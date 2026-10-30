@@ -44,7 +44,9 @@ strih_box_fact_keys() {
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
     STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC \
-    STRIH_STREAM_DEV_SCENE
+    STRIH_STREAM_DEV_SCENE \
+    STRIH_BKSHADING_RELAYS \
+    STRIH_AUDIO_BUFFERING_MS
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -269,7 +271,7 @@ strih_box_validate() {
   # Buffer R (ms) and (issue 1462) the name of that OBS input (stream-pp `Zvuk z mixu`, stream-snv `mbc`,
   # strih-snv `ASIO zvuk`). The stream role takes exactly ONE stream (its hub is gone). The strih role
   # (phase 2, addendum 6338457001) declares all four -- one stream on its own port, the hub keeps 6980 --
-  # or all four `none`: a hub-fed strih (strih-pp) until its console sends it a program stream.
+  # or all four `none`: a hub-fed strih (none deployed since strih-pp took lv1's `strih-obs`, 24.10.2026).
   local vs="${f[STRIH_PROGRAM_VBAN_STREAMS]}" vp="${f[STRIH_PROGRAM_VBAN_PORT]}" vr="${f[STRIH_PROGRAM_VBAN_RESERVE_MS]}"
   local ai="${f[STRIH_PROGRAM_AUDIO_INPUT]}"
   if [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}:${ai}" = none:none:none:none ]; then
@@ -416,6 +418,19 @@ strih_box_validate() {
     nested-pro:strih|clip:strih) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE '${f[STRIH_STREAM_DEV_SCENE]}' on the strih role -- it has no stream Development (none)" >&2; bad=1 ;;
     *) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE '${f[STRIH_STREAM_DEV_SCENE]}' must be one of nested-pro, clip, none" >&2; bad=1 ;;
   esac
+  # issue 808 (owner ruling 5977504457): the shading panel's per-cambox relay overrides. The stream role
+  # runs no shading service (setup step 16c skips it), so it declares none.
+  if [ "${f[STRIH_ROLE]}" = stream ] && [ "${f[STRIH_BKSHADING_RELAYS]}" != none ]; then
+    echo "strih-box ${name}: STRIH_BKSHADING_RELAYS '${f[STRIH_BKSHADING_RELAYS]}' must be none on the stream role (it runs no shading service)" >&2; bad=1
+  else
+    strih_box_bkshading_relays_ok "${f[STRIH_BKSHADING_RELAYS]}" "strih-box ${name}: " "${f[STRIH_CAMERAS]}" || bad=1
+  fi
+  # issue 1425 (design 6443440513): the box's FIXED OBS audio buffering, ms (0..960, OBS's own maximum):
+  # setup-strih step 5 writes it to ~/.camera-box/genlock-audio-buffering-ms, libobs holds the mix at it.
+  # The digit set is spelled out (a bracket range follows the locale).
+  if [[ ! "${f[STRIH_AUDIO_BUFFERING_MS]}" =~ ^[0123456789]{1,3}$ ]] || [ "$((10#${f[STRIH_AUDIO_BUFFERING_MS]}))" -gt 960 ]; then
+    echo "strih-box ${name}: STRIH_AUDIO_BUFFERING_MS '${f[STRIH_AUDIO_BUFFERING_MS]}' must be the box's fixed OBS audio buffering in ms (an integer 0..960)" >&2; bad=1
+  fi
   [ "$bad" = 0 ]
 }
 
@@ -632,7 +647,7 @@ strih_lx_program_sender() {
 
 # strih_lx_program_vban_streams / _port / _reserve_ms -> issue 1439: the console's program VBAN stream
 # name(s) the box receives straight into its obs-vban source, the UDP port OBS binds and the fixed
-# Receive Buffer R in ms (facts STRIH_PROGRAM_VBAN_*; all `none` on the strih role).
+# Receive Buffer R in ms (facts STRIH_PROGRAM_VBAN_*; all `none` on a hub-fed strih).
 strih_lx_program_vban_streams() { strih_box_fact STRIH_PROGRAM_VBAN_STREAMS; }
 strih_lx_program_vban_port() { strih_box_fact STRIH_PROGRAM_VBAN_PORT; }
 strih_lx_program_vban_reserve_ms() { strih_box_fact STRIH_PROGRAM_VBAN_RESERVE_MS; }
@@ -659,6 +674,97 @@ strih_lx_https_public() { strih_box_fact STRIH_HTTPS_PUBLIC; }
 # strih_lx_stream_dev_scene -> the stream Development design: nested-pro | clip | none (fact
 # STRIH_STREAM_DEV_SCENE, issue 1462).
 strih_lx_stream_dev_scene() { strih_box_fact STRIH_STREAM_DEV_SCENE; }
+
+# strih_box_fleet_cameras -> the cameras of every strih venue (issue 1431): the union of STRIH_CAMERAS over
+# the fact files whose STRIH_ROLE is `strih` (parsed, never sourced), ascending, space-separated. rc 1 + one
+# stderr line naming a fact file that does not parse (never a partial list). Runs in a subshell.
+strih_box_fleet_cameras() {
+  (
+    set +f
+    shopt -u nullglob failglob nocaseglob nocasematch 2>/dev/null || true
+    dir="$(strih_box_dir)" all=""
+    for f in "$dir"/*.env; do
+      [ -f "$f" ] || continue
+      parsed="$(strih_box_parse_file "$f" 2>/dev/null)" \
+        || { echo "strih-box: ${f##*/} does not parse -- the venue camera list is unreadable (issue 1431)" >&2; exit 1; }
+      role="" cams=""
+      while IFS= read -r line; do
+        case "$line" in
+          STRIH_ROLE=*) role="${line#*=}" ;;
+          STRIH_CAMERAS=*) cams="${line#*=}" ;;
+        esac
+      done <<<"$parsed"
+      [ "$role" = strih ] && [ "$cams" != none ] || continue
+      all="${all} ${cams}"
+    done
+    printf '%s\n' $all | sort -n -u | tr '\n' ' ' | sed 's/ $//'
+  )
+}
+
+# strih_lx_bkshading_relays -> the shading panel's per-cambox relay overrides (fact STRIH_BKSHADING_RELAYS:
+# none | `N=<transport>@<host>:<port>` ...; issue 808, the seed strih_bkshading_config_text).
+strih_lx_bkshading_relays() { strih_box_fact STRIH_BKSHADING_RELAYS; }
+
+# strih_lx_audio_buffering_ms -> the box's FIXED OBS audio buffering in ms (fact STRIH_AUDIO_BUFFERING_MS,
+# issue 1425; setup-strih step 5 writes it for libobs, verify-strih item 48 + the E2E [0/8] row grade it).
+strih_lx_audio_buffering_ms() { strih_box_fact STRIH_AUDIO_BUFFERING_MS; }
+
+# strih_box_bkshading_relays_ok VALUE [PREFIX] -> 0 iff VALUE is `none` or space-separated
+# `N=<transport>@<host>:<port>` entries: N one of 1..7 and of the box's STRIH_CAMERAS (owner ruling 5977504457 + owner 26.10.2026),
+# no N twice, transport cambox-relay | sbc-relay | ethernet-rest (bkshading/service/src/config.rs; never
+# Bluetooth), host a host name / address that starts with a letter or digit, port 1..65535. Each problem is
+# one stderr line starting with PREFIX. The ONE grammar of the fact: the loader and the seed both call it.
+# _strih_box_relay_id ID -> 0 when ID is a relay registration id: 1-64 of [A-Za-z0-9._-] (the set the
+# bkshading service accepts, bkshading/service/src/registry.rs valid_relay_id). Spelled out, never a range.
+_strih_box_relay_id() {
+  local LC_ALL=C lower='abcdefghijklmnopqrstuvwxyz' upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ' digit='0123456789'
+  [ "${#1}" -ge 1 ] && [ "${#1}" -le 64 ] && [[ "$1" =~ ^[${lower}${upper}${digit}._-]+$ ]]
+}
+
+strih_box_bkshading_relays_ok() {
+  local v="${1-}" p="${2-}" cams="${3-}" e n rest transport hp host port bad=0 seen=" "
+  [ "$v" = none ] && return 0
+  if [ -z "$v" ]; then
+    echo "${p}STRIH_BKSHADING_RELAYS is empty -- none, or N=transport@host:port entries" >&2; return 1
+  fi
+  for e in $v; do
+    if [[ ! "$e" =~ ^([1234567])=([abcdefghijklmnopqrstuvwxyz-]+)@(.+)$ ]]; then
+      if [[ "$e" =~ ^([0123456789]+)= ]]; then
+        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': the camera number must be one of 1..7" >&2
+      else
+        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}' is not N=transport@host:port (or the whole value none)" >&2
+      fi
+      bad=1; continue
+    fi
+    n="${BASH_REMATCH[1]}"; transport="${BASH_REMATCH[2]}"; hp="${BASH_REMATCH[3]}"
+    case "$transport" in
+      cambox-relay|sbc-relay|ethernet-rest) ;;
+      *) echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': transport '${transport}' must be cambox-relay, sbc-relay or ethernet-rest" >&2; bad=1 ;;
+    esac
+    # issue 808 (owner 28.10.2026): a handheld SBC is named by the id it registers with
+    # (`register:<id>`), never by its DHCP address; only an sbc-relay may be.
+    if [[ "$hp" == register:* ]]; then
+      if [ "$transport" != sbc-relay ] || ! _strih_box_relay_id "${hp#register:}"; then
+        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': register:<id> is only for an sbc-relay, id 1-64 of [A-Za-z0-9._-]" >&2; bad=1
+      fi
+    else
+      host="${hp%:*}"; port="${hp##*:}"; rest="$hp"
+      if [ "$host" = "$rest" ] || ! _strih_box_host "$host" || [[ ! "$port" =~ ^[123456789][0123456789]{0,4}$ ]] \
+         || [ "$port" -gt 65535 ]; then
+        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': '${hp}' is not host:port (port 1..65535)" >&2; bad=1
+      fi
+    fi
+    # owner 26.10.2026: a panel lists ITS venue's cameras only (STRIH_CAMERAS, the 3rd argument when given).
+    if [ -n "$cams" ] && [[ " ${cams} " != *" ${n} "* ]]; then
+      echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': camera ${n} is not one of this box's STRIH_CAMERAS (${cams})" >&2; bad=1
+    fi
+    case "$seen" in *" ${n} "*)
+      echo "${p}STRIH_BKSHADING_RELAYS: camera ${n} is declared twice" >&2; bad=1 ;;
+    esac
+    seen="${seen}${n} "
+  done
+  [ "$bad" = 0 ]
+}
 
 # strih_lx_program_audio_sampler -> on | off: whether setup-strih step 16e installs (and verify-strih
 # item 41 grades) the YouTube-guard program-audio sampler (fact STRIH_PROGRAM_AUDIO_SAMPLER, issue 1412).

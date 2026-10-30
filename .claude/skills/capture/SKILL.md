@@ -5,6 +5,23 @@ description: V4L2 capture controls (saturation/contrast/hue) — the certified C
 
 # V4L2 capture controls (src/capture.rs)
 
+## Issue 1430 (29.10.2026) — the Cam Link 4K delivers LIMITED range; never re-scale it
+
+`capture luma:` showing p1=0 / p99=255 with 1-2 % of samples below 16 and 4-5 % above 235 looks
+like full-range video, but it is sub-black and super-white inside a LIMITED signal. A full->limited
+scaling was deployed to cam5 and measured: the painter's white QR background dropped from 253 to 233
+in the strih OBS picture and its black rose from 0 to 8, so it was rolled back and reverted (dev
+87321a7edc). To tell the range, look where a KNOWN white or black reference lands in an OBS
+`GetSourceScreenshot` of the input (a legal white renders at ~253 with today's passthrough), never
+the raw luma percentiles alone.
+
+## Issue 1387 (29.10.2026) — the standard NDI SDK has NO quality lever; P216 changes nothing
+
+Sending P216 (16-bit 4:2:2) instead of UYVY from cam5 left the SpeedHQ bitrate at 277 Mb/s to
+the Mb/s and the strih picture detail within 0.1 %, for +6 % cambox CPU; the switch was removed
+(dev 748b632c5d). Higher camera quality goes through the owner-decided own JPEG XS link beside
+NDI (issue 1387 comments 6487982922 / 6488036928), never another NDI format experiment.
+
 ## #745 (2026-07-14, CURRENT policy) — zero-touch RETIRED: range-aware neutral enforced at every open, for EVERY model
 
 **camera-box now enforces the certified COLOUR set (`color_production_controls()` — `RangeScaled

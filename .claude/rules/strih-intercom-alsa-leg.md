@@ -72,9 +72,9 @@ the cutters' playback INTO the `strih-program` sink and their capture onto its m
   `/var/lib/alsa/asound.state` (2 ch each way); its sample formats are unknown, which is why the format
   is read from the card at spawn.
 - No WirePlumber deny rule on purpose: phase 4 (issue 1440) purges PipeWire + WirePlumber on a strih box
-  whose facts need none (strih-snv; `.claude/rules/strih-pipewire-purge.md`), and verify item 9b then
-  reads the card PCMs held by aplay / arecord. Until then (and on strih-pp) PipeWire still manages the
-  card: while anything plays to it (it is the default sink on strih-snv) aplay/arecord get EBUSY on every
+  whose facts need none (strih-snv, and strih-pp since 24.10.2026; `.claude/rules/strih-pipewire-purge.md`),
+  and verify item 9b then reads the card PCMs held by aplay / arecord. Until the purge runs on a box,
+  PipeWire still manages the card: while anything plays to it (it is the default sink on strih-snv) aplay/arecord get EBUSY on every
   retry, and verify FAILs "not moving audio". PipeWire releases an idle node (suspend timeout).
 
 ## Rollout + rollback (supervisor)
@@ -91,18 +91,15 @@ the hub loads the new one), then restart the hub. strih-pp first. Live check: `c
 http://<box>:8790/api/state | jq '.participants[] | select(.name=="cutters") | .alsa'` -> present, both
 sides `running: true`, the format; the journal shows `card leg cutters aplay opens hw:CARD=...` once per
 side; xruns flat; talkback + headphones checked by ear. Rollback: the TOML adapter back to `pipewire`
-with the old node keys (listed in the converter's docstring and the strih-pp TOML header).
+with the old node keys (listed in the converter's docstring and the strih-pp TOML header). On a box the
+issue-1440 purge ran on (strih-snv, and strih-pp since 24.10.2026) PipeWire must be reinstalled first
+(`.claude/rules/strih-pipewire-purge.md` "Rollback").
 
-## Tests + Tier-0
+## Tests
 
 - `alsa_card_1438.rs` (std-only: the live `stream0` fixture, format choice, card ID, argv, maps,
-  conversions, stats); `alsa_matrix_1438.rs` + `check_config_1438.rs` + the deployed-matrix tests (CI:
-  serde / toml / the binary); `tests/python/test_strih_hub_alsa_leg_1438.py`,
-  `test_strih_hub_config_install_1438.py`, the converter + strih-pp TOML pytests.
-- Local: a plain-rustc replica of alsa_card + its test (13 tests + clippy-driver); a second root
-  (`#[path]` mounts of alsa_leg, hdmi_leg, hdmi_audio, local_audio with serde stripped, pipe_fill,
-  janus_pacing, vban_io + deps over the "VBAN rate" rlibs) runs the HDMI bench, an S32 pipe test and an
-  `AplaySink::spawn_argv` run against a fake tool. A fake tool for that must `exec` the reader: a `sh -c
-  'echo ...; cat'` keeps a grandchild holding stderr after the kill, and `finish()` then waits forever.
-  matrix / state / inputs / alsa_spec + main.rs's `wire_local_audio` type-check and clippy with serde
-  stripped and stub `toml` / `janus_rtp` / `ndi_video` modules.
+  conversions, stats); `alsa_matrix_1438.rs` + `check_config_1438.rs` + the deployed-matrix tests;
+  `tests/python/test_strih_hub_alsa_leg_1438.py`, `test_strih_hub_config_install_1438.py`, the
+  converter + strih-pp TOML pytests.
+- A fake tool for an `AplaySink::spawn_argv` run must `exec` the reader: a `sh -c 'echo ...; cat'`
+  keeps a grandchild holding stderr after the kill, and `finish()` then waits forever.

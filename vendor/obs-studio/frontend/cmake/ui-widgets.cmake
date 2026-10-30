@@ -14,6 +14,10 @@ target_sources(
     widgets/AudioMixer.hpp
     widgets/ColorSelect.cpp
     widgets/ColorSelect.hpp
+    widgets/GenlockJxsReport.cpp
+    widgets/GenlockJxsReport.hpp
+    widgets/GenlockJxsWidget.cpp
+    widgets/GenlockJxsWidget.hpp
     widgets/GenlockRecentEvents.cpp
     widgets/GenlockRecentEvents.hpp
     widgets/OBSBasic.cpp

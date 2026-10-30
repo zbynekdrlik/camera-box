@@ -54,16 +54,8 @@ be deployed to the cam boxes first — do not assume zbar/probe are there.
   sourced-helper pattern — no existing static anchor edited; new banner/comment avoids the
   `capture-delivery-rate preflight` anchor string).
 
-## Verifying this class of change locally under Tier-0 #557 (NO cargo, not even `--no-run`)
-#557 disabled EVERY compiling cargo shape locally (the CLAUDE.md "compile with `--no-run`, run the
-binary directly" pattern is DEAD here — the dispatch/hook confirm "no cargo"). So for a pure
-crate-root module + a shell replica:
-- `cargo fmt --all --check` (allowed — parses + format-checks, catches a stray brace / broken literal).
-- Re-implement the classifier logic in a throwaway Python/awk replica and run it against the SAME
-  test vectors the Rust unit tests use — proves the calibration + median/floor logic without cargo.
+## Verifying this class of change locally
 - `source` the shell lib in bash and drive its pure functions with fixtures directly (median, floor,
-  message, extraction) — a real local green for the shell half.
+  message, extraction).
 - Byte-check the shell abort message against the Rust const (mind Rust's `\`-newline continuation,
   which strips the newline + leading whitespace): both were 240 bytes here.
-- The Rust `tests/harness_*.rs` runs on CI — that is the FIRST place the Rust classifier + parity
-  test actually execute.

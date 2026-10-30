@@ -187,6 +187,10 @@ _cts_find_camera() {
 # statement so the exit propagates, like stray_session_check_assert).
 camera_test_settings_enforce() {
   local here="$1" strih="$2" stream="$3" pw="$4"
+  # issue 1482: the rig's direct feed (cam2's HDMI straight into the splitter) has no test camera in the path
+  if declare -F rig_test_feed_skips_test_camera >/dev/null && rig_test_feed_skips_test_camera; then
+    return 0
+  fi
   shift 4
   local py baseline ack status rc pinned
   local found_label="" found_ip="" unread="" checked="" present=0 acked=0 action

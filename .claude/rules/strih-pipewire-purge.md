@@ -10,8 +10,8 @@ paths:
 
 Phase 4 of the issue-1437 plan. The owner blacklisted PipeWire on the strih role (ROZHODNUTÉ 22.10.2026,
 issue 1440 comment 6337295922). Design 6379965724, Approach 1: purge it on a strih box whose facts say
-nothing needs it. strih-snv first; strih-pp follows by the same condition the day its console sends the
-program as VBAN. The stream role keeps its LOCKED operator PipeWire (issue 1465,
+nothing needs it. strih-snv first; strih-pp followed by the same condition on 24.10.2026, the day its lv1
+sent the program as VBAN (issue 1439 design 6385519443). The stream role keeps its LOCKED operator PipeWire (issue 1465,
 `.claude/rules/stream-operator-audio.md`), and nothing here touches it.
 
 ## The condition (`strih_pipewire_purge_decision ROLE STREAMS TOML`)
@@ -23,7 +23,8 @@ never counts). No new fact, no box name.
 | Box | Verdict | Why |
 |---|---|---|
 | strih-snv | purge | program = obs-vban `strih-obs` (issue 1439 phase 2), cutters = the hub's `alsa` leg (issue 1438), no pipewire participant |
-| strih-pp | keep | `STRIH_PROGRAM_VBAN_STREAMS=none`: its program goes hub `program_out` (adapter pipewire) -> pw-cat -> PipeWire -> OBS |
+| strih-pp | purge (since 24.10.2026) | program = obs-vban `strih-obs` from lv1 on UDP 6981 (issue 1439), cutters = the hub's `alsa` leg on the MG-XU, the vestibule = `alsa_hdmi`, no pipewire participant |
+| a hub-fed strih (all four program facts `none`; none deployed) | keep | its program goes hub `program_out` (adapter pipewire) -> pw-cat -> PipeWire -> OBS |
 | stream-pp / stream-snv | keep | the stream role's locked operator PipeWire |
 
 An unreadable TOML, an unknown role or an unread fact = `unknown` (rc 2): setup step 12 FAILS by name
@@ -79,7 +80,7 @@ never restarts a running hub: restart it after the run.
 ## The browser sources (every strih box, purged or not)
 
 A browser source with `reroute_audio` off plays its page sound to the default device: the cutters' cans
-on strih-snv, the program sink on strih-pp. The strih seed manifest carries `"browser_audio":
+on strih-snv, the MG-XU cans on strih-pp. The strih seed manifest carries `"browser_audio":
 "reroute-mute"`; `strih_scenes.py --bootstrap` runs `program_audio_vban.mute_browser_sources` (set
 `reroute_audio` + mute where either is missing, read both back, status key `browser audio`). The strih
 collection-port presets (`strih-pp`, `strih-snv`) set the same offline (`_browser_audio_reroute_mute`).
@@ -97,8 +98,8 @@ pipewire / pipewire-pulse / wireplumber process for the operator: FAILs until th
 participant's used side, `/proc/asound/<card>/pcm<dev><p|c>/sub0/status` `owner_pid` -> `comm` = aplay /
 arecord; closed = the card leg is not running), `(pipewire-dropins)` (the five gone, the hub drop-in =
 the no-pipewire render), `(browser-audio)` (`strih_scenes.py --browser-audio`, a NOTE while OBS does not
-answer). strih-pp: ONE `(pipewire-purge)` NOTE naming why + the browser row; the stream role: the NOTE
-only. The rows end in `END|<n>`; the report FAILs a shorter list. On a purge box the old MiniFuse /
+answer). strih-pp grades the same six rows on its MG-XU (`MGXU`). A hub-fed strih: ONE `(pipewire-purge)`
+NOTE naming why + the browser row; the stream role: the NOTE only. The rows end in `END|<n>`; the report FAILs a shorter list. On a purge box the old MiniFuse /
 quantum rows are skipped (their files are gone by design).
 
 ## The fixed HDMI output's audio check (drm-output-audio.sh)
@@ -106,7 +107,7 @@ quantum rows are skipped (their files are gone by design).
 After the purge `wireplumber --version` answers nothing, which used to read as `wp-unknown` (FAIL) in
 verify item 4c and a WARNING in setup step 6. `drm_output_audio_no_sound_server` (neither `wireplumber`
 nor `pipewire` is a command; seam `DRM_OUTPUT_AUDIO_SERVER_BINS`): setup writes no rule, verify grades
-`rule=none nodes=0` and the leg on its own OBS log line. A box with PipeWire (imag, strih-pp) is
+`rule=none nodes=0` and the leg on its own OBS log line. A box with PipeWire (imag) is
 unchanged.
 
 **The other apt dry-run guard** (`obs_box_amdgpu_ddx_remove`, obs-box-kiosk.sh) reads only `Remv`
@@ -123,7 +124,7 @@ does not own): harmless, nothing reads it.
 pass it as `LC_ALL=C apt-get -s -o Dir::Etc::PreferencesParts=<dir> purge ...`, then delete the dir. Nothing
 in `/etc/apt` changes; that is how the arch finding above was read on strih-snv.
 
-## Tests (Tier-0)
+## Tests
 
 `tests/python/test_strih_pipewire_purge_1440.py`: the condition over the four real fact files + TOMLs,
 the pin, the read verdict over the live strih-snv `apt-get -s` text, the install against fake `apt-get`
@@ -153,6 +154,12 @@ report / port, the wiring and the line budgets. Seams: `STRIH_PW_PURGE_PREF`, `_
    the card-leg rows PASS, item 4c (if the HDMI output is armed) PASS with `no sound server on the box`.
 6. By ear: the cutters' talkback to the cameramen and the program + cameramen in the MiniFuse cans;
    RustDesk connects (`rustdesk --get-id`).
+
+**strih-pp (issue 1439, 24.10.2026):** the same rollout, in this order. Its `apt-get -s purge` may differ
+from strih-snv's inventory: read it first, read-only. A package outside `SERVER + COLLATERAL` refuses the
+purge by name, and that refusal is a finding for the main; never widen the list blind. Its OBS input
+`ASIO zvuk` must be live on obs-vban (the seed switches it at the OBS start) before the hub restarts
+onto the TOML without `program_out`. The steps are on the issue-1439 LANE-RETURN.
 
 Rollback: delete the pin file, `apt-get install pipewire pipewire-pulse pipewire-alsa wireplumber
 pipewire-audio gstreamer1.0-pipewire` (the shim then conflicts nowhere; `apt-get remove

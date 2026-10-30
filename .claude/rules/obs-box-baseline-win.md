@@ -83,7 +83,9 @@ owner sets it. That is an expected report-only row, not a bug.
   `_grade` helper now grades under `set -euo pipefail` and requires a real verdict on every row.
 - **`scripts/win-baseline-check.sh`** is the dev1 reader. It scp's the gather to
   `C:/camera-box-win-baseline-gather.ps1`, runs it by path and grades each box of the obs-fleet
-  facet `win-baseline` (stream, resolume). resolume is SKIPPED when away. The home gate is the
+  facet `win-baseline` (its windows-genlock rows, issue 1474: resolume-snv on the real fleet since the
+  stream box is the Linux stream-snv; a Windows stream box joins again, which is how the two-box tests
+  run). resolume is SKIPPED when away. The home gate is the
   obs-fleet one (OBS-WS :4455), so a resolume that is up with OBS down is also skipped. That is
   deliberate: the `resolume.lan` / `bridge` .201 address collision (`obs-fleet-list.md`) makes a
   bare ssh-reachability probe unsafe to read as "this is resolume". `--out-dir DIR` keeps
@@ -124,7 +126,8 @@ owner sets it. That is an expected report-only row, not a bug.
   after its fleet rows and before `GATE PASS` / `GATE FAILED` / `GATE INCOMPLETE`.
 - **The bound is sized from the check's own per-box bounds**, never guessed:
   boxes × (2 × `WIN_BASELINE_SSH_TIMEOUT` (scp + ssh, 20 s each) + `OBS_FLEET_RESOLVE_TIMEOUT` 2 s +
-  `OBS_FLEET_STATUS_TIMEOUT` 4 s) + 10 s = 102 s for stream + resolume.
+  `OBS_FLEET_STATUS_TIMEOUT` 4 s) + 10 s = 56 s for resolume alone (the real fleet since issue 1474),
+  102 s for two Windows boxes.
   - `E2E_WIN_BASELINE_TIMEOUT` overrides it.
   - The three defaults are pinned to their sources by a test, so raising one in
     `win-baseline-check.sh` / `obs-fleet.sh` fails there instead of turning a slow box into TIMEOUT.
@@ -154,10 +157,9 @@ owner sets it. That is an expected report-only row, not a bug.
 
 ## Verify without touching a setting
 
-- **Tier-0 net:** the pytest file (plus the no-network run from `ci-testing-gotchas.md`),
-  `bash -n` + `shellcheck -S warning -x` on the touched scripts, and the std-only Rust files through
-  `rustc --test` with the tempfile stub (`deploy_genlock_fleet`, `version_integrity_gate`,
-  `harness_obs_fleet_list_1296`).
+- **Tests:** the pytest file (plus the no-network run from `ci-testing-gotchas.md`), `bash -n` +
+  `shellcheck -S warning -x` on the touched scripts, and the Rust tests `deploy_genlock_fleet`,
+  `version_integrity_gate`, `harness_obs_fleet_list_1296`.
 - **Live, read-only:** paste the gather body (without its final `exit 0`) into the box's win-* MCP
   Shell and grade the output. The real resolume output is the fixture
   `resolume_gather_program_live_2026-09-27.txt`.

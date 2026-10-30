@@ -139,7 +139,7 @@ code. To find it on the box:
 - read `xinput list-props` (is the device a touchpad to libinput at all?).
 The new `(tap-to-click)` row grades the live value whatever the cause.
 
-## Tests (Tier-0, pytest)
+## Tests (pytest)
 
 `tests/python/test_strih_operator_1418.py`: the real lib under the callers' `set -euo pipefail` with
 these fakes:

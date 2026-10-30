@@ -25,7 +25,7 @@ The decision is `camera_box::resolume_playback::evaluate` (skew ≤ 20 ms, ZERO
 the window summary is `camera_box::jitter_audit` parse+`summarize` (last-minus-first saturating
 deltas, `max_abs_head_skew_ms`). Those live in Rust (probe-free, default features), and the real
 CLI `genlock-jitter-report --verdict-source '<name>'` already runs them — but it needs a built
-binary and is not Tier-0 testable. So `scripts/lib/cg-chain-verify.sh` is a PURE bash/awk REPLICA
+binary. So `scripts/lib/cg-chain-verify.sh` is a PURE bash/awk REPLICA
 (`cg_chain_summarize_window` + `cg_chain_verdict`), and `tests/harness_cg_chain_verify_1300.rs` is
 the PARITY GATE: it feeds the SAME raw-log + the SAME windows to BOTH the Rust functions and the
 bash replica and asserts identical summaries + PASS/FAIL. **If you change the Rust bounds
@@ -84,8 +84,7 @@ from `frames @ F fps` only, never from a source name that happens to carry `@ <n
 - `evaluate`'s one consumer is `genlock-jitter-report --verdict-source`, a manual resolume
   maintenance verify;
 - its `jitter_audit` input parses neither `shallow_depth=` nor the canvas rate, so porting the
-  rule means new `AuditSample` fields (kept out of the byte-locked `--json`, #757) and a Rust change
-  no Tier-0 lane can compile;
+  rule means new `AuditSample` fields (kept out of the byte-locked `--json`, #757) and a Rust change;
 - the SongPlayer acceptance (the songplayer genlock series) runs this tool.
 
 So `--verdict-source` still grades a shallow input's ABSOLUTE head age and FAILs it by design. Verify
@@ -159,7 +158,7 @@ asserts `|X| ≤ floor` (default 10, `--asrc-floor-ppm`). Per `asrc-residual-flo
 signature is out of band (FAIL); an ABSENT asrc line is `UNKNOWN`, never a false out-of-band. An
 out-of-band present reading folds into the hop verdict; `UNKNOWN` never fails.
 
-## Soak + rig-health + Tier-0
+## Soak + rig-health + tests
 
 - `--soak-hours N --csv <path>`: repeat per window, append `ts,hop,source,verdict,skew,deltas,ppm`
   rows (the 24 h ±20 ms flatness in issue 1294 §8 is then a plot, not a claim). The inter-window
@@ -172,14 +171,6 @@ out-of-band present reading folds into the hop verdict; `UNKNOWN` never fails.
   (`awk '…'`), so a `#`-comment line containing an apostrophe (`jitter_audit's`) terminates the
   bash string mid-program → `bash -n` / `shellcheck` syntax error (cost a cycle this session). Keep
   awk-internal comments apostrophe-free (and mind bare `(`/`)` after a stray quote).
-- **Tier-0 (#557, no cargo of any compiling shape):** `bash -n` + `shellcheck -S warning`; source
-  the lib and drive the pure functions over fixtures; pytest for the python part
-  (`tests/python/test_cg_chain_rig_health_1300.py`); `cargo fmt --all --check`.
-- **The Rust parity harness runs locally with plain rustc (issue 1302).** Build a std-only
-  `camera_box` stub rlib from the REAL `src/resolume_playback.rs` plus a copy of
-  `src/jitter_audit.rs` with its one serde function (`summaries_to_json`, never called by the
-  harness) cut out. Compile the real `tests/harness_cg_chain_verify_1300.rs` against it with
-  `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test … --extern camera_box=<rlib>`, plus
-  the same with `clippy-driver -D warnings`, and run the binary from the worktree root. For the RED
-  proof, point `CARGO_MANIFEST_DIR` at an export of the pre-fix scripts. CI remains the
-  authoritative run.
+- **Tests:** `bash -n` + `shellcheck -S warning`; source the lib and drive the pure functions over
+  fixtures; pytest for the python part (`tests/python/test_cg_chain_rig_health_1300.py`);
+  `cargo test --test harness_cg_chain_verify_1300` (the parity gate).

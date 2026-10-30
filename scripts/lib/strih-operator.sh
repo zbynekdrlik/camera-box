@@ -268,20 +268,26 @@ strih_operator_nic_isolate() {
   return 0
 }
 
-# strih_operator_hdmi_shows_multiview DRM_JSON -> rc 0 when the fixed HDMI output
-# (~/.camera-box/drm-output.json, issue 1346) is enabled and shows the built-in Multiview, else 1
-# (missing / unreadable / disabled / the Program view).
+# strih_operator_hdmi_shows_multiview DRM_JSON -> rc 0 when a fixed HDMI output (~/.camera-box/drm-output.json,
+# issue 1346) is enabled and shows the built-in Multiview, else 1 (missing / unreadable / disabled / Program
+# only). Issue 1424: read through the ONE Python twin of the C config grammar (drm_output_config.py
+# drm_output_instances), so the strih-pp "outputs" array form counts (an entry with view multiview) and a
+# malformed array, which the C starts no output for, never reads as a Multiview.
 strih_operator_hdmi_shows_multiview() {
-  local f="${1-}"
+  local f="${1-}" dir
   [ -n "$f" ] && [ -f "$f" ] || return 1
-  python3 - "$f" <<'PY'
-import json, sys
+  dir="$(dirname "${BASH_SOURCE[0]}")/.."
+  python3 - "$dir" "$f" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import drm_output_config as d
 try:
-    with open(sys.argv[1]) as fh:
-        d = json.load(fh)
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        text = fh.read()
 except (OSError, ValueError):
     sys.exit(1)
-sys.exit(0 if isinstance(d, dict) and d.get("enabled") is True and d.get("view") == "multiview" else 1)
+verdict, outputs = d.drm_output_instances(text)
+sys.exit(0 if verdict == "ok" and any(o["view"] == "multiview" for o in outputs) else 1)
 PY
 }
 

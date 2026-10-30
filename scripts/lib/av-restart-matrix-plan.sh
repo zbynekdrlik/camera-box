@@ -7,8 +7,8 @@
 # out of scripts/av-restart-matrix.sh to keep the orchestrator under the file budget. It is a VIEW of
 # the orchestrator's resolved configuration, so print_plan reads the orchestrator's globals (KINDS,
 # REPEATS, SETTLE_S, HEALTHY_TIMEOUT_S, POLL_S, SUPERVISOR_TIMEOUT_S, WINDOW_BOUND_S, SOAK_SLOT_S,
-# EXPECTED_S, N_RESTARTS, the targets, RUN_DIR, the lease identity, the paths) -- set before it is
-# called. Every command it prints comes from the SAME builders --run executes
+# EXPECTED_S, N_RESTARTS, STREAM_OBS_MODE, the targets, RUN_DIR, the lease identity, the paths) -- set
+# before it is called. Every command it prints comes from the SAME builders --run executes
 # (scripts/lib/av-restart-matrix.sh, the soak's lib), so plan == run. It runs nothing on the rig.
 
 plan_cmd() { printf '      '; printf '%q ' "$@"; printf '\n'; }
@@ -21,7 +21,7 @@ print_plan() {
 ===== av-restart-matrix PLAN (issue 1367) -- nothing below is executed; run with --run =====
 bounds (read from their single sources): ${bounds_line//$'\n'/; }; graded spread: ${AV_SOAK_SPREAD_COLUMNS:-av_spread_ms}
 kinds: ${KINDS} x ${REPEATS} repeats = ${N_RESTARTS} restarts + 1 baseline window (each kind PASS only ${REPEATS}/${REPEATS})
-settle after healthy: ${SETTLE_S} s; healthy bound: ${HEALTHY_TIMEOUT_S} s (polled every ${POLL_S} s); supervisor-step bound: ${SUPERVISOR_TIMEOUT_S} s
+settle after healthy: ${SETTLE_S} s; healthy bound: ${HEALTHY_TIMEOUT_S} s (polled every ${POLL_S} s); supervisor-step bound: ${SUPERVISOR_TIMEOUT_S} s (a Windows stream box only)
 one window <= ${WINDOW_BOUND_S} s (the soak's own slot ${SOAK_SLOT_S} s + 600 s setup/cleanup); the lease's hold ceiling ${EXPECTED_S} s
 targets:
 EOF
@@ -30,7 +30,12 @@ EOF
       strih-obs) echo "  strih-obs = strih-snv ${STRIH_HOST} (strih-obs.service, the --user unit; $(strih_platform "$STRIH_HOST"))" ;;
       cambox) echo "  cambox = ${CAMBOX} ${CAMBOX_IP} (camera-box.service)" ;;
       dantesync) echo "  dantesync = ${DANTE_NODE} ${DANTE_IP} (dantesync.service; with no --dantesync-node it follows the cambox)" ;;
-      stream-obs) echo "  stream-obs = stream ${STREAM_HOST} (SUPERVISOR step: no session-agnostic path launches the canonical stream OBS)" ;;
+      stream-obs)
+        if [ "$STREAM_OBS_MODE" = restart ]; then
+          echo "  stream-obs = stream ${STREAM_HOST} (strih-obs.service, the --user unit; linux -- the matrix restarts it itself, issue 1474)"
+        else
+          echo "  stream-obs = stream ${STREAM_HOST} (SUPERVISOR step: no session-agnostic path launches the canonical stream OBS)"
+        fi ;;
     esac
   done
   cat <<EOF
@@ -78,8 +83,13 @@ EOF
         echo "     dantesync: ssh root@${DANTE_IP}:"
         av_matrix_restart_remote_cmd dantesync | plan_text ;;
       stream-obs)
-        echo "     stream-obs: the SUPERVISOR step, written to <run-dir>/supervisor-step-stream-obs-rR.txt:"
-        av_matrix_stream_supervisor_step "$HERE" "$(av_matrix_confirm_path "$RUN_DIR" 1)" "$SUPERVISOR_TIMEOUT_S" | plan_text ;;
+        if [ "$STREAM_OBS_MODE" = restart ]; then
+          echo "     stream-obs: ssh <STREAM_USER>@${STREAM_HOST}:"
+          av_matrix_restart_remote_cmd stream-obs | plan_text
+        else
+          echo "     stream-obs: the SUPERVISOR step, written to <run-dir>/supervisor-step-stream-obs-rR.txt:"
+          av_matrix_stream_supervisor_step "$HERE" "$(av_matrix_confirm_path "$RUN_DIR" 1)" "$SUPERVISOR_TIMEOUT_S" | plan_text
+        fi ;;
     esac
   done
   echo "  c. healthy (bounded ${HEALTHY_TIMEOUT_S} s, polled every ${POLL_S} s; time to healthy is recorded):"
@@ -111,7 +121,13 @@ CLEANUP (every exit; signals ignored): a running window gets SIGTERM and its own
 EOF
   for k in $KINDS; do
     case "$k" in
-      stream-obs) echo "     stream-obs: read its WebSocket; not answering -> the supervisor relaunch step is printed" ;;
+      stream-obs)
+        if [ "$STREAM_OBS_MODE" = restart ]; then
+          echo "     stream-obs: ssh <STREAM_USER>@${STREAM_HOST}: $(av_matrix_ensure_running_remote_cmd stream-obs | tr '\n' ' ')"
+          echo "                 then read its WebSocket; not answering -> its restart line is printed"
+        else
+          echo "     stream-obs: read its WebSocket; not answering -> the supervisor relaunch step is printed"
+        fi ;;
       *) echo "     ${k}: $(av_matrix_ensure_running_remote_cmd "$k" | tr '\n' ' ')" ;;
     esac
   done

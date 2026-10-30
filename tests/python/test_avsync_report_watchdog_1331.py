@@ -15,6 +15,14 @@ _HOME = str(pathlib.Path.home())
 _WATCHDOG = _ROOT / "scripts" / "avsync-heartbeat-alert-watchdog.sh"
 
 
+# issue 1441: three confident clips ending now = one live session with a verdict.
+_START_FETCH = (
+    "n=$(date +%s); for d in 180 90 0; do printf '%s\\t%s\\n' \"$((n - d))\" "
+    "\"measured: db=-5.0 [2026-09-17 19:00:59] AV offset +3 fr (+120 ms) conf 5.4 "
+    ":: audio predbieha video o ~120 ms -> ZNIZ '2ME PGM' latency o 120\"; done"
+)
+
+
 def _run_dry_run(env_extra, tmp_path):
     env = {
         "PATH": "/usr/bin:/bin",
@@ -26,6 +34,8 @@ def _run_dry_run(env_extra, tmp_path):
         "AVSYNC_VENUES": "snv",
         "AVSYNC_HEARTBEAT_STATE_FILE": str(tmp_path / "hb.state"),
         "AVSYNC_REPORT_STATE_FILE": str(tmp_path / "report-state.json"),
+        # issue 1441: never read the live rig mode from a test.
+        "AVSYNC_PRODUCTION": "yes",
     }
     env.update(env_extra)
     proc = subprocess.run(
@@ -38,14 +48,9 @@ def _run_dry_run(env_extra, tmp_path):
 
 
 def test_report_pass_would_post_a_verified_session_message(tmp_path):
-    # One CONFIDENT clip at "now" => a live session => the START ("📐 A/V overené ... začiatok
-    # vysielania") message. --dry-run must LOG a "WOULD post" instead of actually POSTing.
-    fetch = (
-        "printf '%s\\t%s\\n' \"$(date +%s)\" "
-        "\"measured: db=-5.0 [2026-09-17 19:00:59] AV offset +3 fr (+120 ms) conf 5.4 "
-        ":: audio predbieha video o ~120 ms -> ZNIZ '2ME PGM' latency o 120\""
-    )
-    proc = _run_dry_run({"AVSYNC_REPORT_FETCH_CMD": fetch}, tmp_path)
+    # Three CONFIDENT clips up to "now" => a live session with a verdict => the FIRST VERDICT
+    # ("📐 A/V overené ... (vysielanie)") message. --dry-run must LOG a "WOULD post", never POST.
+    proc = _run_dry_run({"AVSYNC_REPORT_FETCH_CMD": _START_FETCH}, tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "WOULD post" in proc.stderr, proc.stderr
     assert "📐 A/V overené" in proc.stderr, proc.stderr
@@ -80,11 +85,6 @@ import json as _json
 import os as _os
 import stat as _stat
 
-_START_FETCH = (
-    "printf '%s\\t%s\\n' \"$(date +%s)\" "
-    "\"measured: db=-5.0 [2026-09-17 19:00:59] AV offset +3 fr (+120 ms) conf 5.4 "
-    ":: audio predbieha video o ~120 ms -> ZNIZ '2ME PGM' latency o 120\""
-)
 
 
 def _run_live(tmp_path, curl_http_code, fetch):
@@ -118,6 +118,7 @@ def _run_live(tmp_path, curl_http_code, fetch):
         "AVSYNC_REPORT_STATE_FILE": str(tmp_path / "report-state.json"),
         "AVSYNC_DISCORD_ENV": str(disc_env),
         "AVSYNC_REPORT_FETCH_CMD": fetch,
+        "AVSYNC_PRODUCTION": "yes",
     }
     proc = subprocess.run(
         ["bash", str(_WATCHDOG)], env=env, capture_output=True, text=True
@@ -131,7 +132,7 @@ def test_state_is_committed_only_after_a_successful_discord_post(tmp_path):
     assert marker.exists() and "CURL" in marker.read_text(), "a POST must have been attempted"
     assert state_path.exists(), "on a successful post the advanced report state must be committed"
     st = _json.loads(state_path.read_text())
-    assert st["start_posted"] is True
+    assert st["last_verdict"] == "NESEDI"
 
 
 def test_state_is_NOT_committed_when_the_discord_post_fails(tmp_path):
@@ -142,8 +143,8 @@ def test_state_is_NOT_committed_when_the_discord_post_fails(tmp_path):
     assert marker.exists() and "CURL" in marker.read_text(), "a POST must have been attempted"
     if state_path.exists():
         st = _json.loads(state_path.read_text())
-        assert st.get("start_posted") is not True, (
-            "a failed post must NOT commit start_posted -- the next pass must re-emit the message"
+        assert st.get("last_verdict") is None, (
+            "a failed post must NOT commit the verdict -- the next pass must re-emit the message"
         )
 
 

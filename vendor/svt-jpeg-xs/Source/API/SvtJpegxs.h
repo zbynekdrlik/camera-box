@@ -1,0 +1,265 @@
+/*
+* Copyright(c) 2024 Intel Corporation
+* SPDX - License - Identifier: BSD - 2 - Clause - Patent
+*/
+
+#ifndef _SVT_JPEG_XS_API_H_
+#define _SVT_JPEG_XS_API_H_
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+#include <stdint.h>
+#include <stdarg.h>
+
+/* API Version */
+#define SVT_JPEGXS_API_VER_MAJOR (0)
+#define SVT_JPEGXS_API_VER_MINOR (10)
+
+/*Define PREFIX_API*/
+#ifdef DEF_DLL
+#ifdef DEF_BUILDING_SHARED_LIBS
+#if defined(_WIN32)
+#define PREFIX_API __declspec(dllexport)
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define PREFIX_API __attribute__((visibility("default")))
+#else /*other compiler*/
+#define PREFIX_API
+#endif
+#else /*DEF_BUILDING_SHARED_LIBS*/
+#if defined(_WIN32)
+#define PREFIX_API __declspec(dllimport)
+#else /*other compiler*/
+#define PREFIX_API
+#endif
+#endif /*DEF_BUILDING_SHARED_LIBS*/
+#else  /*DEF_DLL*/
+#define PREFIX_API
+#endif /*DEF_DLL*/
+
+/********************************
+ * Defines
+ ********************************/
+
+#define MAX_COMPONENTS_NUM (4)
+
+/* jpegxs Chroma Format */
+typedef enum ColourFormat {
+    COLOUR_FORMAT_INVALID = 0,
+    COLOUR_FORMAT_PLANAR_YUV400 = 1,
+    COLOUR_FORMAT_PLANAR_YUV420 = 2,        //planar: yuv420p, yuv420p10le etc.
+    COLOUR_FORMAT_PLANAR_YUV422 = 3,        //planar: yuv422p, yuv422p10le etc.
+    /* Planar 4:4:4, 3 components: yuv444p, yuv444p10le etc.
+     * The decoder also reports it for streams without the colour transform (Cpih=0): such a stream
+     * does not signal whether it holds YUV or RGB. */
+    COLOUR_FORMAT_PLANAR_YUV444 = 4,
+    /* Deprecated alias of COLOUR_FORMAT_PLANAR_YUV444, kept for source compatibility.
+     * Use COLOUR_FORMAT_PLANAR_RGB for RGB input; enable_color_transform is not accepted with
+     * this value. */
+    COLOUR_FORMAT_PLANAR_YUV444_OR_RGB = COLOUR_FORMAT_PLANAR_YUV444,
+    COLOUR_FORMAT_PLANAR_4_COMPONENTS = 5, // planar 4 components, 4:4:4:4 sampling (YUVA444; RGBA without colour transform)
+    COLOUR_FORMAT_GRAY = 6,
+    COLOUR_FORMAT_PLANAR_YUV422_ALPHA = 7, // planar 4 components, 4:2:2:4 sampling (Y/Cb/Cr at 4:2:2 plus full-resolution alpha)
+    /* Planar 4:4:4, 3 components in R, G, B order: component 0 = R, 1 = G, 2 = B.
+     * FFmpeg gbrp* stores planes as G, B, R, so the caller must reorder the plane pointers.
+     * Required for enable_color_transform (Cpih=1). The decoder reports it for Cpih=1 streams. */
+    COLOUR_FORMAT_PLANAR_RGB = 8,
+    /* Planar 4:4:4:4, 4 components in R, G, B, A order (component 3 = alpha).
+     * The decoder reports it for 4-component Cpih=1 streams. */
+    COLOUR_FORMAT_PLANAR_RGBA = 9,
+    COLOUR_FORMAT_PLANAR_MAX,
+
+    COLOUR_FORMAT_PACKED_MIN = 20,
+    COLOUR_FORMAT_PACKED_YUV444_OR_RGB, //packed 4:4:4, RGBRGB... (R, G, B order for RGB input), 8-bit: 1 byte per sample, 10-14 bit: 16-bit samples
+    COLOUR_FORMAT_PACKED_MAX
+} ColourFormat_t;
+
+enum VerboseMessages {
+    VERBOSE_NONE = 0,
+    VERBOSE_ERRORS = 1,
+    VERBOSE_SYSTEM_INFO = 2,
+    VERBOSE_SYSTEM_INFO_ALL = 3,
+    VERBOSE_WARNINGS = 4,
+    VERBOSE_INFO_MULTITHREADING = 5,
+    VERBOSE_INFO_FULL = 6
+};
+
+/* Decoder: sizes are after proxy_mode scaling.
+ * Packed format (COLOUR_FORMAT_PACKED_YUV444_OR_RGB): components_num = 1, components[0].width/height in pixels,
+ * components[0].byte_size covers all 3 interleaved samples per pixel. */
+typedef struct svt_jpeg_xs_image_config {
+    uint32_t width;  /*Luma width in pixels*/
+    uint32_t height; /*Luma height in pixels*/
+    uint8_t bit_depth;
+    ColourFormat_t format;
+    uint8_t components_num; /*Number of planes in svt_jpeg_xs_image_buffer_t*/
+    struct {
+        uint32_t width;     /*Plane width in samples (in pixels for packed format)*/
+        uint32_t height;    /*Plane height in lines*/
+        uint32_t byte_size; /*width * height * bytes per sample (1 for 8-bit, else 2), times 3 for packed format*/
+    } components[MAX_COMPONENTS_NUM];
+} svt_jpeg_xs_image_config_t;
+
+typedef struct svt_jpeg_xs_image_buffer {
+    void *data_yuv[MAX_COMPONENTS_NUM];      /*Allocated Data buffer for components*/
+    uint32_t stride[MAX_COMPONENTS_NUM];     /*In samples, not bytes. Greater than or equal to width (width * 3 for packed format).*/
+    uint32_t alloc_size[MAX_COMPONENTS_NUM]; /*Used by Encoder and Decoder to validate that the buffer size is enough.*/
+    void *release_ctx_ptr;                   /*Used by pool allocator, for different allocation free to use.*/
+    /*Set by encoder/decoder,
+    1 indicates that buffer can be released by user
+    */
+    uint8_t ready_to_release;
+} svt_jpeg_xs_image_buffer_t;
+
+typedef struct svt_jpeg_xs_bitstream_buffer {
+    /* Bitstream buffer,
+    this pointer can be changed during encoding process,
+    for deallocation please use *release_ctx_ptr
+    */
+    uint8_t *buffer;
+    uint32_t allocation_size; /* Bitstream buffer size, encoder requires >= bytes_per_frame, ignored by decoder */
+    uint32_t used_size;       /* Bitstream buffer used size, decoder input length */
+    /*
+    Encoder/decoder does not modify this pointer,
+    Used by pool allocator, for different allocation free to use.
+    */
+    void *release_ctx_ptr;
+    /*
+    Set by encoder/decoder,
+    1 indicates that buffer can be released by user
+    */
+    uint8_t ready_to_release;
+    /*
+    Set by encoder, unused in decoder,
+    1 - indicate that this is last packetization unit within frame
+    */
+    uint8_t last_packet_in_frame;
+} svt_jpeg_xs_bitstream_buffer_t;
+
+typedef struct svt_jpeg_xs_frame {
+    /*Common structure to keep input and output for encoder and decoder.
+     *Encoder: image - is input and bitstream is output.
+     *Decoder: bitstream - is input and image is output.*/
+    svt_jpeg_xs_image_buffer_t image;         /* YUV buffer */
+    svt_jpeg_xs_bitstream_buffer_t bitstream; /* Bitstream buffer */
+    void *user_prv_ctx_ptr;                   /* Input user private context pointer, receive in output */
+} svt_jpeg_xs_frame_t;
+
+typedef enum SvtJxsErrorType {
+    SvtJxsErrorNone = 0,
+    SvtJxsErrorInvalidApiVersion = (int32_t)0x40001001,
+    SvtJxsErrorCorrupt_Frame = (int32_t)0x4000100C,
+    SvtJxsErrorInsufficientResources = (int32_t)0x80001000,
+    SvtJxsErrorUndefined = (int32_t)0x80001001,
+    SvtJxsErrorInvalidComponent = (int32_t)0x80001004,
+    SvtJxsErrorBadParameter = (int32_t)0x80001005,
+    SvtJxsErrorDestroyThreadFailed = (int32_t)0x80002012,
+    SvtJxsErrorSemaphoreUnresponsive = (int32_t)0x80002021,
+    SvtJxsErrorDestroySemaphoreFailed = (int32_t)0x80002022,
+    SvtJxsErrorCreateMutexFailed = (int32_t)0x80002030,
+    SvtJxsErrorMutexUnresponsive = (int32_t)0x80002031,
+    SvtJxsErrorDestroyMutexFailed = (int32_t)0x80002032,
+    SvtJxsErrorNoErrorEmptyQueue = (int32_t)0x80002033,
+    SvtJxsErrorNoErrorFifoShutdown = (int32_t)0x80002034,
+
+    //Encoder
+    SvtJxsErrorEncodeFrameError = (int32_t)0x80002035,
+
+    //Decoder
+    SvtJxsErrorDecoderInvalidPointer = (int32_t)0x80003000,
+    SvtJxsErrorDecoderInvalidBitstream = (int32_t)0x80003001,
+    SvtJxsErrorDecoderInternal = (int32_t)0x80003002,
+    SvtJxsErrorDecoderBitstreamTooShort = (int32_t)0x80003003,
+    SvtJxsErrorDecoderConfigChange = (int32_t)0x80003004,
+    SvtJxsDecoderEndOfCodestream = (int32_t)0x80003005,
+
+    SvtJxsErrorMax = 0x7FFFFFFF
+} SvtJxsErrorType_t;
+
+typedef enum {
+    proxy_mode_full = 0,    //0 - Off, decode the stream to Full resolution
+    proxy_mode_half = 1,    //1 - Proxy-Mode 1/2, decode the stream to half the Width and Height
+    proxy_mode_quarter = 2, //2 - Proxy-Mode 1/4, decode the stream to quarter the Width and Height
+    proxy_mode_max
+} proxy_mode_t;
+
+/**
+CPU FLAGS
+*/
+typedef uint64_t CPU_FLAGS;
+#define CPU_FLAGS_C        (0)
+#define CPU_FLAGS_MMX      (1 << 0)
+#define CPU_FLAGS_SSE      (1 << 1)
+#define CPU_FLAGS_SSE2     (1 << 2)
+#define CPU_FLAGS_SSE3     (1 << 3)
+#define CPU_FLAGS_SSSE3    (1 << 4)
+#define CPU_FLAGS_SSE4_1   (1 << 5)
+#define CPU_FLAGS_SSE4_2   (1 << 6)
+#define CPU_FLAGS_AVX      (1 << 7)
+#define CPU_FLAGS_AVX2     (1 << 8)
+#define CPU_FLAGS_AVX512F  (1 << 9)
+#define CPU_FLAGS_AVX512CD (1 << 10)
+#define CPU_FLAGS_AVX512DQ (1 << 11)
+#define CPU_FLAGS_AVX512ER (1 << 12)
+#define CPU_FLAGS_AVX512PF (1 << 13)
+#define CPU_FLAGS_AVX512BW (1 << 14)
+#define CPU_FLAGS_AVX512VL (1 << 15)
+/* Not instruction sets of their own: the AVX-512 kernels are compiled with
+ * -mpopcnt and -mbmi2 for the whole directory, so the processor has to be asked
+ * about those separately from AVX-512 itself. */
+#define CPU_FLAGS_POPCNT   (1 << 16)
+#define CPU_FLAGS_BMI2     (1 << 17)
+/* AArch64. Advanced SIMD is mandatory in AArch64, so this flag is set on every
+ * processor the library runs on and never gates anything by itself. It exists so
+ * that the dispatcher is driven the same way on both architectures, and so that
+ * a caller can still ask for the C implementations by passing CPU_FLAGS_C. */
+#define CPU_FLAGS_NEON     (1 << 18)
+#define CPU_FLAGS_ALL      ((CPU_FLAGS_NEON << 1) - 1)
+#define CPU_FLAGS_INVALID  (1ULL << (sizeof(CPU_FLAGS) * 8ULL - 1ULL))
+
+/**
+ * @brief Log severity levels
+ */
+typedef enum {
+    SVT_LOG_ALL = -1,
+    SVT_LOG_FATAL = 0,
+    SVT_LOG_ERROR = 1,
+    SVT_LOG_WARN = 2,
+    SVT_LOG_INFO = 3,
+    SVT_LOG_DEBUG = 4,
+} SvtLogLevel;
+
+/**
+ * @brief Log callback function signature.
+ *
+ * Applications can register a callback to intercept log messages from the library.
+ * The callback receives every log call unfiltered (no level gating is applied before dispatch),
+ * so it is the callback's own responsibility to filter by `level` if desired.
+ *
+ * @param[in] context Opaque user-provided context pointer (may be NULL)
+ * @param[in] level   Severity level of the log message
+ * @param[in] tag     Optional log tag (may be NULL)
+ * @param[in] fmt     printf-style format string
+ * @param[in] args    Variable argument list corresponding to the format string
+ */
+typedef void (*SvtJxsLogCallback)(void *context, SvtLogLevel level, const char *tag, const char *fmt, va_list args);
+
+/**
+ * Register a callback for intercepting log messages.
+ *
+ * When a callback is registered, all log messages are dispatched to it instead of the default
+ * stderr/file output, for all encoder/decoder instances (this is a global setting). Must be called
+ * before the first log call happens (i.e. before any encoder/decoder init) to take effect - calling
+ * it later is a no-op. Passing a NULL callback is also a no-op.
+ *
+ * @param[in] callback Callback function pointer. Has no effect if NULL.
+ * @param[in] context  Opaque context pointer passed back to the callback. Ignored if callback is NULL.
+ */
+PREFIX_API void svt_jpeg_xs_set_log_callback(SvtJxsLogCallback callback, void *context);
+
+#ifdef __cplusplus
+}
+#endif // __cplusplus
+
+#endif /*_SVT_JPEG_XS_API_H_*/

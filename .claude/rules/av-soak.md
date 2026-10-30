@@ -157,7 +157,10 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   4 before `--run` starts). The slope bound 2 ms/h (`SLOPE_BOUND_MS_PER_H`) is the issue's
   acceptance, defined once in the decision module.
 - **The verdict's own defaults are single sources too:** the soak never passes `--burn-*-run-id`
-  (it deploys no burn) nor `--av-expected-ms` (unless `AV_EXPECTED_MS` is set explicitly).
+  (it deploys no burn). `--av-expected-ms` is the TEST FEED's leg, the same one the E2E passes
+  (issue 1482: `rig_test_feed_av_expected_ms`, -45 ms on the direct feed, 0 optical; an explicit
+  `AV_EXPECTED_MS` wins). The 30.10.2026 1 h run graded the direct feed's -27..-42 ms against 0 and
+  read FAIL while the E2E on the same rig passed; re-graded against -45 every sample was in bound.
 
 ## What a window measures (and what it cannot, passively)
 
@@ -284,7 +287,7 @@ transition (Cut, the operator's restored at cleanup), the burns it turned on,
 and a recording on strih + stream for ~4 min of every 10. Post the report (`$D/report.txt` +
 `report.json`) on issue 1367, then hand the owner `$D/cleanup-plan.txt` if the disk needs the space.
 
-## Tier-0 verification (dev1: no cargo, no heavy checks)
+## Verification
 
 `python3 -m pytest tests/python/test_av_soak_decision_1367.py tests/python/test_av_soak_rig_state_1367.py tests/python/test_av_soak_orchestrator_1367.py`
 (the decision tests use REAL merged verdict fixtures from `tests/python/fixtures/e2e_discord_report/`
@@ -307,7 +310,4 @@ program at each StartRecord is replayed from the call log (`_strih_program_at_st
 test that sends a signal once the sweep runs waits for a cut AFTER a StartRecord
 (`_wait_for_sweep`), because the slot's first cut now comes before the recording. The switch-count
 knobs (`FAKE_LIVE_AFTER_SWITCHES`, `FAKE_UNREADABLE_AFTER_SWITCHES`) count that cut too.
-The probe-gated contract test `tests/soak_first_cut_burn_domain_1367.rs` runs only on CI. Its
-assertions can be re-run on dev1 against the CI `recording-verdict` of any run: apply the same
-fixture transforms, then `--merge-partials stream=<partial> --min-secs 0 --capture-fps 30
---strih-emit-fps 30 --stream-capture-fps 30 --cam2-run-id 1790548508 --switch-schedule <fixture>`.
+The contract test `tests/soak_first_cut_burn_domain_1367.rs` is probe-gated.

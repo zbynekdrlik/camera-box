@@ -46,8 +46,7 @@ This is the same upstream code on Linux and Windows. The runtime `strih-mv-host`
 helper (the other issue-1352 workaround) is retired too: setup-strih step 8b only removes a leftover
 install, and verify-strih item 22 grades it absent.
 
-**Guard:** `tests/obs_projector_stock_toplevel_1357.rs`, a pure-std source anchor that runs
-offline with plain `rustc --test` (set `CARGO_MANIFEST_DIR`). It pins:
+**Guard:** `tests/obs_projector_stock_toplevel_1357.rs`, a pure-std source anchor. It pins:
 
 - the stock ctor, and no `projectorWindowFlags` / `Toplevel()` / host teardown plumbing;
 - a creation site with no `__linux__` branch, no `QVBoxLayout`, and no `new OBSProjector(host`;
@@ -86,7 +85,7 @@ swap-chain reallocation per window lifetime, by design; do not "optimise" it int
 Guard: `tests/obs_display_resize_debounce_1358.rs` (incl. the invariant "exactly
 3 `obs_display_resize(` call sites in the file" — keep the token out of comment prose there).
 
-## Local type-check of a vendored frontend `.cpp` against the REAL Qt6 headers (Tier-0, no cmake)
+## Local type-check of a vendored frontend `.cpp` against the REAL Qt6 headers (no cmake)
 
 dev1 has the Qt6 dev headers (`/usr/include/x86_64-linux-gnu/qt6`), so a frontend widget can be
 `g++ -fsyntax-only` checked with tiny scratch stubs for the OBS side (`obs.hpp` with an `OBSDisplay`

@@ -99,10 +99,10 @@ A GENUINE wire fault — `-71` BETWEEN restarts (no restart within ±3 s) — is
 refuses at the same ≥6/hr bar. The restart read window is widened by ±the adjacency so a -71 at the
 1-hour window edge still sees a restart just outside it.
 
-## Tier-0 verification (no cargo)
+## Verification
 
 The lib is pure bash; `tests/harness_leg_health_guard_1133.rs` shells to `bash` to source it. Verify
-RED→GREEN LOCALLY by sourcing the lib and calling the functions directly over fixtures/inline text
+RED→GREEN by sourcing the lib and calling the functions directly over fixtures/inline text
 (exactly what the harness does), then `cargo fmt --all --check` to prove the `.rs` parses. Report-only
 helpers (`leg_health_dequeue_stall_report`, `leg_health_cap1s_band_warn`) are called as BARE
 statements under the caller's `set -euo pipefail` → they MUST return 0 on every input (empty read,
@@ -116,6 +116,4 @@ function shadows the real binary in that shell, so the whole grep pipeline (epoc
 systemd-signature/camera-box/lifecycle-verb filter) runs against the fixture — the strongest local
 proof that the reader keeps only the intended epochs (the #1133 harness's fake-journalctl tests do
 exactly this). NOTE: a worktree-isolated worker's guard may refuse a `bash -c '…source lib…'` /
-`eval` shape (`.claude/rules/ci-testing-gotchas.md`, #1265) — the sourced-lib + fake-journalctl
-harness then runs at CI / for the supervisor; a worktree worker falls back to `python3 -c` grep-chain
-simulations of the emitted command.
+`eval` shape (`.claude/rules/ci-testing-gotchas.md`, #1265) — run the #1133 harness via `cargo test`.

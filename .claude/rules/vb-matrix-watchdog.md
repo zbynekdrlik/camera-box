@@ -69,13 +69,13 @@ has no session-aware win-* MCP for a GUI app). The DURABLE fix is a supervisor s
 that would kill VB-Matrix after 72 h) + deploy the new bundle-state-server to the boxes (the server
 scripts deploy SEPARATELY from the OBS genlock bundle — `version-integrity-gate.md` #1100).
 
-## Tier-0 from a worktree worker: the fetch-seam dry-run works where a PATH-shim does not
+## From a worktree worker: the fetch-seam dry-run works where a PATH-shim does not
 
 A worktree worker CANNOT PATH-shim `curl` or source the lib under `bash -c` (#1265). But the
 watchdog exposes a `VB_MATRIX_FETCH_CMD` env seam (asio-starve `PROBE_CMD` style): a fixture script
 run with `<ip>` whose stdout is the bundle-state body. So the FULL watchdog `--dry-run` runs
 directly (a plain `VB_MATRIX_FETCH_CMD=… bash scripts/vb-matrix-alert-watchdog.sh --dry-run` — not a
 `bash -c`, not a PATH edit → not blocked), proving every verdict path + the 2-pass→alert + recovery
-latch end-to-end. Pair with pytest for `vb_matrix_decision.py` + the gather parsers; the Rust
-harness (`tests/harness_vb_matrix_alert_watchdog_1227.rs`) type-checks at CI. Add a committed
+latch end-to-end. Pair with pytest for `vb_matrix_decision.py` + the gather parsers, and the Rust
+harness (`tests/harness_vb_matrix_alert_watchdog_1227.rs`). Add a committed
 fixture as `.txt` (not `.log`, gitignored) — here all fixtures are inline, so it did not bite.

@@ -17,6 +17,7 @@
 
 class QTimer;
 class QLabel;
+class GenlockJxsWidget;
 class QNetworkAccessManager;
 class QNetworkReply;
 
@@ -80,6 +81,8 @@ private:
 	 * recent-event window and the clock-staleness check are both measured against it. */
 	QLabel *genlockLabel = nullptr;
 	QPointer<QTimer> genlockTimer;
+	/* camera-box issue 1387: the JPEG XS indicator beside the LOCK label (its own TU + 1 Hz timer). */
+	GenlockJxsWidget *jxsWidget = nullptr;
 	QNetworkAccessManager *genlockClockNam = nullptr;
 	QElapsedTimer genlockClock;
 	/* cached dantesync clock facet (written by the async reply, read by UpdateGenlock) */

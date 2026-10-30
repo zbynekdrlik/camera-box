@@ -208,11 +208,11 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   — a MULTI-WORD literal. Inserting an apt option BETWEEN the words (`apt-get -o ... install`) breaks
   that assertion even though `apt-get` and `install` are both still present. Keep any inserted flag
   AFTER the verb (`apt-get install -o Dir::Cache::archives=... -y ...`; apt accepts it identically).
-  CRITICAL for the Tier-0 bash-source RED→GREEN check (no cargo compile here): verify the EXACT
-  literal substrings each `.contains(...)` uses — multi-word included, with `grep -F "apt-get
-  install"` — NEVER the tokens separately (`grep -q apt-get && grep -q install`), which passes while
-  the real single-`assert!` is RED. A separate-token check is exactly how a self-collision slips past
-  a "GREEN" bash-source pass (caught in #899 review, 2026-09-01).
+  CRITICAL for a bash-source RED→GREEN check: verify the EXACT literal substrings each
+  `.contains(...)` uses — multi-word included, with `grep -F "apt-get install"` — NEVER the tokens
+  separately (`grep -q apt-get && grep -q install`), which passes while the real single-`assert!` is
+  RED. A separate-token check is exactly how a self-collision slips past a "GREEN" bash-source pass
+  (caught in #899 review, 2026-09-01).
 - The OBS boxes hit the same inheritance class in the vendored genlock render tick (issue 1357): its
   affinity leaked too, which `SCHED_RESET_ON_FORK` does not reset, so the tick holds its pin only while
   it sleeps (`genlock-render-tick-pin.md`).
@@ -226,10 +226,9 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   worker spawns the NDI threads), so verify `(ah)` `rt_fifo_thread_ceiling` failed at random. The fix
   is the policy WORD `SCHED_FIFO | SCHED_RESET_ON_FORK` (`0x40000000`, supported by
   `sched_setscheduler` since Linux >= 2.6.32) via the pure `capture_emit_sched_policy_word()` (crate
-  root, numeric literals so a std-only replica mirrors it under Tier-0; a `#[cfg(test)]` parity test
-  ties the literals to `libc`). The hot-path thread keeps FIFO 90; its forked children fall back to
-  SCHED_OTHER. NO thread moves cores. Any FUTURE per-thread FIFO raise site must ALSO use this policy
-  word, never a bare `SCHED_FIFO`.
+  root, numeric literals; a `#[cfg(test)]` parity test ties the literals to `libc`). The hot-path
+  thread keeps FIFO 90; its forked children fall back to SCHED_OTHER. NO thread moves cores. Any
+  FUTURE per-thread FIFO raise site must ALSO use this policy word, never a bare `SCHED_FIFO`.
 - **Follow-up (Finding A, still open):** the running fleet units on cam1/3/4/5/6/7 still carry the
   process-wide FIFO until each box is RE-PROVISIONED — nothing in `deploy-fleet.sh` refreshes
   `camera-box.service`; the M.2 migration re-provisions box by box, and check `(ah)` will only read

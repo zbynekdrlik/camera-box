@@ -100,6 +100,8 @@ from drm_output_config import (  # noqa: E402,F401
 # this file); its settings and the keep-the-operator-state re-create live in ONE module the collection
 # port shares.
 from program_audio_vban import (  # noqa: E402,F401
+    AUDIO_MONITOR_FILTER_KIND, AUDIO_MONITOR_FILTER_NAME, audio_monitor_filter_settings,   # issue 1436
+    parse_program_audio_monitor_filter, seed_audio_monitor_filter,
     VBAN_SOURCE_KIND,
     browser_audio_report,
     drop_pulse_capture_inputs,
@@ -703,7 +705,7 @@ def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
 
 
 def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME, audio_monitor=None,
-              audio_vban=None, pulse_capture=None, browser_audio=None):
+              audio_vban=None, pulse_capture=None, browser_audio=None, audio_monitor_filter=None):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
     CREATE (default, the parallel/imag shape): idempotent CreateScene/CreateInput (ignore "already
@@ -797,6 +799,8 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
         added = ensure_program_audio_in_every_scene(obs, plan, audio_name)
         if added:
             audio_status += " (+%d scene items)" % added
+        if audio_monitor_filter:
+            audio_status += "; audio monitor filter " + seed_audio_monitor_filter(obs, audio_name, audio_monitor_filter)
         if audio_monitor == "off":
             audio_status += "; " + ensure_audio_monitor_off(obs, audio_name)
     result[audio_name] = audio_status
@@ -965,6 +969,7 @@ def main():
                          audio_monitor=parse_program_audio_monitor(manifest_text),
                          pulse_capture=parse_pulse_capture_rule(manifest_text),
                          browser_audio=parse_browser_audio_rule(manifest_text),
+                         audio_monitor_filter=parse_program_audio_monitor_filter(manifest_text),
                          audio_vban=audio_vban)
     print("strih seed (%s): %d inputs, latency %d ms; ndi names: %s"
           % (mode, len(plan), latency,

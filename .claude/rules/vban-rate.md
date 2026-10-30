@@ -1,14 +1,12 @@
 ---
 paths:
   - "scripts/vban_rate.py"
-  - "scripts/vban-rate-alert-watchdog.sh"
-  - "systemd/vban-rate-alert-watchdog.*"
-  - "tests/python/test_vban_rate*_1372.py"
+  - "tests/python/test_vban_rate_1372.py"
 ---
 
 # Inter-PC VBAN rate + loss — by FRAME COUNTER, never by packet count (issue 1372 part C)
 
-## The measurement (`scripts/vban_rate.py`, pure, pytest Tier-0)
+## The measurement (`scripts/vban_rate.py`, pure, pytest)
 
 - **Rate = the VBAN frame counter**, never the packet count. Each header carries `nuFrame` (u32 LE at
   byte 24); a packet's sample index is `nuFrame x (nbs+1)`; the stream clock is the least-squares
@@ -52,6 +50,10 @@ paths:
   loss. If it continues from the candidate, it is a restart. A restart whose re-sent counters collide
   with the old ones is still a restart, because its continuation arrives LATE for the old head. A
   reorder in a segment's first 50 ms (2,0,1 at capture start) is never a jump.
+- **Step limits use the last ACCEPTED packet (review round 1).** The step limits use the arrival
+  of the last ACCEPTED packet, so a late duplicate never shrinks them (a duplicate near the end of
+  an outage cannot hide the outage's loss), and the lookahead treats the rest of a late-duplicate
+  burst as the old stream.
 - Reported alongside: `max_gap_ms`, the fit residual (arrival jitter — obs-vban bursts), the slope
   stderr. A stream shorter than `--min-span-s` (default 20 s) reads SHORT, never a FAULT.
 - **Formats:** classic pcap (either byte order, µs/ns) LINUX_SLL2 276 (`tcpdump -i any`), SLL 113,
@@ -61,36 +63,38 @@ paths:
 - `--dst IP` keeps only streams ARRIVING at the receiver (a strih-snv capture also sees the hub's own
   strih-snv → camN streams, which say nothing about a peer's clock). `--json` / `--tsv` for tools.
 
-## The watchdog (`scripts/vban-rate-alert-watchdog.sh`, dev1, SHIPS DISABLED)
+## The dev1 watchdog was RETIRED (26.10.2026, ROZHODNUTÉ on issue 1372)
 
-- One pass = a ~60 s `tcpdump -i any -s 96 -U -w - 'udp and udp[8:4] = 0x5642414e'` on strih-snv
-  over ssh, sudo fed on stdin (`sudo -S -p ''`), pcap streamed back to dev1. strih-snv is the
-  reference receiver because Linux adjtimex slews CLOCK_REALTIME → its capture clock is the
-  dantesync-disciplined clock. `timeout` exit 124 = a complete capture.
-- Without the magic BPF a 15 s capture was 192 MB (NDI UDP); with it ~10 MB per 40 s.
-- Grades against nominal ±`VBAN_RATE_PPM_BOUND` (20) and `VBAN_RATE_LOSS_CEILING` (1e-4) — both
-  PROVISIONAL: calibrate from data once part A (Windows OBS on the dantesync rate) is live. A
-  Dante-clocked sender still differs from system time by dantesync's `f_phase`, so the bound must
-  leave room for it.
-- Production-critical re-ping (on-air audio): `watchdog_notify_key` time bucket, allowlisted in
-  `test_notify_dedup_key_sweep_1206.py`. The incident key is stream NAME + sender IP, never the
-  sender's ephemeral source port. 2-pass confirm; recovery = one log line; capture failure / no
-  streams / SHORT = SKIP. REPORT-ONLY: no E2E step reads it (no clean single-line seam in
-  recording-e2e.sh for a 60 s capture — kept as watchdog + CLI).
-- **Never silently blind (review round 1).** The remote sudo/tcpdump stderr is kept. A capture that
-  fails `VBAN_RATE_CAPTURE_FAIL_PASSES` (3) passes in a row while strih-snv answers ssh :22 (tcpdump
-  missing, a wrong sudo password) pages once (`vban-rate-capture-<box>`); a failure with the box down
-  is a SKIP. A stream not GRADED (OK/FAULT) for longer than `VBAN_RATE_STALE_S` (900 s) restarts its confirm count; the blind-capture page uses a STABLE key (a chronic config fault, one page per incident). The step limits use the arrival of the last ACCEPTED packet, so a late duplicate never shrinks
-  them (a duplicate near the end of an outage cannot hide the outage's loss), and the lookahead treats
-  the rest of a late-duplicate burst as the old stream.
-- Seams: `VBAN_RATE_CAPTURE_CMD <outfile>` replaces the ssh capture (tests feed synthetic pcaps);
-  `VBAN_RATE_BOX_UP_CMD` replaces the ssh :22 probe.
+`scripts/vban-rate-alert-watchdog.sh` + its unit (a 60 s tcpdump on strih-snv pulled to dev1 every
+pass) shipped DISABLED and never ran. It was removed because:
+
+- **Each receiver measures its own streams now.** The obs-vban RECEIVE source on the stream box
+  (issue 1439, `obs-vban-receive.md`) prints `obs-vban receive:` every 10 s with `received` / `lost` /
+  `late` / `re_anchors` / `concealed` and `sender_ppm` (a 64 s least-squares fit of the sender
+  clock) -- the same rate + loss, measured where the program audio is played out, not from a capture.
+  The strih-snv hub reports its VBAN legs (stalls, lost ticks, the worst leg) on `/api/state`.
+- **The release gate is BLOCKING on it.** The full-path E2E's program-audio continuity gate
+  (`scripts/lib/program-audio-continuity.sh`) fails a run on those receive deltas.
+- **No rig services or rig data on dev1** (owner rule), and the capture pulled ~10 MB/min over ssh.
+
+What stays: `scripts/vban_rate.py` (the offline pcap / pktmon diagnosis CLI, and the ONE VBAN header
+layout the issue-1460 bench planner `scripts/vban_emulator_plan.py` imports). A between-run page on
+VBAN rate/loss, if ever wanted, reads the receiver's own status line on its box; do not bring back a
+dev1 capture.
 
 ## Live baseline (25.9.2026, before part A)
 
 `fohabl-strih` (10.77.7.30, 96 kHz, 103 samples/frame) at strih-snv: +10.3 ppm by the plain fit,
 +7.7 ppm by the trimmed fit (its late tail was the bias), 39 lost / 40 s (1.05e-3) and 49 / 60 s
 (8.8e-4) — the FOH VBAN OUT loss. The hub's own outputs: −0.55 ppm, 0 loss.
+
+## Manual capture on a Linux receiver
+
+`tcpdump -i any -s 96 -U -w <file> 'udp and udp[8:4] = 0x5642414e'` (the VBAN-magic BPF; without
+it a 15 s capture was 192 MB of NDI UDP), then `python3 scripts/vban_rate.py analyze --dst <receiver IP>
+<file>`. Linux adjtimex slews CLOCK_REALTIME, so on a dantesync-disciplined box the capture clock is
+the disciplined clock. A Dante-clocked sender still differs from system time by dantesync's
+`f_phase`.
 
 ## Windows side (pktmon)
 

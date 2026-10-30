@@ -69,6 +69,21 @@ struct obs_source_info alpha_filter_info;
 extern struct obs_source_info create_ndi_burn_filter_info();
 struct obs_source_info ndi_burn_filter_info;
 
+#ifdef CAMERA_BOX_JXS_SOURCE
+// camera-box issue 1387 slice 2: the JPEG XS receiving source (jxs-source.cpp + the jxs-recv-ffi
+// static library), built only by the strih Linux variant (CMake option CAMERA_BOX_JXS_SOURCE).
+extern struct obs_source_info create_jxs_source_info();
+struct obs_source_info jxs_source_info;
+// issue 1387 slice 3: the JPEG XS PROGRAM output (jxs-output.cpp, the jxs-send-ffi ABI carried in
+// the same static library), created from its settings file at FINISHED_LOADING.
+extern struct obs_output_info create_jxs_output_info();
+struct obs_output_info jxs_output_info;
+void camera_box_jxs_output_init();
+void camera_box_jxs_output_deinit();
+// issue 1387: the JPEG XS state table's proc handler, read by the frontend's JPEG XS indicator.
+void camera_box_jxs_state_register();
+#endif
+
 const NDIlib_v6 *load_ndilib();
 
 // camera-box #1185: reserve the program's NDI send instance at module post-load
@@ -297,6 +312,18 @@ static void register_plugin_features()
 
 	obs_log(LOG_DEBUG, "Plugin features registered: QR burn filter (#111)");
 
+#ifdef CAMERA_BOX_JXS_SOURCE
+	// camera-box issue 1387 slice 2: the JPEG XS source needs no NDI; it sits beside the camera's
+	// NDI input and gets nothing until a cambox's CAMERA_BOX_JXS_TARGET points at its UDP port.
+	jxs_source_info = create_jxs_source_info();
+	obs_register_source(&jxs_source_info);
+	obs_log(LOG_INFO, "Plugin features registered: camera-box JPEG XS source (issue 1387)");
+	jxs_output_info = create_jxs_output_info();
+	obs_register_output(&jxs_output_info);
+	obs_log(LOG_INFO, "Plugin features registered: camera-box JPEG XS program output (issue 1387)");
+	camera_box_jxs_state_register();
+#endif
+
 	plugin_features_registered = true;
 	obs_log(LOG_INFO, "register_plugin_features: NDI plugin features registered");
 	obs_log(LOG_DEBUG, "-register_plugin_features()");
@@ -497,19 +524,32 @@ bool obs_module_load(void)
 						[] {
 							main_output_init();
 							preview_output_init();
+#ifdef CAMERA_BOX_JXS_SOURCE
+							camera_box_jxs_output_init();
+#endif
 						},
 						Qt::QueuedConnection);
 				} else if (event == OBS_FRONTEND_EVENT_EXIT) {
 					// Unknown why putting this in obs_module_unload causes a crash when closing OBS
 					main_output_deinit();
 					preview_output_deinit();
+#ifdef CAMERA_BOX_JXS_SOURCE
+					camera_box_jxs_output_deinit();
+#endif
 				} else if (event == OBS_FRONTEND_EVENT_PROFILE_CHANGING) {
 					main_output_deinit();
 					preview_output_deinit();
+#ifdef CAMERA_BOX_JXS_SOURCE
+					// a video reset refuses active outputs (the profile's canvas may change)
+					camera_box_jxs_output_deinit();
+#endif
 				} else if (event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
 					if (plugin_features_registered) {
 						main_output_init();
 						preview_output_init();
+#ifdef CAMERA_BOX_JXS_SOURCE
+						camera_box_jxs_output_init();
+#endif
 					}
 				}
 			},

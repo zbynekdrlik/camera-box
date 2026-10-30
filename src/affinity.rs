@@ -366,6 +366,11 @@ fn env_capture_core() -> Option<usize> {
 
 /// Online cores from `/sys/devices/system/cpu/online`; falls back to
 /// `sysconf(_SC_NPROCESSORS_ONLN)` if the file can't be read.
+/// Every online core (issue 1387 slice 3: the strih OBS JPEG XS output's default encoder set).
+pub fn online_cores() -> Vec<usize> {
+    read_online_cores()
+}
+
 fn read_online_cores() -> Vec<usize> {
     match std::fs::read_to_string("/sys/devices/system/cpu/online") {
         Ok(s) => parse_cpulist(&s),
@@ -442,9 +447,9 @@ pub fn pin_capture_thread() {
     }
 }
 
-/// Pin the calling thread (a painter / `--display` render / intercom auxiliary
-/// thread, `label` for the log) OFF the capture core, onto the general cores.
-pub fn pin_off_capture_core(label: &str) {
+/// The off-capture core split of this box (issue 1198): the general cores an
+/// auxiliary thread may run on, the capture core and the reserved capture-IRQ core.
+pub fn off_capture_split() -> (Vec<usize>, Option<usize>, Option<usize>) {
     let online = read_online_cores();
     let isolated = read_isolated_cores();
     let capture = select_capture_core(env_capture_core(), &isolated, &online);
@@ -456,7 +461,23 @@ pub fn pin_off_capture_core(label: &str) {
         Some(cc) if !read_kernel_is_preempt_rt() => select_irq_reserved_core(cc, &online),
         _ => None,
     };
-    let cores = select_painter_cores(capture, reserved, &online);
+    (
+        select_painter_cores(capture, reserved, &online),
+        capture,
+        reserved,
+    )
+}
+
+/// Pin the calling thread to exactly `cores` (a subset of [`off_capture_split`]'s
+/// general cores chosen by the caller); `false` when the syscall failed.
+pub fn pin_current_thread_to(cores: &[usize]) -> bool {
+    pin_current_thread(cores)
+}
+
+/// Pin the calling thread (a painter / `--display` render / intercom auxiliary
+/// thread, `label` for the log) OFF the capture core, onto the general cores.
+pub fn pin_off_capture_core(label: &str) {
+    let (cores, capture, reserved) = off_capture_split();
     if pin_current_thread(&cores) {
         tracing::info!(
             "#289/1198 {label} thread pinned OFF the capture core to {cores:?} (capture core={capture:?}, reserved capture-IRQ core={reserved:?})"
@@ -504,6 +525,44 @@ pub fn set_current_thread_realtime(role: RtThreadRole) {
             "#899 could not set capture+emit thread SCHED_FIFO prio {prio} (need CAP_SYS_NICE) — thread stays SCHED_OTHER"
         );
     }
+}
+
+/// The SCHED_FIFO priority the JPEG XS encoder threads may run at (issue 1387): below the
+/// capture + emit hot path ([`CAPTURE_FIFO_PRIORITY`]), so the grab always preempts an encode.
+pub const JXS_ENCODER_FIFO_PRIORITY: i32 = 50;
+const _: () = assert!(JXS_ENCODER_FIFO_PRIORITY < CAPTURE_FIFO_PRIORITY);
+
+/// Raise the CURRENT thread to SCHED_FIFO `prio` WITHOUT `SCHED_RESET_ON_FORK`, so the threads it
+/// spawns next INHERIT it (issue 1387). The ONE deliberate exception to the reset-on-fork rule of
+/// [`capture_emit_sched_policy_word`]: the JPEG XS feeder thread raises itself right before it
+/// opens the SVT-JPEG-XS session, whose worker threads (created inside `svt_jpeg_xs_encoder_init`,
+/// no hook to reach them otherwise) are exactly the threads that must run FIFO. The feeder spawns
+/// nothing else. `false` when refused (no CAP_SYS_NICE) or `prio` is out of 1..=99.
+pub fn set_current_thread_fifo_inherited(prio: i32) -> bool {
+    set_current_thread_fifo(prio, SCHED_FIFO_POLICY)
+}
+
+/// SCHED_FIFO `prio` for the CURRENT thread under the policy word `policy` (with or without
+/// reset-on-fork); `false` when refused or `prio` is out of 1..=99.
+fn set_current_thread_fifo(prio: i32, policy: i32) -> bool {
+    if !(1..=99).contains(&prio) {
+        return false;
+    }
+    // SAFETY: sched_setscheduler(0, ...) targets the current thread; `param` is a plain value.
+    unsafe {
+        let param = libc::sched_param {
+            sched_priority: prio,
+        };
+        libc::sched_setscheduler(0, policy, &param) == 0
+    }
+}
+
+/// Raise the CURRENT thread to SCHED_FIFO `prio` WITH `SCHED_RESET_ON_FORK` (the
+/// [`capture_emit_sched_policy_word`] rule: nothing it spawns inherits it). For a JPEG XS
+/// sender thread that spawns no library threads (issue 1387 `jxs-send`). `false` when refused
+/// or `prio` is out of 1..=99.
+pub fn set_current_thread_fifo_reset_on_fork(prio: i32) -> bool {
+    set_current_thread_fifo(prio, capture_emit_sched_policy_word())
 }
 
 /// Route the USB / uvcvideo capture-controller IRQ(s) onto the isolated capture

@@ -54,7 +54,7 @@ strih/stream recording during a CG_CHAIN run and must never hijack the cam2 Vern
 
 ## The verdict — REPORT-ONLY, provably never touches the camera-chain `overall_pass`
 
-The pure decision is the crate-root `src/cg_chain_gate.rs` (Tier-0, mirrors `imag_tick_gate.rs` +
+The pure decision is the crate-root `src/cg_chain_gate.rs` (default-feature, mirrors `imag_tick_gate.rs` +
 reuses `burn_hold`): per hop (`cg_obs`/`strih`/`stream`) the SongPlayer (911014) and cg (911015)
 burn-id contiguity + max-hold (`MAX_HOLD_FRAMES=4`, #575-boundary-trimmed). Contiguity is
 decimation-aware since issue 1302 slice 2 (`hop_contiguity_with_step`, below); `cg_obs` is the 1:1
@@ -82,7 +82,7 @@ than "calibrate the hold". Before the flip:
    carries every CRC-valid payload regardless, so the merge sees the CG ids. Normal runs: the flag
    is absent and both burn sets are byte-identical.
 3. **DONE in code (issue 1302 slice 2), unproven live: decimation.** `hop_contiguity_with_step`
-   is the `burn_contiguity_in_window_with_step` model (duplicated — the probe module is CI-only):
+   is the `burn_contiguity_in_window_with_step` model (duplicated — the probe module is probe-gated):
    per forward gap between consecutive DISTINCT present ids, the excess `gap / step - 1` (integer
    division) is charged; gap == step is decimation, `step + 1` is beat jitter (0 at step 2), and a
    charged slot is listed as `prev + k * step`. The step comes from the fps ratio
@@ -266,7 +266,7 @@ renders only while that input's `genlock_burn` is true, toggled by the existing
     (harmless) or fails its enumeration loudly.
 - **Why leak-guarded like the SongPlayer burn:** the cg OBS program feeds strih and, through Arena,
   possibly FOH/LED — the #246/#844 class. Approach 2 (always ON in TEST mode) was rejected for that.
-- Tier-0: `tests/python/test_cg_chain_cg_burn_1302.py` (fake `obs_burn_filter.py` / `obs_phase2.py` /
+- Tests: `tests/python/test_cg_chain_cg_burn_1302.py` (fake `obs_burn_filter.py` / `obs_phase2.py` /
   `cg_chain_scene.py` run by the real python3, a fake SongPlayer `curl`, a pass-through `timeout`
   logging the per-call budget). Verdict side needs nothing new: `--cg-chain-burns` and
   `src/cg_chain_gate.rs` already expect 911015. The live proof is the next supervisor CG_CHAIN=1 run
@@ -338,7 +338,7 @@ same scene to cg OBS, queued and NOT awaited.
   the SongPlayer burn API, the polls and this facade section; `scripts/lib/cg-obs-burn-backstop.sh`
   the backstop; `scripts/lib/cg-chain-e2e.sh` (the rest) sources both. The uint knobs refuse more
   than 6 digits (a longer value wraps bash's arithmetic).
-- Tier-0: `tests/python/test_cg_chain_measure_1302.py` (fake curl serving the burn/health/program
+- Tests: `tests/python/test_cg_chain_measure_1302.py` (fake curl serving the burn/health/program
   APIs and the dashboard cut, fake `cg_chain_scene.py` that moves SongPlayer's program on a press,
   fake `obs_phase2.py program-scene`, the real lib under `set -euo pipefail`; also the burn poll, the
   backstop and the rig-mode EVENT sweeps with a fake `python3` that can fail one host); the helper's `facade-program` in
@@ -353,7 +353,7 @@ same scene to cg OBS, queued and NOT awaited.
 answer (the cleanup() re-stop) never clears it. The recording is **never copied to dev1**: the first
 design scp'd it there and decoded it inside the `[8/8d]` merge, and the 25.9.2026 release E2E (run
 36115692830) spent 29 min in that one decode and hit the 75-min job timeout (the 250 MB scp itself
-took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follows the stream extract:
+took 3 s — the decode was the cost). Now it follows the stream extract:
 
 - **`scripts/recording-verdict-on-resolume.sh`** (always executes, plain session-agnostic ssh —
   a file copy, a headless CLI decode and a download, so `win-ssh-vs-mcp.md` context B holds):
@@ -409,9 +409,8 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
   a longer job timeout. Run 36622266165 (PR 1393) overran the 900 s after launch with a BURN-LESS
   cg recording: no burn to find, so the fast path never locks and every frame takes the robust path.
   Slice 3 left the budget alone on purpose (design (d)); re-read the decode time on the first run
-  WITH burns, and a still-overrunning decode is its own finding, never a bigger timeout. Tier-0 coverage: `tests/harness_cg_chain_onbox_1302.rs` (std-only, runs with
-  plain `rustc --test` + a `tempfile` shim) drives the launch/collect/marker/merge-args seam against a
-  fake extract script and the resolume script's `main()` against fake `sshpass`/`ssh`/`scp`.
+  WITH burns, and a still-overrunning decode is its own finding, never a bigger timeout. Coverage:
+  `tests/harness_cg_chain_onbox_1302.rs` drives the launch/collect/marker/merge-args seam against a fake extract script and the resolume script's `main()` against fake `sshpass`/`ssh`/`scp`.
 
 ### The ONE tail CG window (issue 1302) — why it is NOT a switch-schedule window
 
@@ -460,18 +459,15 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
   must never contain the `[7/8]` literal — a test anchors on the FIRST `[7/8]` in the file); and
   `cg_chain_after_stoprecord …` after the `imag host file` echo. Anchor gotcha hit here: `[5b/8]`
   first appears in a source-block comment near the top — anchor on `# [5b/8] #707 B1`.
-- Tier-0: the pure bash builders + the fake-curl / fake-python3 / fake-scp runners are driven by
-  `tests/harness_cg_chain_e2e_1302.rs` (std-only — it RUNS locally with plain `rustc --test` +
-  `CARGO_MANIFEST_DIR`, from a script file in a worktree); the scene helper is pytest
-  (`tests/python/test_cg_chain_scene_1302.py`, a scripted fake OBS that refuses a program cut under
-  anything but Cut).
+- Tests: the pure bash builders + the fake-curl / fake-python3 / fake-scp runners are driven by
+  `tests/harness_cg_chain_e2e_1302.rs`; the scene helper is pytest (`tests/python/test_cg_chain_scene_1302.py`,
+  a scripted fake OBS that refuses a program cut under anything but Cut).
 - **The strih/stream hops (issue 1302 slice 2):** items 2 + 3 above — the `--cg-chain-burns` flag
   (`cg_chain_extract_burn_flag`, spliced as `${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"}` into all
   three extract calls: strih-snv, Windows strih, stream — an empty flag adds NO argv word) and
   `cg_chain_merge_args_append` (which also feeds the on-box cg partial). `tests/harness_cg_chain_hops_1302.rs`
-  pins both (std-only, runs with plain `rustc --test`); the verdict side is pinned by the
-  `*_1302` tests in `recording-verdict.rs` (CI-only) and the `cg_chain_gate` unit tests (Tier-0 via
-  a `#[path]` rustc replica with `burn_hold` + `recording_boundary_trim`). A verdict fixture must
+  pins both; the verdict side is pinned by the `*_1302` tests in `recording-verdict.rs` (probe-gated)
+  and the `cg_chain_gate` unit tests. A verdict fixture must
   keep its CG frames clear of the 3-frame #575 lead/tail trim, or the trim silently drops them.
 
 ## Adding ANOTHER chain-origin/hop pair later

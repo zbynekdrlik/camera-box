@@ -80,12 +80,12 @@ model (90/160/184) was owner-REJECTED and REVERTED — never re-derive absolute 
   (operator A/V-align domain) and imag's 3 ms floor are never in the align set; `--pins` refuses an
   underscore/imag-floor-sentinel key.
 
-## Reuse, and Tier-0
+## Reuse, and tests
 
 - Reuse `mv_skew_snapshot.parse_payload`/`tick_map`/`dominant_run_id` (CRC-validated decode) and
   `apply_latency_pins.apply_pins` (read-back-verified, fail-loud writer) — the aligner imports
   `apply_pins` DIRECTLY (it does NOT shell out to `--pins`; that is the manual runbook path).
-- Pure functions are Tier-0 (pytest + fake WS, no rig); the live barrier/decode/apply needs a rig,
+- Pure functions are tested with pytest + fake WS (no rig); the live barrier/decode/apply needs a rig,
   validated by the supervisor. The revert left DANGLING tests asserting the deep pins
   (`test_apply_latency_pins TestPromotedBaseline`, the `test_latency_pins_verify` drift fixture) — a
   baseline-VALUES change (either direction) MUST update those fixtures in the same change.
@@ -177,7 +177,7 @@ system.**
 - **Wiring:** `qr-align.sh` remaps `QR_ALIGN_ROUNDS` → `--max-measure-rounds` and adds
   `QR_ALIGN_BUDGET_S` → `--measure-budget-s`. The ~90 s bound is INTERNAL to the python, so the E2E
   step needs no outer `timeout` and `recording-e2e.sh` is UNTOUCHED (its static anchors stay intact).
-- Tier-0: `_stable_tail` / `_stable_tail_start` / `measure_tail_status` are PURE (no rig);
+- Tests: `_stable_tail` / `_stable_tail_start` / `measure_tail_status` are PURE (no rig);
   `measure_stable_tail` + the `align()` flow are tested against a monkeypatched `barrier_screenshot`
   (`tests/python/test_qr_align_tail_1160.py` — incl. the #1161 outlier-tolerance + extended-window
   cases: the exact live 24-round sequence converges-stable, a lone near-band blip is skipped not
@@ -295,7 +295,7 @@ ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compu
   no audit lines), the aligner falls back to the (inert-prone) floor+delta plan with a loud WARNING
   rather than aborting — so a missing audit degrades to the pre-fix behavior, never a hard stop. The
   normal E2E path runs the reset+fetch for the actual floor-aware fix.
-- **Tier-0:** `arrival_floors_from_jitter`, `floor_aware_pins` (incl. the clamp + don't-tear-down),
+- **Tests:** `arrival_floors_from_jitter`, `floor_aware_pins` (incl. the clamp + don't-tear-down),
   `floor_aware_stuck_abort_reason`, `reset_pins_to_floor`, and the align() flow (a FIFO-modelling
   barrier: #1253 additive present_age = transport + pin; pinned-state sanity + partial-audit fallback) are
   pure/monkeypatched — `tests/python/test_qr_align_pinapply_1161.py`. The `qr-align.sh` two-phase
@@ -371,10 +371,10 @@ transient DQBUF episodes, so it does NOT imply a 49 ms gated residual (cam2, the
 EXCLUDED from the align gate; issue 1216). RE-ARMABLE (`--align-retighten-budget-ms` /
 `QR_ALIGN_RETIGHTEN_BUDGET_MS`): LOWER the budget toward the ≤1-id parity gate ONLY once the N=2
 quantum ITSELF is addressed (a longer / phase-robust barrier audit, or a genlock change) — floor
-reduction alone does NOT shrink it. Tier-0: `budget_bound_verdict` + the hard-fail align()-flow test
+reduction alone does NOT shrink it. Tests: `budget_bound_verdict` + the hard-fail align()-flow test
 in `tests/python/test_qr_align_pinapply_1161.py`.
 
-Tier-0: `floor_aware_partition`, the budget-bound `align()` flow (FIFO-modelling barrier), and the
+Tests: `floor_aware_partition`, the budget-bound `align()` flow (FIFO-modelling barrier), and the
 byte-unchanged within-budget/unstable/hold-inert regression guards are pytest-verified with no rig
 (`tests/python/test_qr_align_pinapply_1161.py`); the live soft-release is the supervisor's E2E
 acceptance instrument.
@@ -420,7 +420,7 @@ to exercise the plan / hold-inert / re-derive paths were superseded — a sub-qu
 already-aligned, so those fixtures were bumped to a CLEARLY-real spread (4 ids ≈ 33 ms = 2 source
 frames; the pinned-state sanity test to 27 ms, target 93 ≤ the 94 ms ceiling). When writing a NEW
 align test that must reach the plan, use a spread ≥ 2 source frames (≥ ~34 ms), never one source
-frame. Tier-0: `within_aligned_quantum` + an `align()` flow test reproducing the run from its REAL
+frame. Tests: `within_aligned_quantum` + an `align()` flow test reproducing the run from its REAL
 recorded deltas + arrival-floor audit (`tests/python/test_qr_align_quantum_1252.py`), pytest, no rig.
 
 **Aliasing blind band (16.7 ms, 25 ms) — the one honest cost.** The lock phase is PERSISTENT while
@@ -454,7 +454,7 @@ budget check, never the pin value. The `samples=2` PHANTOM arrival floor is trea
 `arrival_floors_from_jitter` DROPS a floor whose explicit `samples < MIN_FLOOR_SAMPLES` (3) — run
 1899055119's cam3 "84" = 67 + 16.7 came from `samples=2` (a MISSING samples count is trusted; only an
 explicit low count is the known phantom). The `within_aligned_quantum` gate is unchanged and still
-runs before any plan. Tier-0: `tests/python/test_qr_align_pinapply_1161.py` (the `_FifoBarrier` model
+runs before any plan. Tests: `tests/python/test_qr_align_pinapply_1161.py` (the `_FifoBarrier` model
 migrated `max` → additive, an additive-overshoot RED→GREEN proof) + `test_qr_align_quantum_1252.py`
 (the phantom-floor filter).
 
@@ -509,7 +509,7 @@ already floored the #900 re-anchor pins BEFORE align runs, so restoring `current
 lands them at the floor. Before the fix an aborted run left the rig on the partial plan pins (run
 34973535496: cam1 20 / cam4 19 / cam5-7 36/36/37 DIRTY, restored by hand). Only the post-apply block
 is wrapped — a pre-apply abort (sanity / never-stabilize / already-aligned / budget-bound hard-fail)
-wrote no pins, and the reset already left them at the floor. Tier-0: `test_qr_align_restore_on_abort_1168.py`
+wrote no pins, and the reset already left them at the floor. Tests: `test_qr_align_restore_on_abort_1168.py`
 exercises the full align() abort against a fake ws/apply stub (asserting the LAST apply restores the
 pre-align pins, and that a SUCCESS path does not restore).
 
@@ -526,7 +526,7 @@ sufficient / 1 short / 2 no-jitter). When the first fetch is short the loop slee
 lines accrue from the SAME `$_start`) and re-fetches before letting the fallback fire, so the budget
 check is skipped only when a floor is genuinely unobtainable after two windows. The win_ssh fetch
 pipeline is byte-unchanged (only wrapped in the loop); anchor-safe (all Rust anchors on `qr-align.sh`
-are `.contains()` presence checks; the loop adds no `--box stream`). Tier-0: `floor_samples_sufficient`
+are `.contains()` presence checks; the loop adds no `--box stream`). Tests: `floor_samples_sufficient`
 + the `--floor-samples-ok` CLI in `test_qr_align_floor_samples_1168.py`; the live win_ssh re-fetch is
 supervisor-verified on the rig (bash -n + shellcheck are the only local net for the shell half).
 
@@ -554,7 +554,7 @@ the same direction as `floor_aware_partition` (`base = min(deltas)` = the oldest
 freshest camera carries the largest pin. (The 15.9. 20:15 worked numbers `cam4→3, cam2→23` are the
 inverted mirror of this.)
 
-**What shipped (all pure, Tier-0):**
+**What shipped (all pure):**
 - `floor_equalization_plan(arrival_floors, ...)` — anchor = max-floor camera at the floor; each deficit
   rounded to the NEAREST whole source frame; an above-floor pin is applied ONLY IF (a) a whole-frame
   hold measurably REDUCES the OVERALL cross-camera spread, (b) it stays within the 94 ms ceiling, AND
@@ -636,7 +636,7 @@ and runs `qr_align_reinit_loop "$STRIH" "$SOURCES"`:
    floor-aware plan, whose HARD-FAIL stays the final arbiter. The loop NEVER aborts the run and
    ALWAYS returns 0.
 
-**Seams (Tier-0):** `QR_ALIGN_REINIT_MEASURE_CMD` (a command called `<cmd> <host> <sources>` → the
+**Seams:** `QR_ALIGN_REINIT_MEASURE_CMD` (a command called `<cmd> <host> <sources>` → the
 measure-only JSON) and `QR_ALIGN_REINIT_RESTART_CMD` (a command called `<cmd> <camN>` → restart that
 box's burn instance) default to the production helpers and are injected with fakes by
 `tests/harness_qr_align_reinit_1349.rs` / `tests/python/test_qr_align_measure_only_1349.py` so no rig
@@ -647,9 +647,8 @@ is touched. Turn the whole loop off with `QR_ALIGN_REINIT=0`.
 "qr_align_reinit_spread_frames": S, "rounds_detail": [{"round": N, "spread": S, "reinit":
 ["cam3","cam7"], "measure_retries": M}, …]}` (issue 1349 item 3 — `rounds_detail` names the set
 re-inited per round + the measure-retry count). Wiring this INTO the verdict JSON's
-`all_cambox_continuity` needs a `src/probe/*` Rust change (zero local verification path under Tier-0)
-and is deferred — the file + the `[qr-align-reinit] round N: spread=S re-init=camX,camY` run-log
-lines are the current surface.
+`all_cambox_continuity` needs a `src/probe/*` Rust change and is deferred — the file + the
+`[qr-align-reinit] round N: spread=S re-init=camX,camY` run-log lines are the current surface.
 
 **Live acceptance (supervisor):** a release E2E whose `[4i/8align]` logs ≥ 1 re-init round and then
 passes the floor-aware plan. Live evidence + the restart-proof: issue 1349.

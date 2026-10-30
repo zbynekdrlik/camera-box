@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 #
 # verify-device.sh -- POST-REBOOT runtime acceptance gate for a freshly-provisioned camera-box
 # appliance (#454). This is the fourth and final phase of the unified provisioning method:
@@ -36,6 +37,8 @@
 #                      setup-device.sh; override via env for a box with a different password)
 #   SSH_TIMEOUT       SSH connect timeout in seconds (default: 10)
 #   CLOCK_GUARD_BOUND_US  dantesync clock-offset bound in microseconds (default: 2000, #8)
+#   VERIFY_DEVICE_IP  dial the box at this IPv4 address instead of camera_resolve's (issue 1394:
+#                      the Poprad camboxes, set by verify-fleet.sh --venue); the NAME drives every fact
 #
 # Checks (all must pass):
 #   (a) camera-box --version is a valid, well-formed fleet version string
@@ -125,9 +128,12 @@
 #       active. dantesync's rsntp Linux client cannot setsockopt(IP_TOS) on its own request socket,
 #       so this provisioning rule is the ONLY thing marking the request direction; a box missing
 #       nftables, the rule, or the oneshot FAILs (never a silent pass).
-#   (ap) NDI egress pacing (issue 1242) -- HARD FAIL: the default-route interface's ROOT qdisc is
-#       `fq` with maxrate / flow_limit / limit equal to scripts/lib/cambox-egress-pacing.sh's one
-#       declaration (400mbit / 2000 / 20000), AND what setup-device installed will run at the next
+#   (ap) NDI egress pacing (issue 1242) -- HARD FAIL: the default-route interface carries the
+#       issue-1387 tree: a `prio` root sending every priority to class 1:1, an `fq` under 1:1 with
+#       maxrate / flow_limit / limit equal to scripts/lib/cambox-egress-pacing.sh's one declaration
+#       (400mbit / 2000 / 20000), the JPEG XS class 1:2 (a pfifo) and the fw filter on its socket
+#       mark (0x1387) -- the NDI flows paced, the JPEG XS flow at line rate; a pre-1387 root fq
+#       FAILs -- AND what setup-device installed will run at the next
 #       boot: the boot script is executable, starts with #!/bin/bash and equals what the lib
 #       generates, the unit equals the checked-in systemd/ one (both compared on their functional
 #       lines, comments and blank lines ignored), enabled (reboot survival) and not failed. A
@@ -189,7 +195,9 @@
 #        (setup-device.sh STEP 7 and `ndi-discovery.sh --cambox-apply` remove both).
 #   (ao) bkshading relay provisioned (issue 808) -- HARD FAIL: the relay binary is executable, the
 #        installed bkshading-relay.service BYTE-matches the repo unit, /etc/bkshading/relay.env carries
-#        CAMERA_BOX_CAPTURE_FPS=<int>, gphoto2 is installed, AND the unit's enable-state matches the rig
+#        CAMERA_BOX_CAPTURE_FPS=<int> + the issue-1431 registration (BKSHADING_REGISTER_URL =
+#        http://strih.lan:8770/api/relays/register, BKSHADING_RELAY_ID = this camN), gphoto2 is installed,
+#        AND the unit's enable-state matches the rig
 #        mode (TEST: the relay roster -- the source box + cam2 -- disabled, every other box enabled;
 #        EVENT: enabled). Mode = CAMERA_BOX_RIG_MODE=test|event, else read from cam2's painter state (a roster box
 #        whose mode is unreadable FAILs). setup-device.sh's [bkshading-relay] sub-step provisions it;
@@ -233,6 +241,11 @@
 #        decision create-usb-linux.sh installs). A box off the line is moved by
 #        scripts/rt-kernel-upgrade.sh --box <ip> (reboot-class, owner-approved per box), never by
 #        setup-device.sh. A cut or unreadable read FAILs.
+#   (ax) which strih this cambox follows (issue 1431) -- HARD FAIL: strih.lan, resolved ON the box
+#        (getent ahostsv4, what the intercom, dantesync, the shading relay registration and the preview
+#        use), is the STRIH_IP of a strih-role fact file (scripts/strih-boxes/*.env); the OK line names
+#        the box. No answer, a stream box or any other address FAILs naming it (the router record decides
+#        the venue at a joint event, scripts/lib/strih-follow.sh).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -291,6 +304,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/cambox-egress-pacing.sh"  # cambox_egress_pacing_gather_remote_snippet /
                                        # _provision_verdict -- the (ap) NDI egress pacing check
                                        # (issue 1242; SAME lib setup-device.sh installs it from)
+# shellcheck source=scripts/lib/remote-logging.sh
+# shellcheck source=scripts/lib/strih-follow.sh
+. "$HERE/lib/strih-follow.sh"  # strih_follow_gather_remote_snippet/strih_follow_verdict -- the (ax) check (issue 1431)
 # shellcheck source=scripts/lib/remote-logging.sh
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
@@ -365,8 +381,8 @@ EXPECT_KERNEL="${KERNEL_PIN:-}"                 # optional: also require running
 
 # --- (a) version -------------------------------------------------------------------------------
 
-# version_is_valid_format V -> 0 iff V matches the fleet's vMAJOR.MINOR.PATCH[-dev.N] shape (the
-# CI dev-channel form, e.g. "1.7.0-dev.244", or a plain release "1.7.0").
+# version_is_valid_format V -> 0 iff V matches the fleet's MAJOR.MINOR.PATCH[-dev.N] shape: a
+# release "1.8.0" (every version since issue 1476) or a historical dev build "1.7.0-dev.244".
 version_is_valid_format() {
   grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$' <<<"$1"
 }
@@ -923,8 +939,9 @@ Checks:
       \`table ip dantesync_dscp\` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
       DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
       setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
-  (ap) NDI egress pacing (issue 1242): the default-route interface's root qdisc is fq with the
-      declared maxrate/flow_limit/limit (scripts/lib/cambox-egress-pacing.sh), the installed boot
+  (ap) NDI egress pacing (issue 1242): the default-route interface carries a prio root with the
+      declared fq (maxrate/flow_limit/limit) under 1:1 for NDI and the JPEG XS line-rate class 1:2
+      + its fw filter (issue 1387, scripts/lib/cambox-egress-pacing.sh), the installed boot
       script + unit match what setup-device installs, and cambox-egress-pacing.service is enabled
       and not failed -- a hand-applied qdisc alone FAILs
   (af) v4l2-ctl (v4l-utils) installed and runnable (\`v4l2-ctl --version\`) -- already listed in
@@ -956,7 +973,8 @@ Checks:
   (an) NDI discovery receiver config (issues 1342, 1389): a cambox carries NO networks.ips (mDNS
       only) -- /etc/ndi/ndi-config.v1.json lists no IP and no networks.discovery, and a camera-box
       NDI_CONFIG_DIR drop-in, if left, points at /etc/ndi
-  (ao) bkshading relay provisioned (issue 808): binary + byte-matching unit + env + gphoto2, and the
+  (ao) bkshading relay provisioned (issue 808): binary + byte-matching unit + env (registers as camN
+      at strih.lan, issue 1431) + gphoto2, and the
       unit enable-state matches the rig mode (TEST: source box + cam2 disabled; CAMERA_BOX_RIG_MODE=test|event,
       else read from cam2's painter state)
   (aq) no GRUB menu and no countdown (#1394): the generated /boot/grub/grub.cfg hides the menu with
@@ -973,12 +991,15 @@ Checks:
   (av) display GPU driven (issue 1446): every PCI display controller has a kernel driver bound (an
       N150 8086:46d4 on 6.8.0-142 has none: the HDMI preview then lights only when a monitor was on
       at power-on); the remedy is the HWE kernel via scripts/rt-kernel-upgrade.sh
+  (ax) which strih this cambox follows (issue 1431): strih.lan resolved on the box is a strih
+      box's STRIH_IP (scripts/strih-boxes/*.env), named in the OK line
   (aw) fleet kernel line (issue 1446): linux-lowlatency-hwe-24.04 installed (held reads installed),
       the running kernel booted with preempt=full, and uname -r = the image the installed
       linux-image-generic-hwe-24.04 meta depends on; a box off the line is moved by
       scripts/rt-kernel-upgrade.sh --box <ip> (reboot-class, owner-approved), never setup-device.sh
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
+     VERIFY_DEVICE_IP (dial this IPv4 address, e.g. a Poprad box at 10.76.9.x, issue 1394),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
      DANTESYNC_JOURNAL_MAX_AGE_S (max age of the newest dantesync journal line vs the box
@@ -1004,6 +1025,13 @@ LC_NAME="$(printf '%s' "$DEVICE_ARG" | tr '[:upper:]' '[:lower:]')"
 camera_resolve "$LC_NAME" || exit 1
 NAME_UPPER="$(printf '%s' "$CAMERA_NAME" | tr '[:lower:]' '[:upper:]')"
 IP="$CAMERA_IP"
+# Issue 1394: VERIFY_DEVICE_IP dials the box at another address (the Poprad camboxes answer at
+# 10.76.9.x through companion-pp, verify-fleet.sh --venue sets it); the NAME still drives every fact.
+if [ -n "${VERIFY_DEVICE_IP+set}" ]; then
+  remote_log_ipv4_ok "$VERIFY_DEVICE_IP" \
+    || { echo -e "${RED}ERROR: VERIFY_DEVICE_IP='${VERIFY_DEVICE_IP}' is not an IPv4 address (issue 1394)${NC}" >&2; exit 1; }
+  IP="$VERIFY_DEVICE_IP"
+fi
 EXPECT_FPS="$CAMERA_GENLOCK_FPS"
 
 command -v sshpass >/dev/null 2>&1 || { echo -e "${RED}ERROR: sshpass is required${NC}" >&2; exit 1; }
@@ -1675,7 +1703,8 @@ fi
 # reach strih-snv together (its USB NIC answers with PAUSE storms). setup-device.sh's
 # [egress-pacing] sub-step installs cambox-egress-pacing.service, which paces the default-route
 # interface at boot with the ONE declaration in scripts/lib/cambox-egress-pacing.sh. This reads
-# the live root qdisc, the unit state and what setup-device installed (the boot script's
+# the live qdisc tree + its filters (issue 1387: NDI paced under 1:1, the JPEG XS class 1:2 and its
+# fw filter), the unit state and what setup-device installed (the boot script's
 # executable bit + shebang, the functional-line sha256 of the script and of the unit) in one
 # read-only ssh round trip. It FAILs a
 # missing/drifted qdisc, a missing / non-executable / stale boot script, a unit that differs from
@@ -1691,7 +1720,7 @@ if [ "$aprc" -ne 0 ]; then
 elif [ "$PACING_VERDICT" != "ok" ]; then
   fail "NDI egress pacing: $(cambox_egress_pacing_verdict_oneline "$PACING_VERDICT") (issue 1242)"
 else
-  ok "NDI egress pacing live: $(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_IFACE) root $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_QDISC)" | sed 's/^OK //') + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service installed + enabled (issue 1242)"
+  ok "NDI egress pacing live: $(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_IFACE) $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_QDISC)" "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_FILTER)" | sed 's/^OK //') + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service installed + enabled (issues 1242, 1387)"
 fi
 
 # (af) v4l2-ctl installed AND runnable (v4l-utils runtime dependency, issue 1213) ------------------
@@ -1856,6 +1885,27 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> ${REMOTELOG_SINK}:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> $(remote_log_journal_url "$REMOTELOG_SINK") (this box's venue strih; the next #1309 stick death ships its kernel+journal off-box, #1311, issue 1394)"
+fi
+
+# (ax) which strih this cambox follows (issue 1431) -- HARD FAIL -------------------------------------
+# strih.lan is the ONE switch at a joint event: the intercom target, the dantesync NTP server, the bkshading
+# relay registration and the cameraman preview all follow what it resolves to ON this box. One read-only ssh
+# gather (getent ahostsv4), graded on dev1 against the strih-role fact files. Inserted after the (ak)
+# check and before the (aw) one: outside the slices other tests EXECUTE, and before the .bak cruft check,
+# which stays last. No comment line here may start with a check marker (the slice tests cut at one).
+axrc=0
+STRIH_FOLLOW_IP="$(ssh_box "$(strih_follow_gather_remote_snippet)")" || axrc=$?
+STRIH_FOLLOW_IP="$(printf '%s' "$STRIH_FOLLOW_IP" | tr -d '[:space:]')"
+STRIH_FOLLOW_VERDICT="$(strih_follow_verdict "$STRIH_FOLLOW_IP")"
+if [ "$axrc" -ne 0 ]; then
+  fail "could not read which strih this box follows over ssh (rc=$axrc, issue 1431)"
+else
+  case "$STRIH_FOLLOW_VERDICT" in
+    ok*)
+      IFS=$'\t' read -r _ STRIH_FOLLOW_BOX _ <<<"$STRIH_FOLLOW_VERDICT"
+      ok "this cambox follows ${STRIH_FOLLOW_BOX}: strih.lan resolves to ${STRIH_FOLLOW_IP} on the box (intercom, shading, preview, clock -- issue 1431)" ;;
+    *) fail "which strih this box follows: ${STRIH_FOLLOW_VERDICT#FAIL: } (issue 1431)" ;;
+  esac
 fi
 
 # (aw) fleet kernel line (issue 1446) -- HARD FAIL -------------------------------------------------
@@ -2135,11 +2185,12 @@ case "$RELAY_MODE" in
     ;;
 esac
 RELAY_EXPECTED="$(bkshading_relay_expected_enable_state "$CAMERA_NAME" "$RELAY_MODE" "$RELAY_SRC_BOX" "$RELAY_PAINTER_BOX")"
-RELAY_PROV_VERDICT="$(bkshading_relay_provision_verdict "$RELAY_PROV_BLOCK" "$RELAY_EXPECTED")"
+RELAY_ID_WANT="$(bkshading_relay_id_for_device "$CAMERA_NAME" || true)"
+RELAY_PROV_VERDICT="$(bkshading_relay_provision_verdict "$RELAY_PROV_BLOCK" "$RELAY_EXPECTED" "$RELAY_ID_WANT")"
 if [ "$aorc" -ne 0 ]; then
   fail "could not read the bkshading relay provisioning state over SSH (rc=$aorc, issue 808)"
 elif [ "$RELAY_PROV_VERDICT" = ok ]; then
-  ok "bkshading relay provisioned: binary + unit (byte-matches the repo) + env + gphoto2, unit ${RELAY_EXPECTED} as rig mode '${RELAY_MODE}' (${RELAY_MODE_SRC}) wants -- issue 808"
+  ok "bkshading relay provisioned: binary + unit (byte-matches the repo) + env (registers as ${RELAY_ID_WANT} at strih.lan, issue 1431) + gphoto2, unit ${RELAY_EXPECTED} as rig mode '${RELAY_MODE}' (${RELAY_MODE_SRC}) wants -- issue 808"
 else
   while IFS= read -r _reason; do
     [ -n "$_reason" ] && fail "bkshading relay: ${_reason#FAIL: } (rig mode '${RELAY_MODE}' from ${RELAY_MODE_SRC}, source box '${RELAY_SRC_BOX:-?}')"

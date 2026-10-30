@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 # airuleset:script-ok source-only lib (defines the strih role FACTS + pure decision helpers; its
 # only top-level statement sources the equally source-only fact loader) -- matches the sibling
 # scripts/lib/*.sh convention (obs-fleet.sh, camera-set.sh, genlock-markers.sh) of deliberately NOT setting `set -euo pipefail` here: sourcing
@@ -121,6 +122,21 @@ fi
 if ! declare -F strih_pipewire_purge_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-pipewire-purge.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-pipewire-purge.sh"
+fi
+# issue 1436: the stream operator's Audio Monitor plugin (setup step 4c, verify item 35, stream role).
+if ! declare -F obs_audio_monitor_install >/dev/null; then
+  # shellcheck source=scripts/lib/obs-audio-monitor.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-audio-monitor.sh"
+fi
+# issue 1425: the box's FIXED OBS audio buffering (setup step 5 writes the marker, verify item 48 grades it).
+if ! declare -F obs_audio_buffering_install >/dev/null; then
+  # shellcheck source=scripts/lib/obs-audio-buffering.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-audio-buffering.sh"
+fi
+# issue 1387: verify item 49 grades every running JPEG XS source's lost slices.
+if ! declare -F strih_jxs_verify_row >/dev/null; then
+  # shellcheck source=scripts/lib/strih-jxs-verify.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-jxs-verify.sh"
 fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
@@ -321,9 +337,9 @@ strih_lx_seed_manifest_json() {
   printf '  "outputs": [\n'
   { strih_lx_ndi_outputs; strih_lx_ndi_republishes; } | sed 's/.*/    "&",/' | sed '$ s/,$//'
   printf '  ],\n'
-  # issue 1439 phase 2: a strih box whose facts declare the console's VBAN program (strih-snv) carries
-  # the program-audio input + its obs-vban source settings, which strih_scenes.py --bootstrap switches
-  # (keeping the operator's mixer state); a hub-fed strih (strih-pp) carries neither, byte-identical.
+  # issue 1439 phase 2: a strih box whose facts declare the console's VBAN program (strih-snv, strih-pp)
+  # carries the program-audio input + its obs-vban source settings, which strih_scenes.py --bootstrap
+  # switches (keeping the operator's mixer state); a hub-fed strih carries neither, byte-identical.
   local vban ai
   if vban="$(strih_lx_program_audio_vban_json)"; then
     ai="$(strih_lx_program_audio_input)" || return 1
@@ -1155,9 +1171,12 @@ strih_rustdesk_deb_sha256() { printf '7244ba47c40e804172044bfbe659467c54ce46554c
 # fail`. Every URL/SHA/PW_FILE arg is %q-quoted; the final statement ends with `;` so a `$(...)`
 # embedding never glues a following command (the v4l2-neutral.sh _cmd-helper gotcha). VERSION is used
 # only to name the temp file (provenance).
-strih_rustdesk_install_cmds() {
+# strih_rustdesk_package_cmds VERSION URL SHA256 -> the package half of strih_rustdesk_install_cmds alone (issue
+# 1462): download, sha256 verify, apt install, `systemctl enable --now rustdesk`. No password: setup step 16b
+# installs RustDesk even when no permanent password is at hand, then FAILS naming the dev1 apply command.
+strih_rustdesk_package_cmds() {
   local version="${1:?rustdesk version required}" url="${2:?rustdesk .deb url required}"
-  local sha="${3:?rustdesk .deb sha256 required}" pwfile="${4:?rustdesk password-file path required}"
+  local sha="${3:?rustdesk .deb sha256 required}"
   cat <<EOF
 __rd_deb="\$(mktemp "/tmp/rustdesk-${version}.XXXXXX.deb")" || { echo "rustdesk: mktemp failed" >&2; exit 1; };
 curl -fsSL -o "\$__rd_deb" $(printf '%q' "$url") || { echo "rustdesk: download failed ($url)" >&2; rm -f "\$__rd_deb"; exit 1; };
@@ -1166,11 +1185,61 @@ if [ "\$__rd_got" != $(printf '%q' "$sha") ]; then echo "rustdesk: sha256 mismat
 DEBIAN_FRONTEND=noninteractive apt-get install -y "\$__rd_deb" || { echo "rustdesk: apt install failed" >&2; rm -f "\$__rd_deb"; exit 1; };
 rm -f "\$__rd_deb";
 systemctl enable --now rustdesk || { echo "rustdesk: enable --now failed" >&2; exit 1; };
+EOF
+}
+
+strih_rustdesk_install_cmds() {
+  local version="${1:?rustdesk version required}" url="${2:?rustdesk .deb url required}"
+  local sha="${3:?rustdesk .deb sha256 required}" pwfile="${4:?rustdesk password-file path required}"
+  strih_rustdesk_package_cmds "$version" "$url" "$sha"
+  cat <<EOF
 __rd_pw="\$(cat $(printf '%q' "$pwfile"))" || { echo "rustdesk: cannot read password file ${pwfile}" >&2; exit 1; };
 if [ -z "\$__rd_pw" ]; then echo "rustdesk: password file ${pwfile} is empty" >&2; unset __rd_pw; exit 1; fi;
 rustdesk --password "\$__rd_pw" || { echo "rustdesk: setting the permanent password failed" >&2; unset __rd_pw; exit 1; };
 unset __rd_pw;
 EOF
+}
+
+# strih_rustdesk_state -> issue 1462: `absent` (no rustdesk binary), `down` (the service not active), `nopw`
+# (active, but the root config carries no permanent password) or `ready`. The config is root's 0600
+# RustDesk.toml (STRIH_RUSTDESK_CONF, a test seam): read directly as root, else through a non-interactive
+# sudo; an unreadable config reads as `nopw` (never a false ready). Only the key's PRESENCE is read, the
+# (encrypted) value is never printed. Always rc 0.
+strih_rustdesk_state() {
+  local conf="${STRIH_RUSTDESK_CONF:-/root/.config/rustdesk/RustDesk.toml}" text
+  command -v rustdesk >/dev/null 2>&1 || { printf absent; return 0; }
+  [ "$(systemctl is-active rustdesk 2>/dev/null || true)" = active ] || { printf down; return 0; }
+  text="$({ cat "$conf" 2>/dev/null || sudo -n cat "$conf" 2>/dev/null; } || true)"
+  if grep -qE "^password[[:space:]]*=[[:space:]]*'[^']+'" <<<"$text"; then printf ready; else printf nopw; fi
+}
+
+# strih_rustdesk_apply_hint BOX -> the dev1 command that applies the permanent password to BOX from the
+# credential channel (issue 1462: the owner's one RustDesk password on every box, persisted on dev1).
+strih_rustdesk_apply_hint() {
+  printf 'on dev1: python3 ~/devel/airuleset/airuleset.py secret exec --file ~/.secrets/rustdesk-permanent-password --env RUSTDESK_PERMANENT_PASSWORD -- scripts/rustdesk-password-apply.sh %s' "${1:?box required}"
+}
+
+# strih_rustdesk_grade_row BOX -> verify-strih item 29 (issue 1462): one `OK|text` / `FAIL|text` line. RustDesk
+# is the operator's remote access on EVERY Linux workstation box: not installed, not active, no connect ID
+# or no permanent password all FAIL (stream-snv was handed over 22.10.2026 without it and only a NOTE said
+# so). Always rc 0.
+strih_rustdesk_grade_row() {
+  local box="${1:?box required}" st id
+  st="$(strih_rustdesk_state)"
+  case "$st" in
+    absent) printf 'FAIL|(rustdesk) not installed -- re-run setup-strih.sh step 16b (issue 1462)\n' ;;
+    down) printf 'FAIL|(rustdesk) installed but the service is %s -- systemctl enable --now rustdesk; re-run setup-strih.sh step 16b\n' \
+      "$(systemctl is-active rustdesk 2>/dev/null || echo unknown)" ;;
+    nopw) printf 'FAIL|(rustdesk) active but no permanent password is set -- %s\n' "$(strih_rustdesk_apply_hint "$box")" ;;
+    *)
+      id="$(timeout 10 rustdesk --get-id 2>/dev/null | head -1 || true)"
+      if [ -n "$id" ]; then
+        printf 'OK|(rustdesk) service active, permanent password set, connect ID %s\n' "$id"
+      else
+        printf 'FAIL|(rustdesk) active with a password but no connect ID -- systemctl restart rustdesk\n'
+      fi ;;
+  esac
+  return 0
 }
 
 # --- issue 1345 M3a: Janus audiobridge audio edge (enable-only) ------------------------------------
@@ -1485,21 +1554,44 @@ WantedBy=multi-user.target
 EOF
 }
 
-# strih_bkshading_config_text [BIND] -> the operator config seed for /etc/bkshading/bkshading.toml.
-# BIND defaults to the service's own default_bind (bkshading/service/src/config.rs "0.0.0.0:8770").
-# The camera/relay/preview DATA is pinned from the canonical bkshading/service/bkshading.example.toml
-# (the SAME schema the Windows install was seeded from -- the live Windows C:\bkshading\bkshading.toml
-# was unreadable, the PC being off). Development = one camera on cam1; the handheld blocks are the
-# params-only placeholders for the issue-808 SBC milestone. Relay addresses are host-independent
-# (<cambox>.lan:8771 -- the service connects OUT to each cambox relay, so no cambox repoint is needed).
+# strih_bkshading_config_text [BIND] [RELAYS] [CAMERAS] -> the operator config seed for
+# /etc/bkshading/bkshading.toml. BIND defaults to the service's own default_bind (bkshading/service/src/config.rs
+# "0.0.0.0:8770"). The box's OWN venue cameras first (CAMERAS, default the loaded fact STRIH_CAMERAS;
+# owner 26.10.2026: strih-snv 2 3 5, strih-pp 1 4 6 7), then every other camera as a `visiting` block: issue 1431
+# makes strih.lan the ONE switch, every cambox relay registers itself as camN with the strih behind it, and the
+# service's camera list is static, so both strih boxes declare all seven. A visiting block is listed only once
+# its relay registered, so a normal event still shows only the venue's cameras (the 26.10. ruling). A venue
+# cambox block is `register:camN` with its literal relay as `fallback_address` (a relay that never registers,
+# an older binary). A handheld SBC is the CONTROL of the cambox its video reaches, never its own panel (owner
+# ruling 5977504457 on issue 808), so every block keeps its cambox's NDI preview `CAMN (usb)` + grab_fps 60.
+# RELAYS (default: the loaded box's fact STRIH_BKSHADING_RELAYS) is `none` or `N=<transport>@<host>:<port>`
+# overrides of the default cambox-relay at camN.lan:8771; an sbc-relay override is written as it is. A wrong
+# RELAYS prints nothing and returns 1, never a partial config.
 # Seeded ONLY IF absent (setup-strih step 16c [ ! -f ] guard) so the operator's live edits are kept.
 strih_bkshading_config_text() {
-  local bind="${1:-0.0.0.0:8770}"
+  local bind="${1:-0.0.0.0:8770}" relays cams fleet n e transport address
+  if [ "$#" -ge 2 ]; then relays="$2"; else relays="$(strih_lx_bkshading_relays)" || return 1; fi
+  if [ "$#" -ge 3 ]; then cams="$3"; else cams="$(strih_box_fact STRIH_CAMERAS)" || return 1; fi
+  if [[ ! "$cams" =~ ^[1234567]( [1234567])*$ ]]; then
+    echo "strih_bkshading_config_text: no venue cameras to list ('${cams}')" >&2; return 1
+  fi
+  strih_box_bkshading_relays_ok "$relays" "strih_bkshading_config_text: " "$cams" || return 1
+  # issue 1431: the visiting blocks are every other venue's cameras, read from the strih fact files.
+  fleet="$(strih_box_fleet_cameras)" || return 1
+  local -A tr=() ad=()
+  if [ "$relays" != none ]; then
+    for e in $relays; do
+      n="${e%%=*}"; e="${e#*=}"
+      tr[$n]="${e%%@*}"; ad[$n]="${e#*@}"
+    done
+  fi
   cat <<EOF
-# bkshading service config -- strih-snv (issue 1353). Seeded from the canonical
-# bkshading/service/bkshading.example.toml (the schema the Windows install used); edit the live
-# camera/relay set on the box. Development = one camera on cam1; the handheld blocks are the
-# params-only placeholders for the issue-808 SBC milestone.
+# bkshading service config (issue 808 / issue 1353), seeded by setup-strih step 16c. The panel lists
+# this venue's cameras (STRIH_CAMERAS: ${cams}), one block per cambox; a handheld SBC relay controls the
+# block of the cambox its video reaches (owner ruling 5977504457). Edit the live camera/relay set on the box.
+# Issue 1431: every cambox relay registers itself as camN with the strih behind strih.lan. A venue camera is
+# reached through that registration, else its fallback_address; a visiting camera (the other venue's) is
+# listed only once its relay registered here, at a joint event.
 
 # Web panel bind address (the operator opens http://strih.lan:8770/).
 bind = "${bind}"
@@ -1510,36 +1602,27 @@ fps = 3.0
 jpeg_quality = 55
 capture_timeout_ms = 1000
 reconnect_backoff_ms = 2000
-
-# cam1: camera USB -> cambox cam1, controlled by bkshading-relay on cam1.
-[[camera]]
-id = "cam1"
-label = "Cam 1"
-transport = "cambox-relay"
-address = "cam1.lan:8771"
-ndi_preview = "CAM1 (usb)"
-grab_fps = 60
-
-# Handheld cameras (x3) on a separately powered arm64 SBC running the SAME relay -- no video feed,
-# so a params-only block (no ndi_preview, no grab_fps). Placeholders for the issue-808 SBC milestone.
-[[camera]]
-id = "handheld-1"
-label = "Handheld 1"
-transport = "sbc-relay"
-address = "handheld-1.lan:8771"
-
-[[camera]]
-id = "handheld-2"
-label = "Handheld 2"
-transport = "sbc-relay"
-address = "handheld-2.lan:8771"
-
-[[camera]]
-id = "handheld-3"
-label = "Handheld 3"
-transport = "sbc-relay"
-address = "handheld-3.lan:8771"
 EOF
+  for n in $cams; do
+    transport="${tr[$n]:-cambox-relay}"
+    address="${ad[$n]:-cam${n}.lan:8771}"
+    printf '\n[[camera]]\nid = "cam%s"\nlabel = "Cam %s"\n' "$n" "$n"
+    if [ "$transport" = sbc-relay ]; then
+      printf "# a handheld SBC relay controls this cambox's camera (owner ruling 5977504457)\n"
+      printf 'transport = "%s"\naddress = "%s"\n' "$transport" "$address"
+    else
+      printf 'transport = "%s"\naddress = "register:cam%s"\nfallback_address = "%s"\n' \
+        "$transport" "$n" "$address"
+    fi
+    printf 'ndi_preview = "CAM%s (usb)"\ngrab_fps = 60\n' "$n"
+  done
+  for n in $fleet; do
+    case " $cams " in *" $n "*) continue ;; esac
+    printf '\n[[camera]]\nid = "cam%s"\nlabel = "Cam %s"\n' "$n" "$n"
+    printf '# the other venue'"'"'s camera: listed once its relay registers here (issue 1431, a joint event)\n'
+    printf 'transport = "cambox-relay"\naddress = "register:cam%s"\nvisiting = true\n' "$n"
+    printf 'ndi_preview = "CAM%s (usb)"\ngrab_fps = 60\n' "$n"
+  done
 }
 
 # strih_bkshading_listener_owner reads `ss -tlnp` output on stdin and prints the process NAME that

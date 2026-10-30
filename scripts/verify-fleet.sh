@@ -19,6 +19,10 @@
 # Usage:
 #   scripts/verify-fleet.sh                       # verify cam1-4 (or camera-set.sh's CAMERA_SET)
 #   CAMERA_SET="cam1 cam3" scripts/verify-fleet.sh   # verify a subset
+#   scripts/verify-fleet.sh --venue pp            # every camera a venue's strih fact file lists, dialled
+#                                                 # at its venue address (issue 1394: the Poprad boxes are
+#                                                 # 10.76.9.x through companion-pp; verify-device.sh gets
+#                                                 # it in VERIFY_DEVICE_IP)
 #   scripts/verify-fleet.sh --help
 #
 # Env:
@@ -87,17 +91,30 @@ verify-fleet.sh -- fleet-wide drift-guard loop over scripts/verify-device.sh (#5
 
 Usage:
   scripts/verify-fleet.sh
+  scripts/verify-fleet.sh --venue <venue>
   scripts/verify-fleet.sh --help
 
 There is no per-camera positional argument -- scope the run via the CAMERA_SET env var (env,
 default cam1-4, from scripts/camera-set.sh; #827: cam5/cam6/cam7 retired), e.g. CAMERA_SET="cam1 cam3" scripts/verify-fleet.sh.
+--venue <venue> verifies every camera that venue's strih fact file lists (scripts/strih-boxes/*.env),
+dialled at its venue address from scripts/lib/dantesync-fleet.sh (issue 1394: --venue pp reaches the
+Poprad camboxes, which camera_resolve's 10.77.9.6x addresses do not).
 An offline box is reported SKIPPED, never a hard FAIL. Exit: 0 iff no reachable box FAILed.
 EOF
 }
 
+VENUE=""
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   "") ;;
+  --venue)
+    VENUE="${2:-}"
+    if [ -z "$VENUE" ] || [ "$#" -ne 2 ]; then
+      err "--venue needs exactly one venue name (e.g. --venue pp)"
+      usage >&2
+      exit 2
+    fi
+    ;;
   *)
     err "unknown argument '$1' -- verify-fleet.sh takes no positional camera name (unlike \
 verify-device.sh NAME); scope the run via CAMERA_SET instead, e.g. CAMERA_SET=\"$1\" $0"
@@ -108,19 +125,46 @@ esac
 
 command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get install sshpass)"; exit 1; }
 
-log "Verifying fleet: $SET"
+# Issue 1394: --venue <venue> = the venue's cameras at their venue address (the ONE venue table, the
+# rows cambox-ro-units-apply.sh --venue dials); an unknown venue or one with no camera verifies nothing.
+declare -a VENUE_NAMES=() VENUE_ADDRS=()
+if [ -n "$VENUE" ]; then
+  # shellcheck source=scripts/lib/dantesync-fleet.sh
+  . "$HERE/lib/dantesync-fleet.sh"
+  venue_rows="$(dantesync_fleet_venue_camera_rows "$VENUE")" || {
+    err "venue '$VENUE': the strih fact files do not resolve cleanly (the line above names it) -- nothing was verified"
+    exit 2
+  }
+  while IFS='|' read -r vname vaddr _; do
+    [ -n "$vname" ] || continue
+    VENUE_NAMES+=("$vname"); VENUE_ADDRS+=("$vaddr")
+  done <<<"$venue_rows"
+  if [ "${#VENUE_NAMES[@]}" -eq 0 ]; then
+    err "venue '$VENUE' lists no camera (scripts/strih-boxes/*.env STRIH_VENUE + STRIH_CAMERAS) -- nothing was verified"
+    exit 2
+  fi
+  SET="${VENUE_NAMES[*]}"
+fi
+
+log "Verifying fleet: $SET${VENUE:+ (venue $VENUE)}"
 echo ""
 
 declare -a PASSED=() FAILED=() SKIPPED=()
+idx=0
 for cam in $SET; do
-  # Case-normalize before resolving -- camera-set.sh's own table is strictly lowercase, but
-  # setup-device.sh / verify-device.sh both advertise (and accept) a case-insensitive NAME, so
-  # CAMERA_SET="CAM1 CAM3" must work here too instead of silently rejecting as "invalid".
-  lc_cam="$(printf '%s' "$cam" | tr '[:upper:]' '[:lower:]')"
-  if ! camera_resolve "$lc_cam"; then
-    FAILED+=("$cam(invalid)"); continue
+  if [ -n "$VENUE" ]; then
+    ip="${VENUE_ADDRS[$idx]}"
+    idx=$((idx + 1))
+  else
+    # Case-normalize before resolving -- camera-set.sh's own table is strictly lowercase, but
+    # setup-device.sh / verify-device.sh both advertise (and accept) a case-insensitive NAME, so
+    # CAMERA_SET="CAM1 CAM3" must work here too instead of silently rejecting as "invalid".
+    lc_cam="$(printf '%s' "$cam" | tr '[:upper:]' '[:lower:]')"
+    if ! camera_resolve "$lc_cam"; then
+      FAILED+=("$cam(invalid)"); continue
+    fi
+    ip="$CAMERA_IP"
   fi
-  ip="$CAMERA_IP"
   echo "================================================================"
   echo ">> [$cam] $ip"
   echo "================================================================"
@@ -132,7 +176,12 @@ for cam in $SET; do
 
   verify_rc=0
   if [ "$reachable_rc" -eq 0 ]; then
-    "$VERIFY_CMD" "$cam" || verify_rc=$?
+    if [ -n "$VENUE" ]; then
+      VERIFY_DEVICE_IP="$ip" "$VERIFY_CMD" "$cam" || verify_rc=$?
+    else
+      # an inherited dial override must never re-point camera_resolve's addresses (issue 1394)
+      env -u VERIFY_DEVICE_IP "$VERIFY_CMD" "$cam" || verify_rc=$?
+    fi
   fi
 
   status="$(box_status "$reachable_rc" "$verify_rc")"

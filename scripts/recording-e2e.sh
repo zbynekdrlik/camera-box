@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 # Recording-based full-path E2E (#105 / #7 / #179), dev1-orchestrated — TRUE STREAM-ONLY.
 #
 # The loss verdict + per-hop latency come ONLY from the strih/stream OBS PROGRAM
@@ -132,6 +133,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # issue 1462: the [8/8b] file moves to/from the Linux stream box around its on-box stream decode.
 # shellcheck source=scripts/lib/stream-lx-verdict.sh
 . "$HERE/lib/stream-lx-verdict.sh"
+# issue 1425: the BLOCKING row grading each OBS box's FIXED audio buffering against its box fact.
+# shellcheck source=scripts/lib/obs-audio-buffering.sh
+. "$HERE/lib/obs-audio-buffering.sh"
 # #977/#978/#979: obs64/AHK Windows-session-visibility probe + pure message parser (issue 958) --
 # shared with the #979 dev1 watchdog, never a second detector for the same signal.
 # shellcheck source=scripts/lib/obs-session-visibility.sh
@@ -374,6 +378,9 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # issue 1439: the BLOCKING program-audio continuity gate (a lost or concealed slot in the window = RED).
 # shellcheck source=scripts/lib/program-audio-continuity.sh
 . "$HERE/lib/program-audio-continuity.sh"
+# issue 1404: the BLOCKING YouTube end point (restreamer's delivery to e2e rtmp, the VOD verdict).
+# shellcheck source=scripts/lib/youtube-leg.sh
+. "$HERE/lib/youtube-leg.sh"
 # #882/#1232: restart-and-settle for the [1/8] imag render-health sweep -- the leading windows
 # (right after a fresh OBS start) can measure a real, transient warm-up dip that is not a
 # regression; a settle-adaptive PHASE (bounded by a wall budget) absorbs however many leading
@@ -566,8 +573,11 @@ fi
 # too-small override is CLAMPED up to a hard floor (never trusted to be sane), never allowed to
 # silently re-enable a mid-run fire. FLOOR = the worst-case pre-record overhead itself; below it the
 # first fire could precede StopRecord.
-CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=15
-CAMERA_BOX_DEADMAN_OVERHEAD_MIN="${CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-20}"
+# issue 1404: the YouTube stage now runs before the recording too (the restreamer session start, a
+# busy wait on a recovered leftover session, StartStream, the wait for the live broadcast: ~15 min
+# worst case), so the floor and the default both grow by that: 15 -> 30, 20 -> 35.
+CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=30
+CAMERA_BOX_DEADMAN_OVERHEAD_MIN="${CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-35}"
 case "$CAMERA_BOX_DEADMAN_OVERHEAD_MIN" in
   ''|*[!0-9]*)
     echo "WARNING #772: CAMERA_BOX_DEADMAN_OVERHEAD_MIN='$CAMERA_BOX_DEADMAN_OVERHEAD_MIN' is not a non-negative integer -- clamping to the safe floor ${CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN}min so the dead-man cannot fire mid-recording" >&2
@@ -602,7 +612,9 @@ CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN=$(( (DURATION + 59) / 60 + CAMERA_BOX_DEADMAN_
 # lengthens a normal run's tail -- only a genuinely slow/degraded pre-record phase consumes it.
 # (Comment deliberately avoids the bracketed phase labels + FROZEN_CAM_* identifiers other
 # tests string-anchor on -- the recording-e2e.sh static-anchor GOTCHA, project CLAUDE.md.)
-PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-1200}"
+# issue 1404: the YouTube stage now waits for the live broadcast before the recording (up to its
+# ready deadline + the bound, ~9 min on a slow VPS boot), so the slack grows by that: 1200 -> 1800.
+PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-1800}"
 QR_SIZE="${QR_SIZE:-700}"
 # Topology v2 (#459, EPIC #466, SUPERSEDES the #11 60fps-end-to-end framing below): the 60fps
 # low-latency IMAG role moved OFF strih onto the new imag-nb box (10.77.9.182, #458/#463); strih
@@ -802,6 +814,8 @@ echo "    bkshading-relay pause (cam2/painter, $PAINTER_IP): was-active=$BKSH_PA
 # exit propagates. Absent camera + unpinned baseline = a loud report-only UNVERIFIED (issue 1350).
 # shellcheck source=scripts/lib/camera-test-settings.sh
 . "$HERE/lib/camera-test-settings.sh"
+# shellcheck source=scripts/lib/rig-test-feed.sh
+. "$HERE/lib/rig-test-feed.sh"   # issue 1482: the direct feed has no test camera in the path
 camera_test_settings_enforce "$HERE" "$STRIH" "$STREAM" "$CAM_PW" "$CAMERA_NAME=$CAM1_IP" "cam2=$PAINTER_IP"
 
 echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
@@ -926,6 +940,7 @@ _svg_strih_znote="$(obs_session_visibility_zombie_note "$_svg_strih_out")"
 [ -n "$_svg_strih_znote" ] && echo "    strih $_svg_strih_znote"
 _svg_stream_znote="$(obs_session_visibility_zombie_note "$_svg_stream_out")"
 [ -n "$_svg_stream_znote" ] && echo "    stream $_svg_stream_znote"
+obs_audio_buffering_e2e_gate_all "$STRIH" "$STRIH_USER" "$STRIH_PW" "$STREAM" "$STREAM_USER" "$STREAM_PW" || exit 1
 
 # Disk preflight (#179): the 7.3GB cam1 grab is GONE — only the two downloaded OBS program
 # recordings land on dev1 (~3 MB/s each, strih .mkv + stream .mp4). FAIL EARLY if $OUTDIR's
@@ -2044,6 +2059,8 @@ cleanup() {
   # the same SIGKILL-grace reason (a cg OBS burn survives in its scene collection); cg_chain_cleanup
   # below waits for those jobs and retries. A no-op unless CG_CHAIN=1 and a burn is owed.
   cg_chain_cleanup_burns_first "${CG_HOST_IP:-}" "$HERE/obs_phase2.py"
+  # issue 1404: a live YouTube broadcast is stopped (StopStream + the restreamer session) in the background.
+  youtube_leg_cleanup_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"
   # #281 Fix#3: clear the rig-active heartbeat + stop its refresher — before the cam/OBS
   # restores (which may hang). Once the heartbeat lapses, the rig-restore watchdog is free to
   # recover prod if this run left the rig stranded (e.g. the trap itself is interrupted).
@@ -2243,6 +2260,13 @@ fi"
   # #1265: remember the DAMPED proposed offset BEFORE the guard runs, so the end-of-#856 history
   # append can record it even when a HOLD below clears AV_SYNC_APPLY_OFFSET_MS.
   AV_SYNC_PROPOSED_OFFSET_MS="$AV_SYNC_APPLY_OFFSET_MS"
+  # issue 1482: a direct-test-feed run never tunes the production A/V pin (named HOLD, offset cleared).
+  _avs_feed_hold="$(rig_test_feed_av_apply_hold || true)"
+  if [ -n "$_avs_feed_hold" ] && [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
+    echo "[cleanup] HOLD the A/V apply: $_avs_feed_hold -- stream genlock latency left at the just-restored prod value" >&2
+    AV_SYNC_HELD_REASON="$_avs_feed_hold"
+    AV_SYNC_APPLY_OFFSET_MS=""
+  fi
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
     _avs_hold="$(av_sync_apply_guard_decide "$REPORT_JSON" "$AV_SYNC_BAND_VERDICT" "$AV_SYNC_APPLY_OFFSET_MS" "$HERE/av_sync_apply_guard.py")"
     if [ -n "$_avs_hold" ]; then
@@ -2958,7 +2982,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     # rest of the run.
     _cunit="camera-box-burn-${_cn}-${RUN_ID}"
     _cnodisplay_setenv=""
-    if [ "$_cn" = "cam2" ]; then _cnodisplay_setenv="--setenv=CAMERA_BOX_NO_DISPLAY=1 "; fi
+    if [ "$_cn" = "cam2" ]; then _cnodisplay_setenv="--setenv=CAMERA_BOX_NO_DISPLAY=1 $(rig_test_feed_burn_setenv)"; fi
     # #749: same pre-scp stale-binary sweep as cam1's [2/8] site above -- each ALL_CAMBOX box has
     # its own independent 100MB /tmp tmpfs that can fill the same way.
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
@@ -3019,7 +3043,7 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # (recording-verdict's all_cambox_av_sync). Same collection mechanism the AV_RESTART_GATE mode
 # already uses below (`--audio-marker`/`--marker-log`, #420/#421) — reused, not reinvented. The
 # plain single-camera path (ALL_CAMBOX unset) is UNCHANGED: no marker flags, no self-check.
-AV_SYNC_MARKER_DEVICE="${AV_SYNC_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
+AV_SYNC_MARKER_DEVICE="${AV_SYNC_MARKER_DEVICE:-$(rig_test_feed_marker_device)}"   # issue 1482
 AV_SYNC_MARKER_CADENCE="${AV_SYNC_MARKER_CADENCE:-30}"   # ~0.5 s @ 60 Hz (issue 1318, owner 17.9.2026: keep the mic-chain gate open)
 _cam2_marker_flags=""
 _cam2_marker_check=""
@@ -3889,7 +3913,7 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
       exit 2
       ;;
   esac
-  AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
+  AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-$(rig_test_feed_marker_device)}"   # issue 1482
   AV_RESTART_MARKER_CADENCE="${AV_RESTART_MARKER_CADENCE:-30}"   # ~0.5 s @ 60 Hz (issue 1318)
   AV_RESTART_AUDIO_TRACK="${AV_RESTART_AUDIO_TRACK:-0}"
   AV_RESTART_TOLERANCE_MS="${AV_RESTART_TOLERANCE_MS:-50}"
@@ -4586,6 +4610,9 @@ else
   echo "[5/8 pre] in-run freeze watch — SKIPPED (LIVE_FREEZE_WATCH=$LIVE_FREEZE_WATCH, ALL_CAMBOX=${ALL_CAMBOX:-0})"
 fi
 
+# issue 1404: the YouTube end point goes live BEFORE the recording (its VOD must hold every window).
+youtube_leg_start "$HERE" "$STRIH" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"
+
 # issue 1354 scope 3: BEFORE-window snapshot of strih's per-input genlock-fifo audit counters
 # (holds/relocks/converge_sheds), paired with the AFTER snapshot in [7/8]. Report-only + fail-open
 # (the helper returns 0 on every input; a trailing `|| true` is belt-and-suspenders): an
@@ -4867,6 +4894,7 @@ CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
+youtube_leg_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "${STREAM_HOST_PATH:-}"   # issue 1404: StopStream + the session stop + the early pull/decode on dev2
 
 # issue 1354 scope 3: AFTER-window snapshot of strih's per-input genlock-fifo audit counters --
 # pairs with the BEFORE snapshot in [5/8] so genlock_audit_snapshot.py's window deltas span EXACTLY
@@ -5242,6 +5270,15 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     cbox_burn_log_persist "$CAM_PW" "$_bl_ip" "$_bl_cn" "$RUN_ID" "$OUTDIR"
   done
 fi
+# issue 1482: the sidecar counts the burn instance's whole life; keep only the drops inside the
+# recording window, read from the persisted burn log (an unprovable window keeps the whole count).
+if [ -f "$CAM1_CAPTURE_STATS" ]; then
+  python3 "$HERE/capture_drop_window.py" --sidecar "$CAM1_CAPTURE_STATS" \
+    --burn-log "$OUTDIR/$(cbox_burn_log_dest_name cam1 "$RUN_ID")" \
+    --start "$CAPTURE_RATE_WINDOW_START_EPOCH" --end "$CAPTURE_RATE_WINDOW_END_EPOCH" \
+    --switch-schedule "$SWITCH_SCHEDULE_JSON" \
+    || echo "WARNING issue 1482: capture-drop window scope failed; whole-run count kept" >&2
+fi
 # #193: by DEFAULT decode ON stream.lan where the video lives — do NOT download the multi-GB
 # recordings to slow dev1 (the root of the download + #187 OOM + disk drain). When
 # VERDICT_ON_STREAM=1 (the default), the harness SKIPS the dev1 fetch entirely and the verdict
@@ -5328,7 +5365,10 @@ fi
 # tests/harness_av_expected_calibration_parity_1178.rs). Override for an operator-dialed value, or
 # after a rig-verified physical video-chain change re-derives a genuine non-zero leg.
 # Always passed so the gate is explicit in the printed command, not silently implicit.
+AV_EXPECTED_MS_FROM_ENV="${AV_EXPECTED_MS+set}"
 AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
+# issue 1482: the direct test feed expects its own measured A/V leg (an explicit AV_EXPECTED_MS wins).
+[ -z "$AV_EXPECTED_MS_FROM_ENV" ] && AV_EXPECTED_MS="$(rig_test_feed_av_expected_ms)"
 # #1003: in measurement-eq mode the A/V gate must expect the value the pin+hold DESIGN implies
 # (the profile's coherent av_expected — derived so the equalized-deep pins + rebalanced hold land
 # the common A/V level there), NOT a blindly-inherited 0. With the shipped profile this IS 0, but
@@ -5754,6 +5794,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     fi
     # issue 1439: a program-audio loss (concealed included) or an unprovable window is a blocking FAIL.
     if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
+    # issue 1404: the YouTube end point (the VOD against the stream recording) is BLOCKING too.
+    if ! youtube_leg_gate "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "$REPORT_JSON" "${STREAM_HOST_PATH:-}" "$MARKER_CSV" "$SWITCH_SCHEDULE_JSON" "$PROBE_BIN_DIR"; then [ "$GATE" -ne 0 ] || GATE=1; fi
     # #827: merge the fleet-preflight exclusion list into the verdict JSON so a run that excluded
     # boxes (ALL_CAMBOX only — PREFLIGHT_EXCLUDED_CAMS is otherwise unset/empty, and the merge
     # below is then a harmless no-op `excluded_cams: []`) can NEVER be read back as "full-fleet
@@ -6031,6 +6073,8 @@ fi
 
 # issue 1439: the program-audio continuity gate, the LEGACY decode path's twin of the execute branch's.
 if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
+# issue 1404: the YouTube end point, the legacy path's twin of the execute branch's.
+if ! youtube_leg_gate "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "$REPORT_JSON" "${STREAM_HOST_PATH:-}" "$MARKER_CSV" "$SWITCH_SCHEDULE_JSON" "$PROBE_BIN_DIR"; then [ "$GATE" -ne 0 ] || GATE=1; fi
 
 # #758 item 3 — the in-run freeze watch's own verdict (same check as the E2E_EXECUTE_VERDICT=1
 # branch's own early exit above; this is the LEGACY/plan-print path's equivalent tail).

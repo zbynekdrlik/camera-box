@@ -79,6 +79,8 @@ class Dev2:
             "AVSYNC_REPORT_STATE_FILE": str(self.tmp / "report-state.json"),
             "AVSYNC_REPORT_FETCH_CMD": "true",
             "AVSYNC_LINEUP_OBS_PHASE2": str(self.obs),
+            # issue 1441: a production, so no test reads the rig mode (cam2) or a stream state.
+            "AVSYNC_PRODUCTION": "yes",
         }
         if extra:
             env.update(extra)
@@ -104,8 +106,8 @@ def test_report_pass_runs_for_an_away_venue(tmp_path):
     d = Dev2(tmp_path)
     d.heartbeat("avsync-watchdog-heartbeat-snv.txt")
     fetch = (
-        'if [ "$1" = pp ]; then printf "%s\\t%s\\n" "$(date +%s)" '
-        '"measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)"; fi'
+        'if [ "$1" = pp ]; then n=$(date +%s); for d in 180 90 0; do printf "%s\\t%s\\n" "$((n - d))" '
+        '"measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)"; done; fi'
     )
     p = d.run(_HB, ["--dry-run"], extra={"AVSYNC_REPORT_FETCH_CMD": fetch})   # PP box away
     assert p.returncode == 0, p.stderr
@@ -157,9 +159,11 @@ def test_snv_report_reads_the_old_day_log_too(tmp_path):
     d = Dev2(tmp_path)
     d.heartbeat("avsync-watchdog-heartbeat-snv.txt")
     day = time.strftime("%Y-%m-%d")
-    (d.home / "avsync" / f"measurements-{day}.tsv").write_text(
-        f"{int(time.time())}\tmeasured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)\n"
-    )
+    now = int(time.time())
+    (d.home / "avsync" / f"measurements-{day}.tsv").write_text("".join(
+        f"{now - age}\tmeasured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)\n"
+        for age in (180, 90, 0)
+    ))
     p = d.run(_HB, ["--dry-run"], extra={"AVSYNC_REPORT_FETCH_CMD": ""})
     assert p.returncode == 0, p.stderr
     assert "WOULD post report message: [SNV] 📐 A/V overené" in p.stderr
@@ -213,20 +217,20 @@ def test_the_old_report_state_moves_to_the_snv_file_without_a_repost(tmp_path):
     # and re-posted the START -- a timing-dependent failure that is not about the migration.
     row_epoch = int(time.time())
     fetch = (
-        f'printf "%s\\t%s\\n" "{row_epoch}" '
-        '"measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)"'
+        f'for e in {row_epoch - 180} {row_epoch - 90} {row_epoch}; do printf "%s\\t%s\\n" "$e" '
+        '"measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)"; done'
     )
     extra = {"AVSYNC_REPORT_FETCH_CMD": fetch, "AVSYNC_VENUES": "snv"}
     p = d.run(_HB, extra=extra)
     assert p.returncode == 0, p.stderr
-    assert len(d.curls()) == 1, "the first pass posts the START"
+    assert len(d.curls()) == 1, "the first pass posts the first verdict"
     snv = tmp_path / "report-state-snv.json"
     old = tmp_path / "report-state.json"
     snv.rename(old)                                  # the state as the pre-issue-1441 watchdog left it
     p = d.run(_HB, extra=extra)
     assert p.returncode == 0, p.stderr
-    assert len(d.curls()) == 1, "the migrated state must not re-post the START"
-    assert json.loads(snv.read_text())["start_posted"] is True
+    assert len(d.curls()) == 1, "the migrated state must not re-post the first verdict"
+    assert json.loads(snv.read_text())["last_verdict"] == "SEDI"
     assert not old.exists()
 
 
@@ -234,7 +238,7 @@ def test_dry_run_never_moves_the_old_report_state(tmp_path):
     d = Dev2(tmp_path)
     d.heartbeat("avsync-watchdog-heartbeat-snv.txt")
     old = tmp_path / "report-state.json"
-    old.write_text(json.dumps({"start_posted": True}))
+    old.write_text(json.dumps({"last_verdict": "SEDI"}))
     fetch = 'printf "%s\\t%s\\n" "$(date +%s)" "measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: x"'
     p = d.run(_HB, ["--dry-run"], extra={"AVSYNC_REPORT_FETCH_CMD": fetch, "AVSYNC_VENUES": "snv"})
     assert p.returncode == 0, p.stderr

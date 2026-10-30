@@ -9,7 +9,9 @@ use tracing_subscriber::EnvFilter;
 use camera_box::capture::VideoCapture;
 use camera_box::config::{Config, DisplayConfig};
 use camera_box::intercom;
-use camera_box::intercom_target::{resolve_intercom_target, INTERCOM_TARGET_ENV};
+use camera_box::intercom_target::{
+    intercom_switched_off, resolve_intercom_target, INTERCOM_SWITCH_ENV, INTERCOM_TARGET_ENV,
+};
 use camera_box::ndi::NdiSender;
 use camera_box::ndi_display::{self, NdiDisplayConfig};
 #[cfg(feature = "probe")]
@@ -373,6 +375,20 @@ async fn main() -> Result<()> {
         ic.target_host = target_host;
         ic
     });
+    // Issue 1482: the SNV rig's direct mode gives cam2's USB jack to the QPSK marker; rig-mode TEST
+    // sets CAMERA_BOX_INTERCOM=off in its /run drop-in, EVENT removes it.
+    let intercom_config = if intercom_switched_off(
+        std::env::var(INTERCOM_SWITCH_ENV).ok().as_deref(),
+    ) {
+        if intercom_config.is_some() {
+            tracing::info!(
+                "intercom OFF: {INTERCOM_SWITCH_ENV}=off (the rig's direct mode gives the USB jack to the QPSK marker, issue 1482)"
+            );
+        }
+        None
+    } else {
+        intercom_config
+    };
 
     // Run the capture loop with optional display and intercom
     run_capture_loop(
@@ -571,6 +587,12 @@ async fn run_capture_loop(
         tracing::info!("{}", send_stagger.log_line);
     }
     let send_stagger_offset = send_stagger.offset;
+
+    // Issue 1387 -- the JPEG XS link beside NDI. OFF unless CAMERA_BOX_JXS_TARGET=host:port is
+    // set: then the `jxs-feed` + `jxs-send` threads on the off-capture cores encode the SAME
+    // emitted frame + genlock timecode (two frames in flight) and send it slice by slice to that
+    // one receiver. Unset = `None`, nothing created.
+    let jxs_sender = camera_box::jxs_send::JxsSender::start_from_env(&resolved_hostname);
 
     // #174 cam1-capture render-time QR burn — TEST MODE ONLY. Gated behind
     // CAMERA_BOX_BURN_RUN_ID (mirrors the strih/stream DistroAV burn run_id env): when
@@ -1109,7 +1131,7 @@ async fn run_capture_loop(
                 );
                 // Issue 1371 — one line per re-seed / hidden drop, with the residuals behind it.
                 if let Some(note) = capture_phase.note() {
-                    tracing::info!("#1371 capture phase {}", note.describe());
+                    tracing::info!("{}", note.log_line());
                 }
 
                 // #299 — chroma sample: every CHROMA_SAMPLE_FRAMES captured frames
@@ -1420,6 +1442,32 @@ async fn run_capture_loop(
                 if out_interval_ns > 0 {
                     decimation_gate
                         .note_emitted_stamp_100ns(capture_timecode_100ns, out_interval_ns);
+                }
+                // Issue 1387 slice 1b -- the JPEG XS link takes the current frame HERE, once its
+                // genlock timecode is fixed and BEFORE the stagger sleep and the NDI send, so it
+                // never waits for the NDI send call. Only the frames on the strih 30 fps grid go
+                // (the even slots of the per-second emit grid, chosen by this timecode; owner
+                // decision 29.10.2026); NDI keeps every frame. The capture thread converts the frame straight
+                // into a free planar picture (AVX2, no separate copy) or counts a drop while both
+                // pictures are in flight; it never blocks. Its cost lands inside the #1242 stagger
+                // offset (the sleep below shrinks by it) and the work the 5 s line reports. The
+                // timecode is the very one the NDI frame below carries.
+                if let Some(jxs) = jxs_sender.as_ref() {
+                    jxs.offer(&camera_box::jxs_send::JxsFrame {
+                        data,
+                        width: info.width,
+                        height: info.height,
+                        stride: info.stride,
+                        yuyv: info.fourcc.str().map(|f| f == "YUYV").unwrap_or(false),
+                        timecode_100ns: capture_timecode_100ns,
+                        emit_fps: send_fps,
+                        // the RAW capture instant (never the tracker's slot middle the timecode
+                        // is floored from while locked), for the handoff diagnostics' split
+                        capture_realtime_100ns: camera_box::genlock_stamp::capture_realtime_100ns(
+                            info.capture_monotonic_100ns,
+                            mono_to_real_offset_100ns,
+                        ),
+                    });
                 }
                 // #1242 — the per-camera NDI send stagger, ONCE per emitted iteration: after the
                 // genlock timecode above is fixed (it never moves) and before the first send (the

@@ -279,6 +279,16 @@ static pthread_mutex_t g_outs_lock = PTHREAD_MUTEX_INITIALIZER; /* add / start /
 static pthread_mutex_t g_persist_lock = PTHREAD_MUTEX_INITIALIZER;
 static char g_config_path[1024]; /* the config the autostart read (g_persist_lock) */
 
+void drm_output_registry_lock(void)
+{
+	pthread_mutex_lock(&g_outs_lock);
+}
+
+void drm_output_registry_unlock(void)
+{
+	pthread_mutex_unlock(&g_outs_lock);
+}
+
 int drm_output_inst_count(void)
 {
 	return (int)os_atomic_load_long(&g_outs_count);
@@ -326,7 +336,7 @@ static struct drm_output_inst *drm_output_inst_by_connector(const char *connecto
  * audio leg (after the mode is driven: the connector's ELD appears only then). An output whose config turns
  * "audio" off (issue 1424 part 3: its PCM is owned elsewhere) reads no EDID, resolves and opens nothing.
  * Caller holds g_outs_lock. */
-static bool drm_output_inst_start_locked(struct drm_output_inst *inst)
+bool drm_output_inst_start_locked(struct drm_output_inst *inst)
 {
 	uint8_t edid[512];
 	size_t edid_len = 0;
@@ -346,7 +356,7 @@ static bool drm_output_inst_start_locked(struct drm_output_inst *inst)
 
 /* Stop one instance: its audio leg first (the mix callback disconnected, the PCM closed), then its
  * scanout. Caller holds g_outs_lock. */
-static void drm_output_inst_stop_locked(struct drm_output_inst *inst)
+void drm_output_inst_stop_locked(struct drm_output_inst *inst)
 {
 	drm_output_audio_close(inst->audio);
 	inst->audio = NULL;
@@ -386,6 +396,9 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 
 void obs_drm_output_stop(void)
 {
+	/* issue 1424: the retry supervisor first -- it takes g_outs_lock itself, and no attempt may start
+	 * an output this stop has already stopped */
+	drm_output_retry_stop();
 	pthread_mutex_lock(&g_outs_lock);
 	for (int i = 0; i < drm_output_inst_count(); i++)
 		drm_output_inst_stop_locked(&g_outs[i]);
@@ -507,6 +520,10 @@ void obs_drm_output_maybe_autostart(void)
 			     count > 1 ? "the other output keeps running" : "dormant");
 	}
 	pthread_mutex_unlock(&g_outs_lock);
+	/* issue 1424 (design 6386467303 layer 3): a vk-direct output that did not start (its monitor off,
+	 * the acquire refused) or that loses its scanout later is retried, never left dark until the next
+	 * OBS start */
+	drm_output_retry_start();
 }
 
 /* The graphics-thread frame hook: each instance's backend renders its own view (obs-video.c). */

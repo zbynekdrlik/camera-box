@@ -53,11 +53,11 @@ sweep-check`/`sweep-off`); a `sweep-check` exit 2 (`SWEEP_ENUM_FAILED`) is fail-
 and retries on later passes until read-back confirms clean (only ever set off an observed restart,
 so a retry can never sweep an untied burn). Ships DISABLED; the supervisor live-verifies.
 
-## Testing at Tier-0 (no local `cargo test`, build-ok disabled)
+## Testing
 
 The pure decision (`obs_burn_reconcile_decide` / `_is_fresh_start`) is proven by the runnable
 python twin `tests/python/test_obs_burn_reconcile_decision.py` (shells into the lib). The watchdog
 WIRING is proven by an offline smoke: a stubbed `obs_burn_filter.py` (env-driven frames + sweep-rc)
 on `OBS_BURN_FILTER_PY` + a stub `AIRULESET_NOTIFY`, driving `main` per box across
 seed/NOOP/SWEEP/retry/DEFER/enum-fail. The Rust harness (`tests/harness_obs_burn_reconcile_watchdog_1060.rs`)
-is CI-only (content/wiring + the decision truth-table sourced from the lib).
+covers content/wiring + the decision truth-table sourced from the lib.

@@ -13,7 +13,12 @@ paths:
 **Box set (issue 1317 part 3):** the Windows STRIH-SNV PC is RETIRED (M4 cut-over 20.9.2026; its
 address is the Linux strih-snv). `launch-obs-genlock.sh` accepts `stream|resolume` and
 `obs-self-heal-install.sh` accepts `stream`; `--box strih` is REFUSED by name (pointing at the
-strih-snv `strih-obs.service` user unit) and `--box strih-snv` is refused as a non-Windows box. Both read
+strih-snv `strih-obs.service` user unit) and `--box strih-snv` is refused as a non-Windows box. Since
+issue 1474 both (and `avsync-watchdog-install.sh`) refuse any linux-genlock box through the ONE class
+gate `obs_fleet_refuse_linux_target` (exit 2, nothing on stdout): on the real fleet that is the stream
+box too (stream-snv, Linux since issue 1462), and `fleet_box_mcp` names a win-* MCP only for a
+windows-genlock row. Their suites run the Windows programs on a fleet whose stream box is Windows (an
+`OBS_FLEET` override); the refusal is `tests/python/test_windows_planners_refuse_linux_1474.py`. Both read
 the MCP / address / AHK identity from `scripts/lib/genlock-fleet-boxes.sh`; the self-heal builder
 keys its AHK path on `obs_fleet_has_ahk` + that identity, never the literal name. The `strih`
 material below (the `.lnk` params, `scripts/strih/NL_STARTUP.ahk`) is the retired box's history,
@@ -130,14 +135,11 @@ test" section already documents that `bash -c '…source lib…'` is refused ins
 **What that section does NOT call out: running the script FILE DIRECTLY as an executable — `bash
 scripts/launch-obs-genlock.sh --box strih --force` (or `scripts/obs-self-heal-install.sh --box
 strih`) — is NOT refused**, and both scripts have a real CLI `main()` that prints their FULL emitted
-plan/program to stdout (they need no rig, no MCP, no network — pure string builders). This is a much
-stronger local verification path than the `python3 -c` fallbacks the ci-testing-gotchas.md section
-lists: capture the plan to a file, then Python-simulate every `.find()`/`.rfind()`/`.count()`
-assertion in the corresponding `tests/*.rs` file against the REAL emitted text (extract the raw
-program block between the plan's own two `# ----...` delimiter lines to get exactly what
-`run_sourced("build_launch_program ...")` would return). This proved BOTH a genuine pre-fix RED
-(exact byte offsets showing the bug) and a genuine post-fix GREEN for issue 1272 without any cargo
-compile, and caught the `.find()`-anchor-ambiguity gotcha above before it ever reached CI. Also
+plan/program to stdout (they need no rig, no MCP, no network — pure string builders). Capture the
+plan to a file and read the `tests/*.rs` anchors against the REAL emitted text (the raw program block
+between the plan's own two `# ----...` delimiter lines is exactly what
+`run_sourced("build_launch_program ...")` returns); for issue 1272 this showed the bug's exact byte
+offsets and caught the `.find()`-anchor-ambiguity gotcha above before it ever reached CI. Also
 works to diff an OLD committed version against the new one: `git show <sha>:scripts/foo.sh >
 /tmp/old.sh && bash /tmp/old.sh --box strih` runs the historical version standalone (if it sources
 a sibling lib via a `HERE`-relative path, recreate that relative layout under `/tmp` first — copy

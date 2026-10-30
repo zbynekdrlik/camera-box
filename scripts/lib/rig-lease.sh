@@ -67,8 +67,8 @@
 #                              self-heal: never a permanent deadlock, just a bounded worst case).
 #   RIG_LEASE_LOOKAHEAD_SECS   how far past "now" rig_lease_refresh_if_mine rolls the holder's
 #                              expected_release_at (default 900 = 15 min, issue 1383)
-#   RIG_LEASE_MAX_HOLD_SECS    the hold CEILING: no beat past acquired_at + this (default 4500 =
-#                              full-path-e2e.yml's timeout-minutes 75; the av-soak sets its own
+#   RIG_LEASE_MAX_HOLD_SECS    the hold CEILING: no beat past acquired_at + this (default 6300 =
+#                              full-path-e2e.yml's timeout-minutes 105; the av-soak sets its own
 #                              declared run window, issue 1383)
 #   RIG_LEASE_KEEPALIVE_SEC    the gate keep-alive's beat period (default 30, issue 1383)
 #   RIG_LEASE_KEEPALIVE_MAX_ERRORS  consecutive filesystem errors that end the gate keep-alive
@@ -197,6 +197,35 @@ except Exception:
 ' "$path" 2>/dev/null || printf '\t\n'
 }
 
+# rig_lease_held_by <repo> <run_id> -> exit 0 when holder.json names exactly this repo AND run id
+# (issue 1452: a step of the run that holds the lease -- the post-merge deploy job took it through
+# rig-busy-gate.sh -- may touch the camboxes it owns). An empty argument, an absent or corrupt
+# holder.json never matches. One atomic read (rig_lease_read_holder_repo_run_id).
+rig_lease_held_by() {
+  local want_repo="${1:-}" want_run="${2:-}" pair
+  [ -n "$want_repo" ] && [ -n "$want_run" ] || return 1
+  pair="$(rig_lease_read_holder_repo_run_id)"
+  [ "${pair%%$'\t'*}" = "$want_repo" ] && [ "${pair#*$'\t'}" = "$want_run" ]
+}
+
+# rig_lease_holder_covers <atom> -> exit 0 when the live holder's declared `resources` (issue 1450)
+# include ATOM, or declare none (a holder without `resources` holds the WHOLE rig), or holder.json is
+# unreadable (fail-closed: covered). Exit 1 only for a readable list that does not name ATOM.
+rig_lease_holder_covers() {
+  python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(0)
+r = d.get("resources") if isinstance(d, dict) else None
+if not isinstance(r, list):
+    sys.exit(0)
+sys.exit(0 if sys.argv[2] in r else 1)
+' "$(rig_lease_holder_path)" "${1:-}" 2>/dev/null || return $?
+}
+
 # rig_lease_holder_run_status <repo> <run_id> -> echo "in_progress" or "not_in_progress".
 # Pluggable via RIG_LEASE_RUN_STATUS_CMD (see header); defaults to "in_progress" (assume alive --
 # an unknown/unreachable status checker must never itself cause a reclaim; only a confirmed-dead
@@ -308,7 +337,7 @@ with open(path, "w") as f:
 
 # rig_lease_refresh_if_mine <repo> <run_id> [<lookahead_secs>] -> the HOLDER's own keep-alive
 # (issue 1383). ONLY when the current holder.json names exactly <repo> + <run_id> and the hold is
-# still under its ceiling (acquired_at + RIG_LEASE_MAX_HOLD_SECS, default 4500 s = the full-path
+# still under its ceiling (acquired_at + RIG_LEASE_MAX_HOLD_SECS, default 6300 s = the full-path
 # job's timeout-minutes): bump the heartbeat and roll expected_release_at forward to
 # max(current, now + lookahead) -- never backward, so a holder that declared a longer run up front
 # (the av-soak) keeps its declaration. lookahead defaults to RIG_LEASE_LOOKAHEAD_SECS, else 900 s.
@@ -327,7 +356,7 @@ with open(path, "w") as f:
 # lease may still be ours); 3 past the hold ceiling or no parseable acquired_at.
 rig_lease_refresh_if_mine() {
   local repo="${1:-}" run_id="${2:-}" lookahead="${3:-${RIG_LEASE_LOOKAHEAD_SECS:-900}}"
-  local max_hold="${RIG_LEASE_MAX_HOLD_SECS:-4500}"
+  local max_hold="${RIG_LEASE_MAX_HOLD_SECS:-6300}"
   if [ -z "$repo" ] || [ -z "$run_id" ]; then
     printf 'RIG_LEASE_REFRESH=no-identity\n'
     return 1
@@ -336,7 +365,7 @@ rig_lease_refresh_if_mine() {
     "" | *[!0-9]*) lookahead=900 ;;
   esac
   case "$max_hold" in
-    "" | *[!0-9]*) max_hold=4500 ;;
+    "" | *[!0-9]*) max_hold=6300 ;;
   esac
   python3 "$(dirname "${BASH_SOURCE[0]}")/../rig_lease_refresh.py" \
     "$(rig_lease_dir)" "$repo" "$run_id" "$lookahead" "$max_hold"

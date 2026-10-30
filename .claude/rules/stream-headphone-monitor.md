@@ -21,6 +21,12 @@ paths:
 > interface) wins over the notebook jack, and VLC gets `pl_play` only while OBS publishes. See "The
 > headphone box and the blinking (issue 1465)" at the end.
 >
+> **REVERSED 24.10.2026 (ROZHODNUTE 6383739315):** the headphones are the notebook JACK on every stream box
+> and NEVER a USB interface (stream-snv: `ALC256 Analog` on card `PCH`, the Focusrite `Gen` unused and named
+> once in the log). `resolve_headphone` picks ` Analog$` among the non-USB cards only; only an explicit
+> `--pcm-match` can still name a USB box (whose mixer is then left alone). The "card rule" bullets below that
+> prefer the USB interface are history. The operator's global volume: `stream-operator-audio.md`.
+>
 > **Issue 1456 (owner 21.10.2026) replaced the player with VLC** ("tak chcem to mat rovnako cize to tiez z
 > implementuj aby na stream-pp tiez bolo vlc, a neviem si v stream-pp nastavovat hlasitost vystuput
 > sluchatkoveho a je to potichu"). The ffmpeg -> aplay relay described under "The player" below is
@@ -111,7 +117,7 @@ box now does the same, through ALSA, never PipeWire.
 - Seams: `STRIH_STREAM_MONITOR_ASOUND` / `_PROC` (the player), `_HOSTNAME` / `_SCENES` / `_MANIFEST`
   (the rows).
 
-## Tests (Tier-0 pytest)
+## Tests (pytest)
 
 `tests/python/test_strih_stream_monitor_1436.py` runs the REAL loop with fake `ffmpeg` / `aplay`
 executables and a fake `/proc/asound` (stream-pp's two cards), and the rows through the real libs.

@@ -236,9 +236,8 @@ def _av_offset_log_facets(log_text):
 
 
 def _audio_log_facets(log_text, log_read_tod, ref_band_src):
-    """The OBS audio facets of the bounded log: the #1226/#1231 ts_lag max + freshness, the #1265
-    reference band, the #1325 buffered_ms shape, the issue-1381 mixer + obs-vban pacer loss + mix
-    buffering, and the issue-1385 log-head age. A dict of `build_bundle_state` keywords."""
+    """The OBS audio log facets (ts_lag #1226/#1231, ref band #1265, buffered_ms #1325, mixer + pacer
+    + buffering 1381, mix MIXED_LATE 1460, log-head age 1385) as `build_bundle_state` keywords."""
     # issue 1381: the timestamped tail is parsed ONCE and shared by the mixer + pacer facets below.
     stamped_tail = bsg.timestamped_tail_lines(log_text)
     ts_lag_ms, ts_lag_src, ts_lag_age_s = bsg.audio_telemetry_from_log(log_text)
@@ -275,6 +274,7 @@ def _audio_log_facets(log_text, log_read_tod, ref_band_src):
         "audio_buffering_start_ms": buffering_start_ms,
         "audio_buffering_source": buffering_src,
         "audio_buffering_age_s": buffering_age_s,
+        **dict(zip(bsg.AUDIO_MIX_LATE_KEYS, bsg.audio_mix_late_from_log(log_text, tail=stamped_tail))),
         "vban_pacer_loss_events": vban_events,
         "vban_pacer_loss_ms": vban_ms,
         "vban_pacer_loss_dest": vban_dest,
@@ -445,10 +445,9 @@ def gather_bundle_state(
     # (`obs_log_head_age_s`) proves the log is being written now; never re-read later in the gather.
     log_read_tod = bsg.local_seconds_of_day()
 
-    # #1265 — the reference source whose ts_lag BAND is watched (mbc on stream; env-overridable so a
-    # future box with a different A/V reference can set it). A box that has no such source (strih)
-    # simply reports the band facets empty -> omitted, never a false band.
-    ref_band_src = os.environ.get("AUDIO_REF_BAND_SRC", bsg.AUDIO_REF_BAND_DEFAULT_SRC)
+    # #1265 — the reference source whose ts_lag BAND is watched (env > the stream box's seed manifest
+    # > mbc). A box that has no such source (strih) reports the band facets empty -> omitted.
+    ref_band_src = bsg.audio_ref_band_src(os.environ)  # issue 1460: the stream box's own program audio
 
     log_facets, genlock_lock = _timed(
         timings, "obs_log_parse", _parse_log_facets, log_text, log_read_tod, ref_band_src

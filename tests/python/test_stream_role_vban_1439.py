@@ -21,9 +21,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strih_pp_hub_fed_1439 import hub_fed_boxes  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
@@ -40,7 +44,15 @@ VBAN_KIND = "net.nagater.obs-vban.source"
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
          "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "NDI_DISCOVERY_SENDER_HOSTS",
          "STRIH_HUB_UNIT_FILE", "STRIH_HUB_DROPIN_DIR", "STRIH_HUB_BIN", "STRIH_HUB_CONFIG_DIR",
-         "STRIH_HUB_ASIDE_DIR", "STRIH_PROGRAM_VBAN_WAIT_S", "STRIH_PROGRAM_VBAN_KIND_FILE")
+         "STRIH_HUB_ASIDE_DIR", "STRIH_PROGRAM_VBAN_WAIT_S", "STRIH_PROGRAM_VBAN_KIND_FILE",
+         "STRIH_PROGRAM_VBAN_CHANNELS_FILE")
+
+
+def _ok_channels(tmp_path):
+    """issue 1439: the per-channel meter read of a healthy stereo program (the grader's seam)."""
+    f = tmp_path / "channels"
+    f.write_text("channel_verdict=ok\nchannel_detail=ch1 -40.0 dB ch2 -41.0 dB\n")
+    return f
 
 
 def _load(name, path):
@@ -82,6 +94,11 @@ def _boxes_with(tmp_path, box, old, new):
     return d
 
 
+
+def _hub_fed_boxes(tmp_path):
+    return hub_fed_boxes(tmp_path / "hubfed")
+
+
 # --- the facts ---------------------------------------------------------------------------------------------
 
 def test_the_three_vban_facts_and_the_input_name_sit_before_the_program_sender():
@@ -104,7 +121,7 @@ def test_every_box_fact_file_loads(box):
 
 
 @pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "stream|6980|80"),
-                                      ("strih-snv", "strih-obs|6981|30"), ("strih-pp", "none|none|none")])
+                                      ("strih-snv", "strih-obs|6981|30"), ("strih-pp", "strih-obs|6981|40")])
 def test_each_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s" "$(strih_lx_program_vban_streams)" '
               '"$(strih_lx_program_vban_port)" "$(strih_lx_program_vban_reserve_ms)"', box)
@@ -135,9 +152,9 @@ def test_each_stream_box_r_sits_above_its_senders_worst_gap(box, frames, worst_g
     ("stream-pp", "STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=9\n", "10..500"),
     ("stream-pp", "STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=501\n", "10..500"),
     ("stream-pp", "STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=040\n", "10..500"),
-    # issue 1439 phase 2: a strih box declares all four program facts or none (strih-snv declares them)
-    ("strih-pp", "STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih\n", "strih role"),
-    ("strih-pp", "STRIH_PROGRAM_VBAN_PORT=none\n", "STRIH_PROGRAM_VBAN_PORT=6981\n", "strih role"),
+    # issue 1439 phase 2: a strih box declares all four program facts or none (both strih boxes declare them)
+    ("strih-pp", "STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_STREAMS=none\n", "strih role"),
+    ("strih-pp", "STRIH_PROGRAM_VBAN_PORT=6981\n", "STRIH_PROGRAM_VBAN_PORT=none\n", "strih role"),
 ])
 def test_the_loader_refuses_a_wrong_program_vban(tmp_path, box, old, new, word):
     d = _boxes_with(tmp_path, box, old, new)
@@ -149,7 +166,7 @@ def test_the_loader_refuses_a_wrong_program_vban(tmp_path, box, old, new, word):
 # issue 1462: the OBS program-audio input is named per box (the SNV stream tooling keys on `mbc`, the
 # ported PP collection calls it `Zvuk z mixu`), so the name is a box fact, never a role constant.
 @pytest.mark.parametrize("box,want", [("stream-pp", "Zvuk z mixu"), ("stream-snv", "mbc"),
-                                      ("strih-snv", "ASIO zvuk"), ("strih-pp", "none")])
+                                      ("strih-snv", "ASIO zvuk"), ("strih-pp", "ASIO zvuk")])
 def test_each_box_names_its_program_audio_input(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_audio_input)"', box)
     assert r.returncode == 0, r.stderr
@@ -161,7 +178,7 @@ def test_each_box_names_its_program_audio_input(box, want):
     ("stream-snv", "STRIH_PROGRAM_AUDIO_INPUT=mbc\n", "STRIH_PROGRAM_AUDIO_INPUT= mbc\n"),
     ("stream-snv", "STRIH_PROGRAM_AUDIO_INPUT=mbc\n", "STRIH_PROGRAM_AUDIO_INPUT=mbc/x\n"),
     ("stream-snv", "STRIH_PROGRAM_AUDIO_INPUT=mbc\n", "STRIH_PROGRAM_AUDIO_INPUT=%s\n" % ("m" * 65)),
-    ("strih-pp", "STRIH_PROGRAM_AUDIO_INPUT=none\n", "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n"),
+    ("strih-pp", "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n", "STRIH_PROGRAM_AUDIO_INPUT=none\n"),
 ])
 def test_the_loader_refuses_a_wrong_program_audio_input(tmp_path, box, old, new):
     d = _boxes_with(tmp_path, box, old, new)
@@ -225,9 +242,12 @@ def test_the_stream_snv_manifest_names_mbc_on_the_same_vban_source():
     assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 80}
 
 
-def test_a_hub_fed_strih_manifest_carries_no_vban_block():
-    # issue 1439 phase 2: strih-snv takes its console's VBAN (tests/python/test_strih_role_vban_1439.py)
-    text = _manifest("strih-pp")
+def test_a_hub_fed_strih_manifest_carries_no_vban_block(tmp_path):
+    # issue 1439 phase 2: both strih boxes take their console's VBAN (tests/python/test_strih_role_vban_1439.py)
+    r = _bash('strih_box_load "$1"\nobs_box_seed_manifest_json', "strih-pp",
+              env={"STRIH_BOXES_DIR": str(_hub_fed_boxes(tmp_path))})
+    assert r.returncode == 0, r.stderr
+    text = r.stdout
     assert "program_audio_vban" not in text
     assert PAV.parse_program_audio_vban(text) is None
 
@@ -473,15 +493,17 @@ def test_main_hands_the_manifest_vban_to_the_bootstrap():
 
 # --- the collection port ---------------------------------------------------------------------------------
 
-def test_the_stream_pp_preset_is_the_stream_pp_box_facts():
-    r = _bash('strih_box_load stream-pp\nprintf "%s %s %s" "$(strih_lx_program_vban_port)" '
-              '"$(strih_lx_program_vban_streams)" "$(strih_lx_program_vban_reserve_ms)"')
+@pytest.mark.parametrize("box", ["stream-pp", "strih-pp"])
+def test_each_pp_preset_is_its_box_facts(box):
+    # issue 1439: stream-pp takes lv1's `stream`, strih-pp (24.10.2026) lv1's `strih-obs`, both into the
+    # obs-vban source; the port converts the program input exactly as the launch seed does
+    r = _bash('strih_box_load "$1"\nprintf "%s %s %s" "$(strih_lx_program_vban_port)" '
+              '"$(strih_lx_program_vban_streams)" "$(strih_lx_program_vban_reserve_ms)"', box)
     port, stream, ms = r.stdout.split()
-    n = _bash('strih_box_load stream-pp\nprintf "%s" "$(strih_lx_program_audio_input)"')
-    assert n.returncode == 0 and _port().PRESETS["stream-pp"]["program_audio_input"] == n.stdout
-    assert _port().PRESETS["stream-pp"]["program_audio_vban"] == {
+    n = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_audio_input)"', box)
+    assert n.returncode == 0 and _port().PRESETS[box]["program_audio_input"] == n.stdout
+    assert _port().PRESETS[box]["program_audio_vban"] == {
         "port": int(port), "stream_name": stream, "receive_buffer_ms": int(ms)}
-    assert "program_audio_vban" not in _port().PRESETS["strih-pp"], "the strih role is not switched (issue 1439)"
 
 
 def _vban_coll(audio_name):
@@ -504,8 +526,7 @@ def test_a_ported_vban_source_other_than_the_program_input_is_dropped(preset, au
     names = {s["name"]: s["id"] for s in out["sources"]}
     assert "Old VBAN" not in names, rep
     assert any(r.startswith('DROP source "Old VBAN"') and "UDP port" in r for r in rep), rep
-    want = VBAN_KIND if preset == "stream-pp" else "pulse_input_capture"
-    assert names[audio] == want, names
+    assert names[audio] == VBAN_KIND, names
 
 
 def test_keep_kind_keeps_a_ported_vban_source():
@@ -694,7 +715,7 @@ def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None, box="stream-pp"):
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
             'strih_box_load "$3"\n' + later + 'strih_program_vban_grade /nonexistent 127.0.0.1 "$1"\nwait')
     r = _bash(body, log, tmp_path / "later.txt", box,
-              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_WAIT_S": "1" if append else "0"})
+              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "1" if append else "0"})
     assert r.returncode == 0, r.stderr
     return r.stdout.splitlines()
 

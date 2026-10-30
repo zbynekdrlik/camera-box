@@ -2870,10 +2870,12 @@ fn committed_bkshading_unit_matches_the_printer() {
     );
 }
 
-/// The config seed carries the operator bind + the cam1 cambox-relay camera (development = one camera
-/// on cam1) and is valid TOML; the bind defaults to :8770 and an arg overrides it.
+/// The config seed carries the operator bind + the box's OWN venue cameras (owner 26.10.2026: strih-snv
+/// 2 3 5, strih-pp 1 4 6 7; owner ruling 5977504457: one block per cambox, a handheld is never its own
+/// panel) and is valid TOML; the bind defaults to :8770 and an arg overrides it. The per-box relay
+/// overrides: tests/python/test_bkshading_relays_fact_808.py.
 #[test]
-fn bkshading_config_text_seeds_cam1_and_is_valid_toml() {
+fn bkshading_config_text_seeds_the_venue_cameras_and_is_valid_toml() {
     let (code, cfg, _e) = run_sourced(&[], "strih_bkshading_config_text");
     assert_eq!(code, 0);
     assert!(
@@ -2881,22 +2883,43 @@ fn bkshading_config_text_seeds_cam1_and_is_valid_toml() {
         "default operator bind :8770: {cfg}"
     );
     assert!(
-        cfg.contains("id = \"cam1\""),
-        "must carry the cam1 camera: {cfg}"
+        cfg.contains("id = \"cam2\""),
+        "must carry the cam2 camera: {cfg}"
     );
     assert!(
-        cfg.contains("transport = \"cambox-relay\""),
-        "cam1 is reached through the cambox relay: {cfg}"
+        cfg.contains("address = \"register:cam2\""),
+        "issue 1431: cam2 is reached first through its relay's registration: {cfg}"
     );
     assert!(
-        cfg.contains("address = \"cam1.lan:8771\""),
-        "cam1 relay address (host-independent of the service): {cfg}"
+        cfg.contains("fallback_address = \"cam2.lan:8771\""),
+        "cam2 literal relay address as the fallback (host-independent of the service): {cfg}"
     );
     assert!(
-        cfg.contains("ndi_preview = \"CAM1 (usb)\""),
-        "cam1 NDI preview name: {cfg}"
+        cfg.contains("ndi_preview = \"CAM2 (usb)\""),
+        "cam2 NDI preview name: {cfg}"
     );
-    assert!(cfg.contains("grab_fps = 60"), "cam1 grab fps: {cfg}");
+    assert!(cfg.contains("grab_fps = 60"), "cam2 grab fps: {cfg}");
+    for n in 1..=7 {
+        assert_eq!(
+            cfg.matches(&format!("id = \"cam{n}\"\n")).count(),
+            1,
+            "the panel carries exactly one cam{n} block: {cfg}"
+        );
+    }
+    assert_eq!(
+        cfg.matches("[[camera]]").count(),
+        7,
+        "issue 1431: all seven cameras declared (strih.lan picks the strih at a joint event): {cfg}"
+    );
+    assert_eq!(
+        cfg.matches("visiting = true").count(),
+        4,
+        "strih-snv's venue cameras (2 3 5) are listed always, the other four only once registered: {cfg}"
+    );
+    assert!(
+        !cfg.contains("id = \"handheld"),
+        "a handheld is never its own panel (owner ruling 5977504457): {cfg}"
+    );
     let (jc, _o, je) = run_sourced(
         &[],
         "strih_bkshading_config_text | python3 -c 'import tomllib,sys; tomllib.load(sys.stdin.buffer)'",

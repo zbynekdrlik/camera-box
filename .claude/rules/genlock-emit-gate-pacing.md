@@ -10,8 +10,7 @@ paths:
 
 The cam box captures faster than 60 (ShadowCast free-runs ~61–64 fps) and DECIMATES onto a
 wall-clock 60 fps grid before NDI-emitting to the strih genlock-FIFO. Four cooperating pieces,
-all pure `cfg(target_os="linux")` logic (NOT probe-gated → Tier-0 testable via `cargo test
---no-run --lib` then running `target/debug/deps/camera_box-*` directly):
+all pure `cfg(target_os="linux")` logic (NOT probe-gated → `cargo test --lib`):
 
 The pacing GATE math lives in its own crate-root module `src/genlock_pacing.rs` (issue 1113 —
 extracted verbatim out of the then-2555-line `ndi.rs`), gated `#[cfg(target_os="linux")]` in
@@ -287,7 +286,7 @@ the emit rate 59.97→59.20, off-rig-proven):
 
 `all_capture_times` is pushed every poll, pruned in lock-step with `unique_capture_times`, and cleared
 on the same #131 backward-clock-step. `poll` stays 6-arg; NO `DupeShedLog`/summary/counter change.
-Verified 64/64 via the scratch route below (the 2 [red] arming tests GREEN, every preservation test
+Verified 64/64 (the 2 [red] arming tests GREEN, every preservation test
 unchanged + a steady-no-hiccup anti-over-shed pin). **Supervisor's live rig step:** confirm the strih
 `genlock-fifo audit 'NDI cam1'` `converge_sheds` go quiescent (≈0 between events, depth pinned 1–2)
 and `[4i/8align]` holds a stable cross-camera offset.
@@ -310,7 +309,7 @@ then SKIPS that 60 fps slot instead of filling it → emit under-runs by EXACTLY
 → a strih genlock-FIFO hold → the cam1 presented-frame_id align sawtooth → `[4i/8align]` abort.
 An AT-rate box (`sustained_over_rate` false → Retire/Drain OFF) instead fills the same gap with the
 #1111 copy valve, so it holds 60 with identical corruption — that is why ONLY the over-rate box
-breaks. Diagnosed off-rig (real `poll`, scratch route): a true-60 source over-captured at 62 fps
+breaks. Diagnosed off-rig (real `poll`): a true-60 source over-captured at 62 fps
 under 0.8 corrupted/s emits 59.13 fps (== the live "~59.1"; the emit deficit == the corrupted count
 EXACTLY — each corrupted frame costs one slot), vs 59.93 with the fix.
 
@@ -321,7 +320,7 @@ The fix — a BOUNDED make-up deficit (NO new `ShedAction`, NO summary/tuple cha
   size the source is genuinely starved and the #1111 copy valve / `enough_unique` handoff carries
   it) AND sets `pending_takt_gap`.
 - **Pure `corrupted_makeup_reclaims(action, deficit)`** = `deficit > 0 && matches!(action, Retire | Drain)`
-  (Tier-0 testable). In `poll`, after the unchanged `dupe_shed_action`, if it fires: decrement the
+  — in `poll`, after the unchanged `dupe_shed_action`, if it fires: decrement the
   deficit, `next_boundary_ns = candidate_next` (the SAME single-interval advance Retire/Drain/Emit
   do), clear `deferred_this_boundary`, `record_dupe_emitted()`, `return true` — emit the CURRENT
   GOOD frame (a dupe/repeat in the Retire case, a fresh good frame in the Drain case). Corrupted
@@ -347,9 +346,8 @@ the `corrupted` count on the same `Streaming:` line (a healthy over-rate box sho
   (at-rate periods / FastDrain backlogs) persists and can later convert up to 8 legitimate over-rate
   sheds into copies; bounded to 8/episode and self-terminating. If live data ever shows copy bursts
   trailing a corruption episode, add an aging/clear-on-valve rule.
-- **Tier-0 verify:** the whole cluster is `cfg(target_os="linux")` pure logic → `cargo fmt --all
-  --check` + the rustc `--test` scratch replica (RED with the make-up disabled 59.13 → GREEN 59.93).
-  The Drain leg needs `now_mono` 2+ emit-intervals AHEAD of a monotonic `capture_mono` to reach
+- **Verify:** RED with the make-up disabled 59.13 → GREEN 59.93. The Drain leg needs `now_mono`
+  2+ emit-intervals AHEAD of a monotonic `capture_mono` to reach
   `queue_depth >= QUEUE_DEPTH_SHED_INTERVALS` (a constant residence-2 drains EVERY frame — model a
   warmed gate + one drain frame, per `drain_leg_make_up_emits_instead_of_dropping_1167`).
 
@@ -399,7 +397,7 @@ only `poll`'s APPLICATION of two arms changes:
   Δ0/Δ3 churn the pre-#1145 valve caused at lag 0. `retired` now goes ~0 and `dupe_emitted` becomes a
   LEGITIMATE nonzero on the over-rate box (attribute via the retired count going to 0). The absolute
   `WINDOW_COPIES_GAPS_TOLERANCE` is the live-E2E re-check after deploy (data-first).
-- **Off-rig (real `poll`, #557 scratch):** the sanctioned `run_queue_sim` over-rate 59.7 → ~60.0
+- **Off-rig (real `poll`):** the sanctioned `run_queue_sim` over-rate 59.7 → ~60.0
   (residence still ≤ target, 0 overflow); a 24-frame deep backlog STILL converges in 8.65 s (≤12 s);
   the at-rate 60.0 control unchanged; 73/73 module tests pass. Design chosen via a gated Fable consult
   (hybrid: hold-Drain + latch-gated shallow-fill + kept FastDrain + panic floor).
@@ -413,7 +411,7 @@ the boundary) until it crosses `RETIRE_MAX_LAG_INTERVALS`; then FastDrain fires,
 whole shallow tail drains as a **BURST** of ~6-7 advance-emit-nothing sheds in a fraction of a second
 → one 5s window drops to 293 → cam1's presented-frame_id jumps ~+7 vs its siblings → `[4i/8align]`
 "mutual stability ≤1 id" ABORT. Reproduced off-rig against the REAL `poll` (send-bound 63.5 fps creep
-model, #557 scratch route): current code shows max consecutive-emit boundary **delta = 3** (a +2
+model): current code shows max consecutive-emit boundary **delta = 3** (a +2
 FastDrain jump), skips bunching (min gap 0-17 intervals), a burst of 2-3 skips per 30-interval window.
 
 v3 PACES the convergence — NO new `ShedAction`, the pure `dupe_shed_action` DECISION byte-UNCHANGED,
@@ -449,7 +447,7 @@ only `poll`'s application changes (two new `shed.rs` consts + one `gate.rs` fiel
   stamp only mutates on a performed skip, so a 60.00 card is byte-inert. NO counter/tuple/summary
   change (`take_shed_counts` stays a 6-tuple; a trickle skip records as `retired`, so on the live
   over-rate box `retired` goes to ~1 per gap — attribute via the paced cadence). `main.rs` untouched.
-- **Off-rig (real `poll`, #557 scratch):** RED (send-bound 63.5 creep) delta 3 / min-skip-gap 17 /
+- **Off-rig (real `poll`):** RED (send-bound 63.5 creep) delta 3 / min-skip-gap 17 /
   burst 2 → GREEN delta 2 / gap ≥34 / burst 1; the 24-frame deep backlog STILL converges 8.65 s
   (≤12 s) and 12-frame 4.65 s (≤6.5 s); 75/75 module tests pass. Tune the window-sent proxy against
   the LIVE slack — the deficit is throughput-slack-dependent (a heavily send-bound sim over-estimates
@@ -466,7 +464,7 @@ blocking `self.stream.next()?` has NO grid timer) — has NOTHING to fill with: 
 captured frame's shed into a copy; it cannot fabricate an emit when NO capture arrived. Fewer than 60
 polls/s ⇒ fewer than 60 emits. Each empty-queue boundary (`queue_had_frame==false`, the loop genuinely
 waited) goes unfilled; grid lag creeps until `genlock_emit_gate`'s #131 resync (`lag>8 &&
-!queue_had_frame`) skips it → emit under-runs. Reproduced off-rig (REAL `poll`, #557 scratch, unique
+!queue_had_frame`) skips it → emit under-runs. Reproduced off-rig (REAL `poll`, unique
 captures, empty queue): **57.9fps → 290/300 sent, 36 #707 skips/20s, ZERO dupe-decimation events**
 (`sustained_over_rate` FALSE at 57.9: takt 17.27ms > `RETIRE_MIN_TAKT_INTERVAL_NS` 16.58ms) — a
 DIFFERENT regime from v2/v3. The #1145 copy valve can't help (it needs a DUPE arriving to convert; an
@@ -501,7 +499,7 @@ new fields + a const change):
   `emit_one(emit_timecode_100ns)` FnMut closure (mirroring the existing `tee_grab` nested-closure
   pattern); the loop `for j in (1..=starvation_repeats).rev()` emits the current frame at each
   repeat's own boundary timecode (`genlock_pacing::starvation_repeat_timecode_100ns(base, j, fps)` =
-  `base − j*(10_000_000/fps)`, a pure Tier-0 helper — distinct per-slot timecodes are REQUIRED or the
+  `base − j*(10_000_000/fps)`, a pure helper — distinct per-slot timecodes are REQUIRED or the
   FIFO collapses the repeats into one slot), then `emit_one(capture_timecode_100ns)` for the current.
   0 repeats in every healthy/over-rate window ⇒ the loop is a no-op, byte-identical to the pre-v4
   single send.
@@ -526,7 +524,7 @@ new fields + a const change):
   exclusive) so a FILLED slot is deducted from the #707 boundary-skip diagnostic (a fill is not a
   sick-leg SKIP). APPENDED a summary segment (`{n} starvation last-frame repeats (#1167 v4
   empty-queue slot-fill)`) — existing substrings byte-frozen.
-- **Off-rig (real `poll`, #557 scratch):** 57.9fps 290→300/window, 59.7 299→300, 0 net #707 skips;
+- **Off-rig (real `poll`):** 57.9fps 290→300/window, 59.7 299→300, 0 net #707 skips;
   over-rate 63.6 + healthy 60.0 byte-inert; frozen source 0 repeats; 30fps half-rate exposed under 60.
   83/83 module tests pass; `cargo fmt --all --check` clean. **The `#1167 (TENTH piece)` corrupted
   make-up stays DORMANT** (its own 2026-08-22 note already records it does not fire live — v4 is the
@@ -535,9 +533,6 @@ new fields + a const change):
   margin +0.015 over the 0.95 floor). The CONSECUTIVE cap bounds a burst + prevents dead-leg masking,
   NOT a moderate SUSTAINED under-rate (out of the wander scenario — a deep sustained deficit is caught
   by the existing uniformity / #666 gates, not papered over).
-- **main.rs is UNVERIFIABLE locally** (Tier-0 #557 blocks all cargo compile) — the `emit_one` closure
-  refactor's type/borrow correctness is CI's first check; `cargo fmt --all --check` (which parses
-  main.rs) is the only local net and was clean.
 - **Supervisor's live rig step:** confirm the per-5s `Streaming:` windows hold 299-300 on cam1 in an
   UNDER-rate window (grabber < 60) with `starvation last-frame repeats` > 0, and `[4i/8align]` cam1
   offset holds ±1 across the wander in BOTH directions.
@@ -587,7 +582,7 @@ empty-queue fill fires in BOTH wander directions (`src/dupe_decimation/gate.rs`,
   `!queue_had_frame` gate keeps the fill off); `over_rate_fills_every_60fps_slot` now counts the
   WIRE rate (poll-emits + starvation repeats) since a post-stall slot is filled by a repeat, not a
   poll-emit.
-- **Off-rig (real `poll`, #557 scratch):** over-rate 62 fps + periodic 45 ms stalls,
+- **Off-rig (real `poll`):** over-rate 62 fps + periodic 45 ms stalls,
   `sustained_over_rate=true`. v4: repeats=0, net_skips=18, max_lag=9 (into the resync band), windows
   295–298. v5: repeats>0, net_skips=0, max_lag≤4, windows 300–302. Full module suite 84/84; `cargo
   fmt --all --check` clean. The receiver-side recv-cap_max smoothing (the FIFO paces the
@@ -628,16 +623,9 @@ live in `dupe_decimation/shed_log.rs` (moved unchanged for the file budget).
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
 hand-SIMPLIFIED re-model silently DIVERGES. A shortened `DecimationGate`/`Cur` re-write disagreed
 with the real #1111 test (it read emit 58 at 62/period-15 where the real code holds ~60 via copies),
-which would have mis-designed the fix. The authoritative off-rig check is the CLAUDE.md/#557 SCRATCH
-route: copy the ACTUAL `src/genlock_pacing.rs` + the whole `src/dupe_decimation/` DIRECTORY (`mod.rs`
-+ `signature.rs` + `shed.rs` + `gate.rs` + `tests.rs` — the module was split into a dir for the
-~1000-line budget) into a scratch dir with a `root.rs` that `mod genlock_pacing; mod dupe_decimation;`
-(rustc resolves `dupe_decimation/mod.rs`), then `rustc --edition 2021 --test root.rs` runs the REAL
-`DecimationGate::poll` + the real test suite (70 tests: 44 `dupe_decimation::tests::` + 26
-`genlock_pacing::tests::`). NO `sed` is needed — `crate::genlock_pacing::*` resolves because
-`genlock_pacing` is a top-level `mod` in the scratch crate (the old single-file recipe's
-`sed 's/crate::genlock_pacing:://g'` was never actually required and is retired). For
-a design sweep, drive that real gate with a synthetic capture stream (periodic isolated dupes at the
+which would have mis-designed the fix. The authoritative off-rig check runs the REAL
+`DecimationGate::poll` + its real test suite (`cargo test --lib`). For a design sweep, drive that
+real gate with a synthetic capture stream (periodic isolated dupes at the
 over-rate delta + INDEPENDENT timestamp jitter — content-dupeness is a hash property, NOT a
 sampling-phase artifact; a source-sampling model that ties dupeness to the jittered timestamp
 mis-models the ShadowCast, which stays clean at exactly 60). The downstream uniformity a genlocked
@@ -692,9 +680,7 @@ single-frame wait / `≥ 1.5×` stall (`CAPTURE_STALL_FACTOR`). `frame_from_none
 `is_capture_stall` are the two ends. Fail-safe: an unknown/non-finite measurement → `false`
 (queue-blind = today's behavior), so a bad reading can never SUPPRESS an honest skip — and guard
 `frame_interval_ms` for finiteness too (a `+inf` interval would otherwise falsely read "buffered",
-the unsafe direction). All Tier-0 (`cfg(target_os="linux")`, not probe-gated): verify via
-`rustc --edition 2021 --test src/genlock_pacing.rs` (and `src/capture_stall.rs`) standalone — a
-combined build with `genlock_pacing`/`capture_stall` as submodules runs the real `DecimationGate::poll`.
+the unsafe direction). All `cfg(target_os="linux")`, not probe-gated: `cargo test --lib`.
 
 ## Root-causing method that worked: faithful Python port + live journal cross-check
 
@@ -736,11 +722,3 @@ bug. Closing the gap needs a capture-side change (deeper jitter buffer / RT isol
 trade-off, ownerova doména; #899-adjacent), a cleaner grabber (hardware — cam3 proves it vanishes),
 or the owner relaxing the floor (#1142 — never without the owner). Full data + the replica numbers:
 issue 1170 finding comment.
-
-**Method note (reusable):** the `rustc` replica of `DecimationGate::poll`'s empty-queue path is a
-valid Tier-0 (#557: no cargo compile) way to test an emit-fill change — copy `genlock_emit_gate` /
-`genlock_lag_intervals` / `boundary_skip_count` / the takt EMA verbatim, and reuse the EXACT
-`run_over_rate_stall_sim` / `run_starvation_sim` bodies from `dupe_decimation/tests.rs`. For the
-UNIQUE-frame starvation path the dupe arms (Retire/Drain/FastDrain) never fire, so a minimal poll
-(BlindShed between boundaries, Emit{copy:false} at a crossing → `apply_starvation_fill`) is faithful.
-Validate the replica by confirming CURRENT reproduces the locked tests' asserted values FIRST.

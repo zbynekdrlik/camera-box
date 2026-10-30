@@ -30,7 +30,7 @@ switches foh1_audio `10.77.9.2`, stage_av `10.77.9.3`, foh1_video `10.77.9.4`, f
 
 ## Files
 
-- `scripts/lib/netcfg-audit.sh` — the PURE parse + drift-classify core (no I/O; Tier-0 unit-tested by
+- `scripts/lib/netcfg-audit.sh` — the PURE parse + drift-classify core (no I/O; unit-tested by
   `tests/harness_netcfg_audit_797.rs`). Functions: `netcfg_parse_field`/`netcfg_parse_stat` (RouterOS
   human-output parsers, start-anchored, thousands-space stripped), `netcfg_normalize_rate`/`_version`,
   `netcfg_classify_match`/`_rate`/`_drop_rate`, `netcfg_drift_verdict`,

@@ -48,7 +48,7 @@ phase calibrator's reconstructed latency, effective A/V — move by ~one interva
 first post-#1009 deploy and must be re-baselined by measurement, not assumed unchanged), and the
 receiver guard requires `max_ts > wall_now + max(3×interval, 250 ms)` SUSTAINED for 3
 consecutive due==0 ticks (exit is qualified the same way; a due>0 tick exits immediately).
-Tier-0 authority: `src/genlock_backlog.rs BackwardStepGuard` + its FIFO-sim acceptance tests.
+Authority: `src/genlock_backlog.rs BackwardStepGuard` + its FIFO-sim acceptance tests.
 
 ## Repair
 

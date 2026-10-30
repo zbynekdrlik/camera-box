@@ -67,6 +67,7 @@
 #include "util/platform.h"
 #include "util/threading.h"
 #include "obs-drm-output-vk-internal.h"
+#include "obs-drm-output-retry.h" /* issue 1424: the rebuild backoff (pure) */
 
 /* -------------------------------------------------------------------------------------------------
  * Pure decision helpers (Tier-0, lift-compiled + truth-tabled by tests/drm_output_vk_direct_1346.rs).
@@ -297,25 +298,73 @@ static bool drm_output_vk_wait_fence(struct drm_output_vk_disp *d)
 	}
 }
 
-/* An out-of-date / lost display surface (an HDMI replug, a sink re-plug) is NOT the end of the output:
- * rebuild the swapchain (+ the surface when lost) with bounded retries, 1 s apart, so the fixed output
- * comes back by itself. Gives up (the loop exits, `present loop exited` names it) after
- * DRM_OUTPUT_VK_REBUILD_TRIES consecutive failures or when the display's mode size changed (the shared
- * images no longer fit — an OBS restart re-opens at the new size). */
-#define DRM_OUTPUT_VK_REBUILD_TRIES 10u
+/* issue 1424 (design 6386467303 layer 3): another display of this process is open on the shared
+ * VkInstance. A plain read of the slot flag the open/close paths set under g_drm_vk_dev.lock (the
+ * present thread never takes that lock: an open holds it across its settle wait, which waits for THIS
+ * thread's presents). */
+static bool drm_output_vk_others_open(const struct drm_output_vk_disp *d)
+{
+	for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++)
+		if (&g_drm_vk_disp[i] != d && os_atomic_load_bool(&g_drm_vk_disp[i].in_use))
+			return true;
+	return false;
+}
+
+/* An out-of-date / lost display surface (an HDMI replug, a sink re-plug, a monitor switched off) is NOT
+ * the end of the output: rebuild the swapchain (+ the surface when lost) with the display still
+ * ACQUIRED, on the pure schedule of drm_output_rebuild_next (obs-drm-output-retry.h, issue 1424): 1 s
+ * apart for the fast tries, then every 5 s for as long as another display of the process is open --
+ * NVIDIA refuses to re-acquire a display this process released while the shared VkInstance lives on, so
+ * a release there would be final. Alone it gives up after the fast tries (the loop exits, `present loop
+ * exited` names it); the retry supervisor (obs-drm-output-retry.c) then releases the display and opens
+ * it again on a fresh instance, at whatever mode size the monitor offers now. A wedged queue gives up at
+ * once. The waits are sliced so a halt never waits a whole 5 s step. */
 static bool drm_output_vk_rebuild_or_give_up(struct drm_output_vk_disp *d, VkResult why, unsigned *rebuilds)
 {
-	while (os_atomic_load_bool(&d->running) && !d->queue_wedged && *rebuilds < DRM_OUTPUT_VK_REBUILD_TRIES) {
+	os_atomic_set_bool(&d->rebuilding, true);
+	while (os_atomic_load_bool(&d->running) && !d->queue_wedged) {
+		/* a new presentation is a mode set: never inside another display's acquire (NVIDIA -13 there).
+		 * Clear the flag, THEN read acquiring (seq-cst both; the open does the mirror pair). */
+		os_atomic_set_bool(&d->rebuilding, false);
+		if (os_atomic_load_bool(&d->dev->acquiring)) {
+			os_atomic_set_bool(&d->rebuilding, true);
+			const struct timespec defer = {0, 5000000L};
+			nanosleep(&defer, NULL);
+			continue;
+		}
 		(*rebuilds)++;
-		blog(LOG_WARNING, "drm-output: vk-direct: presentation out of date (VkResult %d) on '%s' -- rebuilding (try %u of %u)",
-		     (int)why, d->output_name, *rebuilds, DRM_OUTPUT_VK_REBUILD_TRIES);
+		const int log_kind = drm_output_rebuild_log_kind(*rebuilds);
+		if (log_kind == DRM_OUTPUT_REBUILD_LOG_TRY)
+			blog(LOG_WARNING,
+			     "drm-output: vk-direct: presentation out of date (VkResult %d) on '%s' -- rebuilding (try %u of %u)",
+			     (int)why, d->output_name, *rebuilds, DRM_OUTPUT_REBUILD_FAST_TRIES);
+		else if (log_kind == DRM_OUTPUT_REBUILD_LOG_SLOW)
+			blog(LOG_WARNING,
+			     "drm-output: vk-direct: presentation of '%s' still out of date after %u tries -- the display "
+			     "stays acquired (another output is open), retrying every %u s until its monitor is back",
+			     d->output_name, DRM_OUTPUT_REBUILD_FAST_TRIES,
+			     (unsigned)(DRM_OUTPUT_REBUILD_SLOW_NS / 1000000000ULL));
 		/* a lost surface is rebuilt whole; an out-of-date one keeps its surface once, then escalates */
-		if (drm_output_vk_rebuild_presentation(d, why == VK_ERROR_SURFACE_LOST_KHR || *rebuilds >= 2u))
+		if (drm_output_vk_rebuild_presentation(d, why == VK_ERROR_SURFACE_LOST_KHR || *rebuilds >= 2u)) {
+			if (*rebuilds > DRM_OUTPUT_REBUILD_FAST_TRIES)
+				blog(LOG_INFO, "drm-output: vk-direct: presentation of '%s' is back after %u tries",
+				     d->output_name, *rebuilds);
 			return true;
-		const struct timespec pause = {1, 0};
-		nanosleep(&pause, NULL);
+		}
+		os_atomic_set_bool(&d->rebuilding, true);
+		uint64_t wait_ns = 0;
+		if (!drm_output_rebuild_next(*rebuilds, drm_output_vk_others_open(d), &wait_ns))
+			break;
+		const uint64_t until = os_gettime_ns() + wait_ns;
+		while (os_atomic_load_bool(&d->running) && os_gettime_ns() < until) {
+			const struct timespec slice = {0, 100000000L};
+			nanosleep(&slice, NULL);
+		}
 	}
-	blog(LOG_WARNING, "drm-output: vk-direct: presentation could not be rebuilt on '%s' -- giving up",
+	os_atomic_set_bool(&d->rebuilding, false);
+	blog(LOG_WARNING,
+	     "drm-output: vk-direct: presentation could not be rebuilt on '%s' -- giving up (the retry supervisor "
+	     "releases the display and opens it again)",
 	     d->output_name);
 	return false;
 }
@@ -365,7 +414,10 @@ static void *drm_output_vk_present_thread(void *arg)
 		VkResult r = d->dev->vk.vkAcquireNextImageKHR(d->dev->device, d->swapchain, DRM_OUTPUT_VK_WAIT_NS,
 							   d->sem_acquire, VK_NULL_HANDLE, &img);
 		if (r == VK_TIMEOUT || r == VK_NOT_READY) {
-			if (++overdue % 5u == 0u)
+			/* issue 1424: a display whose monitor is off can stop its vblanks for hours -- log at 5 s,
+			 * then at every power of two (8, 16, 32 ... s), never every 5 s for the whole outage */
+			++overdue;
+			if (overdue == 5u || (overdue >= 8u && (overdue & (overdue - 1u)) == 0u))
 				blog(LOG_WARNING,
 				     "drm-output: vk-direct: swapchain image overdue (%us) on '%s' -- possible display wedge",
 				     overdue, d->output_name);
@@ -537,6 +589,7 @@ struct drm_output_vk_disp *drm_output_vk_open(int slot, const char *output_name,
 	os_atomic_set_long(&d->want_h, 0);
 	os_atomic_set_long(&d->want_mhz, 0);
 	os_atomic_set_bool(&d->remode, false);
+	os_atomic_set_bool(&d->rebuilding, false);
 
 	if (!drm_output_vk_setup(d)) {
 		drm_output_vk_destroy_display(d);

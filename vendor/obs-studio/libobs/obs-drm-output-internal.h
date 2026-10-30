@@ -26,6 +26,9 @@
 #include "graphics/graphics.h"
 #include "obs-drm-output.h"
 #include "obs-drm-output-audio.h"
+/* issue 1424: the module's ONE log entry -- a retried start's lines are captured (obs-drm-output-logcap.h) */
+#include "obs-drm-output-logcap.h"
+#define blog drm_output_blog
 
 #ifdef __cplusplus
 extern "C" {
@@ -79,6 +82,9 @@ struct drm_output_backend_ops {
 	void (*publish)(struct drm_output_inst *inst, int idx);
 	gs_texture_t *(*texture)(struct drm_output_inst *inst, int idx);
 	void (*mode_size)(struct drm_output_inst *inst, uint32_t *w, uint32_t *h);
+	/* issue 1424: true while the output's scanout really runs (vk-direct: its present loop wants frames);
+	 * NULL = the backend has no retry (the lease backend). Read by the retry supervisor. */
+	bool (*alive)(struct drm_output_inst *inst);
 };
 
 extern const struct drm_output_backend_ops drm_output_lease_backend;     /* "backend": "lease" */
@@ -104,6 +110,20 @@ struct drm_output_inst {
 /* The instance registry (obs-drm-output-outputs.c). drm_output_inst_at returns NULL outside 0..count-1. */
 int drm_output_inst_count(void);
 struct drm_output_inst *drm_output_inst_at(int idx);
+
+/* issue 1424 (design 6386467303 layer 3): the registry's add / start / stop lock and the per-instance
+ * start / stop steps, for the retry supervisor (obs-drm-output-retry.c). start: its EDID, the backend,
+ * then its audio leg; stop: its audio leg, then its scanout. Both run with the registry lock held. */
+void drm_output_registry_lock(void);
+void drm_output_registry_unlock(void);
+bool drm_output_inst_start_locked(struct drm_output_inst *inst);
+void drm_output_inst_stop_locked(struct drm_output_inst *inst);
+
+/* issue 1424: the retry supervisor of the vk-direct outputs (obs-drm-output-retry.c). start: once, at
+ * the end of the autostart (a no-op without a vk-direct output); stop: first thing in
+ * obs_drm_output_stop, BEFORE the registry lock (the supervisor takes that lock itself). */
+void drm_output_retry_start(void);
+void drm_output_retry_stop(void);
 
 /* Mailbox CLAIM: take a scanout buffer of `inst` out of every mailbox role (the issue-1152 claim step).
  * Returns its index, or -1 when nothing is writable. */

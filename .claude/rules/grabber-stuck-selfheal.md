@@ -91,16 +91,13 @@ produce a second page. Pinned by
 refactor toward the sibling convention, or the double-page returns.
 
 `scripts/lib/grabber-stuck-health.sh` is
-the pure classify (`STUCK`/`OK`/`NODATA`) + marker-fps parse — Tier-0 tested
+the pure classify (`STUCK`/`OK`/`NODATA`) + marker-fps parse — tested
 (`tests/harness_grabber_stuck_health_1128.rs`), the driver by
 `tests/harness_grabber_stuck_watchdog_1128.rs`.
 
-## Tier-0 verification (no cargo compile — #557)
+## Verification
 
-`src/grabber_stuck.rs` is a pure crate-root module (default features) — verify RED→GREEN via a
-standalone `rustc --edition 2021 --test` on a scratch copy of the file, and `cargo fmt --all
---check`. `src/main.rs` has NO local type-check path — verify via `rustfmt --check` (parse/brace
-balance) + cross-checking the reused `capture_rate_selfheal` signatures; CI is the first full
-type-check. The bash lib + watchdog: `bash -n`, `shellcheck -S warning`, and a direct sourced run
-(`. scripts/lib/grabber-stuck-health.sh; …` and the `--dry-run` driver with `probe_box`/`sshpass`
-overridden) — the same net the harnesses encode, runnable with zero rig.
+`src/grabber_stuck.rs` is a pure crate-root module (default features). The bash lib + watchdog:
+`bash -n`, `shellcheck -S warning`, and a direct sourced run (`. scripts/lib/grabber-stuck-health.sh;
+…` and the `--dry-run` driver with `probe_box`/`sshpass` overridden) — the same net the harnesses
+encode, runnable with zero rig.

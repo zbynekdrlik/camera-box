@@ -51,7 +51,7 @@ The observed cure was a **PC reboot of a live prod box** (a genuinely destructiv
 ticket. So unlike bundle-state #732 (which auto-restarts the `:8899` task), this watchdog takes NO
 action — it pages (throttled) and logs recovery machine-only. Pure decision core
 `scripts/audio_lag_decision.py` (`extract_audio_lag` + `classify` + `analyze`, #1199 python-mirror
-pattern, pytest Tier-0); orchestrator `scripts/audio-lag-alert-watchdog.sh` curls
+pattern, pytest); orchestrator `scripts/audio-lag-alert-watchdog.sh` curls
 `:8899/bundle-state.json` and reuses `scripts/lib/obs-watchdog-decision.sh`
 (`obs_watchdog_confirm` 2-pass + `obs_watchdog_alert_throttle` ~1h) VERBATIM.
 
@@ -113,7 +113,7 @@ the one card instead of re-pinging); recovery is `log`-only / machine-channel, n
 Units are committed but NOT enabled — install/verify/enable per
 `systemd/audio-lag-alert-watchdog.README.md` (the supervisor's step).
 
-## Tier-0 verify (no cargo)
+## Verify
 
 `python3 -m pytest tests/python/test_audio_lag_*.py` (the #1226 facet/decision/CLI + the #1231
 `test_audio_lag_gather_1231.py`/`test_audio_lag_decision_1231.py` freshness/STALE tests) +
@@ -144,7 +144,9 @@ paging), while the residual early-warning is the SEPARATE upstream-step detector
 (the #856 guard below already HOLDs the apply on the residual case regardless of the band).
 
 - **Box facet (`bundle_state_gather.audio_ref_band_from_log(text, ref_src)`):** for the named
-  reference source (`AUDIO_REF_BAND_SRC`, default `mbc`; a box with no such source omits it — strih),
+  reference source (`AUDIO_REF_BAND_SRC`, else a STREAM-role box's own seed manifest
+  `/opt/camera-box/strih-seed.json` `program_audio_input` -- stream-pp `Zvuk z mixu`, issue 1460 --,
+  else `mbc`, all in `bsg.audio_ref_band_src`; a box with no such source omits it — strih),
   from the SAME #1222 bounded log (ONE read), compute the band SHAPE: `audio_ref_lag_base_ms` (the
   flat-start baseline = median of the HEAD/startup region's readings — "the instance's own flat
   start"; `""` when there is no separator/head), `audio_ref_lag_high_ms`/`_low_ms` (p90/p10
@@ -169,7 +171,7 @@ paging), while the residual early-warning is the SEPARATE upstream-step detector
 The #856 rig-wide A/V controller (`av_sync_combine_offsets.py` → `av_sync_calibrate.py --apply` in
 `recording-e2e.sh cleanup()`) walked `NDI 2ME PGM` 926→976 after the flapping run, because its only
 guards were <2-measured-cams / >100 ms-spread — a rig-wide-CONSISTENT (small-spread) but
-timeline-corrupted run passes both. `scripts/av_sync_apply_guard.py` (pure, pytest Tier-0) +
+timeline-corrupted run passes both. `scripts/av_sync_apply_guard.py` (pure, pytest) +
 `scripts/lib/av-sync-apply-guard.sh` (sourced I/O gather, #675) HOLD the apply on ANY of: (1) the
 run's stream `mbc` band verdict is DRIFTING (gathered at `[8/8g]` into `AV_SYNC_BAND_VERDICT`) — a
 supplementary "audio timeline UNSTABLE, defer tuning" hold, NOT a claim the flap explains the
@@ -225,6 +227,6 @@ re-buffers — the sawtooth every dock/E2E A/V reading inherits.
   root fix is the vendored ASRC (issue 1325); promoting STEP/DRIFT to a phone page is a future ticket
   once that fix is measured. Because it never calls `notify`, the #1206 dedup sweep has nothing to
   enforce for it — keep it notify-free until a page is added (then it needs a stable dedup key).
-- **Tier-0:** `pytest tests/python/test_buffered_ms_1325.py` (gather + classify + analyze + the
+- **Tests:** `pytest tests/python/test_buffered_ms_1325.py` (gather + classify + analyze + the
   build_bundle_state passthrough) + `test_bundle_state_server_log.py` (the server gather FLOWS the
   facets — the order-sensitive `_parse_log_facets` unpack) + the #1206 sweep; `bash -n`/`shellcheck`.

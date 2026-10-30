@@ -400,15 +400,16 @@ static bool genlock_launch_encoder_unsettled = false;
 static bool genlock_launch_growth_logged = false;
 
 /* This tick's freeze (obs-genlock-audio-buffering.h): an audio encoder runs AND the launch's startup race
- * is over. `tick_start_ns` = audio_callback's input tick start (start_ts_in), which only advances -- never
+ * is over -- or (issue 1425) the audio reset's plan is this box's FIXED buffering, frozen from the first
+ * tick. `tick_start_ns` = audio_callback's input tick start (start_ts_in), which only advances -- never
  * the processed window's start, which a growth moves back in front of the first tick. */
-static inline bool genlock_buffering_frozen_now(uint64_t tick_start_ns, bool encoder_active)
+static inline bool genlock_buffering_frozen_now(uint64_t tick_start_ns, bool encoder_active, bool box_fixed)
 {
 	if (!genlock_launch_first_tick_ns)
 		genlock_launch_first_tick_ns = tick_start_ns;
 	const bool settled = genlock_audio_buffering_launch_settled(genlock_launch_first_tick_ns, tick_start_ns);
-	genlock_launch_encoder_unsettled = encoder_active && !settled;
-	return genlock_audio_buffering_frozen(encoder_active, settled);
+	genlock_launch_encoder_unsettled = !box_fixed && encoder_active && !settled;
+	return genlock_audio_buffering_frozen_plan(box_fixed, encoder_active, settled);
 }
 
 /* A growth of `ms` while an encoder ran inside the launch settle window: that output's audio is later
@@ -930,9 +931,18 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	/* camera-box issue 1425 (E2 slice 2, ROZHODNUTE 6217557472 + 6221252305): the buffering FREEZE for
 	 * this tick -- an output with an audio encoder is active and the launch settle window is over. A
 	 * member that then falls behind the window is re-anchored (MIXED_LATE) and the dynamic increase is
-	 * off; with no encoder, or inside the window, stock growth. */
-	audio->genlock_buffering_frozen =
-		genlock_buffering_frozen_now(start_ts_in, obs_output_genlock_audio_encoder_outputs() > 0);
+	 * off; with no encoder, or inside the window, stock growth. Issue 1425: a box-FIXED plan is frozen on
+	 * every tick. */
+	audio->genlock_buffering_frozen = genlock_buffering_frozen_now(
+		start_ts_in, obs_output_genlock_audio_encoder_outputs() > 0, audio->genlock_buffering_box_fixed);
+	/* camera-box issue 1425 (design 6443440513): a box-FIXED plan raises its floor HERE, before this tick's
+	 * render loop, the mix guard and the #800 telemetry. The floor action after calc_min_ts would raise it
+	 * only after the first tick had already judged every member against the un-raised window (re-anchoring
+	 * one the declared buffering would absorb) and logged total_buffering=0. */
+	if (audio->genlock_buffering_box_fixed && audio->total_buffering_ticks < audio->floor_buffering_ticks) {
+		set_floor_audio_buffering(audio, sample_rate, &ts);
+		min_ts = ts.start;
+	}
 
 	pthread_mutex_lock(&data->audio_sources_mutex);
 

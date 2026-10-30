@@ -246,6 +246,7 @@ def _site_texts():
     relay = LIB / "bkshading-relay-mode.sh"
     ndi = LIB / "ndi-discovery.sh"
     upgrade = ROOT / "scripts" / "dantesync-fleet-upgrade.sh"
+    feed = LIB / "rig-test-feed.sh"
     return {
         "persist enable-now": (build(f'. "{persist}"\ncam2_painter_persist_state_cmds enable-now'), _INLINE_CLOSE),
         "persist disable": (build(f'. "{persist}"\ncam2_painter_persist_state_cmds disable'), _INLINE_CLOSE),
@@ -259,11 +260,16 @@ def _site_texts():
                               "\n_dantesync_remount_ro\n"),
         "dantesync rollback": (build(f'set +e\n. "{upgrade}"\nset -e\ndantesync_linux_rollback_cmd'),
                                "\n_dantesync_remount_ro\n"),
+        # issue 1482: the persistent direct-feed drop-ins on cam2 (rig-mode TEST writes, EVENT removes)
+        "rig-test-feed intercom": (build(f'. "{feed}"\nrig_test_feed_intercom_dropin_cmds'), _INLINE_CLOSE),
+        "rig-test-feed painter": (build(f'. "{feed}"\nrig_test_feed_painter_dropin_cmds'), _INLINE_CLOSE),
+        "rig-test-feed clear": (build(f'. "{feed}"\nrig_test_feed_painter_dropin_clear_cmds'), _INLINE_CLOSE),
     }
 
 
 _SITES = ["dantesync rollback", "dantesync upgrade", "ndi apply", "persist disable", "persist enable-now",
-          "relay-mode start", "relay-mode stop", "ro-units apply"]
+          "relay-mode start", "relay-mode stop", "rig-test-feed clear", "rig-test-feed intercom",
+          "rig-test-feed painter", "ro-units apply"]
 
 
 def test_the_site_list_is_complete():
@@ -498,7 +504,7 @@ def test_the_shared_lib_is_sourced_by_every_rw_window_site():
     for rel in ("scripts/deploy-fleet.sh", "scripts/bkshading-deploy-relay.sh",
                 "scripts/lib/cam2-painter-ro-persist.sh", "scripts/lib/bkshading-relay-mode.sh",
                 "scripts/lib/ndi-discovery.sh", "scripts/lib/dantesync-rollback.sh",
-                "scripts/lib/rt-kernel-plan.sh", "scripts/lib/cambox-ro-units.sh"):
+                "scripts/lib/rt-kernel-plan.sh", "scripts/lib/cambox-ro-units.sh", "scripts/lib/rig-test-feed.sh"):
         text = (ROOT / rel).read_text()
         assert "ro-window.sh" in text and "ro_window_close_cmds" in text, rel
 

@@ -104,7 +104,7 @@ fi
 DANTESYNC_FLEET_SCAN_NETS="${DANTESYNC_FLEET_SCAN_NETS:-10.77.9 10.77.8 10.77.7 10.76.9 10.76.8}"
 DANTESYNC_FLEET="${DANTESYNC_FLEET:-dev1|local|linux|video|local|-|
 strih-snv|obs:strih-snv|linux|ntp-master|obsfleet|-|
-stream-snv|obs:stream-snv|windows|video|obsfleet|-|
+stream-snv|obs:stream-snv|linux|video|obsfleet|-|
 resolume-snv|obs:resolume-snv|windows|video|obsfleet|-|
 imag|obs:imag|linux|video|obsfleet|-|
 mbc|10.77.7.232|windows|audio|always|-|

@@ -70,7 +70,7 @@ fn call_over_arg(func: &str, arg: &str) -> String {
 }
 
 // A fully-healthy gathered state (the exact KEY=VALUE shape remote_log_gather_remote_snippet emits).
-const GREEN_BLOCK: &str = "NC_SVC_ENABLED=enabled\nNC_SVC_ACTIVE=active\nNC_SCRIPT_X=yes\nNC_ENABLED=1\nNC_REMOTE_IP=10.77.9.202\nNC_REMOTE_PORT=514\nJU_SVC_ENABLED=enabled\nJU_URL=http://10.77.9.202:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state";
+const GREEN_BLOCK: &str = "NC_SVC_ENABLED=enabled\nNC_SVC_ACTIVE=active\nNC_SCRIPT_X=yes\nNC_ENABLED=1\nNC_REMOTE_IP=10.77.9.202\nNC_REMOTE_PORT=514\nJU_SVC_ENABLED=enabled\nJU_URL=http://10.77.9.202:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state\nCONSOLE_LOGLEVEL=7\nKMSG_REDIRECT=12";
 
 // The box's venue strih sink the GREEN block points at (issue 1394: strih-snv, cam2/cam3/cam5).
 const SINK: &str = "10.77.9.202";

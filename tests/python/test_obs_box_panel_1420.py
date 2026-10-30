@@ -35,7 +35,9 @@ def _bash(body, *args, env=None, box="stream-pp"):
 def test_the_config_is_one_bottom_panel_with_taskbar_tray_and_clock():
     r = _bash("obs_box_panel_tint2rc")
     cfg = dict(ln.split(" = ", 1) for ln in r.stdout.splitlines() if " = " in ln and not ln.startswith("#"))
-    assert cfg["panel_items"] == "TSEC"           # a box with no known app: no launcher; E = the layout item (issue 1441)
+    # a box with no known app: no launcher; E = the layout item (issue 1441); on the stream role the first E is
+    # the headphone volume item (issue 1465 item 3 revision)
+    assert cfg["panel_items"] == "TSEEC"
     assert cfg["panel_position"].startswith("bottom")
     assert cfg["panel_size"] == "100% 30"
     assert cfg["strut_policy"] == "follow_size"
@@ -61,7 +63,8 @@ def _apps_home(tmp_path, units=("strih-obs.service", "bkshading-panel-app.servic
         _exec(rd, "#!/bin/sh\n")
     # issue 1464: no Chrome of the test host leaks in (dev1 has google-chrome-stable installed)
     return home, {"OBS_BOX_PANEL_SYS_UNIT_DIR": str(sysd), "OBS_BOX_PANEL_RUSTDESK_BIN": str(rd),
-                  "OBS_BOX_PANEL_CHROME_BIN": str(tmp_path / "no-chrome")}
+                  "OBS_BOX_PANEL_CHROME_BIN": str(tmp_path / "no-chrome"),
+                  "OBS_BOX_PANEL_SHOT_BIN": str(tmp_path / "no-flameshot")}
 
 
 def test_every_app_the_box_has_gets_a_launcher_started_through_its_unit(tmp_path):
@@ -87,7 +90,7 @@ def test_the_config_puts_the_launchers_in_front_of_the_taskbar(tmp_path):
     home, env = _apps_home(tmp_path)
     r = _bash('obs_box_panel_tint2rc "$1"', str(home), env=env)
     cfg = [ln for ln in r.stdout.splitlines() if not ln.startswith("#")]
-    assert "panel_items = LTSEC" in cfg
+    assert "panel_items = LTSEEC" in cfg
     apps = [ln.split(" = ", 1)[1] for ln in cfg if ln.startswith("launcher_item_app = ")]
     assert apps == [str(home / (".local/share/applications/obs-box-panel-%s.desktop" % i))
                     for i in ("power", "obs", "shading", "restreamer", "rustdesk")]
@@ -117,7 +120,9 @@ def test_the_autostart_starts_the_panel_after_the_display_import(box):
 
 def test_the_unit_runs_tint2_with_the_declared_config_and_restarts():
     u = (REPO / "systemd" / "obs-box-panel.service").read_text()
-    assert "ExecStart=/usr/bin/tint2 -c %h/.config/tint2/tint2rc" in u
+    # issue 1424: tint2 starts only once X has a screen with a monitor (the display watch's guard execs it)
+    assert ("ExecStart=/usr/bin/python3 /usr/local/bin/strih_display_watch.py --exec-when-screen "
+            "/usr/bin/tint2 -c %h/.config/tint2/tint2rc") in u
     assert "Restart=always" in u and "Environment=DISPLAY=:0" in u
 
 
@@ -149,6 +154,10 @@ class Box:
         # issue 1441: the keyboard layout helper's installed path + a stand-in for its live `print` on :0
         self.kbd_helper = tmp / "lib" / "camera-box" / "obs_box_kbd_layout.py"
         _exec(self.bin / "kbdpy", '#!/bin/bash\ncat %s/kbd 2>/dev/null\nexit 0\n' % self.state)
+        self.stock_rc = tmp / "stock-rc.xml"
+        self.stock_rc.write_text('<openbox_config>\n<keyboard>\n  <keybind key="Print">\n'
+                                 '    <action name="Execute"><command>scrot</command></action>\n'
+                                 '  </keybind>\n</keyboard>\n</openbox_config>\n')
         self.proc = tmp / "proc"
         (self.proc / "4242").mkdir(parents=True)
         os.symlink("/usr/bin/tint2", self.proc / "4242" / "exe")
@@ -164,7 +173,11 @@ class Box:
                 "OBS_BOX_PANEL_FILES_BIN": str(self.tmp / "no-pcmanfm"),
                 # issue 1464: the power program's installed path (never the real /usr/local/bin); no Chrome
                 "OBS_BOX_PANEL_POWER_HELPER": str(self.power),
-                "OBS_BOX_PANEL_CHROME_BIN": str(self.tmp / "no-chrome")}
+                "OBS_BOX_PANEL_CHROME_BIN": str(self.tmp / "no-chrome"),
+                # issue 1481: no flameshot binary = no screenshot launcher here; the stock openbox rc.xml
+                # the install seeds the user's from (never the test host's /etc/xdg)
+                "OBS_BOX_PANEL_SHOT_BIN": str(self.tmp / "no-flameshot"),
+                "OBS_BOX_PANEL_OPENBOX_RC_SRC": str(self.stock_rc)}
 
     def with_obs(self):
         ud = self.home / ".config" / "systemd" / "user"
@@ -219,13 +232,13 @@ def _healthy(box):
     (box.state / "kbd").write_text("US\n")
 
 
-def test_a_healthy_panel_passes_nine_rows(box):
+def test_a_healthy_panel_passes_ten_rows(box):
     _healthy(box)
     rows = _rows(box)
     # issue 1448: + (panel-discord) on the stream role; issue 1441: + (panel-kbd); issue 1458: + (panel-files);
-    # issue 1464: + (panel-power)
-    assert [st for st, _ in rows] == ["OK"] * 9, rows
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "9"
+    # issue 1464: + (panel-power); issue 1481: + (panel-shot)
+    assert [st for st, _ in rows] == ["OK"] * 10, rows
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "10"
 
 
 def test_install_writes_the_obs_launcher_and_its_icon(box):
@@ -264,7 +277,7 @@ def test_each_broken_piece_fails_its_row(box):
     rows = dict((d.split(")", 1)[0][1:], st) for st, d in _rows(box))
     assert rows == {"panel-pkg": "FAIL", "panel-config": "FAIL", "panel-launchers": "OK", "panel-unit": "FAIL",
                     "panel-discord": "FAIL", "panel-kbd": "FAIL", "panel-files": "FAIL",
-                    "panel-power": "FAIL",
+                    "panel-power": "FAIL", "panel-shot": "FAIL",
                     "panel-window": "FAIL"}   # the stub's dpkg state covers discord and pcmanfm too
 
 
@@ -282,3 +295,34 @@ def test_setup_and_verify_wire_the_panel():
     assert "obs_box_step_applies 16h-panel" in s
     assert 'obs_box_panel_grade_report "${HERE}/.." "$USER_HOME"' in v
     assert len(s.splitlines()) <= 1000 and len(v.splitlines()) <= 1000
+
+
+
+# --- issue 1424 (independent review): tint2 runs through the display watch's screen guard ------------
+
+def test_the_unit_skips_cleanly_without_its_guard_program():
+    u = (REPO / "systemd" / "obs-box-panel.service").read_text()
+    assert "ConditionPathExists=/usr/local/bin/strih_display_watch.py" in u.splitlines()
+
+
+def test_the_unit_row_never_blames_the_guard_without_the_session_apps_lib():
+    body = (REPO / "scripts/lib/obs-box-panel.sh").read_text().split("obs_box_panel_grade_rows() {", 1)[1]
+    assert "declare -F strih_session_apps_bin_dir" in body.split("\n}\n", 1)[0]
+
+
+def test_the_unit_row_names_a_missing_guard_and_a_panel_waiting_for_a_monitor(box):
+    _healthy(box)
+    guard_dir = box.tmp / "guard-bin"
+    guard_dir.mkdir()
+    env = dict(box.env(), STRIH_SESSION_APPS_BIN_DIR=str(guard_dir))
+    (box.state / "act").write_text("inactive\n")
+    r = _bash('obs_box_panel_grade_rows "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=env)
+    row = [ln for ln in r.stdout.splitlines() if "(panel-unit)" in ln][0]
+    assert row.startswith("FAIL|") and "strih_display_watch.py" in row and "16d" in row, row
+    (guard_dir / "strih_display_watch.py").write_text("#\n")
+    (box.state / "act").write_text("active\n")
+    os.unlink(box.proc / "4242" / "exe")
+    os.symlink("/usr/bin/python3.12", box.proc / "4242" / "exe")
+    r = _bash('obs_box_panel_grade_rows "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=env)
+    row = [ln for ln in r.stdout.splitlines() if "(panel-unit)" in ln][0]
+    assert row.startswith("FAIL|") and "waits for a monitor" in row, row

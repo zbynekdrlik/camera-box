@@ -27,7 +27,7 @@ The painted content is cam2's optical **dual-QR Vernier**: LEFT QR = latest EVEN
 ODD tick, so a HEALTHY captured frame carries exactly two cam2-optical payloads whose `frame_id`s are
 adjacent (`max-min == 1` = `VERNIER_MAX_SPREAD`). The ticket's tear ("halves of two consecutive ticks
 in one frame") generalizes to: a captured frame whose optical span is `> 1` carried ≥2 paint
-GENERATIONS = a scanout tear. `src/tear_detect.rs` is the pure Tier-0 classifier (span → torn),
+GENERATIONS = a scanout tear. `src/tear_detect.rs` is the pure classifier (span → torn),
 consumed by the `all_cambox_continuity.tear` block in `recording-verdict.rs`.
 
 **Measured across 5 real `stream-partial-*.json` (~48k frames): the per-frame optical span is
@@ -226,25 +226,17 @@ Re-disarm = one line (`gates_overall_pass()` → `false`); the mechanism stays d
   and the `NODE_BURN_RUN_IDS` optical filter — the SAME definition `RecordingFrame::tick` uses — so
   the tear windows align 1:1 with the strict `all_cambox_continuity.segments`. Do not re-derive a
   different window/optical definition.
-- **Tier-0:** the pure module RED→GREENs via `rustc --edition 2021 --test` with the `serde::Serialize`
-  derive stripped (the imag-leg-report-only rule's recipe — the LIVE-flip RED→GREEN used exactly
-  this: `green_background_window_passes_the_calibrated_live_gate_1196` fails at ceiling 0.0, passes
-  at 0.005). Real-frame fixtures prove the detector against real decode output
+- **Tests:** the LIVE-flip RED→GREEN: `green_background_window_passes_the_calibrated_live_gate_1196`
+  fails at ceiling 0.0, passes at 0.005. Real-frame fixtures prove the detector against real decode output
   (`pattern-change-needs-decode-fixture`): the id-list txts `cam2_window_optical_ids.txt` (a real
   847-frame single-band CAM2 window, healthy → tear-free/Unproven) and
   `cam2_window_multitile_ids_1196.txt` (a real 846-frame MULTI-TILE window → 844 multi_path_suspect,
   0 torn); the healthy-run aux-decode PNGs `stream-2099068429-frame-{1399,4792}.png`
   (`aux_tick_fixture_decode_1196.rs`); and the known-torn PNGs `stream-1700989544-frame-8090-torn.png`
   (+ `-849{7,8}-healthy.png`) proving the aux single-mark cross-band tear on real projection-leg
-  pixels (`tests/tear_detect_torn_fixture_1196.rs`). `recording-verdict.rs` is probe-gated (CI-first)
-  — verify the wiring with `cargo fmt --all --check` + a hand type-audit; the new `TearStats` fields
-  flow into `all_cambox_continuity.tear.windows[]` via `serde_to_value` with no consumer change.
-  **Multi-module replica assembly (issue 1196):** when the pure module under test depends on OTHER
-  crate-root modules (`aux_tick` needs `colour_scale` + `motion_sweep` + `painter_mode`), assemble
-  ONE standalone file that wraps each dependency's test-stripped source as `pub mod <name> { … }`
-  and KEEP the `crate::` paths verbatim — a standalone rustc file IS its own crate root, so
-  `crate::colour_scale` resolves; a naive `crate::` → `super::` rewrite breaks inside the nested
-  `mod tests` (its `super` is the module, not the root — first attempt failed exactly there).
+  pixels (`tests/tear_detect_torn_fixture_1196.rs`). `recording-verdict.rs` is probe-gated; the new
+  `TearStats` fields flow into `all_cambox_continuity.tear.windows[]` via `serde_to_value` with no
+  consumer change.
 
 ## The aux tick pair's bottom row is GEOMETRICALLY SATURATED — a 210px aux mark cannot be relocated clear of every burn (issue 1266) → RESOLVED by co-location (issue 1270)
 
@@ -341,7 +333,7 @@ camera window (primary dual-QR decodes from the fb0 painter path, aux never deco
   red). The honest "no aux source this window" reading is surfaced REPORT-ONLY by
   `aux_any_decode_fraction == 0.0`, `signal_operable()` false, and `ProjectionProof::hdmi1_proof_backed`
   false (aux coverage 0 < `AUX_ANY_OPERABLE_FLOOR`). Pinned by the inline
-  `no_projection_source_cam2_window_passes_report_only_1316` + the std-only Tier-0 replica
+  `no_projection_source_cam2_window_passes_report_only_1316` +
   `tests/tear_detect_imag_no_projection_1316.rs` (whose `pre_aux_empty_content_windows_are_not_reclassified`
   guards the 781-fixture shape).
 - **The LIVE gate stays armed and honest:** a genuine cross-band tear is still `Observed` and still

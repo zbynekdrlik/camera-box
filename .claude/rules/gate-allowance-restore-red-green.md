@@ -3,7 +3,7 @@ paths:
   - "src/bin/recording-verdict.rs"
 ---
 
-# Restoring a deliberately-relaxed verdict-gate constant (#905-style) — RED→GREEN even with no local compile path
+# Restoring a deliberately-relaxed verdict-gate constant (#905-style) — RED→GREEN
 
 `recording-verdict.rs` carries several deliberate, tracked, LOUDLY-reported relaxations of an
 originally-strict verdict gate — `REAL_DROPS_ALLOWANCE_DEFAULT` (issue 904, restored to 0 by
@@ -24,19 +24,15 @@ shape: a relaxation constant/flag was introduced to work around a KNOWN, NAMED r
 was still unfixed, with an explicit **restore condition** written into its own ticket (usually
 "root cause fixed" + "N consecutive clean runs with the allowance never consumed"). When a
 restore ticket's precondition is finally met, the fix is almost always a ONE-CONSTANT flip with
-zero other production-code changes — but it still deserves the full RED→GREEN discipline, even
-though this file has **no local compile path at all** (`required-features = ["probe"]` — see the
-project CLAUDE.md's Local Build Policy section; `cargo check`/`clippy`/`test` on default features
-never touch it, so there is genuinely nothing to compile-verify locally, not even a syntax check
-beyond `cargo fmt --all --check`).
+zero other production-code changes — but it still deserves the full RED→GREEN discipline (the
+file is `required-features = ["probe"]`: default-feature `cargo check`/`clippy`/`test` never touch it).
 
 ## The pattern that worked (issue 905 item 1, `REAL_DROPS_ALLOWANCE_DEFAULT` 2→0)
 
 1. Write/update the tests FIRST, against the CURRENT (still-relaxed) constant value — commit them
-   as `[red]`. Since the tests can't be executed locally, "RED" here means: reason through what
-   the test's assertion would evaluate to against the OLD constant, and confirm it would genuinely
-   fail (e.g. a test asserting `!pass` for a single real drop, when the still-2 allowance would
-   actually make `pass == true` — a real, if unexecuted, contradiction).
+   as `[red]`, and confirm they genuinely fail against the OLD constant
+   (`cargo test --features probe --bin recording-verdict`; e.g. a test asserting `!pass` for a single
+   real drop, when the still-2 allowance makes `pass == true`).
 2. Flip ONLY the constant (and its doc comment) in a SEPARATE, immediately-following commit —
    `[green]`. Diff-verify with `git show --stat` that this commit really is a 1-line value change
    and nothing else snuck in.
@@ -117,7 +113,7 @@ design — a strict-zero bar on the RAW counter double-reds what the presented l
   `CAMERA_BOX_CAMLEG_V4L2_DROP_ALLOWANCE`) — justified from the live data: healthy cam2/cam3
   routinely log 0–2 capture-dropped per ~10-min run window. The fold became
   `all_pass &= within_band` where `within_band = camleg_capture_band(v4l2_dropped, allowance)`
-  (a pure Tier-0-testable scalar fn returning `(within_band, band_consumed)`). A `<=2` count PASSES
+  (a pure scalar fn returning `(within_band, band_consumed)`). A `<=2` count PASSES
   with the node JSON carrying `zero_loss=true` + `camleg_singleton_band_consumed=true` + a loud
   `note` ("cam-leg V4L2 singleton band consumed: N/2 — absorbed by the issue-1167 emit fill; issue
   1169 re-tighten trail") + a `>>> ⚠ #1169 CAM-LEG V4L2 SINGLETON BAND` stderr line. `>2` still
@@ -178,8 +174,8 @@ crisp rendered burn only the decoder missed, e.g. verdict 1651388579 strih frame
 
 Key facts for a future change:
 
-- The JUDGMENT is the Tier-0 crate-root pure module `src/burn_adjacency.rs`
-  (`inferable_single_miss` + `inferable_frame_indices`, `rustc --test`), the SAME pure-seam pattern
+- The JUDGMENT is the crate-root pure module `src/burn_adjacency.rs`
+  (`inferable_single_miss` + `inferable_frame_indices`), the SAME pure-seam pattern
   as `e2e_latency_gate.rs` / `optical_floor.rs`. The probe-gated `node_verdict_with_optical` glue
   only builds the ordered per-frame `(frame_index, id, delivered)` sequence (via
   `burn_ids_with_frame_index_in` — never `burn_ids_in`, per `burn-hold-uniqueness.md`) and applies
@@ -206,4 +202,4 @@ Key facts for a future change:
   a candidate to scope to the in-window analyzed set later).
 - Adding the `BurnUnreadableInferred` variant required the ONE exhaustive `match` on `MissingKind`
   (the classified-slot printer) to gain an arm — a new variant is a compile error otherwise, and
-  this file is probe-gated (CI is its first compile).
+  this file is probe-gated.

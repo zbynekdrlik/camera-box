@@ -230,7 +230,8 @@ def _seed_skip(tmp_path, view):
     coll = tmp_path / "c.json"
     coll.write_text(json.dumps({"saved_projectors": []}))
     drm = tmp_path / "drm-output.json"
-    drm.write_text(json.dumps({"enabled": True, "view": view}))
+    # a real config names its connector: the C grammar (and its python twin) starts no output without one
+    drm.write_text(json.dumps({"enabled": True, "connector": "HDMI-0", "view": view}))
     r = subprocess.run(["bash", "-c", 'set -euo pipefail\n. "$1"\nstrih_operator_obs_running() { return 1; }\n'
                         'strih_operator_projector_seed "$2" "$(id -un)" "$3"', "h",
                         str(REPO / "scripts" / "lib" / "strih-operator.sh"), str(coll), str(drm)],

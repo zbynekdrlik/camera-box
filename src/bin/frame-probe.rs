@@ -257,7 +257,17 @@ fn main() -> Result<()> {
     // #984/#725: an explicit --audio-marker-device always wins verbatim; otherwise, when the
     // marker is actually enabled, resolve it LIVE from `aplay -l` (never a hardcoded pin -- any
     // HDMI renegotiation can move which DEV=N the physical monitor lands on).
-    let audio_marker_device = if let Some(explicit) = args.audio_marker_device.clone() {
+    // Issue 1482: the steady-state cam2-painter.service passes no flag; in the rig's direct mode its
+    // /run drop-in names the jack through FRAME_PROBE_AUDIO_MARKER_DEVICE (an explicit flag wins).
+    let audio_marker_device = if let Some(explicit) =
+        camera_box::audio_marker_policy::explicit_marker_device(
+            args.audio_marker_device.as_deref(),
+            std::env::var(camera_box::audio_marker_policy::MARKER_DEVICE_ENV)
+                .ok()
+                .as_deref(),
+        ) {
+        tracing::info!(device = %explicit, "audio-marker device given explicitly (flag or {})",
+            camera_box::audio_marker_policy::MARKER_DEVICE_ENV);
         explicit
     } else if audio_marker {
         resolve_audio_marker_device()

@@ -107,21 +107,11 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
   Skips ALONE can also be grabber burstiness (back-to-back frames), so read them together with
   `OVER BUDGET` and the camera's own capture cadence.
 
-## Verifying a change (Tier-0)
+## Verifying a change
 
-- The module is std-only: `rustc --edition 2021 --test -D warnings <copy of src/send_stagger.rs>`,
-  run it, and `clippy-driver` the same copy.
-- The harness reads only `src/main.rs` / `src/ndi.rs` text:
-  `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test tests/harness_send_stagger_1242.rs`,
-  then run it from the worktree root. Put this in a script FILE (the worktree guard refuses the
-  env-prefixed form inline).
-- The lib.rs float const-assert shape compiles standalone (float compares are legal in a `const`
-  item). Check it with a two-module replica file.
-- **`clippy-driver` runs clippy with NO cargo** (Tier-0 legal): `clippy-driver --edition 2021 --test
-  -D warnings <copy.rs> -o <out>` (and `--crate-type lib`). It is the only local way to see CI's
-  `clippy -D warnings` verdict on a std-only module, a test file or a const-assert replica. On this
-  ticket it caught a `double_comparisons` error in the first draft of the lib.rs equality pin.
-- `main.rs` itself compiles first on CI.
+`cargo test --lib send_stagger`, `cargo test --test harness_send_stagger_1242` (it reads only
+`src/main.rs` / `src/ndi.rs` text) and `cargo clippy --all-targets -- -D warnings` (on #1242 clippy
+caught a `double_comparisons` error in the first draft of the lib.rs equality pin).
 
 ## Live acceptance (supervisor)
 

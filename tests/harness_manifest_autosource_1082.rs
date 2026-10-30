@@ -293,7 +293,7 @@ fn write_gh_stub(dir: &std::path::Path) -> PathBuf {
            [ -f \"$STUB_DIR/list-fail\" ] && exit 1\n\
            cat \"$STUB_DIR/runlist\" 2>/dev/null || printf '4242 2026-09-25T04:48:30Z' ;;\n\
          \"run download\")\n\
-           [ -f \"$STUB_DIR/dl-fail\" ] && exit 1\n\
+           [ -f \"$STUB_DIR/dl-fail\" ] && { cat \"$STUB_DIR/dl-fail\" >&2; exit 1; }\n\
            [ -f \"$STUB_DIR/dl-hang\" ] && exec sleep 30\n\
            echo x >> \"$STUB_DIR/downloads\"\n\
            d=\"\"\n\
@@ -759,4 +759,56 @@ fn manifest_autosource_state_has_key_gates_on_a_nonempty_value() {
         "an EMPTY key value must not count as reported (would flip obs_dll_sha256 UNKNOWN)"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue 1474: a failed artifact download is logged with gh's own error text on stderr (the
+/// 27.10.2026 E2E `[0/8]` lost one, and the gh reason was discarded); stdout stays empty, so the
+/// caller still reads "" and refuses.
+#[test]
+fn manifest_fetch_logs_the_gh_error_when_the_download_fails_1474() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path().to_path_buf();
+    let bin = write_gh_stub(&dir);
+    std::fs::write(
+        dir.join("dl-fail"),
+        "error downloading obs-genlock-linux-x86_64-strih: HTTP 502: Bad Gateway\n",
+    )
+    .unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let dest = dir.join("linux-manifest.json");
+    let harness = "set -euo pipefail\n. \"$LIB\"\nmanifest_autosource_fetch o/r linux-genlock.yml obs-genlock-linux-x86_64-strih \"$SHA\" \"$DEST\"\necho END";
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("LIB", lib())
+        .env("PATH", &path)
+        .env("MANIFEST_AUTOSOURCE_CMD", "")
+        .env("MANIFEST_AUTOSOURCE_CACHE_DIR", dir.join("cache"))
+        .env("STUB_DIR", &dir)
+        .env("SHA", "54995646abc")
+        .env("DEST", &dest)
+        .output()
+        .expect("run bash harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the fetch never aborts its caller: {stderr}"
+    );
+    assert_eq!(
+        stdout.trim(),
+        "END",
+        "no manifest path on stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("gh run download 4242")
+            && stderr.contains("obs-genlock-linux-x86_64-strih")
+            && stderr.contains("HTTP 502: Bad Gateway"),
+        "the failed download must be logged with the run, the artifact and gh's own error: {stderr:?}"
+    );
+    drop(td);
 }

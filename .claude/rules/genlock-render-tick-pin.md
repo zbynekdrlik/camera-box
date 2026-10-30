@@ -96,7 +96,7 @@ the two `video_sleep` calls.
 - A grant "gated on isolated cores present" was rejected: the `affinity` row forbids kernel
   isolation, so the gate could never open on a box that passes the baseline. It would be dead code.
 
-## Verification (Tier-0, no cargo)
+## Verification
 
 `tests/genlock_render_tick_pin_1357.rs` is std-only. The Rust authority `src/genlock_render_tick_pin.rs`
 is included via `#[path]`. It lifts the header's block between `/* camera-box issue 1357 render-tick
@@ -121,7 +121,7 @@ pin BEGIN` and its END marker and compiles it three ways:
    child created after the wake must carry the full mask and policy 0. The gate needs at least 2
    CPUs and FAILs, never skips, on a 1-CPU runner.
 
-Run it: `CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/genlock_render_tick_pin_1357.rs -o t && ./t`.
+Run it: `cargo test --test genlock_render_tick_pin_1357`.
 
 Gotchas:
 
@@ -140,9 +140,6 @@ Gotchas:
   - the parser separator and cap, and the silent not-pinned line.
 - The real `obs-video.c` + the header pass a syntax-only compile against the in-tree headers: the
   `obs-drm-output.md` recipe (a stub `obsconfig.h` + `-Ivendor/obs-studio/deps/libcaption`).
-- `clippy-driver --edition 2021 --test -D warnings` over the std-only test files caught a dead
-  helper (`run_block` in `strih_provision_pure_functions.rs`) left behind when its last caller moved.
-  Run it on every std-only test file you touch.
 
 ## Deploy + live check (supervisor)
 

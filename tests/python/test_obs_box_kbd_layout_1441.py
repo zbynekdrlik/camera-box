@@ -125,7 +125,7 @@ def _cfg(text):
 
 
 def test_the_panel_has_the_layout_item_before_the_clock():
-    cfg = _cfg(_bash("obs_box_panel_tint2rc").stdout)
+    cfg = _cfg(_bash("obs_box_panel_tint2rc", box="strih-pp").stdout)
     assert "panel_items = TSEC" in cfg
     helper = "/usr/local/lib/camera-box/obs_box_kbd_layout.py"
     assert "execp = new" in cfg
@@ -141,7 +141,7 @@ def test_launchers_keep_the_layout_item(tmp_path):
     (ud / "strih-obs.service").write_text("[Service]\n")
     env = {"OBS_BOX_PANEL_SYS_UNIT_DIR": str(tmp_path / "none"), "OBS_BOX_PANEL_RUSTDESK_BIN": str(tmp_path / "none"),
            "OBS_BOX_PANEL_DISCORD_BIN": str(tmp_path / "none")}
-    cfg = _cfg(_bash('obs_box_panel_tint2rc "$1"', str(home), env=env).stdout)
+    cfg = _cfg(_bash('obs_box_panel_tint2rc "$1"', str(home), env=env, box="strih-pp").stdout)
     assert "panel_items = LTSEC" in cfg and "execp = new" in cfg
 
 
@@ -164,6 +164,9 @@ class Box:
         _exec(self.bin / "chown", "#!/bin/bash\nexit 0\n")
         _exec(self.bin / "kbdpy", '#!/bin/bash\necho "$*" >> %s/kbdpy.args\ncat %s/kbd 2>/dev/null\nexit 0\n'
               % (self.state, self.state))
+        # issue 1481: the stock openbox rc.xml the panel install seeds from (never the test host's /etc/xdg)
+        self.stock_rc = tmp / "stock-rc.xml"
+        self.stock_rc.write_text("<openbox_config>\n<keyboard>\n</keyboard>\n</openbox_config>\n")
 
     def env(self):
         return {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "STRIH_SESSION_APPS_EUID": "1000",
@@ -176,7 +179,9 @@ class Box:
                 "OBS_BOX_PANEL_FILES_BIN": str(self.tmp / "none"),
                 # issue 1464: the power program's installed path (never the real /usr/local/bin); no Chrome
                 "OBS_BOX_PANEL_POWER_HELPER": str(self.tmp / "lib" / "obs-box-power"),
-                "OBS_BOX_PANEL_CHROME_BIN": str(self.tmp / "none")}
+                "OBS_BOX_PANEL_CHROME_BIN": str(self.tmp / "none"),
+                "OBS_BOX_PANEL_SHOT_BIN": str(self.tmp / "none"),
+                "OBS_BOX_PANEL_OPENBOX_RC_SRC": str(self.stock_rc)}
 
     def install(self):
         return _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(self.home), env=self.env())

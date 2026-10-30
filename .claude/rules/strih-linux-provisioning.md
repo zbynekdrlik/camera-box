@@ -71,8 +71,15 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   `STRIH_CAMERAS` (space-separated numbers = the cameras the VENUE has, issue 1413: strih-snv `2 3 5`,
   strih-pp `1 4 6 7`), `STRIH_CAMERA_DEV1_NET` (issue 1413: how dev1 dials the venue's camboxes for
   the dantesync fleet's camera rows -- `direct`, a `A.B.C` /24 prefix (strih-pp `10.76.9`, through
-  companion-pp), or `none` exactly when `STRIH_CAMERAS` is `none`). **Run-time facts stay derived on
+  companion-pp), or `none` exactly when `STRIH_CAMERAS` is `none`), `STRIH_BKSHADING_RELAYS` (issue
+  808: the shading panel's per-cambox relay overrides, `none` on the stream role; `.claude/rules/bkshading.md`). **Run-time facts stay derived on
   the box** — PL1 watts, the CPU plan, the NIC interface name.
+- **Adding a NEW required fact has exactly three test consumers** (issue 1425 added
+  `STRIH_AUDIO_BUFFERING_MS`): append the key at the END of `strih_box_fact_keys`, then update
+  `tests/strih_box_facts_1361.rs` (`FACT_KEYS` + the strih-snv `KEY=value` list),
+  `tests/python/test_strih_https_1399.py` and `tests/python/test_obs_box_stream_role_1412.py` (both pin
+  the tail of the key list). Every other fixture copies the real `scripts/strih-boxes/*.env`, so the four
+  fact files carrying the key is enough; the 1361 golden renders no raw fact.
 - **Changing strih-snv's `STRIH_CAMERAS` is a fact change with four test consumers** (issue 1413):
   regenerate the 1361 golden from the new facts (`render.sh`), and update the default-box tests that
   read the live list -- `tests/strih_provision_pure_functions.rs` (`strih_lx_ndi_inputs` count, the
@@ -271,7 +278,8 @@ over an existing output file (an imported collection is never regenerated).
   `NDI 2ME PGM` <- `STRIH-PP (2ME PGM)` (the real Windows name carries U+00AE; `source_name_spellings`
   also matches `NDIAr` / `NDIÂ®` / `NDI(R)`, and two spellings in one collection refuse); ytfast dropped; Windows paths ->
   `/srv/obs-media/stream-pp/<folder>/<file>`) and `strih-pp` (the strih-snv collection: every scene;
-  `STRIH-SNV (...)` -> `STRIH-PP (...)`, the CG sender). Every value is overridable on the CLI.
+  `STRIH-SNV (...)` -> `STRIH-PP (...)`, the CG sender; since issue 1439, 24.10.2026, `ASIO zvuk` -> the
+  obs-vban source on lv1's `strih-obs` / 6981 / 40). Every value is overridable on the CLI.
 - **Kinds are an ALLOWLIST** of what the Linux strih bundle ships (`LINUX_INPUT_KINDS`,
   `LINUX_FILTER_KINDS`, unversioned OBS ids). Everything else is dropped with a `DROP` line;
   `--keep-kind` extends the list. `text_gdiplus` becomes `text_ft2_source` (alpha = opacity x 255 / 100,
@@ -505,7 +513,7 @@ consumer still dials the IP — the obs-fleet row is `strih-snv|10.77.9.202|linu
 - **`scripts/lib/strih-provision.sh`** — the ONE place the strih-snv role FACTS + pure decisions live
   (the `obs-fleet.sh` / `camera-set.sh` source-only convention: `# airuleset:script-ok`, no
   top-level statements, no `set -euo pipefail` leak). Sourced by `setup-strih.sh`, `verify-strih.sh`
-  AND `tests/strih_provision_pure_functions.rs` (rustc-free Tier-0). Pure fns: the 10 NDI inputs,
+  AND `tests/strih_provision_pure_functions.rs`. Pure fns: the 10 NDI inputs,
   the namespaced outputs/republishes, the floor-3 latency, the strih CI artifact name, the
   dantesync-client args + client-not-master check, the profile facts, the MiniFuse-4/PipeWire audio
   route + fail-loud TODO predicate, the output-name + no-2nd-STRIH-SNV guards, and the verify
@@ -565,7 +573,7 @@ importing imag's 70 KB DRM-lease/encoder/picom machinery that strih-snv does not
 - **SCOPE: the 10 NDI INPUTS + one per-input scene + Studio Mode**, read from
   `/opt/camera-box/strih-seed.json` (setup-strih.sh step 6). The **5 STRIH-SNV NDI OUTPUTS are a
   SEPARATE ticket** — the seeder never touches `outputs`.
-- **Pure helpers (Tier-0 testable, no rig):** `parse_seed_manifest(text) → (inputs, outputs, latency)`;
+- **Pure helpers (testable, no rig):** `parse_seed_manifest(text) → (inputs, outputs, latency)`;
   `certified_genlock_settings(latency)` = the locked baseline `{ndi_bw_mode:0, genlock_fifo:True,
   ndi_sync:2, latency:<floor>}` (latency rides the manifest floor **3**, NOT obs_phase2's probe
   default 0); `seed_inputs(inputs, latency)` → one `{scene, input, ndi_source_name, settings}` per
@@ -601,8 +609,7 @@ importing imag's 70 KB DRM-lease/encoder/picom machinery that strih-snv does not
   /usr/local/bin/strih_scenes.py` (fail-loud if absent next to the script), alongside the manifest +
   `obs_phase2.py`. `strih-obs-start.sh` preflights `import strih_scenes` BEFORE launch and runs
   `--bootstrap` AFTER the `:4455` wait. Tests: `tests/python/test_strih_scenes_1317.py` (pure helpers +
-  the two static-anchor asserts on the launcher/setup wiring — a python assert over the script text,
-  so it runs in Tier-0 with no cargo).
+  the two static-anchor asserts on the launcher/setup wiring — a python assert over the script text).
 
 ## 2ME feedback inputs are NOT genlocked — per-input settings class (issue 1317, DONE)
 
@@ -733,7 +740,7 @@ to `/opt/obs-genlock` (on no loader path) and installed NO runtime packages, so 
   sorted-unique package list to `RUNTIME_PACKAGES.txt`. It **fails loud on any `=> not found`**. The
   runner that BUILT the binary is the only authority on what it links (a hand-curated 26.04 list rots
   on every soname bump). Its pure half `runtime_packages_from_ldd STAGE` is sourceable + guarded for
-  Tier-0 testing with fake `ldd`/`dpkg` on PATH. BOTH Linux jobs' Stage steps run it BEFORE
+  testing with fake `ldd`/`dpkg` on PATH. BOTH Linux jobs' Stage steps run it BEFORE
   `genlock-manifest.sh --stage` (a `Record runtime packages (#1317)` step) so `RUNTIME_PACKAGES.txt`
   is in the bundle manifest; it travels in BOTH bundles (a re-provisioned imag-nb hits the same gap).
 - **setup-strih.sh step 4 installs the packages, then the bundle into its /usr prefix.**
@@ -874,10 +881,10 @@ with an old inline block that ran its tail unconditionally.
 ## Audio — the local PipeWire graph (issue 1344, WIRED)
 
 > **Issue 1440:** on a strih box whose facts need no sound server (strih role + a direct program VBAN +
-> no `pipewire` hub participant: strih-snv) step 12 PURGES PipeWire instead of installing this graph,
+> no `pipewire` hub participant: strih-snv, and strih-pp since 24.10.2026) step 12 PURGES PipeWire instead of installing this graph,
 > behind an apt pin for every architecture, a `Provides: gstreamer1.0-pipewire` shim for RustDesk and an
 > `apt-get -s` read that refuses anything outside the declared list; verify item 9b grades it. The
-> section below stays true for strih-pp. `.claude/rules/strih-pipewire-purge.md`.
+> section below stays true only for a hub-fed strih (none deployed). `.claude/rules/strih-pipewire-purge.md`.
 
 There is NO Dante on the strih PC (owner 15.9.). **Program audio is a NETWORK stream, NOT the
 MiniFuse** (design 20.9., corrected): the OBS program source `ASIO zvuk` = VB-Matrix slot VASIO8,
@@ -1196,7 +1203,7 @@ kernel scheduler still floats OBS threads onto whichever core the softirq is sta
 provisioning, fact-resolved (never a hard-coded IRQ number, which would break after a kernel/
 firmware change or a different USB port):
 
-- **`scripts/lib/strih-provision.sh`** pure resolvers, all Tier-0 testable over `/proc`-shaped
+- **`scripts/lib/strih-provision.sh`** pure resolvers, all testable over `/proc`-shaped
   fixtures (`SYS_ROOT` / `PROC_INTERRUPTS` / `CPU_ATOM_FILE` seams): `strih_nic_xhci_pci_function`
   (walk `readlink -f /sys/class/net/<iface>/device` up to the `usbN` root → the parent PCI
   function), `strih_nic_xhci_irqs` (the `/proc/interrupts` rows naming BOTH `xhci_hcd` AND that PCI
@@ -1348,7 +1355,7 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
   change old 0 new 10000` then `old 10000 new 0` within a second, every ~14 s, and NM `Activation:
   starting connection` between them; `ethtool -s ... advertise` changes seem not to stick (each reset
   undoes them). Remove it: `nmcli connection modify <name> ethtool.ring-rx ""` + `nmcli con up`.
-- **Tests** (`tests/python/test_strih_nic_driver_1391.py`, Tier-0 pytest): the vendored tree, the facts,
+- **Tests** (`tests/python/test_strih_nic_driver_1391.py`, pytest): the vendored tree, the facts,
   the planner table over both `dkms status` shapes, the apply run through the path seams
   (`STRIH_NIC_DRV_KERNEL` / `_MODULES_ROOT` / `_SRC_ROOT` / `_UDEV_DIR` / `_BACKUP_DIR` / `_SYSROOT`) with a
   fake `dkms` state machine on PATH and a `modprobe`/`rmmod` that log FORBIDDEN, and item 36 over a fake
@@ -1469,6 +1476,19 @@ The five hand-patches that survived ONLY on the live box (a re-flash would rever
     **GOTCHA 1 — masking apport.service does NOT stop the popup on 26.04.** apport 2.34 ships `/usr/lib/systemd/system/systemd-coredump@.service.d/apport-coredump-hook.conf` = `OnSuccess=apport-coredump-hook@%i.service`, which runs `apport --from-systemd-coredump` and writes `/var/crash` regardless of `enabled=` or the apport.service mask — and installing systemd-coredump (the imag recipe) GUARANTEES that route. Mask the TEMPLATE (`systemctl mask apport-coredump-hook@.service` blocks every instance). The imag recipe (`setup-imag.sh` step 8) has the same gap — moot while imag-nb is returned to the owner (16.9.2026); port this template mask into setup-imag.sh if imag-nb is ever re-provisioned. Found by the lane review reading the live box, 23.9.2026.
 
     **GOTCHA 2 — the grant applies at the next REBOOT, not the next login.** OBS runs as the `--user` unit `strih-obs.service`, so it inherits its limits from `user@UID.service`, which LINGERS (step 13 enables linger) and got `pam_limits` (`/usr/lib/pam.d/systemd-user`) when it started at boot. Live 23.9.: grant file present, yet `user@1000` / OBS / `strih-obs.service` all at `Max realtime priority 0`. A logout/login does NOT restart a lingering manager; a reboot (allowed — strih-snv is not a cambox) or a restart of `user@UID` (ends the operator session) does. imag differs: it launches OBS in the autologin graphical session, whose own PAM applies. After the reboot confirm `genlock: render-tick thread set SCHED_FIFO` in the new OBS log (verify item 32 PASSes `ok-sched-fifo`); if it still EPERMs, read `Max realtime priority` in `/proc/<user@UID MainPID>/limits` — 0 there means pam_limits is not applied by the systemd-user PAM stack.
+
+## RustDesk is required (issue 1462, owner 25.10.2026: "preco na stream-snv nebezi rustdesk!!!!")
+
+stream-snv was converted without the 0600 password file, step 16b only WARNed and item 29 only NOTEd, so
+the box was handed over with no remote access. Now `strih_rustdesk_state` (absent / down / nopw / ready:
+the root `RustDesk.toml` `password` key's PRESENCE, never the value) drives both sides:
+- step 16b: ready = untouched; the 0600 file = install + apply; otherwise the package
+  (`strih_rustdesk_package_cmds`, the emitter's package half, split byte-identically) and setup FAILS
+  with `strih_rustdesk_apply_hint` = the dev1 command;
+- item 29 (`strih_rustdesk_grade_row`): absent / down / no password / no connect ID all FAIL;
+- `scripts/rustdesk-password-apply.sh BOX...` (dev1, through `secret exec --file <the persisted dev1
+  credential> --env RUSTDESK_PERMANENT_PASSWORD`) sends the owner's ONE password on ssh stdin to `sudo -n
+  rustdesk --password` and discards its output. Applied 25.10.2026 to stream-snv, strih-snv, stream-pp.
 
 ## Fresh-install gaps — a fresh run reproduces the live box (issue 1361 slice, 25.9.2026)
 

@@ -261,7 +261,7 @@ are byte-identical (unchanged `fire_notify`, stable keys); only the new arm was 
 **What PAGES (🚨):** the stream is LIVE (`outputActive` true) **and** the heartbeat is FRESH +
 measured + non-wedged **and** the SyncNet confidence is `>= OFFSET_CONF_FLOOR` (4.0, the quality
 gate) **and** `|offset_ms| >= OFFSET_ALARM_MS` (30, owner ruling 17.9.2026 / issue 1333). The alert text carries offset + conf + the
-`ZNIZ/ZVYS '2ME PGM'` knob advice already in the verdict.
+knob advice already in the verdict (since issue 1459 the venue's program audio sync offset, below).
 
 **What is SUPPRESSED (never a false page):** stream off / unreadable (`not-live`), stale heartbeat
 (`stale`, owned by the liveness arm), no-signal / TIMEOUT (`not-measured`), an UNMEASURABLE
@@ -318,7 +318,7 @@ per-camera A/V offsets. On 2026-09-01 the stream box's reference source `mbc` ts
 (small-spread) shape — so the combiner's only guards (<2-measured-cams / >100 ms-spread) both passed
 and the controller walked the pin 926→976 toward noise. The #1265 STABILITY GUARD holds it instead:
 
-- **Pure decision `scripts/av_sync_apply_guard.py`** (`hold_reason(...)`, pytest Tier-0) HOLDs on ANY
+- **Pure decision `scripts/av_sync_apply_guard.py`** (`hold_reason(...)`, pytest) HOLDs on ANY
   of: (1) the run's stream `mbc` ts_lag band is DRIFTING
   (`.claude/rules/audio-lag-watchdog.md` band arm, gathered at `[8/8g]`) — a supplementary
   "defer tuning while the timeline is unstable" hold, NOT the residual explanation; (2)
@@ -344,11 +344,9 @@ and the controller walked the pin 926→976 toward noise. The #1265 STABILITY GU
   dev1 reference (preserving `applied_latency_ms` — a live data contract, not a rewritten
   offset-only schema) for the next run's jump baseline. When the guard says proceed, #856 is
   byte-identical.
-- **Tier-0:** `pytest tests/python/test_av_sync_apply_guard_1265.py` (the predicate) +
+- **Tests:** `pytest tests/python/test_av_sync_apply_guard_1265.py` (the predicate) +
   `tests/harness_av_sync_apply_guard_1265.rs` / `tests/harness_recording_e2e_av_sync_guard_1265.rs`
-  (the sourced lib + the wiring; CI-run, cross-checked locally by running the python one-liners
-  standalone + a `.find`/window simulation, since a worktree worker cannot `bash -c`-source the lib
-  under the isolation guard and cannot run cargo).
+  (the sourced lib + the wiring).
 
 ## The #856 controller has a FIXED LOOP GAIN 0.4 — the plant gain is ~2.31, so gain 1 diverges (#1265)
 
@@ -371,7 +369,7 @@ known to stabilize the loop, only bounded away from 1.
 
 - **The fix (Prístup 1):** a FIXED loop gain (default **0.4**, env `AV_SYNC_LOOP_GAIN`, a value in
   (0, 1]; non-numeric / ≤0 / >1 → default 0.4 with a loud log line). The combined offset is DAMPED
-  `combined × gain` at `[8/8g]` (pure `scripts/av_sync_loop_gain.py::damped_offset`, pytest Tier-0,
+  `combined × gain` at `[8/8g]` (pure `scripts/av_sync_loop_gain.py::damped_offset`, pytest,
   via the `av_sync_apply_loop_gain` sourced helper) — BEFORE the #1265 guard sees `proposed_offset`
   AND before the ±50/run clamp — so the effective loop gain is 0.4×2.31 = **0.92 < 1** and the loop
   converges (error ×0.076/run: 913 + 0.4×61.4 = **938 ≈ the predicted null 940**; even if the plant
@@ -396,17 +394,16 @@ known to stabilize the loop, only bounded away from 1.
   `[av-sync] SET '…' genlock_latency_ms_src: A -> B` line other consumers grep stays byte-identical.
 - **History corpus (Prístup 2 prep, REJECTED for now):** the adaptive slope estimator needs ≥ 5
   points; this lane STARTS collecting them into the append-only `~/.camera-box/av-sync-history.jsonl`
-  (`scripts/av_sync_history.py`, pytest Tier-0; via the `av_sync_append_history` sourced helper,
+  (`scripts/av_sync_history.py`, pytest; via the `av_sync_append_history` sourced helper,
   written LAST in the #856 `cleanup()` block after the applied-offset persist): one JSON object per
   run — run_id, ts, pin_at_measure, residual_median_ms, residual_spread_ms, proposed_offset_ms,
   loop_gain, combined_offset_ms_raw, and EITHER applied_pin (a proceed) OR held+hold_reason. It is a
   no-op when a run produced no measurement (residual-last is a prior run's), append-only, never
   truncating, dir/file-tolerant.
-- **Tier-0:** `pytest tests/python/test_av_sync_loop_gain.py` (gain math + validation + the
+- **Tests:** `pytest tests/python/test_av_sync_loop_gain.py` (gain math + validation + the
   pin-913→938 scenario) + `test_av_sync_history.py` (the append) + the loop-gain/persist/log-line
   additions in `test_av_sync_calibrate.py`; `tests/harness_recording_e2e_av_sync_loop_gain_1265.rs`
-  guards the wiring at CI (cross-checked locally by a `.find`/window python simulation + a real
-  `bash` run of the sourced-lib helpers under `set -euo pipefail`).
+  guards the wiring.
 
 # Stream-box measurement RETIRED → dev2 GPU measurer (#1331)
 
@@ -518,19 +515,32 @@ from `avsync_lineup.py` (single source of truth, never retyped). A SESSION start
 clip is CONFIDENT when its status parses `AV offset ±N fr (±X ms) conf C` with `C ≥ floor` (a
 `conf 3.2` clip is "nemerateľné", a `conf 5.4` clip is a verdict); the WINDOW verdict = the median
 offset of the confident clips in the last 1200 s, needing ≥ 3 clips, SEDÍ when `|median| ≤ 30 ms`
-else NESEDÍ with the `ZNIZ/ZVYS '2ME PGM' latency o |median|` advice (byte-parity with
-`av_sync_measure.py`). `decide` is IDEMPOTENT — a re-run with the same rows emits nothing new (the
+else NESEDÍ with the knob advice (`knob_advice`, byte-identical with `av_sync_measure.py`; since
+issue 1459 `ZVYS/ZNIZ '<program audio input>' sync offset o |median|`, below). `decide` is IDEMPOTENT — a re-run with the same rows emits nothing new (the
 persisted state dedups). Times are Europe/Bratislava local.
 
-**The four message kinds (Slovak, phone-readable, each `📐 A/V …`):**
-- **START** — on the first confident clip of a session:
-  `📐 A/V overené HH:MM (začiatok vysielania): 1. meranie +X ms conf C — verdikt po ≥ 3 meraniach`.
-- **PERIODIC** — every 20 min while the session is live:
-  `📐 A/V overené HH:MM: za 20 min N meraní (K nemerateľných), medián +X ms (p10 … p90) → SEDÍ`
-  (or `… → NESEDÍ o X ms → ZNIZ '2ME PGM' latency o X`).
-- **CHANGE** — the window verdict flips SEDÍ↔NESEDÍ between two evaluations → posted at once.
-- **END** — at session end:
+**The message kinds (Slovak, phone-readable, each `📐 A/V …`), since issue 1441 (owner 28.10.2026:
+"nech to nebol spam ale len podstatne hlasky ktore niecomu pomahaju"):**
+- **FIRST VERDICT** — once, the first time the 20-min window holds ≥ 3 confident clips:
+  `📐 A/V overené HH:MM (vysielanie): za 20 min N meraní (K nemerateľných), medián +X ms (p10 … p90) → SEDÍ`
+  (or `… → NESEDÍ o X ms → ZVYS 'mbc' sync offset o X`).
+- **CHANGE** — each SEDÍ↔NESEDÍ flip after that, once.
+- **END** — at session end, only when the session posted a verdict or ran at least one window
+  (a few-minute blip before the real broadcast has none):
   `📐 A/V počas vysielania HH:MM–HH:MM: N meraní (K nemerateľných), medián +X ms, p10 … p90 → SEDÍ/NESEDÍ`.
+- The 1st-clip START and the 20-min PERIODIC are gone (they were 52 of the 62 posts in 48 h).
+
+**Only a production posts (issue 1441).** `scripts/lib/avsync-production.sh` decides per venue:
+the rig venue (`AVSYNC_RIG_MODE_VENUE`, snv) by the cam2 painter rig mode (EVENT = yes, TEST = no),
+every other venue (and snv when cam2 is unreadable) by its stream box streaming; `AVSYNC_PRODUCTION`
+overrides (tests). The report passes `--production` to the decider, which latches a session as a
+production once any pass inside it read yes/unknown (unknown never silences a broadcast); a session
+read only as `no` posts nothing, not even its END. The same reading gates the heartbeat legs (a
+confirmed stale leg in development logs `never a page`) and the lineup liveness + offset alarms
+(an ALARM in development is downgraded to SUPPRESSED). The heartbeat page key is STABLE
+(`avsync-<venue>-heartbeat-<leg>`, one page per incident). Replay of the real 26.–28.10. rows
+(`tests/fixtures/avsync_report_1441/`): the PP event = 3 posts (NESEDÍ 40 ms, the change to SEDÍ
+after the 140→100 ms fix, the END), the SNV TEST streams = 0 (57 before).
 
 Low-confidence / UNMEASURABLE / no-signal rows are never verdicts, only counted (K nemerateľných).
 
@@ -558,18 +568,16 @@ pass — no unit change needed. Acceptance is the next live (the ticket stays `o
 SyncNet clips (the cross-check evidence) for free, and the per-day TSV on dev2 is the durable record
 the E2E / av-step watchdogs can correlate against.
 
-### GOTCHA (issue 1331) — removing a bash function from a watchdog ORPHANS its Rust harness tests + helpers → dead_code under CI clippy `-D warnings`, invisible to Tier-0
+### GOTCHA (issue 1331) — removing a bash function from a watchdog ORPHANS its Rust harness tests + helpers → dead_code under CI clippy `-D warnings`
 
 Deleting `maybe_forward_verdict` from `scripts/avsync-heartbeat-alert-watchdog.sh` (its Rust tests
 in `tests/harness_avsync_heartbeat_alert_watchdog.rs` source the script and call the function
 directly) means those tests must go too — and their removal cascades: any harness helper/const/
 struct-field used ONLY by the deleted tests (`MEASURED_ZNIZ_BODY`, `run_main_with_fake_curl`,
 `discord_last_call`) becomes `dead_code`, which CI's `cargo clippy --all-targets -D warnings` fails.
-Tier-0 blocks `cargo clippy`/`build`/`test` locally, so this is INVISIBLE until CI. The net that
-catches it WITHOUT compiling: after the deletions, for EVERY remaining `fn`/`const`/struct-field in
-the harness `grep -cE '\bNAME\b' <file>` must be ≥ 2 (definition + ≥ 1 use); a helper left at 1 is
-dead. `cargo fmt --all --check` proves the file still PARSES but does NOT catch dead_code — the grep
-audit is the substitute. Keep a helper only if a SURVIVING test uses it (`discord_call_count` stayed
+The net that catches it WITHOUT compiling: after the deletions, for EVERY remaining `fn`/`const`/
+struct-field in the harness `grep -cE '\bNAME\b' <file>` must be ≥ 2 (definition + ≥ 1 use); a
+helper left at 1 is dead. Keep a helper only if a SURVIVING test uses it (`discord_call_count` stayed
 — `dry_run_never_calls_notify` still asserts it; `discord_last_call` went — nothing did).
 
 ### GOTCHA (issue 1331) — a new `report` pass makes the EXISTING behavioral harness tests invoke the fake `python3`/`ssh` stubs, inflating `notify_call_count`
@@ -596,7 +604,8 @@ venue's stream, SNV and PP today, from ONE table.
 
 - One row per venue, `venue|box|host|key`. Accessors: `avsync_venue_rtmp_url`, `avsync_venue_ws_host`,
   `avsync_venue_box`, `avsync_venue_label` (`SNV`/`PP`), `avsync_venue_heartbeat_file`,
-  `avsync_selected_venues` (`AVSYNC_VENUES` narrows), `avsync_watchdog_venues HOST`.
+  `avsync_venue_audio_input` (issue 1459, below), `avsync_selected_venues` (`AVSYNC_VENUES`
+  narrows), `avsync_watchdog_venues HOST`.
 - **Derived, never typed.** A Linux stream box = a fact file `scripts/strih-boxes/<box>.env` with
   `STRIH_ROLE=stream` (venue = `STRIH_VENUE`, stream key = the box name, the issue-1436 convention). It
   is parsed with the loader's own `strih_box_parse_file`, never sourced. The hand-built Windows
@@ -701,3 +710,30 @@ measurer per venue, the symlink, the flock, the template, the installer),
 `test_avsync_watchdogs_venues_1441.py` (both watchdogs, a fake dev2 `ssh` answering per venue from the
 remote command, `OBS_FLEET_HOME` pinning which traveling box is home). The Rust behavioral harnesses
 pin `AVSYNC_HEARTBEAT_HOST=stream` (legacy venue only) or the PP box away, so they stay off the network.
+
+# The advice names the venue's PROGRAM AUDIO sync offset (issue 1459)
+
+The SyncNet advice used to say `ZNIZ/ZVYS '2ME PGM' latency` at every venue. That is the video
+knob of the SNV Windows era; the operator aligns A/V on the program audio input. One PP/SNV design:
+
+- **The knob** = the venue stream box's fact `STRIH_PROGRAM_AUDIO_INPUT` (stream-snv `mbc`, stream-pp
+  `Zvuk z mixu`), read by `avsync_venue_audio_input VENUE` from `scripts/strih-boxes/<box>.env` with
+  the loader's own `strih_box_parse_file`. Empty (rc 0) for a box with no fact file (a declared
+  Windows row), a `none` fact or an unparseable file; rc 1 for a venue with no row.
+- **The text** (`knob_advice(offset_ms, knob_input)`, byte-identical in `av_sync_measure.py` and
+  `avsync_report.py`, pinned by `inspect.getsource` equality): SyncNet + (audio LEADS video) ->
+  `ZVYS '<input>' sync offset o N` (more audio delay); SyncNet - -> `ZNIZ '<input>' sync offset o N`;
+  0 -> `A/V sync OK`. Note the sign is the OPPOSITE of the old video knob (more latency fixed video
+  leading). No input -> the old `2ME PGM` latency text, so an un-upgraded caller keeps working.
+- **The plumbing:** `avsync-measure-dev2.sh` `resolve_venue_config` derives `KNOB_INPUT` (env
+  `AVSYNC_MEASURE_KNOB_INPUT` wins) and `run_measure` passes `--knob-input` to `av_sync_measure.py`
+  only when it is set; the dev1 `run_report_pass` passes the same accessor's value to
+  `avsync_report.py --knob-input`. The lineup offset alarm forwards the verdict text verbatim
+  (`offset_advice_from_status`), so it names the new knob with no change.
+- **Rollout:** re-run `scripts/avsync-dev2-install.sh --install` from the merged checkout (it ships the
+  measurer, `av_sync_measure.py`, the libs and the fact files; the template unit needs no change).
+  Until then dev2 prints the old text; the dev1 report already names the new knob after the merge.
+- Tests: `tests/python/test_avsync_knob_advice_1459.py`.
+- **Sourcing the measurer in a test:** `avsync-measure-dev2.sh` parses its own argv even when sourced,
+  so a `bash -c 'script' harness A B` that passes values as positional args must take them first and
+  `set --` before the `.` line (else `unknown arg`, exit 2).

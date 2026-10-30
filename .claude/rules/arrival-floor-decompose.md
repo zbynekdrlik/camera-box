@@ -42,7 +42,7 @@ the older 4-camera fleet era with the current 7-camera fleet destroys the rankin
 finding). Output: per-run digest, a per-camera aggregate table (floor median/min/max/pstdev,
 mean floor-RANK, latency-pin set) ordered by median floor, and a STABILITY verdict — is one camera
 the anchor (fastest) / slowest in ≥ `RANK_MODE_STABLE_FRAC` (0.6) of usable runs, or is the variance
-run-level? The pure core (`aggregate`, `_keep_run`, `mine_run_dir`) is Tier-0 fixture-tested with a
+run-level? The pure core (`aggregate`, `_keep_run`, `mine_run_dir`) is fixture-tested with a
 SECOND real fixture (`recording-e2e-659887078`, anchor cam4 / slowest cam2) that contrasts the
 first (`recording-e2e-1363366080`, anchor cam3 / slowest cam1) so the smoke test folds two
 genuinely disagreeing runs.
@@ -111,13 +111,12 @@ for a camera whose lag outgrows it.
 - Only the cambox `Streaming:`/`#707` grabber parsers are genuinely new (that signal isn't parsed
   elsewhere for this).
 
-## Tier-0 (issue 557) — pure Python, full local RED→GREEN
+## Tests — pure Python, full local RED→GREEN
 
 Pure decision core (`decompose`, `parse_streaming`, `parse_dqbuf_stalls`, `cap_avg_by_source`,
 `floors_and_fields`) with no I/O below the CLI, so `python3 -m pytest
-tests/python/test_arrival_floor_decompose_1168.py` gives a complete local RED→GREEN with zero cargo —
-the issue-1199/1203/1226 python-mirror precedent. The two real-data smoke tests run over a COMMITTED fixture
-(`tests/fixtures/arrival_floor_1168/`), so they always run (test-strictness: no skips).
+tests/python/test_arrival_floor_decompose_1168.py` gives a complete local RED→GREEN. The two real-data smoke
+tests run over a COMMITTED fixture (`tests/fixtures/arrival_floor_1168/`), so they always run (test-strictness: no skips).
 
 ## SINGLE-RUN observation (2026-09-01, verdicts 1363366080 / 1168855508) — SUPERSEDED by the multi-run aggregate below
 

@@ -1,0 +1,24 @@
+[package]
+name = "jxs-recv-ffi"
+version.workspace = true
+edition = "2021"
+description = "Issue 1387 slice 2: a C ABI static library over camera-box's JPEG XS receiver (jxs_recv::JxsReceiver), linked into the strih DistroAV build"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+# staticlib: what the strih DistroAV build links (linux-genlock.yml, the strih variant).
+# rlib: so this crate's own tests call the same functions.
+crate-type = ["staticlib", "rlib"]
+
+# Linux only, like the receiver it wraps (recvmmsg, UDP_GRO, SO_TIMESTAMPNS).
+[target.'cfg(target_os = "linux")'.dependencies]
+camera-box = { path = "../..", features = ["jxs"] }
+# Issue 1387 slice 3: the sender's C ABI rides in this crate's static library (the ONE Rust
+# archive DistroAV links; src/lib.rs pulls it in).
+jxs-send-ffi = { path = "../send-ffi" }
+svt-jpegxs-sys = { path = "../sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tempfile = "3.9"

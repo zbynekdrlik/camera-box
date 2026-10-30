@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The OBS audio facet parsers of the bundle-state gather: the `audio-telemetry #800` lag +
 freshness (#1226 / #1231), the reference-source ts_lag band (#1265), the buffered_ms drift/step
-shape (#1325), the audio MIXER real-time facet (issue 1381 / 1385) and the mix BUFFERING
-ratchet facet (issue 1381). The obs-vban pacer
+shape (#1325), the audio MIXER real-time facet (issue 1381 / 1385), the mix BUFFERING
+ratchet facet (issue 1381) and the mix-wide MIXED_LATE count (issue 1460). The obs-vban pacer
 loss facet read beside the mixer lives in `bundle_state_vban`.
 
 Part of the bundle-state gather split (issue 1386): a PURE facet family re-exported by
@@ -11,6 +11,7 @@ siblings). Ships in the :8899 server tree declared in `scripts/lib/bundle-state-
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 
@@ -64,6 +65,31 @@ AUDIO_TS_LAG_STALE_AFTER_S = 180  # ~3x the 60 s emit period: a source silent th
 # and, for the named reference source, computes the band SHAPE at tens-of-ms resolution; the dev1
 # `classify_band` decision thresholds it, ships DISABLED like every sibling watchdog.
 AUDIO_REF_BAND_DEFAULT_SRC = "mbc"     # the stream A/V-gate audio reference (cam2 HDMI -> hand1 mic)
+# issue 1460 -- the box's own seed manifest (setup-strih writes it, strih_scenes.py reads it). On a
+# STREAM-role box (the manifest carries `dev_scene`, written for the stream role only) its
+# `program_audio_input` IS the A/V reference: stream-snv `mbc`, stream-pp `Zvuk z mixu`.
+SEED_MANIFEST_PATH = "/opt/camera-box/strih-seed.json"
+
+
+def audio_ref_band_src(env, manifest_path=SEED_MANIFEST_PATH):
+    """issue 1460: the reference source whose ts_lag band + buffered_ms are watched on this box.
+
+    `AUDIO_REF_BAND_SRC` in `env` wins; else a stream-role seed manifest's `program_audio_input`;
+    else `mbc`. An absent, unreadable or non-stream manifest falls back, never raises (the server
+    must keep serving)."""
+    named = env.get("AUDIO_REF_BAND_SRC")
+    if named:
+        return named
+    try:
+        with open(manifest_path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return AUDIO_REF_BAND_DEFAULT_SRC
+    if isinstance(manifest, dict) and "dev_scene" in manifest:
+        src = manifest.get("program_audio_input")
+        if isinstance(src, str) and src.strip() and src != "none":
+            return src
+    return AUDIO_REF_BAND_DEFAULT_SRC
 AUDIO_REF_BAND_DUTY_MARGIN_MS = 20     # a tail reading > baseline + this counts as "high mode"
 AUDIO_REF_BAND_WINDOW_CAP = 120        # bound the tail-window readings considered (recent state)
 
@@ -361,6 +387,31 @@ def audio_mixer_from_log(text, tail=None):
         return ("", "", "", "", "")
     return (last[1], last[2], str(round((last[0] - prev[0]) * 1000.0)), last[3],
             str(round(head - last[0])))
+
+
+# issue 1460 -- the mix-wide MIXED_LATE count. libobs logs `audio-telemetry #800 mix: frozen=<0|1>
+# mixed_late=<N>` once a minute (obs-audio.c, the same 60 s block as the `#800` summary); N counts
+# since the audio reset every mix member that fell behind the frozen mix window and was re-anchored
+# (an audible hole). Cumulative, so the dev1 audio-mixer watchdog pages a RISE between two passes.
+_AUDIO_MIX_LATE_RE = re.compile(r"audio-telemetry #800 mix: frozen=(\d) mixed_late=(\d+)")
+
+
+def audio_mix_late_from_log(text, tail=None):
+    """issue 1460 -- `(mixed_late, frozen, age_s)` of the NEWEST `#800 mix:` line in the tail, all
+    strings, or three `""` when the tail holds none (absent -> UNKNOWN downstream, never a fake 0).
+    `age_s` is that line's in-log age behind the log head (the audio-mixer recency convention).
+    `tail` = a precomputed `timestamped_tail_lines(text)`."""
+    stamped, head = tail if tail is not None else timestamped_tail_lines(text)
+    newest = None
+    for pos, line in stamped:
+        if "#800 mix:" not in line:
+            continue
+        m = _AUDIO_MIX_LATE_RE.search(line)
+        if m:
+            newest = (pos, m.group(2), m.group(1))
+    if newest is None:
+        return ("", "", "")
+    return (newest[1], newest[2], str(round(head - newest[0])))
 
 
 def _audio_stall_dump_in_head(text):

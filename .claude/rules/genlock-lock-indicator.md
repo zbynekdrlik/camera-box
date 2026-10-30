@@ -23,7 +23,7 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 
 | Piece | File | Notes |
 |---|---|---|
-| The DECISION (pure) | `src/genlock_lock_state/decision.rs` (`decide`) | Tier-0 authority, crate-root, std-only. Since issue 1302 the module is split by concern (`decision` / `phase_events` / `qpc_step` / `media_clock` under `src/genlock_lock_state/`); the root `src/genlock_lock_state.rs` re-exports every item, so `camera_box::genlock_lock_state::<item>` is unchanged. |
+| The DECISION (pure) | `src/genlock_lock_state/decision.rs` (`decide`) | Authority, crate-root, std-only. Since issue 1302 the module is split by concern (`decision` / `phase_events` / `qpc_step` / `media_clock` under `src/genlock_lock_state/`); the root `src/genlock_lock_state.rs` re-exports every item, so `camera_box::genlock_lock_state::<item>` is unchanged. |
 | The DECISION (C port) | `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` (`genlock_decide_lock_state`) | Byte-for-byte mirror; OBS/Qt-free so the parity gate lifts + `cc`-compiles it. Keep the two enums + struct + fn CONTIGUOUS (the lift slices from the first enum through the fn's closing brace). |
 | C-vs-Rust parity gate | `tests/genlock_lock_state_parity.rs` | Lifts the C block, `cc`-compiles it, compares `(state, reason)` over all 2^9 flag combos × the three media-clock verdicts × a set of `(n_inputs, n_locked, n_absent, n_idle)` tuples (a TABLE + loop harness since issue 1372 part D: ~35k straight-line assignments took ~1 min at `-O1`, the table compiles in < 1 s — keep new axes in the table) (the 8th flag is #1303's `audio_unpaired`; the `n_absent` axis is #1299's — some-absent-but-all-connected-locked → LOCKED, some-absent-with-a-connected-unlocked → DEGRADED, all-absent → HEALTHY-idle, and the impossible `n_absent > n_inputs` both ports saturate to `n_connected=0`). |
 | Per-source stats API | `obs.h` (`struct obs_genlock_stats`, `obs_source_get_genlock_stats`) + `obs-source.c` (`genlock_fill_stats`) | The `genlock-fifo audit` log line and the API BOTH route through `genlock_fill_stats` — they can never disagree. Additive + versioned (`OBS_GENLOCK_STATS_VERSION`, 4 since issue 1302: `audio_hold_mode` / `audio_withheld` / `audio_place_err_ms` / `audio_place_err_seeded`, which the audit line now prints from the same snapshot; the frontend names the mode through the export `obs_genlock_audio_hold_token`, never a copy of the strings). |
@@ -31,9 +31,10 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 | Fast first idle classification (issue 1302) | `src/genlock_lock_state/phase_events.rs` (`InputIdleClass`, `input_idle_class`, the `GENLOCK_IDLE_*` constants; unit cases in the `#[path]` child `genlock_lock_state/idle_tests.rs`) ↔ `GenlockLockState.hpp` (`genlock_input_idle_class` + the constants as macros, right after `genlock_input_new_phase_events`); the ring tick `genlock_idle_classify_tick` in `GenlockRecentEvents.cpp` (state `GenlockIdleClassifier`, the status bar member `genlockIdle`) | `tests/genlock_idle_class_1302.rs`: C-vs-Rust parity of the rule and its five constants (312 vectors) + a replay of the shipped ring tick and recent-event tick on six scenarios graded by the C decision, every tick's classes checked against a reference ring on the Rust authority. Guards: `genlock_lock_idle_first_classification_present_1302` + the issue-1302 idle-class pwsh block in both ymls. |
 | Per-output stats API | `obs.h` (`struct obs_genlock_output_stats`, `obs_output_set_genlock_wall_stamping`, `obs_output_get_genlock_stats`) + `obs-output.c` + `obs-internal.h` (two bool fields, bzalloc-zeroed) | DistroAV's `ndi-output.cpp` sets `wall_stamping=true` at `begin_data_capture` success, `false` at stop. |
 | The widget | `OBSBasicStatusBar.{hpp,cpp}` (`UpdateGenlockLabel`, `PollGenlockClock`) | A permanent `QLabel` + an ALWAYS-ON 1 Hz `QTimer` (NOT the stream-only `refreshTimer`). |
-| Vendored-source guards | `tests/genlock_lock_indicator_guards.rs` | std-only, runnable via `rustc --test`; the Linux-CI twin of the pwsh gates. |
+| Vendored-source guards | `tests/genlock_lock_indicator_guards.rs` | std-only; the Linux-CI twin of the pwsh gates. |
 | Media-clock term (issue 1372 part D) | `src/genlock_lock_state/media_clock.rs` (`MediaClock`, `MediaDiscipline`, `media_clock_window` (µs step band + time-weighted rate), `media_clock_window_ready`, `media_clock_verdict`; python mirror cross-checked by the same parity test) ↔ `GenlockLockState.hpp` (the `genlock_media_*` block after the qpc lift) + libobs `os_gettime_discipline()` (`util/platform.h`, `platform-windows.c`) | Parity: the decision grid × the three media verdicts + a 5th lift (`c_media_clock_matches_the_rust_authority_1372_part_d`); the libobs getter is checked read by read in `tests/os_clock_discipline_parity_1372.rs`. Guards: `genlock_lock_media_clock_term_present_1372_part_d` + the part-D pwsh block in both ymls. |
 | pwsh source-anchor gates | `windows-genlock.yml` + `windows-genlock-fast.yml` (`Assert in-OBS genlock LOCK indicator present (#1298)`) | 3-copy lock-step per `obs-titlebar-build-id.md`. |
+| The JPEG XS indicator BESIDE it (issue 1387) | `widgets/GenlockJxsWidget.{hpp,cpp}` + `GenlockJxsReport.{hpp,cpp}` + `GenlockJxsState.hpp` ↔ `src/genlock_jxs_state.rs` | Its own label + 1 Hz timer, added right after the LOCK label; it never touches the LOCK decision or the `genlock-lock:` family (design 6506884476 rejected merging transport into the LOCK states). Everything about it: `.claude/rules/jxs-link.md`, section "The in-OBS JPEG XS indicator". |
 
 ## State decision (the contract)
 
@@ -141,7 +142,7 @@ lowest)**; else LOCKED (green).
   `#[path]` attributes on the submodules.** `src/genlock_lock_state.rs` declares `decision`,
   `phase_events`, `qpc_step` and `media_clock` as `#[path = "genlock_lock_state/<name>.rs"] mod
   <name>;` and re-exports every item. The explicit path resolves the same way when the crate loads
-  the file and when a Tier-0 replica mounts it with `#[path = ".../src/genlock_lock_state.rs"]`:
+  the file and when a replica mounts it with `#[path = ".../src/genlock_lock_state.rs"]`:
   rustc treats a `#[path]`-mounted file like a `mod.rs`, so a bare `mod decision;` would be looked up
   at `src/decision.rs` (E0583). A replica that COPIES the root file must copy the
   `genlock_lock_state/` directory next to it. A new item goes into its concern's file AND the
@@ -211,7 +212,7 @@ lowest)**; else LOCKED (green).
     (`events` = those windowed new events since v8, the lifetime total before) and the human
     `genlock-lock:` line as `reason=recent_event:<name>`; `genlock_lock_decision.analyze` enriches
     the watchdog's reason to `recent_event:<name>` so a page is actionable.
-  - **Tier-0 proof of the tick on the shipped bytes:** `tests/genlock_phase_baseline_1302.rs`
+  - **Proof of the tick on the shipped bytes:** `tests/genlock_phase_baseline_1302.rs`
     compiles `GenlockRecentEvents.cpp` as shipped (keep it plain std C++; the test refuses an OBS/Qt
     include) with g++ and the real headers, replays scripted 1 Hz scenarios (a 40-relock reattach, a
     real event after it, a wake, a vanish, a backward reset, the offender window and its tie, an
@@ -303,8 +304,8 @@ lowest)**; else LOCKED (green).
   `obs_data_get_double(d, "f_ptp_ppm")` uses REAL C++ quotes, so its needle is
   `"obs_data_get_double(d, \"f_ptp_ppm\")"` (Rust `\"` → literal `"`). Using the `\\\"` form for a
   real-quote anchor fails the guard ("anchor GONE") even though the source is correct — distinguish
-  the two when adding an anchor, and run `rustc --test tests/genlock_lock_json_guards.rs` (with
-  `CARGO_MANIFEST_DIR` set) to confirm it actually matches before trusting green.
+  the two when adding an anchor, and run `cargo test --test genlock_lock_json_guards` to confirm it
+  actually matches before trusting green.
 - **`genlock-lock:` is a new OBS-log family** (emitted on state/reason CHANGE, not every tick) —
   mutually non-substring with `genlock-fifo audit '`, `genlock-ndi-output audit '`,
   `genlock-ndi-filter audit '`, `genlock-relock`, `genlock-acquire-bracket '%s':` (guarded by
@@ -336,7 +337,5 @@ lowest)**; else LOCKED (green).
   `OBS_GENLOCK_OUTPUT_STATS_VERSION` too (line 2, `output_stats=<N>`, ROZHODNUTÉ 6030159870) and the
   gate compares both. A struct change MUST bump its version (the obs.h comment's rule), or the gate
   cannot see it; the pytest pins each struct body to its version so a change without a bump fails
-  CI. CI is the first place the C/Qt compiles — locally only
-  `cargo fmt --all --check` + the pure Rust module (`rustc --test`) + the parity/guard tests
-  (standalone) verify; the blog refactor's format/arg types were lift-compiled under `gcc
-  -Wformat=2 -Werror`.
+  CI. CI is the first place the C/Qt compiles; the blog refactor's format/arg types were
+  lift-compiled under `gcc -Wformat=2 -Werror`.

@@ -4,6 +4,7 @@ paths:
   - "scripts/obs_box_kbd_layout.py"
   - "scripts/obs_box_recordings.py"
   - "scripts/obs_box_power.py"
+  - "scripts/stream_operator_volume.py"
   - "systemd/obs-box-panel.service"
   - "tests/python/test_obs_box_panel_1420.py"
   - "tests/python/test_obs_box_kbd_layout_1441.py"
@@ -84,6 +85,35 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
   --scope` for the binary launchers, which needs a live check on a box first (tracked as issue 1465
   item 7, comment 6363702188).
 
+## The screenshot tool (issue 1481, owner 25.10.2026: "nastroj ... podobne ako pod windows mali lightshot")
+
+- flameshot on EVERY role (one Linux workstation type), installed by step 16h with
+  `--no-install-recommends` (`obs_box_panel_shot_install`). The `screenshot` = `Snímka obrazovky`
+  launcher (`/usr/bin/flameshot gui`, icon `org.flameshot.Flameshot`) sits after Chrome, before
+  RustDesk, where the binary exists (`OBS_BOX_PANEL_SHOT_BIN`). Use: drag a region, Ctrl+C =
+  clipboard, Ctrl+S = a file in `~/Pictures/Snimky`.
+- `~/.config/flameshot/flameshot.ini`: `obs_box_panel_shot_ini_merge` sets the declared `[General]` keys
+  (fixed save path, `snimka-%F_%H-%M-%S`, no tray icon, no startup message) and keeps every other key:
+  flameshot rewrites its own ini from its settings dialog.
+- The openbox keys: the stock `/etc/xdg/openbox/rc.xml` binds `Print` / `A-Print` to scrot.
+  `obs_box_panel_shot_rc` REWRITES those `<command>`s to `flameshot gui` and adds a missing one before
+  `</keyboard>`. The kiosk's `obs_box_openbox_rc_with_keys` only APPENDS, which would leave two Print
+  bindings. The user's rc.xml is seeded from the stock one when absent (`OBS_BOX_PANEL_OPENBOX_RC_SRC`),
+  a symlinked file or folder is refused. Keys apply at the next login / `openbox --reconfigure`.
+- Row `(panel-shot)` (row 10): the package, the ini and the rc.xml graded by idempotence (the filter's
+  output equals the file).
+
+## The headphone volume item (issue 1465 item 3 revision, stream role only)
+
+Owner 24.10.2026 (ROZHODNUTE 6383739315): the stream operator needs an understandable GLOBAL headphone volume.
+`_obs_box_panel_tint2rc_headphones` (rendered only when `strih_box_role` = stream, BEFORE the keyboard item, so
+`panel_items` is `TSEEC` / `LTSEEC` there and `TSEC` / `LTSEC` on the strih role) runs
+`/usr/bin/python3 $OBS_BOX_PANEL_HEADPHONES_HELPER watch` (`/usr/local/bin/obs-box-headphones` =
+`scripts/stream_operator_volume.py`): `Slúchadlá NN %` / `Slúchadlá stlmené`, wheel = +-5 %, left click = mute.
+`obs_box_panel_headphones_keybinds_xml` declares the XF86Audio keys running the same helper. Both the helper and
+the keys are INSTALLED by setup step 12 and graded by verify item 9b's `(operator-audio-control)` row
+(`stream-operator-audio.md`); step 16h only renders the item.
+
 ## The keyboard item (issue 1441)
 
 `obs_box_kbd_layout.py watch|next|print` (tint2 executor) shows and switches the XKB group. It only works
@@ -94,7 +124,8 @@ layout to `us` (`scripts/lib/strih-keyboard.sh`, `.claude/rules/strih-operator.m
 
 `OBS_BOX_PANEL_KBD_HELPER`, `OBS_BOX_PANEL_FILES_HELPER` (else the install writes the real
 `/usr/local/lib/camera-box`), `OBS_BOX_PANEL_FILES_BIN`, `OBS_BOX_PANEL_SYS_UNIT_DIR`,
-`OBS_BOX_PANEL_RUSTDESK_BIN`, `OBS_BOX_PANEL_DISCORD_BIN`, `OBS_BOX_PANEL_PROC`, `OBS_BOX_PANEL_POWER_HELPER`
+`OBS_BOX_PANEL_RUSTDESK_BIN`, `OBS_BOX_PANEL_DISCORD_BIN`, `OBS_BOX_PANEL_SHOT_BIN`, `OBS_BOX_PANEL_OPENBOX_RC_SRC`
+(else the install reads the test host's `/etc/xdg/openbox/rc.xml`), `OBS_BOX_PANEL_PROC`, `OBS_BOX_PANEL_POWER_HELPER`
 (else the install writes the real `/usr/local/bin`), `OBS_BOX_PANEL_CHROME_BIN` (dev1 HAS
 `/usr/bin/google-chrome-stable`, so a test that leaves it unset gets a Chrome launcher on the stream role
 and a launcher-list assert fails on dev1 only), `OBS_BOX_PANEL_LOGIND_TIMEOUT`. The `Box` stub's

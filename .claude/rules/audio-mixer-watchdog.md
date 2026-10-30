@@ -30,6 +30,7 @@ if a box sends VBAN again.
 | `audio_mixer_ticks` / `_ticks_over` / `_tick_ms` / `_window_ms` / `_age_s` + `obs_log_head_age_s` | `audio-stall #1367: ... ticks=N ticks_over=M tick_ms=21.3` (obs-audio.c, one per dump) | MIXER | BEHIND: `abs(ticks - 2812.5) > 5`; OVERLOADED: `ticks_over > 30`; STALLED: dump age > 180 s AND log head age <= 60 s (issue 1385) |
 | `vban_pacer_loss_events` / `_loss_ms` / `_loss_dest` / `vban_pacer_age_s` | `[obs-vban] obs-vban pacing: ...` (every 10 s per output) | VBAN | VBAN_LOSS: any loss counter moved in the window |
 | `audio_buffering_ms` / `_start_ms` / `_source` / `_age_s` | `audio-telemetry #800: total_buffering=N ms` (every 60 s) + the reset block's `buffering type:` line (obs.c) / the genlock floor line before issue 1425 / `ABOVE the floor` lines (obs-audio.c) | BUFFERING | RAISED: at least one mixer tick above the session start (issue 1381, the section below) |
+| `audio_mix_mixed_late` / `_frozen` / `_age_s` | `audio-telemetry #800 mix: frozen=F mixed_late=N` (every 60 s, cumulative since the audio reset) | MIX-LATE | LATE: N rose since the count the watchdog stored; after a lower N (a new audio session) the stored count is 0 (issue 1460, the section below) |
 
 Both are parsed from the TAIL of the #1222 bounded read, in the server's one `obs_log_parse`
 tuple (appended at the END; the unpack is order-sensitive). Omit-when-empty: a box with no dump yet
@@ -112,7 +113,7 @@ verdict reads STALE and resets the confirm: the arm is blind, silently.
   MISMATCH. The zone offset cancels in the difference, so any offset is caught. A frozen log's daily
   date wrap (a huge negative change) is OK; passes closer than 60 s or further than 600 s apart are
   UNKNOWN. The orchestrator keeps the previous head age + pass epoch per box in its state file
-  (`AUDIO_MIXER_NOW_EPOCH` is the Tier-0 seam for the pass time).
+  (`AUDIO_MIXER_NOW_EPOCH` is the test seam for the pass time).
 - **The observer effect (review round 3).** Every `:8899` request opens a local OBS WebSocket
   connection AFTER the log read (`gather_ndi_inputs`), and obs-websocket logs it at INFO. So a hung
   OBS whose render and audio threads are stuck but whose WebSocket thread runs reads about one pass
@@ -226,10 +227,56 @@ nominal. The lasting, audible effect is the buffering, so this third arm pages i
 - **Deploy:** the facet is new on the `:8899` gather, so the bundle-state server tree must be
   redeployed on stream-snv, strih-snv and resolume (supervisor step, every file of
   `scripts/lib/bundle-state-files.txt`). Until then the facet is absent and the arm reads UNKNOWN.
-- Tier-0: `tests/python/test_audio_mixer_buffering_1381.py` -- the parser over the real 15.10 lines
+- Test: `tests/python/test_audio_mixer_buffering_1381.py` -- the parser over the real 15.10 lines
   (the `#800` line rendered from the C format string), the truth table, and the real bash watchdog
   through `AUDIO_MIXER_FETCH_CMD` (RAISED twice -> one page, HEALTHY -> one RECOVERY line, the
   time-bucketed key read from a fake notify).
+
+## MIX-LATE = the mix-wide MIXED_LATE count rose since the last pass (issue 1460, design 6480263478)
+
+libobs logs `audio-telemetry #800 mix: frozen=<0|1> mixed_late=<N>` once a minute (obs-audio.c, the
+`#800` block). N is cumulative since the audio reset: every rise is a mix member that fell behind the
+frozen mix window and was re-anchored (`MIXED_LATE`, an audible hole; `genlock-audio-buffering-floor.md`).
+Before this arm only the E2E (`program_audio_continuity.py`) and verify item 48 read it.
+
+- **Gather** (`audio_mix_late_from_log`, `bundle_state_audio.py`, the shared `tail=`): the newest
+  `#800 mix:` line in the tail -> `audio_mix_mixed_late` / `audio_mix_frozen` / `audio_mix_age_s`
+  (age behind the log head). Omit-when-empty; "0" is a reading. The server maps the tuple through
+  `bsg.AUDIO_MIX_LATE_KEYS` on ONE line of `_audio_log_facets` (the server's line count unchanged).
+- **Decision** (`classify_mix_late(now, prev, age_s, reachable, stale_s)`): SKIP unreachable;
+  UNKNOWN no line; STALE line older than the mixer arm's stale bound (180 s); BASELINE no stored
+  count, or a LOWER one (a new audio session zeroed it); LATE now > prev; HEALTHY now == prev.
+  `analyze` takes `prev_mix_late` (CLI `--prev-mix-late`) and prints `mix_late_verdict` / `mix_late` /
+  `mix_late_prev` / `mix_frozen` / `mix_late_age_s`.
+- **Watchdog** (`handle_mix_late`): state key `<box>_mix_late_prev`, prefix `audio-mix-late`, key base
+  `audio-mixer-mixlate` (`watchdog_notify_key`, production-critical). A rise is a ONE-PASS edge, and
+  a HEALTHY pass resets the 2-pass confirm, so on a LATE pass the stored count KEEPS its pre-rise
+  value until the confirm has paged: the second pass still reads LATE and one real event pages (ticket
+  comment 6480298631). HEALTHY / a first BASELINE / a confirmed page store the current count; SKIP /
+  UNKNOWN / STALE leave it (STALE also resets the confirm, the date-less-log rule above).
+- **A lower count = a new audio session (review round 1).** Its count started at 0 at the reset, so
+  every one of its events is a hole nobody was paged about: the watchdog stores 0 (not the new count)
+  and leaves the confirm as it is, so the next pass reads LATE against 0 and pages. A count that
+  reset to exactly 0 reads HEALTHY next. Stated residuals (review round 2): a rise seen only before
+  the reset is not paged when the new session is clean; the arm has no session identity, so a new
+  session whose count is already EQUAL to the stored one reads HEALTHY (its holes missed) and a
+  higher one pages with an under-stated delta (closing it needs a session marker, e.g. the age of
+  the reset block's `buffering type:` line); a storm that survives an OBS restart while the arm is
+  throttled stays one incident (up to the 12-pass window).
+- **Paging cadence.** A count that rises on CONSECUTIVE passes is one incident under the arm + box
+  throttle (12 passes). The first UNCHANGED pass after a page is HEALTHY: one machine-channel
+  RECOVERY line and the throttle cleared, so the next separate rise pages again (two passes later,
+  a fresh time-bucketed key). Every separate MIXED_LATE episode is a real audible hole, so that is
+  intended.
+- **Deploy:** a new `:8899` facet -> redeploy the bundle-state server tree on every audio-mixer box
+  (every file of `scripts/lib/bundle-state-files.txt`). Until then the arm reads UNKNOWN, never a page.
+- **Test:** `tests/python/test_audio_mix_late_1460.py` (the parser over lines rendered from the C
+  format string, the truth table, and the real bash watchdog through `AUDIO_MIXER_FETCH_CMD`:
+  BASELINE -> LATE held -> page once -> HEALTHY recovery, a lower count re-baselines, STALE resets the
+  confirm, the time-bucketed key read from a fake notify). The issue-1386 goldens carry it: two
+  `#800 mix:` lines in `all_families.txt`; the served JSON gained only the three keys. One golden value
+  moved for an input reason: `bounded:concat`'s age-only `audio_mixer_age_s` 646 -> 645, the tail cut
+  shifted by the two inserted lines (the age is the whole tail span there).
 
 ## VBAN loss = counter increase inside a 660 s window, per destination
 
@@ -337,8 +384,9 @@ strih-snv's current log (196 dumps, review round 1) read ticks=2813 with ticks_o
 
 - Roster: obs-fleet facet `audio-mixer` = strih-snv stream resolume (`obs_fleet_boxes audio-mixer`,
   env override `AUDIO_MIXER_BOXES`); resolume is polled only while home (`obs_fleet_poll_now`).
-- PRODUCTION-CRITICAL (issue 1308): all three arms time-bucket their key —
-  `watchdog_notify_key "audio-mixer-<box>"` / `"vban-loss-<box>"` / `"audio-buffering-<box>"` — and the file is on the
+- PRODUCTION-CRITICAL (issue 1308): all four arms time-bucket their key —
+  `watchdog_notify_key "audio-mixer-<box>"` / `"vban-loss-<box>"` / `"audio-buffering-<box>"` /
+  `"audio-mixer-mixlate-<box>"` (issue 1460) — and the file is on the
   `_PRODUCTION_CRITICAL_TIME_BUCKETED` allowlist. The throttle signature is arm + box, never the
   verdict, so a BEHIND ↔ OVERLOADED flip of one fault is not a new incident. Throttle 12 passes (~1 h).
 - DETECTION ONLY, recovery log-only, ships DISABLED; the timer is on `scripts/lib/watchdog-roster.sh`
@@ -346,12 +394,11 @@ strih-snv's current log (196 dumps, review round 1) read ticks=2813 with ticks_o
   `systemd/audio-mixer-alert-watchdog.README.md` (deploy the new bundle-state server files to the
   boxes FIRST — the watchdog reads UNKNOWN until the facets are served).
 
-## Tier-0 verify
+## Verify
 
 `python3 -m pytest tests/python/test_audio_mixer_*_1381.py tests/python/test_audio_mixer_*_1385.py tests/python/test_notify_dedup_key_sweep_1206.py`
 (gather, decision, replay incl. the bash dry-run, fleet wiring) + `bash -n` / `shellcheck -S warning`
-on the watchdog. No cargo involved. The obs-fleet Rust harness is std-only and runs with plain
-`rustc --test` (`tests/harness_obs_fleet_list_1296.rs`).
+on the watchdog, and `cargo test --test harness_obs_fleet_list_1296`.
 
 ## File size
 

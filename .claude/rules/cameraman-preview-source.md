@@ -13,6 +13,15 @@ Every cambox shows the strih box's `interkom` NDI output on its HDMI monitor. Th
 fleet-wide unconditional preview from the #528 ruling: no per-box config, no env knob. The source
 is RESOLVED on every (re)connect by the pure `src/preview_source.rs`:
 
+0. **The strih behind `strih.lan` (issue 1431, joint events).** The `STRIH-<box> (interkom)`
+   output whose NDI address (the finder's `p_url_address`, `ip:port`) is the IP `strih.lan`
+   resolves to wins **on sight**, ahead of the preferred name. `strih.lan` is re-resolved on every
+   (re)connect (`resolve_strih_lan` in `src/ndi_display.rs`, first IPv4), so one router record
+   moves the preview with the intercom, the shading registration and the clock. Only a strih
+   interkom output counts (never the PGM or a camera at that IP); two at the same IP = the first by
+   name. A `strih.lan` that does not resolve, or an IP no strih interkom output is published from,
+   leaves rules 1-4 unchanged. Journal: `NDI display: strih.lan resolves to <ip> ...` once per
+   change, then `preview source resolved to '<name>', the strih behind strih.lan (<ip>) (#1431)`.
 1. The **preferred** name (`DEFAULT_PREVIEW_SOURCE` = `STRIH-SNV (interkom)`, or an explicit
    `--display` / `[display]` source) wins **the moment it is announced**, matched by exact name.
 2. Otherwise the **ONE** discovered `STRIH-<box> (interkom)` output is used. The match is exact
@@ -40,7 +49,8 @@ waits the 30 s window (`the_old_named_strih_is_still_picked_after_the_window_141
 ## Wiring (where the pieces live)
 
 - `NdiReceiver::connect_with(timeout, label, pick)` (`src/ndi.rs`) runs the ONE finder loop. On
-  every ~1 s pass it hands the discovered names to `pick(names, window_elapsed)` and connects to
+  every ~1 s pass it hands the discovered sources (`DiscoveredSource`: name + `p_url_address`,
+  issue 1431) to `pick(sources, window_elapsed)` and connects to
   the EXACT name returned. A final pass with `window_elapsed == true` is guaranteed before it
   gives up. `NdiReceiver::connect(name)` is a thin wrapper that keeps the old SUBSTRING semantics
   for the probe callers (`probe::reader`, `probe::multi_reader`, `ndi-recv-probe`). Never build a
@@ -48,8 +58,8 @@ waits the 30 s window (`the_old_named_strih_is_still_picked_after_the_window_141
   must be used before the next `find_get_current_sources` / `find_destroy`.
 - `run_display_loop` (`src/ndi_display.rs`) logs a resolution only when it is FINAL (a pick, or
   the end of the window) and differs from the last one logged (`last_resolution` persists across
-  reconnects). The decision is the pure `preview_log_level`, so it is Tier-0-tested. Keep any
-  new log decision in the pure module, never inline in the CI-only closure.
+  reconnects). The decision is the pure `preview_log_level`, so it is unit-tested. Keep any
+  new log decision in the pure module, never inline in the closure.
 - The preferred name is matched EXACTLY, a change from the old receiver's substring match. A
   partial `--display "STRIH-SNV"` value no longer matches directly: it reaches the strih fallback
   only after the 30 s window, and a partial non-strih value never matches. Journal lines: `NDI display: preview source resolved to '<name>' (#1362)` (INFO),
@@ -57,14 +67,9 @@ waits the 30 s window (`the_old_named_strih_is_still_picked_after_the_window_141
 - `DEFAULT_DISPLAY_SOURCE` in `src/main.rs` is sourced from the pure constant. Change the
   preferred strih ONLY there, in `preview_source::DEFAULT_PREVIEW_SOURCE`.
 
-## Verify (Tier-0; main.rs/ndi.rs/ndi_display.rs are CI-only compiles)
+## Verify
 
-- `rustc --edition 2021 --test src/preview_source.rs -o <scratch>/ps && <scratch>/ps`, plus
-  `clippy-driver --edition 2021 --test -D warnings src/preview_source.rs -o <scratch>/psc`.
-- The closure / borrow shape of the display-loop wiring can be checked with a small standalone
-  replica: `#[path]`-include the real `preview_source.rs` and pair it with a mock `connect_with`
-  of the same signature, then run it through `clippy-driver -D warnings`. That catches FnMut
-  capture / borrowck mistakes that CI would otherwise find first.
+- `cargo test --lib preview_source` + `cargo clippy --all-targets -- -D warnings`.
 - Live acceptance (supervisor, after the fleet deploy): read the journal on a cambox with a
   monitor (`journalctl -u camera-box | grep 'NDI display'`) for `preview source resolved to
   'STRIH-SNV (interkom)'` + `connected to 'STRIH-SNV (interkom)'`. The deploy's own service

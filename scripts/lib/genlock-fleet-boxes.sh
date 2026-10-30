@@ -25,8 +25,14 @@
 _fleet_box() { obs_fleet_canonical_name "${1:-}"; }
 
 # fleet_box_mcp BOX -> the win-* MCP server that drives a WINDOWS genlock box (stream-snv,
-# resolume-snv); rc 2 for any other name (a Linux box has no win-* MCP).
-fleet_box_mcp() { case "$(_fleet_box "${1:-}")" in stream-snv) echo "win-stream-snv" ;; resolume-snv) echo "win-resolume" ;; *) return 2 ;; esac; }
+# resolume-snv); rc 2 for any other name (a Linux box has no win-* MCP). issue 1474: only while the
+# box's fleet row class is windows-genlock -- stream-snv is linux-genlock since issue 1462, so on the
+# real fleet it names no MCP; a fleet whose stream box is Windows gets win-stream-snv again.
+fleet_box_mcp() {
+  local b; b="$(_fleet_box "${1:-}")"
+  [ "$(obs_fleet_class "$b" 2>/dev/null || true)" = "windows-genlock" ] || return 2
+  case "$b" in stream-snv) echo "win-stream-snv" ;; resolume-snv) echo "win-resolume" ;; *) return 2 ;; esac
+}
 # fleet_boxes_swap_obs_dll CSV -> 1 when the list holds a Windows box (one with a win-* MCP above AND a
 # windows-genlock fleet row: the boxes a --fast deploy swaps obs.dll on), else 0. issue 1302: the
 # stats-ABI gate's scope. issue 1462: stream-snv runs the Linux stream role (its fleet row is

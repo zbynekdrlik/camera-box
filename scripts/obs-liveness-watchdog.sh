@@ -107,7 +107,14 @@ measure_boxes() {
       strih-snv) host="$STRIH_HOST"; fps="$STRIH_TARGET_FPS" ;;
       stream-snv) host="$STREAM_HOST"; fps="$STREAM_TARGET_FPS" ;;
       resolume-snv)
-        obs_fleet_is_home resolume-snv || continue   # away -> do not poll a traveling box
+        # away -> do not poll a traveling box; rc 2 = another machine answers there (issue 1357)
+        local poll_rc=0
+        obs_fleet_poll_now resolume-snv 2>/dev/null || poll_rc=$?
+        if [ "$poll_rc" = 2 ]; then
+          log "resolume-snv: UNKNOWN -- identity check failed ($OBS_FLEET_IDENTITY_REASON), not polled (issue 1357)"
+          continue
+        fi
+        [ "$poll_rc" = 0 ] || continue
         fps="$RESOLUME_TARGET_FPS"
         # RESIDUAL (#1296 review): unlike network-reach (whose promotion AND page condition are BOTH
         # keyed on .201 liveness, so they cannot contradict), THIS is a PAGING watchdog whose
@@ -122,6 +129,8 @@ measure_boxes() {
         # BEFORE enabling it (targets.md RESOLUME-SNV checklist, .claude/skills/ops). A future
         # identity-confirm-before-poll (read resolume's own :8899 bundle-state profile name) would
         # close it in code; until then it is a documented, supervisor-gated residual.
+        # CLOSED IN CODE (issue 1357): obs_fleet_poll_now reads the computer name that answers at
+        # resolume.lan and returns 2 unless it is the row's OBS_FLEET_IDENTITY name.
         ;;
       *) fps="${OBS_LIVENESS_DEFAULT_FPS:-30}" ;;
     esac

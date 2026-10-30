@@ -329,13 +329,13 @@ def _ci_step_run(tmp_path, fake_rc):
 def test_ci_step_deploys_each_away_venue_and_passes_when_they_pass(tmp_path):
     r, argv = _ci_step_run(tmp_path, 0)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert argv == ["--binary dist/camera-box --venue pp"], argv
+    assert argv == ["--binary dist/camera-box --venue pp --relay-binary dist-relay/bkshading-relay"], argv
 
 
 def test_ci_step_reds_the_job_when_a_venue_deploy_fails_and_names_its_exit(tmp_path):
     r, argv = _ci_step_run(tmp_path, 1)
     assert r.returncode == 1, r.stdout + r.stderr
-    assert argv == ["--binary dist/camera-box --venue pp"], argv
+    assert argv == ["--binary dist/camera-box --venue pp --relay-binary dist-relay/bkshading-relay"], argv
     err = next(ln for ln in r.stdout.splitlines() if ln.startswith("::error::"))
     assert "venue pp" in err and "exited 1" in err, err
 

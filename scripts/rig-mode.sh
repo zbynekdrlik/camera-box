@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 # rig-mode.sh — the DETERMINISTIC rig TEST-mode / EVENT-mode switch (#247).
 #
 # WHY (#247, the #246 live-event disaster): switching the rig between TEST mode (QR/E2E measurement)
@@ -123,6 +124,10 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # device silently plays into a dead pin after any HDMI renegotiation.
 # shellcheck source=scripts/lib/marker-device-resolve.sh
 . "$RIG_MODE_DIR/lib/marker-device-resolve.sh"
+# issue 1482: the rig's test feed (optical = a camera films cam2's monitor; direct = cam2's HDMI straight into
+# the splitter, the marker on cam2's USB jack, cam2's intercom off in TEST).
+# shellcheck source=scripts/lib/rig-test-feed.sh
+. "$RIG_MODE_DIR/lib/rig-test-feed.sh"
 # #723: SINGLE SOURCE OF TRUTH for the rig-test LEDGER — anything a test/worker starts on the
 # rig registers durably here; EVENT mode cleans BY LEDGER (kill-by-PID, immune to a process
 # rename — the #721 incident's root link: a RENAMED painter that every name-based cleanup
@@ -417,6 +422,7 @@ mkdir -p "$dropin_dir"
   echo '[Service]'
   echo 'Environment=CAMERA_BOX_NO_DISPLAY=1'
 } > "$dropin"
+$(rig_test_feed_intercom_dropin_cmds)
 systemctl daemon-reload
 systemctl restart camera-box
 # (2) wait until /dev/fb0 is actually free (the no-display camera-box released it; teardown is async).
@@ -1252,17 +1258,21 @@ park_stream_program_dev() {
 # OBS launch goes via the win-* MCP; #701 proved plain scp/ssh reaches stream, but that doesn't
 # drive/verify a GUI app; the Linux strih-snv restarts its supervised user unit, issue 1317). #257: env-free; the wrapper just verifies the genlock
 # render tick is ENABLED (build default). Only needed if OBS is not already running on a box.
+# issue 1474: the stream line is picked by the stream box's obs-fleet class (stream_box_obs_restart_hint,
+# scripts/lib/stream-box.sh): the Linux stream-snv restarts the same unit over plain ssh -- the Windows
+# relaunch planner refuses a Linux box -- and a Windows stream box keeps the planner line.
 print_genlock_relaunch_note() {
-  local mode="$1"
+  local mode="$1" stream_line
+  stream_line="$(stream_box_obs_restart_hint "$STREAM_USER" "$STREAM_IP" "scripts/launch-obs-genlock.sh --box stream --force")"
   cat <<EOF
 # ---- OBS genlock relaunch (only if OBS is not already running) ----
 # The measurement burn for ${mode} mode was just toggled over WebSocket above (no relaunch). The
 # genlock build is hard-locked (render tick + ts-align always ON, latency 3 ms — NO env), so a
-# relaunch is only needed to (re)start a stopped/wedged OBS. The strih is the Linux strih-snv
-# (issue 1317): restart its supervised user unit. The Windows stream box: paste the printed program
-# into its win-* MCP Shell:
+# relaunch is only needed to (re)start a stopped/wedged OBS. A Linux box (strih-snv, issue 1317; the
+# stream box when its fleet class is linux-genlock, issue 1474) restarts its supervised user unit
+# over plain ssh; a Windows stream box: paste the printed program into its win-* MCP Shell:
 #   strih-snv : ssh newlevel@${STRIH_IP} 'systemctl --user restart strih-obs.service'
-#   stream   : scripts/launch-obs-genlock.sh --box stream --force
+#   stream   : ${stream_line}
 # Then confirm (per the e2e / obs-ops playbook skills): the right stream scene (${STREAM_PROG_SCENE}
 # for test; EVENT leaves the stream program to the owner, issue 1380), recording NATIVE 1080p (#225), DanteSync locked. The wrapper EXITS 0 only when the OBS
 # log shows the genlock render tick ENABLED.
@@ -1315,6 +1325,12 @@ cam_ssh() {
 # was actually used, AFTER launch.
 resolve_marker_device() {
   local aplay_text resolved
+  # issue 1482: in the direct feed the marker plays to cam2's USB jack, never an HDMI monitor
+  if [ "$(rig_test_feed)" = direct ]; then
+    echo "[issue 1482] direct feed: the marker plays to cam2's jack $(rig_test_feed_marker_device)" >&2
+    rig_test_feed_marker_device
+    return 0
+  fi
   aplay_text="$(cam_ssh "$(marker_device_aplay_list_cmds)" 2>/dev/null || true)"
   if resolved="$(marker_device_resolve_from_aplay "$aplay_text")"; then
     echo "[#725] resolved marker device from cam2's live aplay -l: $resolved" >&2
@@ -1333,6 +1349,15 @@ resolve_marker_device() {
 verify_marker_device_monitor() {
   local device="$1" aplay_text
   aplay_text="$(cam_ssh "$(marker_device_aplay_list_cmds)" 2>/dev/null || true)"
+  if [ "$(rig_test_feed)" = direct ]; then
+    if rig_test_feed_jack_present "$aplay_text" "$device"; then
+      echo "PASS: [issue 1482] direct feed: the marker jack $device is present on cam2 (post-launch re-check)"
+      return 0
+    fi
+    echo "FAIL: [issue 1482] direct feed: the marker jack $device is NOT in cam2's aplay -l -- killing the just-launched painter." >&2
+    cam_ssh "PID=\$(cat '$PAINTER_PIDFILE' 2>/dev/null || true); [ -n \"\$PID\" ] && kill \"\$PID\" 2>/dev/null || true" || true
+    return 1
+  fi
   if marker_device_carries_monitor "$aplay_text" "$device"; then
     echo "PASS: [#725] marker device $device confirmed carrying a live monitor (post-launch re-check)"
     return 0
@@ -1393,6 +1418,7 @@ do_test() {
   # strih program (cam1 off) skipped this handoff, the 2 h transient painter expired and the QPSK
   # marker stopped. A failed check still fails the run, but cam2 keeps painting.
   echo "[cam2 ${PAINTER_IP}] #1008/#937 hand STEADY STATE to the PERMANENT supervised cam2-painter.service (durable -- Restart=always, survives crash + reboot -- NOT a disposable 2h nohup):"
+  cam_ssh "$(rig_test_feed_painter_dropin_cmds)"   # issue 1482: the steady painter's marker device for this feed
   cam_ssh "$(cam2_painter_steady_state_handoff_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")"
   echo
   echo "[cam2 ${PAINTER_IP}] #1075 arm the transient cam2-painter dead-man as a standing 'never dark' net for the handed-off permanent painter (symmetric with EVENT mode's disarm; no-ops on every fire while the painter's own frame-probe is alive):"
@@ -1735,6 +1761,7 @@ do_event() {
   # burn-clear, and fail loud at the END (folded into the exit status below) — fail-loud is
   # preserved, statelessness of the rig is no longer sacrificed to it.
   _cam_restore_rc=0
+  cam_ssh "$(rig_test_feed_painter_dropin_clear_cmds)" || _cam_restore_rc=$?   # issue 1482: before the camera-box restart
   cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")" || _cam_restore_rc=$?
   if [ "$_cam_restore_rc" -ne 0 ]; then
     echo "WARNING #868: cam-side restore FAILED (rc=$_cam_restore_rc) — continuing to the OBS burn-clear so no burn is stranded ON; EVENT mode will still exit non-zero." >&2

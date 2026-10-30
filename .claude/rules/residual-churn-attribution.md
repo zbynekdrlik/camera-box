@@ -6,7 +6,7 @@ paths:
 
 # Attributing a copies/gaps residual: SOURCE (grabber) vs DOWNSTREAM (FIFO/decimation) from burn logs (issue 1242)
 
-`scripts/residual_churn_attribution.py` (pure, Tier-0, a supervisor mining instrument — no rig, no
+`scripts/residual_churn_attribution.py` (pure, a supervisor mining instrument — no rig, no
 gate) aligns every `all_cambox_continuity` residual event's `wall_clock_epoch_s` to that cambox's
 OWN burn log and classifies the SOURCE side. Run it over run dirs or bare RUN_IDs:
 `python3 scripts/residual_churn_attribution.py <RUN_ID|dir>... [--json out] [--markdown out]`.

@@ -68,8 +68,7 @@ deliberately does **not** re-indent the body (bash-legal; the ~100 static-anchor
 substrings, not indentation) — smallest diff, zero anchor risk. Never remove an anchored token
 (`imag=$IMAG_IP`, `record --host "$IMAG_IP"`, `BURN_TARGETS=(`, `--merge-partials`) and never add a
 `\nfi\n` inside the `[8/8d]` merge-adjacency region (`harness_imag_topology` `!between.contains("\nfi\n")`).
-After ANY recording-e2e.sh edit, run every affected static-anchor binary (compile `--no-run`, run
-the compiled binaries directly — Tier-0; #477 disables the build-ok bypass).
+After ANY recording-e2e.sh edit, run every affected static-anchor test (`cargo test --test <name>`).
 
 ## rig-mode.sh's #789 TEST-entry gate is a SECOND imag hard-abort site — also offline-ack-aware (issue 1171)
 
@@ -87,7 +86,7 @@ fail-closing:
   (explicit env wins, same precedence as recording-e2e.sh).
 - The skip/proceed decision is a PURE `imag_genlock_gate_offline_ack_action REASON REACHABLE` (I/O —
   `imag_service_reachable "$IMAG_IP"` (ssh :22 / dantesync :8898, never a bare ping; issue 1317) —
-  stays in the caller; the decision is pure + Tier-0 testable, the same seam pattern as
+  stays in the caller; the decision is pure + testable, the same seam pattern as
   `imag_genlock_gate_verdict`). acked+UNREACHABLE → `skip` (loud named skip
   citing issue 1013 + reason, `return 0`, no drift-guard); acked+REACHABLE = STALE ack → `proceed`
   (falls through to the byte-unchanged gate — NOT exempted, mirrors the [0/8] stale-ack protection);
@@ -150,7 +149,7 @@ The fix (issue 1317) is ONE shared predicate `imag_service_reachable HOST` in
 dantesync `:8898/status` answers (2 s timeout each), NEVER a bare ICMP ping. All THREE stale-ack
 sites call it — `resolve_imag_offline_leg` + `require_imag_genlock_current` in `scripts/rig-mode.sh`
 (`imag_service_reachable "$IMAG_IP"`) and the `[0/8]` imag-acked branch in
-`scripts/recording-e2e.sh` (`imag_service_reachable "$_ip"`). Tier-0 seams
+`scripts/recording-e2e.sh` (`imag_service_reachable "$_ip"`). Test seams
 `IMAG_REACH_SSH_PROBE_CMD` / `IMAG_REACH_HTTP_PROBE_CMD` (a fixture command whose EXIT CODE stands
 in for the probe) keep it hermetically testable with no rig. **Trade-off (accepted):** a box whose
 sshd AND dantesync are both down but which is genuinely present reads "unreachable" and lets a

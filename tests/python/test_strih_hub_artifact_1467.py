@@ -20,6 +20,7 @@ no root):
 """
 import json
 import os
+import re
 import subprocess
 import zipfile
 from pathlib import Path
@@ -164,7 +165,9 @@ def test_the_checkout_version_is_the_workspace_version(tmp_path):
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "1.7.0-dev.900"
     real = _run('. "$1"\nstrih_checkout_version "$2"', CI_ART, REPO)
-    assert real.stdout.strip().startswith("1.7.0-dev."), real.stdout
+    # issue 1476: the workspace version is a clean X.Y.Z release since 1.8.0 (the staged tree above
+    # keeps the historical -dev.N form, so both forms stay pinned)
+    assert re.fullmatch(r"[0123456789]+\.[0123456789]+\.[0123456789]+", real.stdout.strip()), real.stdout
 
 
 # --- the install ------------------------------------------------------------------------------------

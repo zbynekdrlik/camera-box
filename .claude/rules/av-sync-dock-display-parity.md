@@ -23,8 +23,7 @@ which cross-checks the C++ VALUES against the Rust results.
   build (`.claude/rules/vendored-libobs-change-safety.md`). High-risk.
 - **Doc-comment / new-`const` / `constexpr` + `static_assert` changes are SAFE** — the self-test
   compares values only (a comment can't break `-Werror`; an unused `pub const` / `static_assert`-
-  referenced `constexpr` won't be flagged unused). Locally: `cargo test --test
-  av_sync_dock_cpp_mirror_gate # airuleset:build-ok` (needs g++; ~12–80s depending on box load).
+  referenced `constexpr` won't be flagged unused). Run `cargo test --test av_sync_dock_cpp_mirror_gate` (needs g++).
 - Gotcha: making the additive constant load-bearing (`-x + ADDITIVE_MS`) is NOT free — for `x==0`
   it flips the result from IEEE `-0.0` to `+0.0`, interacting with `dock_latency_display_ms`'s own
   `-0.0→0.0` normalization. Keep such a constant DECORATIVE + guarded by a test unless a

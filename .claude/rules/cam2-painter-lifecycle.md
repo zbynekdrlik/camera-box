@@ -57,6 +57,22 @@ since #984, emitting the QPSK marker default-ON.
   present OR `cam2-painter.service` enabled) but strih's program reads black — so an enabled unit
   makes `painter_expected` correctly true in TEST mode.
 
+## The direct test feed's drop-ins are PERSISTENT like the unit (issue 1482, 30.10.2026)
+
+In the direct feed (`scripts/lib/rig-test-feed.sh`) TEST writes `cam2-painter.service.d/zz-rig-direct-marker.conf`
+(the jack as the marker device) and `camera-box.service.d/zz-rig-direct-intercom-off.conf` under
+`/etc/systemd/system`, never `/run`. The unit is enabled and survives a reboot, so its marker device must too:
+the 29.10.2026 reboot with the drop-ins in `/run` brought the painter back on the HDMI PCM, the intercom took
+the jack, the program-audio guard read FOREIGN and the E2E `[0/8]` preflight refused.
+- The write / removal goes through a remount-rw window closed by `ro_window_close_cmds`; a drop-in already in
+  its wanted state opens no window (a repeat TEST never remounts). The old `/run` copies are removed on every
+  TEST and EVENT.
+- EVENT removes both in ONE window before its camera-box restart; a failed window is recorded (#868), never a
+  half-way stop.
+- The no-display drop-in stays in `/run` (every E2E cleanup clears it; cam2 carries its own provisioned
+  `cam2-no-display.conf` in `/etc` anyway).
+- Tests: `tests/python/test_rig_test_feed_persist_1482.py` on the issue-1407 fake read-only-root box.
+
 ## Gotchas
 
 - The handoff builder embeds `$(audio_marker_emission_check_cmds ...)` inside its heredoc — mind

@@ -35,8 +35,9 @@
 #   RETIRED and its row is gone, see the table below). strih-snv joins every facet whose premise is a
 #   PLATFORM-NEUTRAL read (ping / OBS-WS :4455 / the box's own :8899 bundle-state JSON / dantesync
 #   :8898), and stays OUT of the Windows-only ones:
-#   audio-lag     = strih-snv stream   (the vendored OBS `audio-telemetry #800` lines, read off each box's
-#                   own :8899 -- identical on Linux; resolume EXCLUDED: no program-audio chain on the CG box)
+#   audio-lag     = strih-snv stream strih-pp stream-pp   (the vendored OBS `audio-telemetry #800` lines,
+#                   read off each box's own :8899 -- identical on Linux; resolume EXCLUDED: no program-audio
+#                   chain on the CG box; issue 1460: the traveling PP boxes are polled only while home)
 #   av-step       = stream            (the av-sync dock lives on the stream box only, #1267)
 #   vb-matrix     = stream            (a Windows VB-Audio Matrix process check; strih-snv has NO VB-Matrix --
 #                   PipeWire replaced it, issue 1344 -- and resolume has no install either)
@@ -59,11 +60,13 @@
 #                   audit refuses any other count. It consumes the member NAME only (the NDI machine
 #                   name = the uppercased hostname, the anchor IP = the anchor's own mDNS record), so
 #                   a strih swap (the Poprad strih-pp next) is this one policy edit.)
-#   obs-session   = stream resolume   (issue 1317 part 2: the #979 obs64/AHK Windows SESSION-0
-#                   visibility probe -- a PowerShell probe over win_ssh_run, meaningless on a Linux
-#                   box, so windows-genlock members ONLY. The consumer ALSO class-gates each box, so
-#                   even an override naming strih-snv never gets the PowerShell probe; resolume is
-#                   probed only while home, via obs_fleet_poll_now.)
+#   obs-session   = strih-snv stream resolume   (the #979 operator-visibility watchdog between E2E
+#                   runs. The consumer picks the probe by CLASS: a windows-genlock box gets the obs64/AHK
+#                   SESSION-0 PowerShell probe over win_ssh_run, a linux-genlock box (issue 1474) the
+#                   recording-e2e [0/8] Linux check -- strih-obs.service over plain ssh + a bounded
+#                   obs-websocket round-trip -- and never PowerShell; any other class is skipped.
+#                   resolume is probed only while home, via obs_fleet_poll_now. The PP boxes stay
+#                   out, like obs-liveness / network-reach.)
 #   burn-reconcile = strih-snv stream  (issue 1317 part 2: the #1060 fresh-OBS-start burn reconcile
 #                   -- OBS-WS GetStats renderTotalFrames + obs_burn_filter sweeps, platform-neutral.
 #                   The unattended-start premise holds on strih-snv too: a boot autostart or a
@@ -83,9 +86,12 @@
 #                   audio mixer whose `audio-stall` dump says whether it keeps real time; resolume
 #                   also carries the obs-vban FOH/lv1 senders whose pacer loss the same watchdog
 #                   pages. The consumer polls resolume only while home, via obs_fleet_poll_now.)
-#   win-baseline  = stream resolume   (issue 1357: the Windows OBS boxes graded against the ONE
-#                   Windows baseline -- power plan, sleep, USB suspend, WER -- by
-#                   scripts/win-baseline-check.sh, report-only; resolume SKIPPED when away.)
+#   win-baseline  = the windows-genlock rows of `stream resolume`   (issue 1357: the Windows OBS boxes
+#                   graded against the ONE Windows baseline -- power plan, sleep, USB suspend, WER -- by
+#                   scripts/win-baseline-check.sh, report-only; resolume SKIPPED when away. Issue
+#                   1474: a Windows baseline means nothing on a Linux box, so the facet takes only the
+#                   rows whose class is windows-genlock: resolume alone since stream-snv went Linux
+#                   (issue 1462), both again on a fleet whose stream box is Windows.)
 #   obs-handles   = strih-snv stream resolume   (issue 1406: every managed OBS process can leak
 #                   handles -- the 5.10.2026 stream obs64 held 4M after ~22 h -- and the :8899
 #                   `obs_handles*` facet reads its count on Windows AND Linux (strih-snv: /proc fds).
@@ -234,13 +240,23 @@ obs_fleet_home_check() {
   printf '%s' "${e##*|}"
 }
 
+# _obs_fleet_windows_rows NAMES -> the NAMES (space-separated, in order) whose fleet row class is
+# windows-genlock; a name with no row is left out. issue 1474: a Windows-only facet's members.
+_obs_fleet_windows_rows() {
+  local m out=""
+  for m in ${1:-}; do
+    [ "$(obs_fleet_class "$m" 2>/dev/null || true)" = "windows-genlock" ] && out="${out:+$out }$m"
+  done
+  printf '%s' "$out"
+}
+
 # obs_fleet_facet_members <facet> -> the space-separated box NAMES carrying FACET (stdout), decided
 # by the policy table documented in this file's header. Unknown facet -> error on stderr + return 1
 # (fail-closed: a caller must never silently derive an empty roster from a typo'd facet).
 obs_fleet_facet_members() {
   local facet="${1:-}"
   case "$facet" in
-    audio-lag)     printf 'strih-snv stream-snv' ;;
+    audio-lag)     printf 'strih-snv stream-snv strih-pp stream-pp' ;;   # issue 1460: + the PP Linux boxes, polled only while home
     av-step)       printf 'stream-snv' ;;
     vb-matrix)     printf 'stream-snv' ;;
     bundle-state)  printf 'strih-snv stream-snv resolume-snv' ;;
@@ -249,14 +265,14 @@ obs_fleet_facet_members() {
     genlock-lock)  printf 'strih-snv stream-snv imag resolume-snv strih-pp stream-pp' ;;   # issue 1441: + the PP Linux boxes
     render-freeze) printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;
     ndi-portmap)   printf 'strih-snv' ;;
-    obs-session)   printf 'resolume-snv' ;;   # Windows-only; stream-snv runs Linux since issue 1462
+    obs-session)   printf 'strih-snv stream-snv resolume-snv' ;;   # issue 1474: the probe is picked by class
     burn-reconcile) printf 'strih-snv stream-snv' ;;
     rig-restore)   printf 'strih-snv stream-snv' ;;
     ndi-sender)    printf 'strih-snv stream-snv resolume-snv' ;;
-    win-baseline)  printf 'stream-snv resolume-snv' ;;   # issue 1357: the Windows OBS-box baseline (win-baseline-check.sh)
+    win-baseline)  _obs_fleet_windows_rows 'stream-snv resolume-snv' ;;   # issue 1357/1474: the Windows OBS-box baseline, Windows rows only
     audio-mixer)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1381: mixer real time + VBAN pacer loss
     obs-handles)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1406: the OBS process handle / fd count
-    build-parity)  printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp resolume-pp' ;;   # issue 1426: one OBS genlock build across both venues
+    build-parity)  printf 'strih-snv stream-snv strih-pp stream-pp' ;;   # issue 1426: one OBS genlock build across both venues; the cg OBS resolume boxes are out (owner 16.10.2026: minimal priority)
     *)
       echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles build-parity)" >&2
       return 1
@@ -294,6 +310,11 @@ obs_fleet_boxes() {
 obs_fleet_resolve_host() {
   # issue 1317 part 4 review: time-bounded -- strih_platform / the class gate now resolve an unknown
   # NAME through this seam, so a stalled DNS resolver must never stall every caller.
+  # issue 1426: OBS_FLEET_RESOLVE_CMD <host> -> the address, a test seam like OBS_FLEET_IDENTITY_CMD.
+  if [ -n "${OBS_FLEET_RESOLVE_CMD:-}" ]; then
+    "$OBS_FLEET_RESOLVE_CMD" "${1:-}" 2>/dev/null | head -n 1 || true
+    return 0
+  fi
   timeout "${OBS_FLEET_RESOLVE_TIMEOUT:-2}" getent ahosts "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
 }
 
@@ -308,6 +329,11 @@ obs_fleet_resolve_host_v4() {
 # subshell + timeout bounds a hung connect. Override in a test to stub the probe.
 obs_fleet_status_probe() {
   local host="${1:-}" port="${2:-}"
+  # issue 1426: OBS_FLEET_STATUS_PROBE_CMD <host> <port> -> exit 0 = the port answers (a test seam).
+  if [ -n "${OBS_FLEET_STATUS_PROBE_CMD:-}" ]; then
+    if "$OBS_FLEET_STATUS_PROBE_CMD" "$host" "$port" >/dev/null 2>&1; then printf '1'; else printf '0'; fi
+    return 0
+  fi
   if timeout "${OBS_FLEET_STATUS_TIMEOUT:-4}" bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
     printf '1'
   else
@@ -421,13 +447,91 @@ obs_fleet_refuse_linux_target() {
 # `retired` box never. A name with NO row (an ops `<X>_BOXES` override naming a box the table does
 # not know yet) is polled as given -- the override is authoritative, exactly as it already bypasses
 # the facet derivation.
+#
+# issue 1357 (follow-up 5866910703): a traveling box that is home is ALSO identity-checked before rc
+# 0 -- the computer name that answers at its host must be the one OBS_FLEET_IDENTITY declares
+# (resolume.lan resolves to 10.77.9.201, an address the `bridge` PC has also held). A different or
+# unreadable name returns 2 (UNKNOWN: never poll, never copy) with OBS_FLEET_IDENTITY_REASON naming
+# the machine that answered, plus one stderr line, so every reader is guarded; a reader that only
+# tests `if ! obs_fleet_poll_now` skips it like an away box. rc: 0 poll / 1 away / 2 identity UNKNOWN.
 obs_fleet_poll_now() {
-  local name="${1:-}" check
+  local name="${1:-}" check host
+  OBS_FLEET_IDENTITY_REASON=""
   check="$(obs_fleet_home_check "$name")" || return 0
   case "$check" in
     always) return 0 ;;
-    *) obs_fleet_is_home "$name" ;;
   esac
+  obs_fleet_is_home "$name" || return 1
+  host="$(obs_fleet_host "$name")" || return 0
+  obs_fleet_identity_check "$name" "$host" && return 0
+  echo "obs-fleet: $name UNKNOWN -- $OBS_FLEET_IDENTITY_REASON at $host (issue 1357 identity check): not polled, nothing copied" >&2
+  return 2
+}
+
+# OBS_FLEET_IDENTITY -- issue 1357: the expected COMPUTER NAME of each row whose host is a DHCP NAME,
+# as space-separated `name=EXPECTED` pairs. The ONE declaration every reader of obs_fleet_poll_now
+# checks against (never hand-typed per script). Compared case-insensitively (Windows `hostname`
+# prints RESOLUME-SNV, a Linux box its lower-case name). The fixed-IP `always` rows carry none: their
+# address is pinned, and obs_fleet_poll_now does no live I/O for them. resolume-pp is not declared
+# until its computer name is read live (an undeclared row is polled as before).
+OBS_FLEET_IDENTITY="${OBS_FLEET_IDENTITY-resolume-snv=RESOLUME-SNV strih-pp=strih-pp stream-pp=stream-pp resolume-pp=resolume-pp}"
+
+# obs_fleet_expected_identity <name> -> the declared expected computer name of NAME (stdout, rc 0),
+# or rc 1 when none is declared. A transition alias (issue 1414) finds its renamed row's name. Pure.
+obs_fleet_expected_identity() {
+  local want pair IFS=$' \t\n'
+  want="$(obs_fleet_canonical_name "${1:-}")"
+  [ -n "$want" ] || return 1
+  for pair in $OBS_FLEET_IDENTITY; do
+    [ "${pair%%=*}" = "$want" ] || continue
+    [ -n "${pair#*=}" ] || return 1
+    printf '%s' "${pair#*=}"
+    return 0
+  done
+  return 1
+}
+
+# obs_fleet_identity_read <name> <host> -> the computer name that answers at HOST (stdout; empty when
+# unreadable). Seam: OBS_FLEET_IDENTITY_CMD, invoked as `<cmd> <name> <host>`. Default: `hostname`
+# over ssh with the fleet credential (OBS_FLEET_SSH_USER / OBS_FLEET_SSH_PASS, default the
+# targets.md newlevel login every fleet reader uses), bounded by OBS_FLEET_IDENTITY_TIMEOUT (s,
+# default 10). sshpass stays the OUTER command, so a test's sshpass function stub still intercepts it.
+obs_fleet_identity_read() {
+  local name="${1:-}" host="${2:-}" out
+  if [ -n "${OBS_FLEET_IDENTITY_CMD:-}" ]; then
+    out="$("$OBS_FLEET_IDENTITY_CMD" "$name" "$host" 2>/dev/null)" || out=""
+  else
+    out="$(sshpass -p "${OBS_FLEET_SSH_PASS:-newlevel}" timeout "${OBS_FLEET_IDENTITY_TIMEOUT:-10}" \
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+      -o ConnectTimeout=5 "${OBS_FLEET_SSH_USER:-newlevel}@${host}" hostname 2>/dev/null)" || out=""
+  fi
+  out="${out%%$'\n'*}"
+  out="${out//$'\r'/}"
+  out="${out//[[:space:]]/}"
+  printf '%s' "$out"
+}
+
+# obs_fleet_identity_check <name> <host> -> rc 0 when NAME declares no expected computer name or the
+# one answering at HOST matches it; rc 1 otherwise, with OBS_FLEET_IDENTITY_REASON set to
+# `answered as <GOT>, expected <EXP>` or `identity unreadable (expected <EXP>)`. OBS_FLEET_HOME set
+# without OBS_FLEET_IDENTITY_CMD = a forced test/ops state: authoritative, nothing is read.
+obs_fleet_identity_check() {
+  local name="${1:-}" host="${2:-}" want got
+  OBS_FLEET_IDENTITY_REASON=""
+  want="$(obs_fleet_expected_identity "$name")" || return 0
+  if [ -n "${OBS_FLEET_HOME:-}" ] && [ -z "${OBS_FLEET_IDENTITY_CMD:-}" ]; then
+    return 0
+  fi
+  got="$(obs_fleet_identity_read "$name" "$host")"
+  if [ -z "$got" ]; then
+    OBS_FLEET_IDENTITY_REASON="identity unreadable (expected $want)"
+    return 1
+  fi
+  if [ "${got,,}" != "${want,,}" ]; then
+    OBS_FLEET_IDENTITY_REASON="answered as $got, expected $want"
+    return 1
+  fi
+  return 0
 }
 
 # obs_fleet_is_home <name> -> returns 0 iff NAME is currently "home" (reachable + serving), 1 if away

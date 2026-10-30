@@ -297,7 +297,10 @@ def test_date_master_check_keeps_the_step_bound_line_for_a_1_10_0_master(tmp_pat
 
 def test_the_version_pin_is_the_release_this_date_grading_implements():
     body = (_ROOT / "scripts" / "dantesync-version-gate.sh").read_text()
-    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.18.0}"' in body
+    # 1.19.0 (dantesync#134 fast boot sync) keeps every date field this grading reads; it adds
+    # ntp_server_unsynchronized only. 1.20.0 (dantesync#136, the time server + NTP burst on their own
+    # threads) changes no /status field.
+    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.20.0}"' in body
 
 
 # ---------------------------------------------------------------------------------------------

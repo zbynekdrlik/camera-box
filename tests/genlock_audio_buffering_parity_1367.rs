@@ -18,8 +18,9 @@
 //!   `genlock_audio_buffering_make_plan_floor`), so the override and the max lift stay pinned.
 
 use camera_box::genlock_audio_buffering::{
-    action, frozen, launch_settled, plan, plan_with_floor, ticks_for_ms, ticks_ns, BufferingAction,
-    AUDIO_OUTPUT_FRAMES, DEFAULT_MAX_TICKS, FLOOR_MS, LAUNCH_SETTLE_NS,
+    action, frozen, frozen_plan, launch_settled, parse_box_ms, plan, plan_box, plan_with_floor,
+    ticks_for_ms, ticks_ns, BufferingAction, AUDIO_OUTPUT_FRAMES, BOX_MAX_MS, DEFAULT_MAX_TICKS,
+    FLOOR_MS, LAUNCH_SETTLE_NS,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -128,6 +129,77 @@ fn frozen_vectors() -> Vec<(bool, bool)> {
     vec![(false, false), (false, true), (true, false), (true, true)]
 }
 
+/// Issue 1425 (design 6443440513): the per-box FIXED buffering -- the plan from the marker's ms
+/// (None = no valid marker, today's plan) at both production rates and the edges.
+fn plan_box_vectors() -> Vec<(Option<u32>, u32, bool, u32)> {
+    let mut v = Vec::new();
+    for ms in [
+        None,
+        Some(0),
+        Some(1),
+        Some(21),
+        Some(22),
+        Some(64),
+        Some(85),
+        Some(959),
+        Some(960),
+    ] {
+        for (max, fixed) in [(0_u32, false), (20, true), (50, false), (500, false)] {
+            for rate in [44_100_u32, 48_000] {
+                v.push((ms, max, fixed, rate));
+            }
+        }
+    }
+    v
+}
+
+/// Issue 1425: the freeze under a plan -- a fixed plan is frozen from the first tick, whatever the
+/// encoder and the launch settle window say.
+fn frozen_plan_vectors() -> Vec<(bool, bool, bool)> {
+    let mut v = Vec::new();
+    for fixed in [false, true] {
+        for enc in [false, true] {
+            for settled in [false, true] {
+                v.push((fixed, enc, settled));
+            }
+        }
+    }
+    v
+}
+
+/// Issue 1425: the marker file's bytes. Valid = 1..3 ASCII digits, an optional trailing `\n`,
+/// value 0..BOX_MAX_MS.
+pub const BOX_MS_BYTES: [&[u8]; 24] = [
+    b"",
+    b"0",
+    b"0\n",
+    b"00",
+    b"7",
+    b"85\n",
+    b"960",
+    b"960\n",
+    b"961",
+    b"999\n",
+    b"1000",
+    b"0960",
+    b"\n",
+    b"85\n\n",
+    b"85\r\n",
+    b" 85",
+    b"85 ",
+    b"-1",
+    b"+5",
+    b"8a",
+    b"0x5",
+    b"\xd9\xa1",
+    b"12345678",
+    b"85\x00",
+];
+
+fn bytes_token(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect::<String>()
+}
+
 fn action_token(a: BufferingAction) -> i32 {
     a as i32
 }
@@ -194,6 +266,38 @@ fn rust_trace() -> Vec<String> {
             u8::from(frozen(enc, settled))
         ));
     }
+    for (ms, max, fixed, rate) in plan_box_vectors() {
+        let p = plan_box(ms, max, fixed, rate, AUDIO_OUTPUT_FRAMES);
+        out.push(format!(
+            "planb {} {} {max} {} {rate} {} {} {} {} {}",
+            u8::from(ms.is_some()),
+            ms.unwrap_or(0),
+            u8::from(fixed),
+            p.floor_ticks,
+            p.max_ticks,
+            u8::from(p.fixed),
+            u8::from(p.overridden),
+            u8::from(p.box_fixed)
+        ));
+    }
+    for (fixed, enc, settled) in frozen_plan_vectors() {
+        out.push(format!(
+            "frozenp {} {} {} {}",
+            u8::from(fixed),
+            u8::from(enc),
+            u8::from(settled),
+            u8::from(frozen_plan(fixed, enc, settled))
+        ));
+    }
+    for b in BOX_MS_BYTES {
+        let r = parse_box_ms(b);
+        out.push(format!(
+            "parse {} {} {}",
+            bytes_token(b),
+            u8::from(r.is_some()),
+            r.unwrap_or(0)
+        ));
+    }
     out
 }
 
@@ -237,6 +341,27 @@ fn c_harness() -> String {
             if enc { "true" } else { "false" },
             if settled { "true" } else { "false" }
         ));
+    }
+    let tf = |b: bool| if b { "true" } else { "false" };
+    for (ms, max, fixed, rate) in plan_box_vectors() {
+        body.push_str(&format!(
+            "\tplanb_line({}, {}u, {max}u, {}, {rate}u);\n",
+            tf(ms.is_some()),
+            ms.unwrap_or(0),
+            tf(fixed)
+        ));
+    }
+    for (fixed, enc, settled) in frozen_plan_vectors() {
+        body.push_str(&format!(
+            "\tfrozenp_line({}, {}, {});\n",
+            tf(fixed),
+            tf(enc),
+            tf(settled)
+        ));
+    }
+    for b in BOX_MS_BYTES {
+        let lit: String = b.iter().map(|x| format!("\\x{x:02x}")).collect();
+        body.push_str(&format!("\tparse_line(\"{lit}\", {}u);\n", b.len()));
     }
     format!(
         r#"#include <inttypes.h>
@@ -285,6 +410,31 @@ static void action_line(int total, int floor, int max, bool behind, bool frozen)
 static void frozen_line(bool enc, bool settled)
 {{
 	printf("frozen %d %d %d\n", enc ? 1 : 0, settled ? 1 : 0, genlock_audio_buffering_frozen(enc, settled) ? 1 : 0);
+}}
+
+static void planb_line(bool has, uint32_t ms, uint32_t max, bool fixed, uint32_t rate)
+{{
+	const struct genlock_audio_buffering_plan p =
+		genlock_audio_buffering_make_plan_box(has, ms, max, fixed, rate, 1024u);
+	printf("planb %d %" PRIu32 " %" PRIu32 " %d %" PRIu32 " %" PRIu32 " %" PRIu32 " %d %d %d\n", has ? 1 : 0, ms,
+	       max, fixed ? 1 : 0, rate, p.floor_ticks, p.max_ticks, p.fixed ? 1 : 0, p.overridden ? 1 : 0,
+	       p.box_fixed ? 1 : 0);
+}}
+
+static void frozenp_line(bool fixed, bool enc, bool settled)
+{{
+	printf("frozenp %d %d %d %d\n", fixed ? 1 : 0, enc ? 1 : 0, settled ? 1 : 0,
+	       genlock_audio_buffering_frozen_plan(fixed, enc, settled) ? 1 : 0);
+}}
+
+static void parse_line(const char *buf, size_t len)
+{{
+	uint32_t ms = 12345u;
+	const bool ok = genlock_audio_buffering_parse_box_ms(buf, len, &ms);
+	printf("parse ");
+	for (size_t i = 0; i < len; i++)
+		printf("%02x", (unsigned)(unsigned char)buf[i]);
+	printf(" %d %" PRIu32 "\n", ok ? 1 : 0, ok ? ms : 0u);
 }}
 
 int main(void)
@@ -387,7 +537,16 @@ fn c_audio_buffering_matches_the_rust_authority_1367() {
             && has("settled 0 1000000000 0")
             && has("frozen 0 1 0")
             && has("frozen 1 0 0")
-            && has("frozen 1 1 1"),
+            && has("frozen 1 1 1")
+            && has("planb 1 0 0 0 48000 0 45 0 0 1")
+            && has("planb 1 85 0 0 48000 4 45 0 0 1")
+            && has("planb 1 960 0 0 48000 45 45 0 0 1")
+            && has("planb 0 0 0 0 48000 0 45 0 0 0")
+            && has("frozenp 1 0 0 1")
+            && has("frozenp 0 1 0 0")
+            && has("parse 3936300a 1 960")
+            && has("parse 393631 0 0")
+            && has("parse 38350d0a 0 0"),
         "issue 1367: the parity vectors no longer reach the 0 floor's stock growth, a floor raise, \
          the override, the maximum, the dynamic increase, the freeze and the launch settle window"
     );
@@ -431,6 +590,52 @@ fn the_header_defines_are_the_rust_constants_1367() {
     );
     // Issue 1425 E2 slice 3: no floor.
     assert_eq!(lift_define(&h, "GENLOCK_AUDIO_BUFFERING_FLOOR_MS"), "0");
+    // Issue 1425 (design 6443440513): the per-box fixed buffering's ceiling = OBS's own maximum.
+    assert_eq!(
+        lift_define(&h, "GENLOCK_AUDIO_BUFFERING_BOX_MAX_MS"),
+        BOX_MAX_MS.to_string()
+    );
+    assert_eq!(BOX_MAX_MS, 960);
+}
+
+#[test]
+fn a_fixed_plan_never_grows_from_its_first_tick_1425() {
+    // Issue 1425 (design 6443440513): under a box plan the action is never DYNAMIC -- at tick 0 the
+    // floor is raised (or nothing at 0 ms), afterwards a late source is never a growth, with or
+    // without an encoder, inside or after the launch settle window.
+    for ms in [0_u32, 21, 85, 960] {
+        for rate in [44_100_u32, 48_000] {
+            let p = plan_box(Some(ms), 0, false, rate, AUDIO_OUTPUT_FRAMES);
+            assert!(p.box_fixed && !p.fixed);
+            for enc in [false, true] {
+                for settled in [false, true] {
+                    let fr = frozen_plan(true, enc, settled);
+                    assert!(
+                        fr,
+                        "a fixed plan must be frozen (enc={enc} settled={settled})"
+                    );
+                    for total in 0..=p.max_ticks as i32 {
+                        let a = action(total, p.floor_ticks as i32, p.max_ticks as i32, true, fr);
+                        assert_ne!(a, BufferingAction::Dynamic, "ms={ms} total={total}");
+                        if total < p.floor_ticks as i32 {
+                            assert_eq!(a, BufferingAction::Floor);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // No marker: today's plan exactly.
+    for (max, fixed) in [(0_u32, false), (20, true)] {
+        let mut want = plan(max, fixed, 48_000, AUDIO_OUTPUT_FRAMES);
+        want.box_fixed = false;
+        assert_eq!(
+            plan_box(None, max, fixed, 48_000, AUDIO_OUTPUT_FRAMES),
+            want
+        );
+    }
+    assert!(!frozen_plan(false, false, true));
+    assert!(!frozen_plan(false, true, false));
 }
 
 /// The #786 launch-gate bound of one consumer, lifted from its source.

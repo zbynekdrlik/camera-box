@@ -33,7 +33,7 @@ recovery one-liner under three names, and the three fetches that only differed b
   the lib on the same command line and follows the `source=` directive, so it stays quiet without
   the directive; a per-file run (every local recipe) warns. Add it whenever a move leaves a global
   read only by the lib (slice C missed 20 of them, a review caught it).
-- **A Tier-0 fetch seam is an ARGUMENT, not a copy.** A watchdog that wants a `*_FETCH_CMD` replay
+- **A test fetch seam is an ARGUMENT, not a copy.** A watchdog that wants a `*_FETCH_CMD` replay
   seam calls `fetch_bundle_json "$ip" MY_FETCH_CMD` (the variable's NAME). A non-empty value then
   runs as `<cmd> <ip>` in place of curl: one executable file path runs whole (spaces allowed),
   anything else is split on whitespace without globbing or quote handling (`bash <fixture>`, never
@@ -68,7 +68,7 @@ recovery one-liner under three names, and the three fetches that only differed b
   `recovery_latch_fires <was_alerted>`; what a recovery DOES (a machine-channel log line, clearing
   the latch) stays in the watchdog.
 - **Where the source line goes:** after `obs-watchdog-decision.sh`. The exceptions are
-  bundle-state, ndi-halving and vban-rate, whose `--help` prints a line range that reaches into the
+  bundle-state and ndi-halving, whose `--help` prints a line range that reaches into the
   source block. There it goes after the last source line, so `--help` stays byte-identical.
 
 ## Proving a helper move is behaviour-neutral (the issue-1386 recipe)

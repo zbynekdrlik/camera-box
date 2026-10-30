@@ -140,9 +140,10 @@ fn fleet_boxes_reproduces_the_legacy_byte_exact_defaults_1296() {
     // issue 1317: audio-lag watches the PRODUCTION strih (now the Linux strih-snv at .202 -- its
     // vendored OBS emits the same `audio-telemetry #800` lines) + stream. vb-matrix is WINDOWS-only
     // (PipeWire replaced VB-Matrix on strih-snv), so it is stream alone.
+    // issue 1460: + the PP Linux boxes (traveling, read only while home).
     assert_eq!(
         boxes("audio-lag"),
-        "strih-snv|10.77.9.202 stream-snv|10.77.9.204"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     );
     assert_eq!(boxes("vb-matrix"), "stream-snv|10.77.9.204");
     // av-step: stream only (the av-sync dock box, #1267).
@@ -324,18 +325,41 @@ const ALL_FACETS: [&str; 16] = [
 // their rosters from the fleet list too, each facet by its own premise.
 // ---------------------------------------------------------------------------------------------
 #[test]
-fn fleet_obs_session_facet_is_windows_genlock_only_1317() {
-    // obs-session = the Windows session-0 / AHK visibility probe (a PowerShell probe over
-    // win_ssh_run). It has no meaning on a Linux box, so the facet carries ONLY windows-genlock
-    // boxes: resolume (gated on is_home by the consumer); stream-snv runs Linux since issue 1462.
-    assert_eq!(boxes("obs-session"), "resolume-snv|resolume.lan");
+fn fleet_obs_session_facet_watches_both_snv_linux_boxes_and_resolume_1474() {
+    // obs-session = the operator-visibility watchdog between E2E runs. Issue 1474: the consumer
+    // probes a linux-genlock box with the `[0/8]` Linux check (strih-obs.service + obs-websocket,
+    // plain ssh) and a windows-genlock box with the session-0 / AHK PowerShell probe, so the facet
+    // carries both SNV Linux boxes (stream-snv runs Linux since issue 1462) plus resolume (gated on
+    // is_home by the consumer). The PP boxes stay out, like obs-liveness / network-reach.
+    assert_eq!(
+        boxes("obs-session"),
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
+    );
     for m in fleet_stdout("obs_fleet_facet_members obs-session").split_whitespace() {
-        assert_eq!(
-            fleet_stdout(&format!("obs_fleet_class {m}")),
-            "windows-genlock",
-            "obs-session member {m} is not a Windows box -- it would be probed with PowerShell"
+        let class = fleet_stdout(&format!("obs_fleet_class {m}"));
+        assert!(
+            class == "windows-genlock" || class == "linux-genlock",
+            "obs-session member {m} has class {class:?}: the consumer has a probe for neither"
         );
     }
+}
+
+#[test]
+fn fleet_win_baseline_facet_is_its_windows_rows_only_1474() {
+    // issue 1474: the Windows OBS-box baseline (win-baseline-check.sh) means nothing on a Linux box,
+    // so the facet takes only the windows-genlock rows of its list: on the real fleet resolume-snv
+    // alone (stream-snv is linux-genlock since issue 1462), while a fleet whose stream box is
+    // Windows still carries both, in the list's order.
+    assert_eq!(boxes("win-baseline"), "resolume-snv|resolume.lan");
+    let win = "strih-snv|10.77.9.202|linux-genlock|always\n\
+stream-snv|10.77.9.204|windows-genlock|always\n\
+resolume-snv|resolume.lan|windows-genlock|traveling";
+    assert_eq!(
+        fleet_stdout(&format!(
+            "OBS_FLEET='{win}'; obs_fleet_facet_members win-baseline"
+        )),
+        "stream-snv resolume-snv"
+    );
 }
 
 #[test]
@@ -518,7 +542,7 @@ fn sourced_boxes_default_is_byte_exact_for_the_legacy_facets_1296() {
     // The three pre-#1296 facets reproduce their exact legacy literal when sourced with no override.
     assert_eq!(
         watchdog_var("audio-lag-alert-watchdog.sh", "BOXES", &[]),
-        "strih-snv|10.77.9.202 stream-snv|10.77.9.204"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     );
     assert_eq!(
         watchdog_var("av-step-alert-watchdog.sh", "BOXES", &[]),

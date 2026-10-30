@@ -53,6 +53,10 @@ PYTHON_BIN="${AVSYNC_MEASURE_PYTHON:-$HOME/avsync/venv/bin/python}"
 MEASURE_SCRIPT="${AVSYNC_MEASURE_SCRIPT:-$HOME/avsync/av_sync_measure.py}"
 FRESHNESS_SCRIPT="${AVSYNC_MEASURE_FRESHNESS:-$HOME/avsync/avsync_freshness.py}"
 HEARTBEAT="${AVSYNC_MEASURE_HEARTBEAT:-}"
+# issue 1459: the venue's program audio input the SyncNet advice names (`--knob-input`). Empty =
+# derived from the venue (resolve_venue_config, the stream box fact STRIH_PROGRAM_AUDIO_INPUT); still
+# empty after that (a box with no fact file) = av_sync_measure.py keeps its old 2ME PGM wording.
+KNOB_INPUT="${AVSYNC_MEASURE_KNOB_INPUT:-}"
 MEASURE_CAP_S="${AVSYNC_MEASURE_CAP_S:-180}"
 # issue 1441: the dev2-wide SyncNet lock and how long a pass waits for another venue's run (default:
 # the measurement cap -- one whole other run fits; the template unit's TimeoutStartSec covers it).
@@ -123,6 +127,9 @@ resolve_venue_config() {
     HEARTBEAT="$(avsync_measure_heartbeat_path "$HOME" "$VENUE")"
     [ "$VENUE" = "$AVSYNC_LEGACY_HEARTBEAT_VENUE" ] && LEGACY_LINK=1
   fi
+  if [ -z "$KNOB_INPUT" ]; then
+    KNOB_INPUT="$(avsync_venue_audio_input "$VENUE")" || KNOB_INPUT=""
+  fi
   return 0
 }
 
@@ -188,6 +195,9 @@ get_max_db() {
 # lock fd is inherited by the measurement process, so a run outliving this function still holds it.
 run_measure() {
   local clip="$1" out_f err_f rc last_out last_err lock_fd wait_s
+  local -a knob_args=()
+  # issue 1459: the advice names the venue's program audio sync offset (absent = the old wording).
+  [ -n "${KNOB_INPUT:-}" ] && knob_args=(--knob-input "$KNOB_INPUT")
   wait_s="${LOCK_WAIT_S:-$MEASURE_CAP_S}"
   if ! command -v flock >/dev/null 2>&1; then
     printf 'ERROR: flock (util-linux) is missing on this box -- the SyncNet lock cannot be taken, not measured'
@@ -219,7 +229,7 @@ run_measure() {
   # UNCHANGED; only the (unwanted) self-delivery is disabled.
   AIRULESET_NOTIFY="$MEASURE_NOTIFY_BIN" \
     timeout "$MEASURE_CAP_S" "$PYTHON_BIN" "$MEASURE_SCRIPT" --media "$clip" --repo "$REPO" \
-    >"$out_f" 2>"$err_f" || rc=$?
+    "${knob_args[@]}" >"$out_f" 2>"$err_f" || rc=$?
   exec {lock_fd}>&-
   if [ "$rc" -eq 124 ]; then
     rm -f "$out_f" "$err_f"
@@ -238,7 +248,7 @@ run_measure() {
 main() {
   avsync_venue_table_load   # derive the venue table once (its warnings print once per pass)
   resolve_venue_config
-  log "pass start (venue=$VENUE grab_url=$GRAB_URL repo=$REPO heartbeat=$HEARTBEAT)"
+  log "pass start (venue=$VENUE grab_url=$GRAB_URL repo=$REPO heartbeat=$HEARTBEAT knob_input=${KNOB_INPUT:-<2ME PGM>})"
 
   # 1. grab
   local -a grab_argv=()

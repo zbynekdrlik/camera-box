@@ -45,7 +45,7 @@ superset (adds the stage dirs, a younger-than-D union, and a deploy-free path).
 
 ## The decision (keep newest-N per kind UNION younger-than-D-days)
 
-Canonical spec: **`src/obs_backup_retention.rs`** (pure, Tier-0, `tests/obs_backup_retention.rs`).
+Canonical spec: **`src/obs_backup_retention.rs`** (pure, `tests/obs_backup_retention.rs`).
 `scripts/obs-backup-retention.ps1` (win) and the `--local-sweep` bash decision in
 `scripts/obs-backup-retention.sh` (imag) are FAITHFUL PORTS of it — keep all three in sync.
 
@@ -80,19 +80,14 @@ Tune with `--keep-runs N --keep-days D`. Win paths override with `--win-backup-r
 `--win-stage-parent`; imag paths with `--backup-root` / `--stage-parent`. ssh passwords via
 `STRIH_SSH_PW` (win, default `newlevel`) and `IMAG_IP`/`IMAG_USER`/`IMAG_PW` (imag).
 
-## Tier-0 verification (#477/#557 block ALL local cargo, `--no-run` INCLUDED)
+## Verification
 
-- **Pure decision:** copy `src/obs_backup_retention.rs` + `tests/obs_backup_retention.rs` into a
-  scratch dir (define the neutral `RetentionPolicy`/`KeepReason`/`SECONDS_PER_DAY` at crate root,
-  `mod obs_backup_retention { … }`, strip the test's `//!` header + adjust the two `use` lines) and
-  compile standalone with `rustc --edition 2021 --test scratch.rs && ./scratch` — rustc is not
-  cargo, so the Tier-0 hook does not touch it, and it runs the logic RED→GREEN with zero repo
-  `target/`. Also `cargo fmt --all --check` (allowed, non-compiling — it parses the Rust).
+- **Pure decision:** `cargo test --test obs_backup_retention`.
 - **The `.sh` (incl. the bash decision):** `bash -n` + `shellcheck -S warning`, then a REAL
   functional dry-run against a FIXTURE dir (`mkdir` dated/stage/foreign dirs, `touch -d` their
   mtimes, run `--local-sweep --backup-root <fix> --stage-parent <fix>`) and assert the DELETE plan
   matches the Rust decision — and that `--execute` deletes ONLY the DELETE set (foreign dirs
-  survive). This is the imag decision's local test (no cargo needed).
+  survive). This is the imag decision's local test.
 - **The `.ps1`:** `pwsh` is not available on dev1, so verify by (a) ASCII-only
   (`grep -nP '[^\x00-\x7F]'` — a scp'd `.ps1` is read in a non-UTF-8 codepage; a non-ASCII char in a
   string BREAKS parsing, issue 1122), (b) `[0-9]`/`[0-9a-f]` never `\d` in the allowlist regex (.NET

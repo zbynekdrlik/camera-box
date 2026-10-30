@@ -22,7 +22,9 @@ Three uses, as presets (every preset value can be overridden on the command line
     those folder names).
 * `--preset strih-pp`: the strih-snv collection -> strih-pp.
   - keeps every scene; `STRIH-SNV (...)` -> `STRIH-PP (...)`, the CG sender `RESOLUME-SNV (SP-program)`
-    -> `RESOLUME-PP (SP-program)`; drops the shader filter and Windows-path scripts.
+    -> `RESOLUME-PP (SP-program)`; drops the shader filter and Windows-path scripts;
+  - the program input `ASIO zvuk` becomes the obs-vban receive source on lv1's VBAN `strih-obs` (UDP
+    6981, R 40 ms; issue 1439, 24.10.2026: no hub `program_out`, no PipeWire on strih-pp).
 * `--preset strih-snv` (issue 1414): the IN-PLACE rename of the SNV strih's own collection when the
   box takes its venue name -- the self-loop inputs follow the new NDI prefix, nothing else changes
   (every scene, input and shader filter kept). Map the two SNV hosts to themselves:
@@ -128,6 +130,9 @@ PRESETS = {
         "name": "strih-pp",
         "keep_scenes": None,
         "program_audio_input": "ASIO zvuk",
+        # issue 1439 (24.10.2026): lv1's VBAN `strih-obs` into the obs-vban source, pinned equal to the
+        # strih-pp box facts (STRIH_PROGRAM_VBAN_PORT / _STREAMS / _RESERVE_MS) by the pytest.
+        "program_audio_vban": {"port": 6981, "stream_name": "strih-obs", "receive_buffer_ms": 40},
         "source_renames": {},
         "sender_prefixes": {"STRIH-SNV": "STRIH-PP", "STRIH-LX": "STRIH-PP"},  # issue 1414: + the pre-rename prefix
         "sender_renames": {"RESOLUME-SNV (SP-program)": "RESOLUME-PP (SP-program)"},

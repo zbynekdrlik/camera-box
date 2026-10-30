@@ -55,7 +55,7 @@ is that a "continuously-deployed, no canonical value" component is NOT an excuse
 - **Fixed pin** — for a component that upgrades RARELY + DELIBERATELY (a maintainer bumps the pin as
   part of the upgrade): `dantesync-version-gate.sh`'s `DANTESYNC_VERSION_PIN`,
   `verify-device.sh`'s `NDI_VERSION_PIN`.
-- **Moving pin** — for a component deployed on almost every PR (`camera-box` `1.7.0-dev.NNN`): pin to
+- **Moving pin** — for a component deployed on almost every PR (`camera-box`, a new patch release `X.Y.Z` per merge since issue 1476; `1.7.0-dev.NNN` before it): pin to
   a SOURCE OF TRUTH that advances automatically WITH the deploy, so pin and deployed reality move
   together and there is no stale-pin spurious-fail window. `camera-box-version-gate.sh` (#1136) reads
   the pin from `git show origin/main:Cargo.toml`, and the push-to-main auto-deploy (ci.yml

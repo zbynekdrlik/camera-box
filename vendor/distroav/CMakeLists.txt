@@ -105,6 +105,52 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   )
 endif()
 
+# camera-box issue 1387 slice 2: the JPEG XS receiving source. ONLY the strih Linux build
+# (linux-genlock.yml, the strih variant) turns it on, passing the jxs-recv-ffi static library cargo
+# built, its header dir, and the native libraries `rustc --print native-static-libs` named for it.
+# Every other build (Windows, the imag full build, the compile check) leaves it OFF: the receiver is
+# Linux-only and those builds have no Rust toolchain.
+option(CAMERA_BOX_JXS_SOURCE "camera-box issue 1387: build the JPEG XS source (needs jxs-recv-ffi)" OFF)
+if(CAMERA_BOX_JXS_SOURCE)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "CAMERA_BOX_JXS_SOURCE is Linux-only (issue 1387)")
+  endif()
+  set(CAMERA_BOX_JXS_FFI_LIB "" CACHE FILEPATH "libjxs_recv_ffi.a (issue 1387)")
+  set(CAMERA_BOX_JXS_FFI_INCLUDE "" CACHE PATH "jxs/recv-ffi/include (issue 1387)")
+  set(CAMERA_BOX_JXS_FFI_NATIVE_LIBS "" CACHE STRING "rustc --print native-static-libs (issue 1387)")
+  # issue 1387 slice 3: the JPEG XS program output's header (jxs/send-ffi/include). Its C ABI is
+  # carried INSIDE CAMERA_BOX_JXS_FFI_LIB (one Rust archive: two would each carry std, camera-box
+  # and a second SVT-JPEG-XS), so there is no second library to link.
+  set(CAMERA_BOX_JXS_SEND_FFI_INCLUDE "" CACHE PATH "jxs/send-ffi/include (issue 1387 slice 3)")
+  if(NOT EXISTS "${CAMERA_BOX_JXS_FFI_LIB}")
+    message(FATAL_ERROR "CAMERA_BOX_JXS_FFI_LIB not found: '${CAMERA_BOX_JXS_FFI_LIB}' (issue 1387)")
+  endif()
+  if(NOT EXISTS "${CAMERA_BOX_JXS_FFI_INCLUDE}/camera_box_jxs.h")
+    message(FATAL_ERROR "camera_box_jxs.h not in CAMERA_BOX_JXS_FFI_INCLUDE '${CAMERA_BOX_JXS_FFI_INCLUDE}' (issue 1387)")
+  endif()
+  if(NOT EXISTS "${CAMERA_BOX_JXS_SEND_FFI_INCLUDE}/camera_box_jxs_send.h")
+    message(FATAL_ERROR "camera_box_jxs_send.h not in CAMERA_BOX_JXS_SEND_FFI_INCLUDE '${CAMERA_BOX_JXS_SEND_FFI_INCLUDE}' (issue 1387)")
+  endif()
+  if(CAMERA_BOX_JXS_FFI_NATIVE_LIBS STREQUAL "")
+    message(FATAL_ERROR "CAMERA_BOX_JXS_FFI_NATIVE_LIBS is empty (issue 1387)")
+  endif()
+  target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/jxs-source.cpp src/jxs-source-decide.h
+                 src/jxs-output.cpp src/jxs-output-decide.h src/genlock-emit-timecode.h
+                 src/jxs-state-table.h)
+  target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CAMERA_BOX_JXS_SOURCE=1)
+  target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CAMERA_BOX_JXS_FFI_INCLUDE}"
+                             "${CAMERA_BOX_JXS_SEND_FFI_INCLUDE}")
+  separate_arguments(_camera_box_jxs_native UNIX_COMMAND "${CAMERA_BOX_JXS_FFI_NATIVE_LIBS}")
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE "${CAMERA_BOX_JXS_FFI_LIB}" ${_camera_box_jxs_native})
+  # -z noexecstack: SVT-JPEG-XS's nasm objects carry no .note.GNU-stack, which would mark the whole
+  # plugin as needing an EXECUTABLE stack -- glibc 2.41+ (the Ubuntu 26.04 strih box) then refuses to
+  # load distroav.so. --exclude-libs: no Rust or SVT symbol is exported from the plugin.
+  get_filename_component(_camera_box_jxs_lib_name "${CAMERA_BOX_JXS_FFI_LIB}" NAME)
+  target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "LINKER:-z,noexecstack"
+                      "LINKER:--exclude-libs,${_camera_box_jxs_lib_name}")
+  message(STATUS "camera-box issue 1387: the JPEG XS source is built (${CAMERA_BOX_JXS_FFI_LIB})")
+endif()
+
 set(valid_uuid FALSE)
 check_uuid(${WINDOWS_APP_UUID} valid_uuid)
 if(NOT valid_uuid)

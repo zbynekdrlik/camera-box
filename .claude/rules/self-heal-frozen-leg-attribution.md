@@ -88,13 +88,10 @@ physically replaced and a stable week passes with no self-heal escalations — a
 which is the whole reason this method exists as its own seam rather than inlining the decision at
 each call site.
 
-**Testing a probe-gated report-only decoupling with no local run path — the DIFFERENTIAL fixture
-technique.** `recording-verdict.rs` is `required-features = ["probe"]` (this repo's Local Build
-Policy — see the project CLAUDE.md), so any end-to-end test added to it has ZERO local
-compile/test path; the first time it actually runs is CI. Rather than asserting an ABSOLUTE
-`overall_pass == true` on a hand-built fixture (which silently assumes every OTHER unrelated gate
-in that huge function also happens to pass with your minimal fixture — fragile, and you cannot
-verify it locally before pushing), build TWO otherwise-IDENTICAL fixtures — one WITH the
+**Testing a probe-gated report-only decoupling — the DIFFERENTIAL fixture technique.** Rather than
+asserting an ABSOLUTE `overall_pass == true` on a hand-built `recording-verdict.rs` fixture (which
+silently assumes every OTHER unrelated gate in that huge function also happens to pass with your
+minimal fixture — fragile), build TWO otherwise-IDENTICAL fixtures — one WITH the
 term-under-test firing, one WITHOUT — and assert `overall_pass` is IDENTICAL between them. This is
 exactly `#861`'s own precedent
 (`all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861`) and it fully
@@ -314,7 +311,7 @@ bigger root-cause-lane change, deferred to issue 1242):** `classify_leg` is now 
 exactly ONE owner again (the per-cambox tolerance). `STALE_REPLAY_MAX_ISOLATED` stays as a
 documented, now genuinely UNUSED informational constant (see `frozen_leg.rs`'s own doc). No new
 parameters, no probe-gated call-site change — the fix is entirely confined to the one pure
-Tier-0 crate-root module (see `frozen_leg.rs`'s own module doc for the full evidence + mechanism).
+crate-root module (see `frozen_leg.rs`'s own module doc for the full evidence + mechanism).
 
 **Item 2 stays BLOCKING — this is a FIX to the classifier, not a re-decouple.** `.616` = this fix;
 if a FUTURE strict run still fails `frozen_leg` on a genuinely diffuse (tolerance-owned) shape, that
@@ -328,18 +325,3 @@ disagree with — the gate that already owns that signal's real acceptance bar.*
 "widen the tolerance" or "soften the gate" — it is recognizing that ONE of the two gates should not
 be deciding that signal's fate at all once the other genuinely owns it; scope each gate to what its
 OWN acceptance criteria actually named, never to "anything left over that feels risky".
-
-**Tier-0 verification technique for a fix that spans TWO sibling crate-root modules — a COMBINED
-rustc replica, not two separate ones.** `frozen_leg.rs` and `self_heal_attribution.rs` are both
-pure (no probe deps) but `self_heal_attribution.rs` `use crate::frozen_leg::{...}` — a standalone
-`rustc --test` replica of EITHER file alone (the existing single-file pattern, see
-`verdict-gate-seam-calibration.md` §11) cannot prove the FIX didn't silently break the SIBLING
-module's own tests, which is exactly the risk here (6 `self_heal_attribution.rs` fixtures relied
-on `frozen_leg`'s removed branch to reach a classified-Frozen window). Concatenate both files as
-`pub mod frozen_leg { <frozen_leg.rs verbatim> }` / `pub mod self_heal_attribution { <verbatim,
-its `use crate::frozen_leg::...` line resolves unchanged since `crate` = this ONE combined file>
-}` into one scratch file, then `rustc --edition 2021 --test <file> -o <bin> && <bin>` — this ran
-ALL 35 (later 36) tests from both modules together and genuinely caught nothing broken. Reusable
-whenever a fix to a shared pure module has sibling pure-module consumers with their own test
-suites — never assume the sibling module's tests are unaffected just because you didn't touch its
-file; verify with the combined replica.

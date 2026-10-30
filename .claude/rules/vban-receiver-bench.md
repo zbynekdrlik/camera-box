@@ -45,8 +45,7 @@ designs 6338127636 and 6338457001.
   - the rig is not PROVABLY idle (`av_soak_rig_busy_settled`, busy=false);
   - the OBS preflight refuses;
   - the UDP port is bound on strih-snv;
-  - strih-snv has no ffmpeg (only the test track is ever pulled to dev1, never the program
-    recording: no rig data on dev1);
+  - strih-snv has no ffmpeg (only the test track is pulled to dev1, never the program recording);
   - the record volume is under `RECORDINGS_FREE_MIN_GB` (the soak's `av_soak_free_space_verdict`;
     unreadable = one WARNING, the run goes on);
   - a credential is missing, or the strih is not the Linux strih-snv.
@@ -69,9 +68,9 @@ designs 6338127636 and 6338457001.
   flagged recording is stopped only when `av_soak_rig_state.py leftovers` proves it is the bench's
   (its `recordTimecode` age against the flag time in `recording.state`), the stop is verified by a
   status read, and the lease is released only when nothing is left.
-- **The emulator's own send lateness is graded.** dev1 runs other projects' CI; a sender wake late
-  by more than `--emulator-late-bound-ms` (5 ms) changes the profile's shape, so that profile is
-  `INVALID` (bench.tsv column `emulator_late_ms`), never blamed on the receiver and never a PASS.
+- **The emulator's own send lateness is graded.** A sender wake late by more than
+  `--emulator-late-bound-ms` (5 ms) changes the profile's shape, so that profile is `INVALID`
+  (bench.tsv column `emulator_late_ms`), never blamed on the receiver and never a PASS.
 - **The test input is removed on every exit**, also during a broadcast: a silent input on a
   non-program track is safe to remove. `teardown` removes only an input whose kind, port and stream
   name are the bench's, and restores RecTracks only while it still holds the value setup wrote.
@@ -123,6 +122,45 @@ designs 6338127636 and 6338457001.
   within ±20 ms of the aligned slot, length within 64 samples); the pilot rate equal to the
   injected ppm within the bound; the lead (before the pilot) silent; the track otherwise clean
   (residual p99 under -30 dB).
+- **A CONCEALED loss is graded by the timeline across it, never by silence.** The issue-1439
+  receiver repeats the previous packet (crossfaded) for a run of at most
+  `VBAN_RECV_CONCEAL_MAX_SLOTS` (3) lost slots between two received packets. `CONCEAL_MAX_SLOTS`
+  in the script is pinned to that `#define` by a test.
+  - The step detector cannot judge it: a repeat with the timeline intact reads +2..+6 samples of
+    "step" inside one run of blocks (live lv1 29.10.2026: -1.3 / -1.7). So `analyze_scheduled`
+    runs two passes: analyze, map every loss of <= 3 packets onto the recording, analyze again
+    with those windows EXCLUDED (`analyze(exclude=[(lo, hi, loss index)])`, each widened by
+    `CONCEAL_PAD`, 2 blocks). The run splits there and the existing slope-projection bridge
+    measures the timeline across the window; the bridge names the loss in `conceal_windows`.
+  - The mapping: r0 = the pilot onset - the frames the receiver held (its `receive emitting:
+    source '<input>' frame=N` line, the first second it never plays), then refined by any silence
+    slots the analysis found (the same fit the grade uses). The orchestrator reads N from the
+    profile's own OBS log (`hold_frames_of`, the test input's line only) and passes
+    `--hold-frames N`; absent = 187, the value every bench run logged.
+  - Per loss of <= 3 packets with no silence slot: `concealed` when the bridge held (under
+    `MIN_JUMP_SAMPLES`), else `timeline moved` (FAIL: a concealed loss is still a loss, the
+    timeline must hold). A silence slot at such a loss is still acceptable (`ok`, the receiver
+    decides at the deadline from what it stored). A loss over 3 packets without silence stays
+    `no silence slot`. A bridge step at a concealed window is that loss's reason, never a second
+    "phase step".
+
+- **A bridge measures its own gap only (issue 1460, bench 20261028T2054Z).** The rate line chains
+  every run onto the previous one, so the chained phase carries every earlier move. The first
+  grader measured each bridge against that chained phase: the -50 ppm profile's one real move (the
+  ASRC's lock placement at 81 s: a 1008-sample silence whose timeline residue modulo one pilot period
+  reads -13.1 samples) read about -13.5 samples across every later loss, and the
+  +50 profile's in-run step came back at the next silence. The recording was continuous at every
+  scheduled loss. Each bridge now reads the two runs' own phases, each with its in-run events
+  removed (the previous run at its last level), so a step next to a gap is not read twice either.
+  - **Before blaming the receiver or the ASRC for a grade's move, check the recording directly**:
+    fit a line to the pilot phase on each side of the event (0.3-15 s windows, the event excluded)
+    and compare both at the event. A synthetic -13.5 sample step reads -13.50 that way.
+  - **A ±50 ppm sender always shows the stamp-basis ASRC's lock transient**: nothing applied for
+    the first 60 s, one placement at the lock (an unscheduled silence + a timeline move), then a
+    1000 ppm recovery slew for about 20 s. The measured rate averages that transient in (p4: -42.3
+    against a steady -53.4 / -51.5), which the 60 s settle does not cover.
+  - **An unscheduled concealed loss** (the receiver's `missing N packet(s) ... concealed` line, a
+    real network loss) reads as an in-run "phase step" of +2..+6 samples: check the OBS log for it.
 
 ## The OBS log rows (`vban_bench_log.py`, the issue-1439 acceptance of designs 6338127636 + 6338457001)
 
@@ -178,7 +216,7 @@ cat "$D/bench.tsv"                 # one row per profile: sine, log, verdict, re
 - Default profiles `clean lv1 stress:+50 stress:-50`, about 50 min, exit 0 only when every
   profile ran and its analysis AND log grade pass (and the emulator was on time).
 - bench.tsv columns: `profile ppm sine log emulator_late_ms verdict recording`, the verdict
-  `PASS` / `FAIL` / `INVALID` (the emulator was late: rerun when dev1 is quieter).
+  `PASS` / `FAIL` / `INVALID` (the emulator was late).
 - Add `--extra-setting <key>=<value>` for a setting the issue-1439 receiver adds (its fixed reserve
   R), once its key name is final.
 - Per profile the run dir holds `pN-schedule.json`, `pN-audio.mkv`, `pN-analysis.json`,
@@ -196,7 +234,7 @@ cat "$D/bench.tsv"                 # one row per profile: sine, log, verdict, re
 The E2E wiring calls this bench from `recording-e2e.sh` through a SOURCED helper lib (the issue-675
 pattern), never an inline edit of that file's pinned anchors.
 
-## Tier-0 verification (dev1: no cargo)
+## Verification
 
 `python3 -m pytest tests/python/test_vban_emulator_plan_1460.py tests/python/test_vban_sine_continuity_1460.py tests/python/test_vban_bench_obs_1460.py tests/python/test_vban_receiver_bench_1460.py`
 plus `bash -n` and `shellcheck -S warning scripts/vban-receiver-bench.sh` (never `-x`).

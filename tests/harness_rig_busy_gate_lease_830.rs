@@ -56,6 +56,10 @@ fn run_gate(
         .env("OBS_PHASE2_PY", fake_py)
         .env("RIG_BUSY_GATE_ITERATIONS", iterations)
         .env("RIG_BUSY_GATE_SLEEP_SECS", sleep_secs)
+        .env(
+            "YOUTUBE_LEG_MARKER",
+            lease_dir.join("no-youtube-leg-marker.json"),
+        )
         .env("RIG_LEASE_DIR", lease_dir)
         .env("RIG_LEASE_REPO", "zbynekdrlik/camera-box")
         .env("RIG_LEASE_RUN_ID", run_id)

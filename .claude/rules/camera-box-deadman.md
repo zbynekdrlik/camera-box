@@ -34,12 +34,12 @@ the runner SIGKILL, runs FOREVER). A process/unit-presence guard would therefore
 camera-box-style dead-man PERMANENTLY disarmed. So the pattern flips:
 
 - **DELAY the first fire past the whole run window** (`--on-active=<ceil(DURATION/60)+overhead>min`,
-  computed in recording-e2e.sh; `CAMERA_BOX_DEADMAN_OVERHEAD_MIN` default 20). This is the
+  computed in recording-e2e.sh; `CAMERA_BOX_DEADMAN_OVERHEAD_MIN` default 35 since issue 1404's YouTube stage, was 20). This is the
   SAFETY-CRITICAL invariant: the dead-man can then NEVER fire during a live measurement — worst case
   is a slower recovery (~run-length + overhead), never a corrupted verdict. Recovery timing is
   equivalent to cam2-painter's (which also only recovers at ~run-end, after frame-probe's
   --duration-secs). **The overhead margin is the ONE knob the invariant hangs on — VALIDATE + FLOOR
-  it** (`CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=15`, the ~12-15 min worst-case pre-record overhead by
+  it** (`CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=30` since issue 1404, was 15, the ~12-15 min worst-case pre-record overhead by
   the script's own retry accounting): a non-integer / negative / too-small env override is CLAMPED up
   to the floor, never trusted — a smaller margin silently moves the first fire INTO the recording.
 - **Re-fire periodically** (`--on-unit-active=5min`) so a run killed AFTER the first fire still
@@ -130,12 +130,11 @@ satisfy it.
   anyway (both conflict on the device via camera-box). The two deadmen COMPOSE (do not race): #772
   clears the stray burn + restores production, then the next cam2-painter-deadman tick sees the
   device free and restores the painter.
-- **Tier-0 test it FUNCTIONALLY** (`tests/harness_cam2_painter_deadman_run_aware_1246.rs`, mirroring
+- **Test it FUNCTIONALLY** (`tests/harness_cam2_painter_deadman_run_aware_1246.rs`, mirroring
   `harness_camera_box_deadman_772.rs`): source the lib, extract the `/bin/bash -c '...'` action, run
   it under fake `pgrep`/`systemctl` stubs (real `grep`) — assert the action does NOT `systemctl
   start cam2-painter` when a burn PROCESS or an active burn UNIT is present, and DOES when the device
-  is free. Prove RED→GREEN at the bash level first (Tier-0 blocks the cargo compile), then rely on
-  CI for the actual Rust run.
+  is free. Prove RED→GREEN at the bash level first.
 
 ## Nested-quoting: embedding a `systemd-run ... /bin/bash -c '<action>'` via `$(...)` in an ssh string
 
@@ -159,14 +158,6 @@ Test it FUNCTIONALLY, not just `bash -n`: extract the `/bin/bash -c '...'` actio
 under fake `systemctl`/`pkill` stubs on `$PATH` (the "fake the remote, not the ssh" pattern from
 `harness_udev_camera_box_894.rs`), asserting the exact calls (stop unit, pkill, start-if-inactive,
 self-disarm, NO frame-probe) — see `harness_camera_box_deadman_772.rs::run_action_call_log`.
-
-## Local verification reality (camera-box #477)
-
-`cargo test` cannot RUN locally (the `# airuleset:build-ok` bypass is DISABLED for this repo). To
-check the anchor-collision class after editing recording-e2e.sh, `cargo test --no-run` (compiles all
-binaries, Tier-0 allowed) then EXECUTE the built binaries directly from `target/debug/deps/`
-(running an ELF is not a `cargo` invocation, so the #477 block does not apply) — the static-anchor
-tests read the scripts at RUNTIME, so a directly-run binary reflects the current script text.
 
 ## Swapping a RUNNING binary on a read-only appliance: rename over it + park the deadman (issue 1351)
 
@@ -220,7 +211,7 @@ swap on the ro-rootfs cam boxes:
    enable-state-preserving restore (`frame_probe_restore_enable_decision`) stays UNCHANGED; the
    `enable --now` restart is what makes the painter pick the new inode.
 
-Tier-0 verify (a worktree worker's `bash -c` is refused, but `bash <written-file>` runs): a PATH-stub
+Verify (a worktree worker's `bash -c` is refused, but `bash <written-file>` runs): a PATH-stub
 replica that runs the REAL `deploy-fleet.sh --frame-probe` (frame-probe-only mode) under stub
 `sshpass`/`scp`/`mount`/`systemctl`/`systemd-run`/`chmod`/`mv`/`sync`/`sha256sum` (the `systemctl`
 stub reports the deadman `is-active` + painter `is-enabled` so the conditional re-arm fires), LOGGING each remote call in

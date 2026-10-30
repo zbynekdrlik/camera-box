@@ -320,8 +320,10 @@ def test_the_https_keys_close_the_fact_list():
     r = _bash("strih_box_fact_keys", sources=(FACTS,))
     # issue 1424 part 2 appended the HDMI output list after them, issue 1453 the public-intercom switch,
     # issue 1462 the stream Development design.
-    assert r.stdout.split()[-5:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS",
-                                     "STRIH_HTTPS_PUBLIC", "STRIH_STREAM_DEV_SCENE"]
+    # issue 808 the shading relay overrides, issue 1425 the fixed OBS audio buffering.
+    assert r.stdout.split()[-7:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS",
+                                     "STRIH_HTTPS_PUBLIC", "STRIH_STREAM_DEV_SCENE", "STRIH_BKSHADING_RELAYS",
+                                     "STRIH_AUDIO_BUFFERING_MS"]
 
 
 def test_strih_snv_declares_the_three_interkom_names_and_shading():

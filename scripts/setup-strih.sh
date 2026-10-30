@@ -1,6 +1,6 @@
 #!/bin/bash
-# strih-snv One-Shot Setup (issue 1317) -- see the extended header below the strict-mode line.
-# Provisions a Linux notebook as the strih cutter/mix box; runs ON the box as root, idempotent.
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
+# strih-snv One-Shot Setup (issue 1317): provisions a Linux notebook as the strih cutter/mix box;
 set -euo pipefail
 # Pin a 022 umask: a caller running this under 077 (the 24.9.2026 deploy) made every directory it
 # created root-only, and the intercom-hub (User=newlevel) could not read its own config.
@@ -359,12 +359,13 @@ step "4c" "Downstream Keyer OBS plugin $(obs_dsk_version) (pinned upstream .deb,
 # Idempotent: a plugin that already has the pinned hash downloads nothing. verify-strih item 35 grades it.
 ( eval "$(obs_dsk_install_cmds "$(obs_dsk_version)" "$(obs_dsk_deb_url)" "$(obs_dsk_deb_sha256)" "$(obs_dsk_so_sha256)" /usr/lib/x86_64-linux-gnu /usr/share)" ) \
   || fail "Downstream Keyer install failed (see above) -- check the pinned .deb URL / sha256 in scripts/lib/obs-downstream-keyer.sh and re-run"
+obs_audio_monitor_install /usr/lib/x86_64-linux-gnu /usr/share || fail "issue 1436: the Audio Monitor plugin install failed (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"
-# issue 1317: create ~/.config/obs-studio owned by the DESKTOP user (this script runs under sudo, so a
-# bare `mkdir` roots it and the obs user cannot then create .sentinel -- `Permission denied`, hit live).
+# issue 1317: ~/.config/obs-studio owned by the DESKTOP user (under sudo a bare `mkdir` roots it: `Permission denied`).
 strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "$OBS_CFG" || fail "cannot create ${OBS_CFG} as ${DESKTOP_USER} (above)"
+obs_audio_buffering_install "$USER_HOME" "$DESKTOP_USER" "$(strih_lx_audio_buffering_ms)" || fail "issue 1425: the fixed OBS audio buffering marker could not be written (above)"
 strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-profile-facts.txt" | sed 's/^/  /'
 rm -f "$GENLOCK_DIR/strih-lx-profile-facts.txt"   # issue 1414: the pre-rename name of the role file
 mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/null || true
@@ -857,26 +858,27 @@ echo "  Companion Satellite v${CS_VER} installed to /opt (run by companion-satel
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-step "16b" "RustDesk remote desktop (owner request 22.9.2026) -- pinned .deb, permanent password from a 0600 file"
-# issue 1317: install RustDesk from the PINNED .deb (sha256-verified, fail-loud on mismatch), enable
-# --now the service, and apply the permanent password read INSIDE the emitted block from a 0600 file
-# the SUPERVISOR places (a provisioning input) -- the @JANUS_ROOM_SECRET@ discipline: the password
-# value never appears in git, in an argv here, or in a log. Gated on the password file's presence:
-# without it a permanent password cannot be set, so we SKIP + warn (never invent one, never abort the
-# whole provisioning run for a not-yet-placed supervisor secret). Run in a SUBSHELL (the step-4b/-16
-# pattern): the emitter `exit 1`s on a fetch/sha/install failure, so `( eval "$(...)" ) || fail` fires
-# with the actionable message instead of terminating setup-strih.sh directly.
-RD_VER="$(strih_rustdesk_version)"
-RD_URL="$(strih_rustdesk_deb_url)"
-RD_SHA="$(strih_rustdesk_deb_sha256)"
+step "16b" "RustDesk remote desktop (owner request 22.9.2026) -- pinned .deb, the permanent password REQUIRED"
+# issue 1317: RustDesk from the PINNED .deb (sha256-verified, fail-loud on mismatch), enabled --now. Issue 1462:
+# remote access is required on every box -- a box with RustDesk active and its permanent password set is left
+# as it is; a 0600 file at RD_PW_FILE (a provisioning input, never in git) installs + applies it; otherwise the
+# package is installed and setup FAILS naming the dev1 command that applies the password from the credential
+# channel (never a WARN that lets a box be handed over without remote access). Subshells: the emitters exit 1.
+RD_VER="$(strih_rustdesk_version)"; RD_URL="$(strih_rustdesk_deb_url)"; RD_SHA="$(strih_rustdesk_deb_sha256)"
 RD_PW_FILE="${STRIH_LX_RUSTDESK_PW_FILE:-/etc/rustdesk/permanent-password.secret}"
-if [ -s "$RD_PW_FILE" ]; then
+RD_STATE="$(strih_rustdesk_state)"
+if [ "$RD_STATE" = ready ]; then
+  echo "  RustDesk active with its permanent password set; connect ID: $(timeout 10 rustdesk --get-id 2>/dev/null | head -1 || true)"
+elif [ -s "$RD_PW_FILE" ]; then
   ( eval "$(strih_rustdesk_install_cmds "$RD_VER" "$RD_URL" "$RD_SHA" "$RD_PW_FILE")" ) \
     || fail "RustDesk install failed (v${RD_VER}) -- confirm the pinned .deb URL/sha256 and the 0600 password file ${RD_PW_FILE}, then re-run"
-  RD_ID="$(rustdesk --get-id 2>/dev/null | head -1 || true)"
-  echo "  RustDesk v${RD_VER} installed + enabled --now (permanent password applied from ${RD_PW_FILE}); connect ID: ${RD_ID:-<run: rustdesk --get-id>}"
+  echo "  RustDesk v${RD_VER} installed + the permanent password applied from ${RD_PW_FILE} (was: ${RD_STATE})"
 else
-  warn "  RustDesk NOT installed -- place the 0600 permanent-password file at ${RD_PW_FILE} (a provisioning input the supervisor sets; never in git) and re-run this step"
+  if [ "$RD_STATE" != nopw ]; then
+    ( eval "$(strih_rustdesk_package_cmds "$RD_VER" "$RD_URL" "$RD_SHA")" ) \
+      || fail "RustDesk install failed (v${RD_VER}) -- confirm the pinned .deb URL/sha256, then re-run"
+  fi
+  fail "issue 1462: RustDesk v${RD_VER} has no permanent password -- $(strih_rustdesk_apply_hint "$(hostname -s)"), then re-run"
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -916,7 +918,7 @@ install -d -m 0755 /etc/bkshading
 if [ ! -f /etc/bkshading/bkshading.toml ]; then
   strih_bkshading_config_text > /etc/bkshading/bkshading.toml \
     || fail "could not seed /etc/bkshading/bkshading.toml"
-  echo "  seeded /etc/bkshading/bkshading.toml (cam1 + handhelds; edit for the live camera set)"
+  echo "  seeded /etc/bkshading/bkshading.toml (the box's STRIH_CAMERAS + its STRIH_BKSHADING_RELAYS; edit for the live camera set)"
 else
   echo "  /etc/bkshading/bkshading.toml already present -- leaving the operator's config"
 fi

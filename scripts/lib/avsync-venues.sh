@@ -230,6 +230,29 @@ avsync_venue_rtmp_url() {
   printf 'rtmp://%s:%s/%s/%s' "$host" "$AVSYNC_RTMP_PORT" "$AVSYNC_RTMP_APP" "$key"
 }
 
+# avsync_venue_audio_input VENUE -> the venue stream box's PROGRAM AUDIO input (its fact
+# STRIH_PROGRAM_AUDIO_INPUT: stream-snv `mbc`, stream-pp `Zvuk z mixu`), the knob the SyncNet advice
+# names (issue 1459: "ZVYS '<input>' sync offset o N"). Read from the box's fact file with the
+# loader's own parser (never sourced, never a hand-typed table). Empty, rc 0, when the box has no fact
+# file (a declared Windows row: the advice keeps its old 2ME PGM wording), when the fact is `none` or
+# absent, or when the file does not parse (one stderr line). rc 1 + the named stderr line for a venue
+# with no row.
+avsync_venue_audio_input() {
+  local box f parsed line val=""
+  box="$(avsync_venue_box "${1-}")" || return 1
+  f="$(strih_box_dir)/${box}.env"
+  [ -f "$f" ] || return 0
+  if ! parsed="$(strih_box_parse_file "$f" 2>/dev/null)"; then
+    echo "avsync-venues: box ${box}: its fact file ${f} does not parse -- no program audio input for the advice" >&2
+    return 0
+  fi
+  while IFS= read -r line; do
+    case "$line" in STRIH_PROGRAM_AUDIO_INPUT=*) val="${line#*=}" ;; esac
+  done <<<"$parsed"
+  [ "$val" = none ] && val=""
+  printf '%s' "$val"
+}
+
 # avsync_venue_label VENUE -> the venue as a message shows it (`SNV`, `PP`).
 avsync_venue_label() {
   printf '%s' "${1-}" | tr '[:lower:]' '[:upper:]'

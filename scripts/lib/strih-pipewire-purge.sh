@@ -11,8 +11,9 @@
 #
 #   * strih_pipewire_purge_decision ROLE STREAMS TOML -- the DERIVED condition (pure but for reading TOML):
 #     strih role AND a direct program VBAN (STRIH_PROGRAM_VBAN_STREAMS != none) AND no `adapter =
-#     "pipewire"` participant in the box's hub routing. strih-snv = purge; strih-pp = keep (its program
-#     still goes hub program_out -> pw-cat -> PipeWire); the stream role = keep (its LOCKED operator
+#     "pipewire"` participant in the box's hub routing. strih-snv + strih-pp = purge (strih-pp since its
+#     lv1 sends `strih-obs` straight into OBS, issue 1439, 24.10.2026); a hub-fed strih (program via a
+#     hub `program_out` -> pw-cat -> PipeWire) = keep; the stream role = keep (its LOCKED operator
 #     PipeWire, issue 1465). No new fact, no box name.
 #   * strih_pipewire_purge_install REPO USER_HOME DESKTOP_USER -- setup-strih step 12 on such a box:
 #       1. the apt pin (Pin-Priority -1) on every PipeWire / WirePlumber / pulseaudio server package, for

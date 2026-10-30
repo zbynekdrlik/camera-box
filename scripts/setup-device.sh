@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 #
 # Camera-Box Device Setup Script
 # Sets up a clean Ubuntu installation as a camera-box appliance
@@ -681,7 +682,8 @@ echo "  Static IP configured: $DEVICE_IP"
 # =============================================================================
 echo ""
 echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
-# The binary is ALWAYS a CI artifact (a `-dev.N` build), never a GitHub release -- installing from
+# The binary is ALWAYS a CI artifact, never a GitHub release (issue 1476 publishes one per merge,
+# but releases/latest is not the fleet's pin) -- installing from
 # releases/latest silently version-drifted a fresh box from the fleet (cam6, #457). #1066: the
 # fleet's production truth is MAIN's pinned release (early-gate PIN doctrine, issue 1136), so the
 # DEFAULT source is the latest successful ci.yml run on `main` -- the SAME source deploy-fleet.sh
@@ -1880,7 +1882,8 @@ else
 fi
 # The unit + env + gphoto2 go in even when the binary could not be fetched (the recorded problem
 # still refuses Setup Complete); the lib warns loudly about the missing binary.
-if bkshading_relay_provision_install "$RELAY_ENABLE_STATE" "$RELAY_BIN_SRC"; then
+# issue 1431: the relay registers with the strih behind strih.lan as this box's camN.
+if bkshading_relay_provision_install "$RELAY_ENABLE_STATE" "$RELAY_BIN_SRC" "$(bkshading_relay_id_for_device "$DEVICE_NAME" || true)"; then
     echo "  issue 808: bkshading relay provisioned -- unit ${RELAY_ENABLE_STATE} (rig mode ${RIG_MODE_ARG}), never started here; verify-device.sh (ao) grades it after the reboot"
 else
     RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }the relay install (gphoto2/unit/env/enable-state) failed -- see the lines above"

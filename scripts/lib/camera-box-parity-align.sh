@@ -28,6 +28,8 @@
 _CBPA_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cambox-offline-ack.sh
 . "$_CBPA_HERE/cambox-offline-ack.sh"
+# shellcheck source=scripts/lib/ci-build-job-run.sh
+. "$_CBPA_HERE/ci-build-job-run.sh"
 
 # --- PURE decision (no network, no SSH -- unit-tested by sourcing this file) -------------------
 
@@ -237,9 +239,9 @@ cambox_align_deploy() {
       return 1
     fi
     local run_id
-    run_id="$(gh run list --repo "$repo" --commit "$sha" --workflow ci.yml --status success --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+    run_id="$(ci_build_job_run_id "$repo" "$sha")"
     if [ -z "$run_id" ]; then
-      echo "[0/8] camera-box parity auto-align (#1244): the candidate's own ci.yml build for commit ${sha} is not published yet (no successful ci.yml run for that commit) -- the gate below decides." >&2
+      echo "[0/8] camera-box parity auto-align (#1244): the candidate's own ci.yml build for commit ${sha} is not published yet (the Build job of the ci.yml run for that commit has not succeeded, issue 1387) -- the gate below decides." >&2
       return 1
     fi
     dist="$(mktemp -d)"
@@ -264,8 +266,11 @@ cambox_align_deploy() {
     return 1
   fi
   local rc=0
+  # issue 1452: camera-box ONLY (--no-relay). This align runs inside an E2E that holds the rig lease
+  # and is about to pause the relay on the measurement boxes; its one job is the camera-box parity the
+  # gate below grades. The relay rides the post-merge fleet deploy (deploy-fleet.sh's default).
   CAMERA_SET="$names" SSH_PASS="${CAM_PW:-newlevel}" \
-    "$deploy_fleet" --binary "$bin" || rc=$?
+    "$deploy_fleet" --binary "$bin" --no-relay || rc=$?
   [ -n "$dist" ] && rm -rf "$dist"
   return "$rc"
 }

@@ -19,12 +19,23 @@
 #     restarts it). rc 1 + a stderr line when no headphone device resolves (nothing written or removed);
 #   * stream_operator_audio_grade_rows / _report REPO USER_HOME DESKTOP_USER -- verify-strih item 9b on the
 #     stream role (STREAM_OPERATOR_AUDIO_ROWS rows): the files, the six read-back rows of the module's grader
-#     (pw-dump + pw-metadata in the operator's session), and the stream OBS holding no pulse capture input.
+#     (pw-dump + pw-metadata in the operator's session), the jack mixer (live + stored), the stream OBS
+#     holding no pulse capture input, and the operator's volume control (the helper, the panel item, the keys).
+#
+# Item 3 REVISION (owner 24.10.2026, ROZHODNUTE 6383739315, design 6383742509): the device is the notebook
+# jack on every stream box (never a USB interface); step 12 also writes the jack's declared HDA mixer and
+# stores it (`stream_operator_audio.py apply-mixer`: Speaker off, Auto-Mute Enabled, Master / Headphone / PCM
+# 0 dB, `alsactl store` -> alsa-restore.service at boot), installs the GLOBAL volume helper
+# (scripts/stream_operator_volume.py -> $OBS_BOX_PANEL_HEADPHONES_HELPER, /usr/local/bin/obs-box-headphones)
+# and merges the notebook's XF86Audio volume keys into the user's openbox rc.xml through the kiosk's ONE
+# rc.xml filter (obs_box_openbox_rc_with_keys); the panel item itself is step 16h's (obs-box-panel.sh).
 #
 # Test seams (tests/python/test_stream_operator_audio_1465.py): STREAM_OPERATOR_AUDIO_SCENES (strih_scenes.py),
 # the module's STREAM_OPERATOR_AUDIO_SYS / _UDEVADM and the monitor's STRIH_STREAM_MONITOR_ASOUND;
 # STRIH_SESSION_APPS_EUID (strih_session_apps_user_run: inline vs sudo -u the operator); `pw-dump`,
-# `pw-metadata` and `timeout` are looked up on PATH.
+# `pw-metadata` and `timeout` are looked up on PATH; the module's STREAM_OPERATOR_AUDIO_AMIXER / _ALSACTL /
+# _ASOUND_STATE; OBS_BOX_PANEL_HEADPHONES_HELPER (the helper's installed path) and
+# STREAM_OPERATOR_AUDIO_OPENBOX_RC_SRC (the stock rc.xml a user without one starts from).
 
 STREAM_OPERATOR_AUDIO_PW_DROPIN=60-stream-operator-clock.conf
 STREAM_OPERATOR_AUDIO_WP_DROPIN=60-stream-operator-headphones.conf
@@ -36,9 +47,12 @@ STREAM_OPERATOR_AUDIO_LEFTOVERS=(
   wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf
   wireplumber/wireplumber.conf.d/51-strih-minifuse.conf
 )
-# How many rows stream_operator_audio_grade_rows prints (files + the module's six + the jack mixer + OBS).
+# How many rows stream_operator_audio_grade_rows prints (files + the module's six + the jack mixer + OBS +
+# the volume control).
 # shellcheck disable=SC2034  # read by the report below and the tests
-STREAM_OPERATOR_AUDIO_ROWS=9
+STREAM_OPERATOR_AUDIO_ROWS=10
+# The stock openbox rc.xml a user without one starts from (the kiosk's brightness facet reads the same file).
+STREAM_OPERATOR_AUDIO_OPENBOX_RC_SRC="${STREAM_OPERATOR_AUDIO_OPENBOX_RC_SRC:-/etc/xdg/openbox/rc.xml}"
 
 # _stream_operator_audio_session USER SECONDS CMD... -> CMD in USER's session (the operator PipeWire), bounded.
 _stream_operator_audio_session() {
@@ -69,7 +83,7 @@ stream_operator_audio_install() {
   local mod="${1}/scripts/stream_operator_audio.py" owner dump wp rel f pm
   pm="$(_stream_operator_audio_pcm_match_dropins "$home")"
   if [ -n "$pm" ]; then
-    echo "stream-operator-audio: ${pm//$'\n'/ } gives strih-stream-monitor a --pcm-match; the locked PipeWire follows the default rule (the ONE USB audio interface, else the jack) -- remove that drop-in (systemctl --user daemon-reload) and re-run" >&2
+    echo "stream-operator-audio: ${pm//$'\n'/ } gives strih-stream-monitor a --pcm-match; the locked PipeWire follows the default rule (the notebook jack, never a USB interface) -- remove that drop-in (systemctl --user daemon-reload) and re-run" >&2
     return 1
   fi
   owner="${user}:$(id -gn "$user" 2>/dev/null)" || { echo "stream-operator-audio: unknown user ${user}" >&2; return 1; }
@@ -94,8 +108,68 @@ stream_operator_audio_install() {
       echo "  removed the strih-role leftover ${f}"
     fi
   done
+  python3 "$mod" apply-mixer || { echo "stream-operator-audio: the jack's mixer could not be written + stored (above)" >&2; return 1; }
+  stream_operator_audio_volume_install "$repo" "$home" "$user" "$owner" || return 1
   echo "  NOTE: the locked operator PipeWire applies at the next start of the operator's audio session: as ${user}"
   echo "        systemctl --user restart wireplumber pipewire pipewire-pulse (or reboot), then restart strih-stream-monitor"
+  return 0
+}
+
+# stream_operator_audio_volume_install REPO USER_HOME DESKTOP_USER OWNER -> the operator's GLOBAL headphone volume
+# (ROZHODNUTE 6383739315): the helper to $OBS_BOX_PANEL_HEADPHONES_HELPER (0755, owned by whoever runs setup:
+# root) and the notebook's volume keys merged into the user's openbox rc.xml (seeded from the stock rc.xml when
+# the user has none; operator content kept). Both compare-then-write. A symlinked openbox dir or rc.xml is
+# refused (root never reads or writes through a link the desktop user placed). rc 0 / 1.
+stream_operator_audio_volume_install() {
+  local repo="$1" home="$2" user="$3" owner="$4" rc_user rc_src merged
+  install -d -m 0755 "$(dirname "$OBS_BOX_PANEL_HEADPHONES_HELPER")" \
+    || { echo "stream-operator-audio: cannot create $(dirname "$OBS_BOX_PANEL_HEADPHONES_HELPER")" >&2; return 1; }
+  obs_box_write_if_changed "$OBS_BOX_PANEL_HEADPHONES_HELPER" 0755 "$(id -un):$(id -gn)" "operator headphone volume helper" \
+    < "${repo}/scripts/stream_operator_volume.py" || return 1
+  rc_user="${home}/.config/openbox/rc.xml"
+  if [ -L "${home}/.config/openbox" ] || [ -L "$rc_user" ]; then
+    echo "stream-operator-audio: ${rc_user} (or its folder) is a symlink -- refusing to merge the volume keys through it; replace it with a plain file" >&2
+    return 1
+  fi
+  strih_user_home_dir "$home" "$user" "${home}/.config/openbox" || return 1
+  if [ -f "$rc_user" ]; then rc_src="$rc_user"; else rc_src="$STREAM_OPERATOR_AUDIO_OPENBOX_RC_SRC"; fi
+  [ -f "$rc_src" ] || { echo "stream-operator-audio: no openbox rc.xml to merge the volume keys into (${rc_src} missing)" >&2; return 1; }
+  merged="$(obs_box_openbox_rc_with_keys obs_box_panel_headphones_keybinds_xml < "$rc_src")" \
+    || { echo "stream-operator-audio: ${rc_src} has no </keyboard> section -- the volume keys cannot be merged" >&2; return 1; }
+  printf '%s\n' "$merged" | obs_box_write_if_changed "$rc_user" 0644 "$owner" "openbox rc.xml headphone volume keys" || return 1
+  echo "  the volume keys apply at the next login or now: as ${user}, DISPLAY=:0 openbox --reconfigure"
+}
+
+# _stream_operator_audio_control_row REPO USER_HOME -> the (operator-audio-control) row: the helper = the checkout,
+# every headphone keybind line in the user's openbox rc.xml, every line of the panel item in the tint2 config.
+# Always rc 0.
+_stream_operator_audio_control_row() {
+  local repo="$1" home="$2" rc cfg line bad=""
+  rc="${home}/.config/openbox/rc.xml"
+  cfg="$(obs_box_panel_config_path "$home")"
+  cmp -s "${repo}/scripts/stream_operator_volume.py" "$OBS_BOX_PANEL_HEADPHONES_HELPER" 2>/dev/null \
+    || bad="${bad} ${OBS_BOX_PANEL_HEADPHONES_HELPER} missing or not the checkout (setup step 12);"
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in '<!--'*|'') continue ;; esac
+    if ! grep -qF -- "$line" "$rc" 2>/dev/null; then
+      line="${line#*key=\"}"
+      bad="${bad} ${rc##*/} lacks the ${line%%\"*} key (setup step 12, then openbox --reconfigure);"
+    fi
+  done < <(obs_box_panel_headphones_keybinds_xml)
+  while IFS= read -r line; do
+    case "$line" in '#'*|'') continue ;; esac
+    if ! grep -qxF -- "$line" "$cfg" 2>/dev/null; then
+      bad="${bad} ${cfg##*/} lacks '${line}' (setup step 16h);"
+      break
+    fi
+  done < <(_obs_box_panel_tint2rc_headphones)
+  if [ -n "$bad" ]; then
+    printf 'FAIL|(operator-audio-control)%s -- the operator has no global headphone volume\n' "$bad"
+  else
+    printf 'OK|(operator-audio-control) the global headphone volume: panel item Slúchadlá (wheel, click) + the XF86Audio keys -> %s\n' \
+      "$OBS_BOX_PANEL_HEADPHONES_HELPER"
+  fi
   return 0
 }
 
@@ -158,6 +232,7 @@ stream_operator_audio_grade_rows() {
   python3 "${repo}/scripts/stream_operator_audio.py" grade --pw-dump "$dump" --settings "$settings" --sm-settings "$sm" \
     2>/dev/null || printf 'FAIL|(operator-audio-sink) the operator audio grader failed\n'
   _stream_operator_audio_obs_row "$repo"
+  _stream_operator_audio_control_row "$repo" "$home"
   rm -f "$dump" "$settings" "$sm"
   return 0
 }

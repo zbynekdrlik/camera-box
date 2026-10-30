@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 # scripts/deploy-genlock-fleet.sh -- ONE deploy path for the OBS genlock build across the whole rig.
 # See the extended header below for the full contract.
 set -euo pipefail
@@ -926,7 +927,9 @@ main() {
   if [ "$want_win" = 1 ]; then
     echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
     # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
-    ( IFS=','; for b in $boxes; do case "$b" in stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" "$stats_abi" ;; esac; done )
+    # issue 1474: a box that took the Linux (setup-strih) arm above gets no Windows program -- the plan
+    # arm's own routing predicate, so the two arms can never disagree.
+    ( IFS=','; for b in $boxes; do fleet_box_runs_setup_strih "$b" && continue; case "$b" in stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" "$stats_abi" ;; esac; done )
   fi
 
   # --- imag: the ssh deploy of the bundle prepared above --------------------------------------------

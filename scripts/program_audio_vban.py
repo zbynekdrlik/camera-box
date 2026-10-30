@@ -330,7 +330,7 @@ def drop_pulse_capture_inputs(obs, keep=None, sleep=None):
 
 # --- issue 1440: the browser sources' page audio, rerouted into OBS and muted -----------------------------
 # On a box without a sound server (the strih role, issue 1440) a browser source with `reroute_audio` off
-# plays its page sound to the default device (the cutters' cans on strih-snv, the program sink on
+# plays its page sound to the default device (the cutters' cans on strih-snv, the MG-XU cans on
 # strih-pp). With `reroute_audio` on, obs-browser hands that sound to OBS as the source's own audio, and
 # the source muted in the mixer keeps it off every bus. The seed (strih_scenes.py --bootstrap, the strih
 # manifest's `browser_audio: reroute-mute`) sets both, verify-strih reads them back (--browser-audio).
@@ -412,3 +412,48 @@ def browser_audio_report(obs):
     if problems:
         return "browser audio: " + "; ".join(problems)
     return "browser audio: OK (%s)" % _browser_audio_ok_text(len(found))
+
+
+# issue 1436 (owner 25.10.2026): on the Windows stream box the operator heard the program audio through
+# exeldro's Audio Monitor plugin on its own fader. The stream manifest names the pulse sink in
+# `program_audio_monitor_filter`; the seed adds ONE such filter to the program input when it has no
+# `audio_monitor` filter yet (an operator's own filter and its settings always win, never rewritten).
+AUDIO_MONITOR_FILTER_KIND = "audio_monitor"
+AUDIO_MONITOR_FILTER_NAME = "Sluchadla operatora"
+
+
+def parse_program_audio_monitor_filter(text):
+    """issue 1436: the pulse sink of the program input's Audio Monitor filter from the manifest, or None
+    (the strih role, an older manifest, a non-JSON text). Lenient, never raises."""
+    try:
+        d = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    v = d.get("program_audio_monitor_filter") if isinstance(d, dict) else None
+    return v if isinstance(v, str) and v else None
+
+
+def audio_monitor_filter_settings(device):
+    """issue 1436: the seeded filter's settings: the pulse sink by id and name, full volume, unmuted."""
+    return {"device": device, "deviceName": device, "volume": 100.0}
+
+
+def seed_audio_monitor_filter(obs, name, device):
+    """issue 1436: add the Audio Monitor filter to input NAME playing to DEVICE, unless NAME already has an
+    `audio_monitor` filter (kept as it is). Returns a status word; never raises."""
+    got = obs.req("GetSourceFilterList", {"sourceName": name}, ignore_err=True) or {}
+    filters = got.get("filters")
+    if not isinstance(filters, list):
+        return "untouched: the filters of '%s' are unreadable" % name
+    for f in filters:
+        if isinstance(f, dict) and f.get("filterKind") == AUDIO_MONITOR_FILTER_KIND:
+            return "kept: '%s' already has the Audio Monitor filter '%s'" % (name, f.get("filterName"))
+    obs.req("CreateSourceFilter", {"sourceName": name, "filterName": AUDIO_MONITOR_FILTER_NAME,
+                                   "filterKind": AUDIO_MONITOR_FILTER_KIND,
+                                   "filterSettings": audio_monitor_filter_settings(device)}, ignore_err=True)
+    back = obs.req("GetSourceFilter", {"sourceName": name, "filterName": AUDIO_MONITOR_FILTER_NAME},
+                   ignore_err=True) or {}
+    if back.get("filterKind") != AUDIO_MONITOR_FILTER_KIND:
+        return "create FAILED: OBS lists no '%s' filter on '%s' (the Audio Monitor plugin not loaded? issue 1436)" \
+            % (AUDIO_MONITOR_FILTER_NAME, name)
+    return "added '%s' -> %s" % (AUDIO_MONITOR_FILTER_NAME, device)

@@ -306,6 +306,13 @@ if [ -n "$LEASE_INHERITED" ]; then
   fi
 fi
 VERDICT_BIN="${PROBE_BIN_DIR:+$PROBE_BIN_DIR/recording-verdict}"
+# issue 1482: the A/V gate centres on the test feed's own leg, the SAME expected offset the E2E uses
+# (rig_test_feed_av_expected_ms: -45 ms for the direct feed, 0 optical); an explicit AV_EXPECTED_MS wins.
+# shellcheck source=scripts/lib/rig-test-feed.sh
+. "$HERE/lib/rig-test-feed.sh"
+if [ -z "${AV_EXPECTED_MS+set}" ]; then
+  AV_EXPECTED_MS="$(rig_test_feed_av_expected_ms)" || die 4 "RIG_TEST_FEED='${RIG_TEST_FEED}' names no test feed"
+fi
 
 # --- --plan: print every step, touch nothing ------------------------------------------------------
 

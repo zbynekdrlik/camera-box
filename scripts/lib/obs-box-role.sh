@@ -54,7 +54,9 @@ OBS_BOX_STREAM_AUDIO_MONITOR=off
 OBS_BOX_STREAM_OUTPUT_NAME="stream"
 # The stream role's session apps, in start order (obs_box_role_apply below; the genlock deploy's start
 # step reads the same list for a stream-role box, issue 1462).
-OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service)
+# issue 1436: the pulse sink the program input's Audio Monitor filter plays to (stream-operator-audio.sh's sink).
+OBS_BOX_STREAM_AUDIO_MONITOR_FILTER_DEVICE=stream-operator-headphones
+OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service strih-display-watch.service)
 # issue 1380 (ROZHODNUTE 13.10.2026): the stream role's YouTube-safe Development scene -- the program
 # video input (muted) over the measurement clip, never the production scene (it holds the live mixer).
 # The scene name equals STREAM_DEV_SCENE_DEFAULT (scripts/lib/stream-dev-scene.sh, pinned by a pytest).
@@ -209,6 +211,9 @@ obs_box_stream_seed_manifest_json() {
   # The loader validated the four facts (one stream name and one input name of plain characters, two
   # integers); the block's one renderer is strih_lx_program_audio_vban_json (scripts/lib/strih-provision.sh).
   printf '  "program_audio_vban": %s,\n' "$vban"
+  # issue 1436 (owner 25.10.2026): the Audio Monitor plugin's filter on the program input plays it to the
+  # operator's locked headphone sink, as on the Windows stream box (seeded only when the input has none)
+  printf '  "program_audio_monitor_filter": "%s",\n' "$OBS_BOX_STREAM_AUDIO_MONITOR_FILTER_DEVICE"
   # issue 1465 item 3: no pulse capture input may capture the operator's headphone mix into the program
   printf '  "pulse_capture": "forbid",\n'
   # issue 1462: ONE Development design per box (fact STRIH_STREAM_DEV_SCENE). clip = the stream-pp

@@ -79,7 +79,7 @@ widen `find_package(XCB … RANDR …)`; add the `.c`/`.h` to `target_sources(li
 the `HDMI-1` name), and the DRM connector id is discovered from the LEASED fd
 (`drmModeGetResources(leasefd)->connectors[0]`), never from the config string. So the config
 `connector` value is the **X RandR output name** (`"HDMI-1"`). The pure CRTC-selection
-(`drm_output_pick_free_crtc`, Tier-0 truth-tabled) picks a free candidate CRTC to include in the
+(`drm_output_pick_free_crtc`, truth-tabled) picks a free candidate CRTC to include in the
 lease request; on the leased fd there is then exactly one crtc+connector.
 
 The lease fd IS DRM master of the leased objects — so **no `SET_MASTER` ioctl and no fbcon-detach**
@@ -88,10 +88,9 @@ reference here). Linux/EGL/DRM only — strih+stream are libobs-d3d11 where xcb/
 exist; the whole TU is under `#if defined(__linux__)` and the obs.c call site is `__linux__`-guarded,
 so there is **no `windows-genlock*.yml` pwsh mirror** (nothing to assert on Windows).
 
-## Local verification (CI is the first real type-check, but buy a compile check back)
+## Local verification
 
-- **Anchor + lift-compile gate** `tests/drm_output_lease_1152.rs` (std-only, runs via
-  `CARGO_MANIFEST_DIR=<abs> rustc --test --edition 2021 tests/drm_output_lease_1152.rs -o /tmp/t && /tmp/t`).
+- **Anchor + lift-compile gate** `tests/drm_output_lease_1152.rs` (std-only).
   Facet A source-anchors the mechanism (lease/free_lease/pageflip/`drm-output:`/pick-helper, the
   os-linux.cmake link, the `__linux__`-guarded obs.c autostart + obs_shutdown stop). Facet B lifts
   `drm_output_pick_free_crtc` and cc-compiles it under `-Werror -Wconversion` over a truth table —
@@ -342,7 +341,7 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
     version carried a render across a stop/restart into a tick that did not contain it.
   - The `multiview-render` line carries `self_ns=` (the value the gate last used). On a healthy
     30 fps view it reads about the Multiview cost (~14e6).
-  - Tier-0 mirror: `src/render_budget.rs` (`display_should_skip` + `aux_consumed_ns` +
+  - Pure mirror: `src/render_budget.rs` (`display_should_skip` + `aux_consumed_ns` +
     `aux_sender_should_skip_excluding`). C parity + the live numbers (pre 15 + mv 14 = 30/30, the
     wrapper 15/30, pre 25 + mv 14 = the floor 7/30): `tests/drm_output_view_mv_budget_1346.rs`.
   - Any NEW surface that renders inside the graphics tick and asks this gate must pass its own
@@ -453,8 +452,9 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   USB). The vestibule TV path has no Cam Link, so never present that number as the TV's latency.
 - **Bounded, and a replug is not the end:** the present loop's acquire/fence waits are 1 s and
   re-checked. `VK_ERROR_OUT_OF_DATE_KHR` / `VK_ERROR_SURFACE_LOST_KHR` (an HDMI or grabber replug)
-  rebuild the swapchain (+ the display-plane surface when lost, or from the 2nd try on) with 10 tries
-  1 s apart, without any device wait: a swapchain-only rebuild RETIRES the replaced swapchain (handed
+  rebuild the swapchain (+ the display-plane surface when lost, or from the 2nd try on) 1 s apart for 10
+  tries, then (issue 1424 hotplug, `display-hotplug.md`) every 5 s while another display is open -- the
+  display stays acquired; alone it gives up and the retry supervisor reopens it -- without any device wait: a swapchain-only rebuild RETIRES the replaced swapchain (handed
   over as `oldSwapchain`, freed after 4 later signalled fences or at the teardown) and the per-image
   present semaphores live across rebuilds, so a still-queued present never waits a destroyed object.
   **A surface rebuild never retires the surface** (issue 1424, live strih-pp: the old display-plane
@@ -494,7 +494,9 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   with VkResult 0 and exited. After ANY harness run check `pgrep -x vk-rig-harness` is empty (NOT `pgrep -f`, which matches the ssh `bash -c` that carries the name) — a hung
   harness holds HDMI-0 acquired. Re-run it on every new NVIDIA strih box (strih PP). The boxes carry no
   dev headers: stage dev1's `/usr/include/{vulkan,vk_video,X11,xcb,EGL,GL,KHR}` as one tarball into a
-  box scratch dir, plus `libobs/util` and the vk files, and link the runtime sonames directly
+  box scratch dir, plus `libobs/util`, the vk files and (issue 1424 hotplug) `obs-drm-output-retry.h` +
+  `obs-drm-output-logcap.h` (the harness's `blog()` becomes `drm_output_blog` through the internal
+  header's macro), and link the runtime sonames directly
   (`-l:libX11.so.6 -l:libX11-xcb.so.1 -l:libxcb.so.1 -l:libxcb-randr.so.0 -l:libEGL.so.1`). Stop OBS only
   for the run (`systemctl --user stop strih-obs.service`, an EXIT trap starts it again) and confirm
   `multiview bind LIVE` afterwards.
@@ -507,6 +509,16 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   green; the HDMI shows the chosen view and the Tools switch changes it live. Rollback: remove the
   config (or its `"backend"` key) and restart OBS; `xrandr --output HDMI-0 --auto` brings the port
   back to the desktop only if wanted.
+
+## Display hotplug: retry, X config, display watch (issue 1424, owner 24.10.2026)
+
+A vk-direct output never stays dark until the next OBS start: the retry supervisor
+(`obs-drm-output-retry.{c,h}`, pure decision parity-gated with `src/drm_output_retry.rs`) retries a dormant
+output's start and releases + retries one whose present loop died; the present loop keeps a display
+acquired through an unplug beside another open display; X never sets a mode on a fixed output (an
+xorg.conf.d MetaModes, `scripts/lib/strih-x-display.sh`); a session display watch keeps a usable screen
+and puts operator monitors into the layout (`scripts/strih_display_watch.py`); tint2 starts only on a real
+screen. Everything, incl. the runbook: `.claude/rules/display-hotplug.md`.
 
 ## Lifecycle invariants (locked by the #1152 review — keep them if you touch the module)
 
@@ -669,10 +681,11 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   `drm_output_vk_first_unsettled`, truth-tabled in `tests/drm_output_vk_two_displays_1424.rs`), then
   acquires. Rejected alternative (review): acquire EVERY display before any presents (no overlap by
   construction) -- it needs a two-phase open across the outputs layer and the vk core API; the settle
-  wait is causal (presents, not a sleep) and also covers a re-mode on the other display. Known limit
-  (review round 2): a REPLUG rebuild of the other display (`drm_output_vk_rebuild_or_give_up`) does not
-  check `dev->acquiring`, so an HDMI replug exactly while an output opens can still fail that open's
-  acquire with -13; opens happen only at OBS startup, so it is left named, not guarded. A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
+  wait is causal (presents, not a sleep) and also covers a re-mode on the other display. A REPLUG rebuild
+  of the other display (`drm_output_vk_rebuild_or_give_up`) defers while `dev->acquiring` is up and,
+  waiting between tries, is skipped by the settle wait (its `rebuilding` flag) -- the issue-1424 hotplug
+  slice closed the old review-round-2 limit, since opens now also happen at run time (the retry
+  supervisor, `display-hotplug.md`). A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
   resets its settle count BEFORE re-checking the flag (both seq-cst), so an open and a re-mode can never
   miss each other. Logs: `waited N ms for the other display to settle before acquiring '<c>'`, or the
   WARNING `'<other>' is still bringing its presentation up after N ms -- acquiring '<c>' anyway`.
@@ -680,9 +693,10 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   canvas mode in mHz, handed over like the OBS frame hook; the run fails unless that mode is on scanout,
   `MODE output=... wanted=yes`) proves both displays on one device, then closes display 0 while display
   1 keeps presenting (its count must advance at ITS OWN refresh, 29.97 Hz after the re-mode), then
-  closes display 1 too and re-opens BOTH on a fresh device. A re-open BESIDE a live display is refused
-  by NVIDIA (the released-display -13 above) -- a known limit OBS never hits: the outputs start once
-  at autostart and stop together at `obs_shutdown`. Live 13.10.2026 on strih-pp: both acquired (waited
+  closes display 1 too and re-opens BOTH on a fresh device. A re-acquire of a display RELEASED beside a
+  live one is refused by NVIDIA (the released-display -13 above); since the issue-1424 hotplug slice a
+  teardown beside a live display PARKS the acquisition instead and a re-open reuses it
+  (`display-hotplug.md`). Live 13.10.2026 on strih-pp: both acquired (waited
   75 ms), HDMI-0 2560x1440@59.951, HDMI-1 re-moded to 1920x1080@29.970 and presenting, rc=0.
 - **Audio + mode per output:** each leg reads its OWN output's view (`const volatile long *view`) and
   present clock, so the Multiview output's leg is muted while the Program output plays (verify grades

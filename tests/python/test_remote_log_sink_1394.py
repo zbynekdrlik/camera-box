@@ -149,7 +149,8 @@ def test_the_generators_bake_the_given_sink_and_refuse_none():
 
 GREEN = ("NC_SVC_ENABLED=enabled\nNC_SVC_ACTIVE=active\nNC_SVC_RESULT=success\nNC_SCRIPT_X=yes\n"
          "NC_ENABLED=1\nNC_REMOTE_IP=10.77.9.202\nNC_REMOTE_PORT=514\nJU_SVC_ENABLED=enabled\n"
-         "JU_URL=http://10.77.9.202:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state")
+         "JU_URL=http://10.77.9.202:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state\n"
+         "CONSOLE_LOGLEVEL=7\nKMSG_REDIRECT=12")
 
 
 def test_the_verdict_grades_against_the_given_sink_and_fails_closed_without_one():

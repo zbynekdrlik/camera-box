@@ -20,8 +20,15 @@ env:
 # re-push doesn't leave the old run burning a runner. Keyed by workflow + ref so
 # dev, main, and a manual dispatch each get their own independent group.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Issue 1476: a main run is never cancelled. Every main run tags + publishes a release (and
+  # deploys the fleet); a second merge right behind it used to cancel it after the tag was pushed,
+  # leaving a tag with no GitHub Release (a cancelled job never trips notify-on-failure). So each
+  # main run gets its OWN group (the run id appended): GitHub keeps only one PENDING run per group
+  # even without cancel-in-progress, so a shared main group would still drop the middle one of
+  # three quick merges. The fleet deploy keeps its own hardware queue (deploy-fleet's job group).
+  # dev and manual runs still cancel a superseded run.
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -41,7 +48,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev nasm  # nasm: issue 1387, the jxs feature builds the vendored SVT-JPEG-XS (jxs/sys/build.rs)
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -53,6 +60,17 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Issue 1387: the JPEG XS codec crate is a workspace member the root clippy above only
+      # compiles as a dependency; lint its own code and tests too.
+      - name: Clippy (svt-jpegxs-sys)
+        run: cargo clippy -p svt-jpegxs-sys --all-targets -- -D warnings
+
+      # Issue 1387 slice 2: the C ABI static library the strih DistroAV build links.
+      - name: Clippy (jxs-recv-ffi)
+        run: cargo clippy -p jxs-recv-ffi --all-targets -- -D warnings
+      - name: Clippy (jxs-send-ffi)
+        run: cargo clippy -p jxs-send-ffi --all-targets -- -D warnings
 
   test:
     name: Test
@@ -79,7 +97,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev  # libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson; libsimde-dev: issue 1439, the obs-vban source lift includes libobs's util/sse-intrin.h
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson; libsimde-dev: issue 1439, the obs-vban source lift includes libobs's util/sse-intrin.h
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
@@ -124,6 +142,18 @@ jobs:
       - name: Run tests (nextest)
         run: cargo nextest run --all-features
 
+      # Issue 1387: the codec crate's own encode -> decode tests (the root run above covers the
+      # link through camera-box's `jxs` feature).
+      - name: Run tests (svt-jpegxs-sys)
+        run: cargo nextest run -p svt-jpegxs-sys
+
+      # Issue 1387 slice 2: the C ABI pinned against its header by the C compiler, the static
+      # library linked into a -z defs shared object, and the real-codec loopback through it.
+      - name: Run tests (jxs-recv-ffi)
+        run: cargo nextest run -p jxs-recv-ffi
+      - name: Run tests (jxs-send-ffi)
+        run: cargo nextest run -p jxs-send-ffi
+
       - name: Build benchmarks (compile check only)
         run: cargo bench --no-run
 
@@ -145,7 +175,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       # ffmpeg/ffprobe for the #106 recorded-file analysis path covered by the
       # recording_decode integration test (run under llvm-cov here too).
@@ -188,7 +218,9 @@ jobs:
         # mutation-tested, but its sched_setaffinity / /proc-irq / /sys IO glue cannot
         # be — so the file follows the same whole-file exclusion as kms.rs (glue
         # excluded from coverage, pure functions still mutated in the mutants job).
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader|colour_sample)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict)\.rs|src/affinity\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        # src/bin/jxs-recv-probe.rs (issue 1387): the probe's CLI + print loop; the pieces it runs
+        # (jxs_link, jxs_recv) are library code covered by tests/jxs_loopback_1387.rs.
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader|colour_sample)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict|jxs-recv-probe)\.rs|src/affinity\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
   mutants:
     name: Mutation Testing
@@ -209,7 +241,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@cargo-mutants
@@ -225,8 +257,9 @@ jobs:
       - name: Mutation testing (PR diff only)
         # cargo-mutants runs a full unmutated baseline build+test first; skip it
         # entirely when the PR touches no Rust, so doc/CI-only PRs stay fast.
-        # --features probe: the probe modules are feature-gated, so mutants must
-        #   be built+tested with the feature or they all "survive" vacuously.
+        # --features probe,jxs: the probe modules and the issue-1387 JPEG XS link's codec
+        #   paths are feature-gated, so mutants must be built+tested with both features or
+        #   they all "survive" vacuously (jxs needs nasm, installed above).
         # -e <glue>: painter/reader/run/fb/bin drive /dev/fb0 + NDI and are
         #   verified by the on-device loopback E2E, not unit tests — exclude them
         #   (same rationale as the coverage exclusion).
@@ -281,7 +314,7 @@ jobs:
         # (classify_patch / summarize_node_colour) and NodeVerdict::is_zero's colour_fail term.
         run: |
           if git diff --name-only origin/main...HEAD | grep -q '\.rs$'; then
-            cargo mutants --in-diff pr.diff --features probe \
+            cargo mutants --in-diff pr.diff --features probe,jxs \
               -e 'src/probe/painter.rs' \
               -e 'src/probe/reader.rs' \
               -e 'src/probe/run.rs' \
@@ -289,6 +322,7 @@ jobs:
               -e 'src/probe/multi_reader.rs' \
               -e 'src/probe/colour_sample.rs' \
               -e 'src/bin/frame-probe.rs' \
+              -e 'src/bin/jxs-recv-probe.rs' \
               --exclude-re 'NdiSender::send_frame_data' \
               --exclude-re 'NdiSender::set_external_pacing' \
               --exclude-re '\bwall_clock_ns\b' \
@@ -644,15 +678,17 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev nasm  # nasm: issue 1387, the jxs feature builds the vendored SVT-JPEG-XS (jxs/sys/build.rs)
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: build
 
+      # Issue 1387: the deployed appliance carries the JPEG XS link (`jxs` feature, OFF at run time
+      # unless CAMERA_BOX_JXS_TARGET is set on the box).
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --features jxs
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -679,9 +715,13 @@ jobs:
       #                             instead of reimplementing compute_phase_sync_offsets.
       - name: Build probe tools (verdict + frame-probe + probe camera-box)
         run: |
-          cargo build --release --features probe \
+          cargo build --release --features probe,jxs \
             --bin recording-verdict --bin frame-probe --bin camera-box
           cp target/release/camera-box target/release/camera-box-probe
+
+      # Issue 1387: the JPEG XS link's receive/measure tool (runs on strih/dev1, `jxs` feature).
+      - name: Build jxs-recv-probe (issue 1387)
+        run: cargo build --release --features jxs --bin jxs-recv-probe
 
       - name: Build default-feature gate bins (frozen-camera-gate #365, render-budget-gate #405, obs-watchdog-gate #391, av-restart-sync-gate #137, zero-loss-restart-gate #109, phase-sync-gate #438, mv-fps-gate #771)
         run: cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin obs-watchdog-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin mv-fps-gate
@@ -701,6 +741,7 @@ jobs:
             target/release/zero-loss-restart-gate
             target/release/phase-sync-gate
             target/release/mv-fps-gate
+            target/release/jxs-recv-probe
 
   windows-probe:
     name: Windows probe build (recording-verdict.exe + obs-watchdog-gate.exe + obs-self-heal-gate.exe)
@@ -800,14 +841,21 @@ jobs:
     # camera-box-grow-root.sh (first-boot growpart/resize2fs) that NO top-level script sources,
     # so the non-recursive glob would otherwise leave them uncovered. Gate at `-S warning`
     # (errors + warnings fail the build); the many style/info-level findings are a DELIBERATE
-    # floor, not weakening -- advisory-only, no CI block. GitHub's
-    # ubuntu-latest ships shellcheck preinstalled, so no separate install step is needed; the
-    # apt-get fallback below is a cheap belt-and-suspenders in case that ever changes upstream.
+    # floor, not weakening -- advisory-only, no CI block. Issue 1395: the job runs the PINNED
+    # shellcheck from scripts/lib/shellcheck-pin.sh (sha256-verified release, first on PATH), never
+    # the runner's preinstalled 0.9.0: the heaviest entry scripts carry a file-scoped
+    # `extended-analysis=false` directive that 0.9.0 does not know (SC1107), and without it the
+    # dataflow over their sourced closures passed 12 GB RSS.
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ensure shellcheck is installed
-        run: command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+      - name: Install the pinned shellcheck (issue 1395)
+        run: |
+          set -euo pipefail
+          . scripts/lib/shellcheck-pin.sh
+          bin="$(shellcheck_pin_install "$RUNNER_TEMP/shellcheck-pin")"
+          dirname "$bin" >> "$GITHUB_PATH"
+          "$bin" --version
 
       - name: Shellcheck (warning severity, binary gate)
         run: shellcheck -S warning scripts/*.sh scripts/lib/*.sh
@@ -831,7 +879,8 @@ jobs:
     # deploy-set.sh / camera-set.sh — a shell bug here can brick a box). A RED in any of these must
     # NOT auto-deploy to prod cameras. (coverage/mutants/python-tests/windows-probe/drift-guard are
     # deliberately excluded — they don't bear on the Linux binary or the deploy shell.)
-    needs: [lint, test, build, security, shellcheck]
+    # issue 1452: + bkshading -- the same run's bkshading relay is deployed with camera-box.
+    needs: [lint, test, build, security, shellcheck, bkshading]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: [self-hosted, linux, camera-lan]
     # Share the E2E hardware-serialization slot (loopback-e2e.yml / full-path-e2e.yml's group) so a
@@ -856,6 +905,15 @@ jobs:
         with:
           name: probe-tools-linux-amd64
           path: dist-probe
+
+      # issue 1452: the bkshading RELAY of this SAME run. deploy-fleet.sh brings every cambox that has
+      # a relay to it (through bkshading-deploy-relay.sh) and names each box's camera-box + relay
+      # version; before this the fleet deploy left every relay on an old build (28.10.2026 event).
+      - name: Download the bkshading relay (this run's bkshading job, issue 1452)
+        uses: actions/download-artifact@v4
+        with:
+          name: bkshading-linux-amd64
+          path: dist-relay
 
       # issue 1432: the deploy restarts camera-box on every active cambox, so it takes the shared rig
       # lease first through the SAME gate the full-path E2E uses: it waits for a live holder
@@ -893,7 +951,7 @@ jobs:
             exit 1
           fi
           echo "Active set: [$CAMERA_ACTIVE_SET]  ->  deploy set (minus acked): [$deploy_set]"
-          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe
+          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe --relay-binary dist-relay/bkshading-relay
 
       # issue 1432: release the SNV rig lease right after the SNV deploy (also on a failure or a
       # cancellation); the other venues' deploy below is a different rig the lease does not cover.
@@ -924,13 +982,117 @@ jobs:
           for v in $venues; do
             echo "Deploying camera-box $(dist/camera-box --version 2>/dev/null | awk '{print $NF}') to venue $v"
             v_rc=0
-            scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v" || v_rc=$?
+            scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v" --relay-binary dist-relay/bkshading-relay || v_rc=$?
             if [ "$v_rc" -ne 0 ]; then
               echo "::error::deploy-fleet.sh --venue $v exited $v_rc (its lines above name the cause)"
               rc=1
             fi
           done
           exit "$rc"
+
+  version-check:
+    name: Version is above main (dev only)
+    # Issue 1476 + the version-bumping rule: dev must carry a clean X.Y.Z strictly above main's
+    # version BEFORE the merge, so a missed bump fails here in seconds instead of reaching main,
+    # where the release tag would refuse it after the code already shipped. The decision is
+    # scripts/lib/release-version.sh's release_version_dev_check (tests/release_versions_1476.rs).
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: dev version > main version
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/release-version.sh
+          . scripts/lib/release-version.sh
+          git fetch --depth=1 origin main
+          dev="$(grep -m1 -oE '^version = "[^"]+"' Cargo.toml | sed -E 's/^version = "([^"]+)"$/\1/' || true)"
+          main="$(git show FETCH_HEAD:Cargo.toml | grep -m1 -oE '^version = "[^"]+"' | sed -E 's/^version = "([^"]+)"$/\1/' || true)"
+          echo "dev ${dev:-<unreadable>}, main ${main:-<unreadable>}"
+          verdict="$(release_version_dev_check "$dev" "$main")" || {
+            echo "::error::${verdict}"
+            exit 1
+          }
+          echo "$verdict"
+
+  release-tag:
+    name: Tag the release vX.Y.Z (post-merge, main only)
+    # Issue 1476: every dev->main merge is a real release. Cargo.toml's [workspace.package] version
+    # is a clean X.Y.Z (dev bumps it to the next patch after every release), the binary THIS run's
+    # build job produced must report the same version, and the merge commit gets the tag vX.Y.Z.
+    # Idempotent: a re-run whose tag already names this commit is OK (EXISTS); a tag on ANOTHER
+    # commit FAILS loudly (dev was not bumped before the release, a release is never moved). The
+    # decision is scripts/lib/release-version.sh's release_tag_decision (tests/release_versions_1476.rs).
+    # Gated on the same binary gates as deploy-fleet, never on deploy-fleet itself: a rig that is
+    # away or busy does not withhold the release of a green build.
+    needs: [lint, test, build, security, shellcheck]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download camera-box binary (this run's build job)
+        uses: actions/download-artifact@v4
+        with:
+          name: camera-box-linux-amd64
+          path: dist
+
+      - name: Runtime library the binary links (libasound)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2
+
+      - name: Tag the merge commit
+        id: tag
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/release-version.sh
+          . scripts/lib/release-version.sh
+          ver="$(grep -m1 -oE '^version = "[^"]+"' Cargo.toml | sed -E 's/^version = "([^"]+)"$/\1/' || true)"
+          chmod +x dist/camera-box
+          bin="$(dist/camera-box --version 2>/dev/null | awk '{print $NF}' || true)"
+          # An annotated tag lists its commit under ^{}; a lightweight tag only under its own name.
+          tag_sha="$(git ls-remote origin "refs/tags/v${ver}^{}" | awk '{print $1}')"
+          [ -n "$tag_sha" ] || tag_sha="$(git ls-remote origin "refs/tags/v${ver}" | awk '{print $1}')"
+          echo "Cargo.toml ${ver:-<unreadable>}, camera-box --version ${bin:-<unreadable>}, tag v${ver} -> ${tag_sha:-<none>}, merge ${GITHUB_SHA}"
+          decision="$(release_tag_decision "$ver" "$bin" "$tag_sha" "$GITHUB_SHA")" || {
+            echo "::error::release tag refused: ${decision}"
+            exit 1
+          }
+          case "$decision" in
+            CREATE)
+              git tag "v${ver}" "$GITHUB_SHA"
+              git push origin "refs/tags/v${ver}"
+              echo "pushed tag v${ver} on ${GITHUB_SHA}"
+              ;;
+            EXISTS)
+              echo "tag v${ver} already names ${GITHUB_SHA} (a re-run) -- publishing again"
+              ;;
+            *)
+              echo "::error::unexpected release_tag_decision output: ${decision}"
+              exit 1
+              ;;
+          esac
+          echo "tag=v${ver}" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish the GitHub Release (post-merge, main only)
+    # Issue 1476: a tag pushed with the default GITHUB_TOKEN starts NO other workflow (GitHub's
+    # anti-recursion rule), so release.yml's own `push: tags` trigger never fires for the tag the
+    # job above pushed. release.yml is called here as a reusable workflow instead, in this same
+    # run, with the tag; it builds the binary from the tag, checks its --version against it and
+    # publishes the release (binary tarball + sha256).
+    needs: [release-tag]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-tag.outputs.tag }}
 
   notify-on-failure:
     name: Notify on red
@@ -942,7 +1104,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, intercom-web-e2e]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, intercom-web-e2e, version-check, release-tag, release]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

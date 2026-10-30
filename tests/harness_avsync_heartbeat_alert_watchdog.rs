@@ -431,6 +431,10 @@ impl Harness {
             // tests never invoke the fake python3 stub (which would inflate notify_call_count) and
             // never touch the shared report-state path. A report test overrides this via extra_env.
             .env("AVSYNC_REPORT_FETCH_CMD", "true")
+            // issue 1441: a stale leg pages only during a production; these legacy-venue tests
+            // run as a production so the rig-mode probe and the OBS stream read (the fake
+            // python3, which would count as a notify) never run.
+            .env("AVSYNC_PRODUCTION", "yes")
             .env(
                 "AVSYNC_REPORT_STATE_FILE",
                 self.state_file.with_file_name("report-state.json"),

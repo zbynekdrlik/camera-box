@@ -147,6 +147,13 @@ pub mod render_budget;
 // `tests/drm_output_audio_1424.rs` compiles the C header and requires the same answers.
 pub mod drm_output_audio_match;
 
+// issue 1424 (owner 24.10.2026, design 6386467303 layer 3) — the Rust twin of the vendored libobs
+// header `obs-drm-output-retry.h`: when a dormant vk-direct HDMI output retries its start, when a live
+// one whose present loop died is released, and how the present loop backs off rebuilding a presentation
+// whose monitor went away. Pure; `tests/drm_output_retry_1424.rs` compiles the C header and requires
+// the same answers.
+pub mod drm_output_retry;
+
 // #373 — the zero-loss HEADLINE analyzed-span duration gate (pure decision). A collapsed/partial
 // cam2 optical read must not vacuously pass the headline over a handful of frames. No probe deps,
 // so it unit-tests Tier-0; the probe-gated `bin/recording-verdict` feeds each node's optical-span
@@ -551,6 +558,10 @@ pub mod vban_conceal;
 // committed parity gate `tests/genlock_lock_state_parity.rs`. Split by concern into
 // `src/genlock_lock_state/` (issue 1302); every item is re-exported at this path.
 pub mod genlock_lock_state;
+// Issue 1387: the in-OBS JPEG XS indicator decision (OFF / OK / DEGRADED / DOWN) + the Sources-dock
+// transport tag. The C port is vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp, parity-gated
+// by tests/genlock_jxs_state_parity_1387.rs.
+pub mod genlock_jxs_state;
 
 // #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (issue 1367: audio placed at
 // its NDI timecode + the video's MEASURED stamp→present delay through the live wall→mono offset;
@@ -612,6 +623,22 @@ pub mod send_stall;
 // own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
 // are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
 pub mod send_stagger;
+// Issue 1387: the JPEG XS link's wire format + reassembly + pixel helpers (pure, every platform).
+pub mod jxs_link;
+// Issue 1387: the sender's automatic bpp controller (pure state machine, every platform).
+pub mod jxs_auto_bpp;
+// Issue 1387 item 2: the sender's delay-based congestion control (pure) and its bottleneck bench.
+pub mod jxs_congestion;
+#[cfg(test)]
+mod jxs_congestion_bench;
+// Issue 1387: the pure helpers of the jxs-encode-bench bin (synthetic content, percentiles).
+pub mod jxs_bench;
+// Issue 1387: the cambox JPEG XS sender (off unless CAMERA_BOX_JXS_TARGET is set) and the receive
+// side the jxs-recv-probe bin and the loopback tests use. The codec itself needs the `jxs` feature.
+#[cfg(target_os = "linux")]
+pub mod jxs_recv;
+#[cfg(target_os = "linux")]
+pub mod jxs_send;
 // The send-stagger clamp must stay strictly below the buffered-dequeue fraction its idle-wait
 // add-back relies on (a genuinely buffered frame must still read as buffered after the sleep is
 // added back) — checked here against the REAL constant, so changing either one breaks the build.

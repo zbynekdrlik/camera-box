@@ -74,12 +74,11 @@ non-60-DELIVERED case only.
   PAIR (recv integer AND ts present). Any "never a silent UNKNOWN" guard: increment the blind counter
   when the sample is missing ANY field it needs downstream, not just the first one you check.
 
-## Tier-0 + ships DISABLED
+## Pure lib + ships DISABLED
 
-Pure lib is Tier-0 (`std`/bash, no probe/OBS/rig). `cargo` does NOT run locally here (build-ok
-DISABLED #477) — prove behaviour by running `scripts/cadence-alert-watchdog.sh --dry-run` with a
-`CADENCE_PROBE_CMD` stub (seed → WRONG-confirm → alert → throttle → recovery), and by sourcing the
-lib directly; CI runs the Rust assertions. Units are committed but NOT enabled — install/enable per
+Pure lib (`std`/bash, no probe/OBS/rig). Prove behaviour by running `scripts/cadence-alert-watchdog.sh
+--dry-run` with a `CADENCE_PROBE_CMD` stub (seed → WRONG-confirm → alert → throttle → recovery), and
+by sourcing the lib directly. Units are committed but NOT enabled — install/enable per
 `systemd/cadence-alert-watchdog.README.md` (the supervisor sets the live `CADENCE_SOURCES` first).
 
 ## Byte-safety of the received= extraction (#1258 layer 2)
@@ -92,5 +91,5 @@ digit sed, and the leading-timestamp sed) — NOT plain grep/sed. PowerShell 5.1
 fleet's UTF-8 locale, plain grep then flags stdin BINARY (empty extraction) and plain sed's trailing
 `.*` leaves line-tail garbage after the digits — either way the sample is worthless. Full root cause
 + the fix pattern: `.claude/rules/mv-reverify-escalate.md` "Layer 2" section (this watchdog is one of
-its 3 proven-RED consumers, verified via a Tier-0 fixture with an injected invalid byte). Never
+its 3 proven-RED consumers, verified via a fixture with an injected invalid byte). Never
 re-add a plain (non-`LC_ALL=C`) grep/sed on this extraction.

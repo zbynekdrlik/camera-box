@@ -130,9 +130,19 @@ elif sub == "record":
         if not os.environ.get("FAKE_STOP_FAILS"):
             if os.path.exists(rec):
                 os.remove(rec)
+            if os.environ.get("FAKE_STOP_LAG"):
+                open(os.path.join(d, "stop-lag"), "w").write(os.environ["FAKE_STOP_LAG"])
         print(os.environ.get("FAKE_REC_PATH", "/srv/_REC/2026-10-22 10-00-00.mkv"))
     elif action == "status":
-        print("active=%s path=" % os.path.exists(rec))
+        # FAKE_STOP_LAG: OBS still finishing the file for the first N status reads after a stop
+        # (live strih-snv 28.10.2026).
+        lag = os.path.join(d, "stop-lag")
+        n = int(open(lag).read()) if os.path.exists(lag) else 0
+        if n > 0:
+            open(lag, "w").write(str(n - 1))
+            print("active=True path=")
+        else:
+            print("active=%s path=" % os.path.exists(rec))
 """
 
 FAKE_BENCH_OBS = r"""#!@PY@
@@ -396,6 +406,17 @@ def _clean_run(rig, log_lines, **extra):
     return rig.run("--run", "--profiles", "clean", "--minutes", "2", "--run-dir", str(rig.run_dir), **extra)
 
 
+def test_a_recording_that_reads_active_for_a_moment_after_stoprecord_still_passes(rig):
+    # Live 28.10.2026: one status read right after StopRecord said active=True while OBS finished
+    # the file, and the bench aborted (exit 5) on a healthy rig.
+    r = _clean_run(rig, [ASRC_LINE % (INPUT, "0.12ppm"),
+                         "13:01:10.000: vban-source '%s': received=22500 lost=0 late=0 reanchors=0\n" % INPUT],
+                   FAKE_STOP_LAG="2", VBAN_BENCH_STOP_POLL_S="0.05")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "still reads" not in out
+
+
 def test_a_clean_profile_passes_end_to_end(rig):
     r = _clean_run(rig, [ASRC_LINE % (INPUT, "0.12ppm"),
                          "13:01:10.000: vban-source '%s': received=22500 lost=0 late=0 reanchors=0\n" % INPUT])
@@ -419,6 +440,30 @@ def test_a_clean_profile_passes_end_to_end(rig):
     for line in calls.splitlines():
         if line.startswith("sshpass -e"):
             assert CAM_PW not in line and STRIH_PW not in line, line
+
+
+EMITTING_LINE = ("13:01:01.000: [obs-vban] obs-vban receive emitting: source '%s' frame=%d margin_ms=34.6 "
+                 "after the first second's hold -- every slot goes out by 2 ms before its stamp\n")
+
+
+def test_the_sine_grade_gets_the_receivers_own_hold(rig):
+    # the concealed losses are placed on the recording from the frames the receiver held, read from
+    # the profile's own OBS log -- never another source's line (the strih program receiver logs too)
+    r = _clean_run(rig, [EMITTING_LINE % ("ASIO zvuk", 999), EMITTING_LINE % (INPUT, 200),
+                         ASRC_LINE % (INPUT, "0.12ppm"),
+                         "13:01:10.000: vban-source '%s': received=22500 lost=0 late=0 reanchors=0\n" % INPUT])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads((rig.run_dir / "p1-analysis.json").read_text())["hold_frames"] == 200
+    assert "the receiver held 200 frames" in r.stdout + r.stderr
+
+
+def test_without_the_emitting_line_the_measured_hold_is_used(rig):
+    r = _clean_run(rig, [ASRC_LINE % (INPUT, "0.12ppm"),
+                         "13:01:10.000: vban-source '%s': received=22500 lost=0 late=0 reanchors=0\n" % INPUT])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads((rig.run_dir / "p1-analysis.json").read_text())["hold_frames"] == 187
+    # a fallback is named, so a renamed log line never goes unnoticed
+    assert "with the default hold of 187 frames" in r.stdout + r.stderr
 
 
 def test_a_buffering_guard_on_the_test_input_fails_the_profile(rig):

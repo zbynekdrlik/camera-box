@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 # verify-strih.sh (issue 1317) -- see the extended header below the strict-mode line.
 # strih-snv acceptance gate: RUN ON the box, read-only, fail loud on any missing item.
 set -euo pipefail
@@ -732,19 +733,10 @@ else
   note "(collection-hygiene) active collection JSON / python3 absent -- report-only"
 fi
 
-# 29) RustDesk remote desktop (issue 1317, owner request 22.9.): the service is active + a connect ID is readable.
-#     FAIL loud when installed-but-broken; NOTE when not installed (no pw file placed, so step 16b skipped it).
-if command -v rustdesk >/dev/null 2>&1; then
-  RD_ACTIVE="$(systemctl is-active rustdesk 2>/dev/null || true)"
-  RD_ID="$(rustdesk --get-id 2>/dev/null | head -1 || true)"
-  if [ "$RD_ACTIVE" = active ] && [ -n "$RD_ID" ]; then
-    ok "(rustdesk) service active + connect ID present"
-  else
-    bad "(rustdesk) installed but not ready (active='${RD_ACTIVE:-<none>}', id='${RD_ID:-<empty>}') -- systemctl enable --now rustdesk; re-run setup-strih.sh step 16b"
-  fi
-else
-  note "(rustdesk) not installed -- place the 0600 password file + re-run setup-strih.sh step 16b (report-only until installed)"
-fi
+# 29) RustDesk remote desktop (issue 1317; issue 1462: not installed / not active / no connect ID / no
+#     permanent password all FAIL -- stream-snv was handed over without it). The (rustdesk) row: strih_rustdesk_grade_row, reads rustdesk --get-id.
+RD_ROW="$(strih_rustdesk_grade_row "$(hostname -s)")"
+case "$RD_ROW" in OK\|*) ok "${RD_ROW#OK|}" ;; *) bad "${RD_ROW#FAIL|}" ;; esac
 
 # 6b) dantesync ROLE live check (issue 1317): :8898/status reachable AND mode LOCK/NANO AND -- for the
 #     server role (the post-M4 default: the notebook IS the fleet NTP master) -- an ntp UDP :123
@@ -912,6 +904,8 @@ fi
 
 # 36) rig NIC driver version, USB Gen 2 link, 5G link, NM pinning vs the box facts (issue 1391, strih-nic-driver.sh).
 strih_nic_grade_report /sys "$(ip -o -4 addr show 2>/dev/null || true)" || bad "(nic) the rig-NIC grader printed no row"
+obs_audio_buffering_verify_row "$(strih_lx_audio_buffering_ms)" "$USER_HOME" "$LOG"   # 48) the FIXED OBS audio buffering == the box fact (issue 1425)
+strih_jxs_verify_row "$LOG"   # 49) every running JPEG XS source: lost_slices=0 over its last minute (issue 1387, scripts/lib/strih-jxs-verify.sh)
 
 # 35) Downstream Keyer OBS plugin (issue 1361): setup-strih.sh step 4c installs the pinned upstream
 #     plugin into the /usr prefix OBS loads; FAIL unless the installed .so has the pinned sha256 (the
@@ -928,6 +922,7 @@ if [ "$_dsk_verdict" = ok ]; then
 else
   bad "(downstream-keyer) ${_dsk_verdict#FAIL: } at ${_dsk_so} -- re-run setup-strih.sh step 4c (issue 1361)"
 fi
+obs_audio_monitor_grade_report   # issue 1436: the stream operator's Audio Monitor plugin (stream role)
 
 # 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender
 #     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with --

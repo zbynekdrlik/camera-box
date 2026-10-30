@@ -423,6 +423,15 @@ step (verify-strih) sees them active.
 - Outside a deploy (setup-strih run by hand, a fresh box), a stopped unit stays stopped until the next
   kiosk login or a `systemctl --user start`.
 
+## The display watch (`strih-display-watch.service`, issue 1424)
+
+The sixth entry on the strih role, the fourth on the stream role: `scripts/strih_display_watch.py` keeps
+the kiosk X screen usable with and without monitors (operator monitors `--auto` into the layout, fixed
+HDMI outputs kept out, >= 1920x1080 with no monitor). Its extra rows: `(display-watch-pass)` (its
+`--check-state`) and `(display-x-config)` (the layer-1 X config, `scripts/lib/strih-x-display.sh`), so
+`strih_session_apps_row_count` = units + 5 on strih-snv. The panel unit runs tint2 through its
+`--exec-when-screen` guard. Everything: `.claude/rules/display-hotplug.md`.
+
 ## Live steps (supervisor, after integration)
 
 1. The next strih-snv genlock deploy (`deploy-genlock-fleet.sh --run-id <id> --boxes strih-snv`) runs

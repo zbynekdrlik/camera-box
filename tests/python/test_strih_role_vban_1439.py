@@ -5,8 +5,9 @@ strih obs") + the PHASE 2 inputs 6361250274 (fohabl 10.77.7.30 sends the NEW str
 strih-snv 10.77.7.202:6981 over the VLAN-70 leg, 96 kHz, 239 frames per packet, 2 ch, PCM24). One unified
 design: the program VBAN is a box FACT on every role, and every consumer follows the facts, never the role:
 
-  * the loader takes the four program facts on the strih role too -- all `none` (a hub-fed strih, strih-pp)
-    or all set (strih-snv: `strih-obs` / 6981 / 30 / `ASIO zvuk`), never a mix;
+  * the loader takes the four program facts on the strih role too -- all `none` (a hub-fed strih; none is
+    deployed since 24.10.2026) or all set (strih-snv: `strih-obs` / 6981 / 30 / `ASIO zvuk`; strih-pp, design
+    6385519443: lv1's `strih-obs` / 6981 / 40 / `ASIO zvuk`), never a mix;
   * the strih seed manifest then carries `program_audio_input` + `program_audio_vban`, which the role-free
     seeder (strih_scenes.py -> program_audio_vban.py) already switches, keeping the operator's mixer state;
   * verify item 9 grades the obs-vban source on every box that declares it;
@@ -25,6 +26,9 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strih_pp_hub_fed_1439 import HUB_FED_PAIRS  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
@@ -36,7 +40,15 @@ VBAN_KIND = "net.nagater.obs-vban.source"
 
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
          "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "NDI_DISCOVERY_SENDER_HOSTS",
-         "STRIH_PROGRAM_VBAN_WAIT_S", "STRIH_PROGRAM_VBAN_KIND_FILE")
+         "STRIH_PROGRAM_VBAN_WAIT_S", "STRIH_PROGRAM_VBAN_KIND_FILE",
+         "STRIH_PROGRAM_VBAN_CHANNELS_FILE")
+
+
+def _ok_channels(tmp_path):
+    """issue 1439: the per-channel meter read of a healthy stereo program (the grader's seam)."""
+    f = tmp_path / "channels"
+    f.write_text("channel_verdict=ok\nchannel_detail=ch1 -40.0 dB ch2 -41.0 dB\n")
+    return f
 
 
 def _load(name, path):
@@ -85,6 +97,7 @@ def _boxes_with(tmp_path, box, pairs):
     return d
 
 
+
 def _header_define(name):
     m = re.search(r"#define\s+%s\s+([0-9]+)" % name, HEADER.read_text())
     assert m, name
@@ -94,7 +107,7 @@ def _header_define(name):
 # --- the facts ---------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("box,want", [("strih-snv", "strih-obs|6981|30|ASIO zvuk"),
-                                      ("strih-pp", "none|none|none|none")])
+                                      ("strih-pp", "strih-obs|6981|40|ASIO zvuk")])
 def test_each_strih_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s|%s" "$(strih_lx_program_vban_streams)" '
               '"$(strih_lx_program_vban_port)" "$(strih_lx_program_vban_reserve_ms)" '
@@ -110,6 +123,31 @@ def test_strih_snv_receives_on_6981_from_the_console_on_its_leg():
     assert f["STRIH_PROGRAM_VBAN_PORT"] == "6981"
     assert f["STRIH_PROGRAM_VBAN_SENDER"] == "10.77.7.30:6980,6981"
     assert f["STRIH_PROGRAM_VBAN_LEG"] == "vlan:70"
+
+
+def test_strih_pp_receives_lv1s_strih_obs_on_6981_with_no_leg():
+    # issue 1439 on strih-pp (design 6385519443): lv1 10.77.8.230 sends `strih-obs` to the rig NIC
+    # 10.77.8.202:6981 directly (tcpdump 24.10.2026: 48 kHz, 103 frames, 2 ch, PCM16), as stream-pp's lv1
+    # leg: no VBAN-only leg; the hub keeps 6980 for lv1's `strih` (the cans + the vestibule)
+    f = _facts("strih-pp")
+    assert (f["STRIH_PROGRAM_VBAN_STREAMS"], f["STRIH_PROGRAM_VBAN_PORT"]) == ("strih-obs", "6981")
+    assert (f["STRIH_PROGRAM_VBAN_LEG"], f["STRIH_PROGRAM_VBAN_LEG_ADDR"], f["STRIH_PROGRAM_VBAN_SENDER"]) == (
+        "none", "none", "none")
+    hub = tomllib.loads((REPO / f["STRIH_INTERCOM_CONFIG"]).read_text())
+    assert hub["hub"]["vban_bind"].endswith(":6980")
+
+
+def test_strih_pps_r_sits_above_lv1s_worst_gap():
+    # R = 40 ms, the value lv1 is proven at on stream-pp (lost 0, ~27 ms spare); lv1's worst gap there
+    # read 26-29 ms -- measured on lv1's 256-frame `stream`, not on this 103-frame `strih-obs` (the live
+    # read after a production is a supervisor acceptance item, .claude/rules/obs-vban-receive.md).
+    # A packet is in time with up to R - one packet (103 frames at 48 kHz) - the 2 ms playout margin of
+    # delay over the earliest arrival.
+    r = _bash('strih_box_load strih-pp\nprintf "%s" "$(strih_lx_program_vban_reserve_ms)"')
+    reserve_ms = int(r.stdout)
+    budget_ms = reserve_ms - 103 * 1000.0 / 48_000 - _header_define("VBAN_RECV_DEADLINE_MARGIN_MS")
+    assert budget_ms > 29, (reserve_ms, budget_ms)
+    assert reserve_ms <= 40, "the strih path's R stays low (owner 22.10.2026: low latency against double sound)"
 
 
 def test_strih_snvs_low_r_sits_above_the_consoles_measured_gap_on_the_leg():
@@ -131,11 +169,11 @@ def test_strih_snvs_low_r_sits_above_the_consoles_measured_gap_on_the_leg():
 
 
 @pytest.mark.parametrize("pairs", [
-    [("STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih\n")],
-    [("STRIH_PROGRAM_AUDIO_INPUT=none\n", "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n")],
-    [("STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih\n"),
-     ("STRIH_PROGRAM_VBAN_PORT=none\n", "STRIH_PROGRAM_VBAN_PORT=6981\n"),
-     ("STRIH_PROGRAM_VBAN_RESERVE_MS=none\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=20\n")],
+    [("STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_STREAMS=none\n")],
+    [("STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n", "STRIH_PROGRAM_AUDIO_INPUT=none\n")],
+    [("STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_STREAMS=none\n"),
+     ("STRIH_PROGRAM_VBAN_PORT=6981\n", "STRIH_PROGRAM_VBAN_PORT=none\n"),
+     ("STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=none\n")],
 ])
 def test_a_strih_box_declares_all_four_program_facts_or_none(tmp_path, pairs):
     d = _boxes_with(tmp_path, "strih-pp", pairs)
@@ -144,16 +182,12 @@ def test_a_strih_box_declares_all_four_program_facts_or_none(tmp_path, pairs):
     assert "all none" in r.stderr and "strih role" in r.stderr, r.stderr
 
 
-def test_a_strih_box_with_all_four_program_facts_loads(tmp_path):
-    d = _boxes_with(tmp_path, "strih-pp", [
-        ("STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih\n"),
-        ("STRIH_PROGRAM_VBAN_PORT=none\n", "STRIH_PROGRAM_VBAN_PORT=6981\n"),
-        ("STRIH_PROGRAM_VBAN_RESERVE_MS=none\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=40\n"),
-        ("STRIH_PROGRAM_AUDIO_INPUT=none\n", "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n")])
+def test_a_hub_fed_strih_box_with_all_four_program_facts_none_still_loads(tmp_path):
+    d = _boxes_with(tmp_path, "strih-pp", HUB_FED_PAIRS)
     r = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_vban_port)"', "strih-pp",
               env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "6981"
+    assert r.stdout == "none"
 
 
 @pytest.mark.parametrize("old,new,word", [
@@ -190,8 +224,17 @@ def test_the_strih_snv_manifest_switches_asio_zvuk_to_the_vban_source():
     assert latency == 3 and "STRIH-SNV (2ME PGM)" in outputs
 
 
-def test_a_hub_fed_strih_manifest_carries_no_program_keys():
+def test_the_strih_pp_manifest_switches_asio_zvuk_to_lv1s_vban_source():
     text = _manifest("strih-pp")
+    assert _scenes().parse_program_audio_input(text) == "ASIO zvuk"
+    assert PAV.parse_program_audio_vban(text) == PAV.vban_source_settings(6981, "strih-obs", 40)
+
+
+def test_a_hub_fed_strih_manifest_carries_no_program_keys(tmp_path):
+    d = _boxes_with(tmp_path, "strih-pp", HUB_FED_PAIRS)
+    r = _bash('strih_box_load "$1"\nobs_box_seed_manifest_json', "strih-pp", env={"STRIH_BOXES_DIR": str(d)})
+    assert r.returncode == 0, r.stderr
+    text = r.stdout
     assert "program_audio_vban" not in text and "program_audio_input" not in text
     assert PAV.parse_program_audio_vban(text) is None
 
@@ -205,7 +248,7 @@ def test_the_stream_and_strih_manifests_render_the_vban_block_through_one_functi
 
 # --- verify item 9 -----------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("box,want", [("strih-snv", "yes"), ("strih-pp", "no"), ("stream-pp", "yes"),
+@pytest.mark.parametrize("box,want", [("strih-snv", "yes"), ("strih-pp", "yes"), ("stream-pp", "yes"),
                                       ("stream-snv", "yes")])
 def test_the_program_vban_declared_predicate_follows_the_facts(box, want):
     r = _bash('strih_box_load "$1"\nif strih_program_vban_declared; then echo yes; else echo no; fi', box)
@@ -229,7 +272,7 @@ def test_item_9_grades_strih_snvs_asio_zvuk_on_the_facts(tmp_path):
             'strih_box_load strih-snv\n( sleep 0.3; cat "$2" >> "$1" ) &\n'
             'strih_program_vban_grade /nonexistent 127.0.0.1 "$1"\nwait')
     r = _bash(body, log, tmp_path / "later.txt",
-              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_WAIT_S": "1"})
+              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "1"})
     assert r.returncode == 0, r.stderr
     rows = r.stdout.splitlines()
     assert not [x for x in rows if x.startswith(("FAIL", "NOTE"))], rows
@@ -297,7 +340,7 @@ def _grade_once(tmp_path, log_text):
     kf.write_text(VBAN_KIND)
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
             'strih_box_load strih-snv\nstrih_program_vban_grade /nonexistent 127.0.0.1 "$1"')
-    r = _bash(body, log, env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_WAIT_S": "0"})
+    r = _bash(body, log, env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "0"})
     assert r.returncode == 0, r.stderr
     return [x for x in r.stdout.splitlines() if x.startswith("FAIL")]
 

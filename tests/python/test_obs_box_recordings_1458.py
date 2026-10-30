@@ -209,8 +209,8 @@ def test_the_files_row_fails_a_helper_that_differs(box):
     assert rows["panel-files"] == "FAIL"
 
 
-def test_the_row_count_is_nine():   # issue 1464: + (panel-power)
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "9"
+def test_the_row_count_is_ten():   # issue 1464: + (panel-power); issue 1481: + (panel-shot)
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "10"
 
 
 def test_the_helper_is_std_only():

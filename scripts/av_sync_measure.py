@@ -2,15 +2,20 @@
 """#801 — AI A/V-sync meter: SyncNet offset of the stream-OBS program output, zero management.
 
 Wraps syncnet_python (pretrained SyncNet + S3FD): measures the audio-visual offset of a clip
-of the PROGRAM output and maps it onto the one knob the operator actually turns — the
-'NDI 2ME PGM' genlock latency. Confidence gating makes it self-managing: windows without a
-usable face/lip correlation (band wide shots, graphics) report as unmeasurable and are simply
-skipped — nobody has to tell it "now there is speech".
+of the PROGRAM output and maps it onto the one knob the operator actually turns — the venue's
+PROGRAM AUDIO sync offset (issue 1459: `--knob-input`, the stream box fact STRIH_PROGRAM_AUDIO_INPUT,
+stream-snv `mbc`, stream-pp `Zvuk z mixu`; without it the old 'NDI 2ME PGM' latency text).
+Confidence gating makes it self-managing: windows without a usable face/lip correlation (band wide
+shots, graphics) report as unmeasurable and are simply skipped — nobody has to tell it "now there is speech".
 
 Sign convention (VALIDATED 2026-07-19 on synthetic shifts, exact to the frame):
-  SyncNet offset +N frames  = audio LEADS video by N*40 ms (video late)   -> LOWER the latency knob
-  SyncNet offset -N frames  = audio LAGS  video by N*40 ms (video early)  -> RAISE the latency knob
-  => knob_delta_ms = -offset_frames * 40
+  SyncNet offset +N frames  = audio LEADS video by N*40 ms (video late)
+      -> RAISE the program audio sync offset by N*40 (ZVYS: more audio delay)
+  SyncNet offset -N frames  = audio LAGS  video by N*40 ms (video early)
+      -> LOWER the program audio sync offset by N*40 (ZNIZ)
+  => audio_sync_offset_delta_ms = +offset_frames * 40   (knob_advice, issue 1459)
+  The legacy video knob (no --knob-input, the 'NDI 2ME PGM' latency) moves the other way:
+  latency_delta_ms = -offset_frames * 40.
 
 Usage:
   av_sync_measure.py --media clip.mp4 [--repo DIR] [--webhook URL] [--threshold-ms 30]
@@ -380,6 +385,21 @@ def _calibration_record(stamp: str, offset_frames: int, confidence: float, usabl
     return rec
 
 
+def knob_advice(offset_ms, knob_input=None):
+    """PURE (issue 1459): the operator knob advice for an A/V offset in ms (SyncNet sign: + = audio
+    leads video). With the venue's program audio input it names that input's sync offset, and more
+    audio delay fixes audio leading: + -> "ZVYS '<input>' sync offset o N", - -> "ZNIZ ...". Without
+    one (a caller not upgraded yet) it keeps the old 2ME PGM latency text. 0 -> "A/V sync OK".
+    Byte-identical in av_sync_measure.py and avsync_report.py (tests/python/
+    test_avsync_knob_advice_1459.py); no diacritics, so a ZNIZ/ZVYS grep reads it everywhere."""
+    m = int(round(offset_ms))
+    if m == 0:
+        return "A/V sync OK"
+    if knob_input:
+        return "{} '{}' sync offset o {}".format("ZVYS" if m > 0 else "ZNIZ", knob_input, abs(m))
+    return "{} '2ME PGM' latency o {}".format("ZNIZ" if m > 0 else "ZVYS", abs(m))
+
+
 def one_measurement(args, repo: Path) -> int:
     with tempfile.TemporaryDirectory(prefix="avsync-") as td:
         workdir = Path(td)
@@ -412,11 +432,11 @@ def one_measurement(args, repo: Path) -> int:
             _calibration_record(stamp, offset_frames, conf, True, dist_curve),
         )
     offset_ms = offset_frames * FRAME_MS
-    knob = -offset_ms
+    advice = knob_advice(offset_ms, getattr(args, "knob_input", None))
     if offset_ms > 0:
-        verdict = f"audio predbieha video o ~{offset_ms} ms -> ZNIZ '2ME PGM' latency o {abs(knob)}"
+        verdict = f"audio predbieha video o ~{offset_ms} ms -> {advice}"
     elif offset_ms < 0:
-        verdict = f"video predbieha audio o ~{abs(offset_ms)} ms -> ZVYS '2ME PGM' latency o {abs(knob)}"
+        verdict = f"video predbieha audio o ~{abs(offset_ms)} ms -> {advice}"
     else:
         verdict = "A/V sync OK (offset 0 ms)"
     line = f"[{stamp}] AV offset {offset_frames:+d} fr ({offset_ms:+d} ms) conf {conf:.1f} :: {verdict}"
@@ -445,6 +465,12 @@ def main() -> int:
              "alerts. DEFAULT (omit this) routes those alerts through `airuleset.py notify` with a "
              "stable per-kind --dedup-key (fleet-standard since #1206); passing a URL keeps the raw "
              "webhook (manual opt-in) with a simple per-kind throttle instead.",
+    )
+    ap.add_argument(
+        "--knob-input", default=None,
+        help="issue 1459: the venue's program audio input (the stream box fact "
+             "STRIH_PROGRAM_AUDIO_INPUT); the advice then names its sync offset. Absent = the "
+             "old 'NDI 2ME PGM' latency text",
     )
     ap.add_argument("--threshold-ms", type=int, default=30)  # issue 1333: owner ruling 17.9.2026, one A/V tolerance 30 ms
     ap.add_argument(

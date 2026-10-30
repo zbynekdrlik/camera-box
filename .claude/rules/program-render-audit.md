@@ -53,8 +53,7 @@ audit line"): lift-compile the `blog()` format string under `-Wformat=2 -Wconver
 (vendored C compiles only on CI); the C format string must stay BYTE-IDENTICAL to what
 `program_render_audit.rs` parses; the window state lives on `struct obs_graphics_context`
 (field names `program_render_audit_*`, DISTINCT from the obs_display `render_audit_*` #771 fields to
-avoid the `genlock_preload.rs`/ymls anchor collision). `tests/program_render_audit_emit.rs` is the
-std-only RED→GREEN anchor (run via `rustc --test`, the #1026 recipe).
+avoid the `genlock_preload.rs`/ymls anchor collision). RED→GREEN anchor: `tests/program_render_audit_emit.rs`.
 
 ## #1320 — the `program_render_lagged` bundle-state facet (a `lagged>0` window == a render-thread freeze)
 

@@ -180,17 +180,13 @@ backward-step regime clears the latch on every regime tick and returns before th
 deep N>=2 source keeps the pin-only cap for the whole regime (and one tick after it, until the
 release re-latches N) — not a regression: that regime drained deep sources before D1 too.
 
-## Verification (Tier-0, no cargo)
+## Verification
 
-- Authority: a replica `lib.rs` with `#[path]` mods for `genlock_grid` + `genlock_n2_grid`;
-  `rustc --edition 2021 --test` + `clippy-driver --test -D warnings`.
-- Bench + probe mirror: add `genlock_backlog`, `genlock_n1_depth`, the `#[cfg(test)]` bench and
-  `pub mod probe { #[path] pub mod genlock; }` (its N>=2 tests are the `#[path]` child
-  `src/probe/genlock_n2_tests.rs`). The probe sims tick on the per-second grid, up to 2 ms LATE,
-  never early — the #401-era ±2 ms alternating slew puts every other tick 2 ms early, off the grid,
-  which a real render tick never is.
-- Parity: build a `camera_box` rlib from that replica, compile the test with `--extern`,
-  `CARGO_MANIFEST_DIR` + `CARGO_TARGET_TMPDIR` at compile time. Mutation proof: a scratch tree with
+- Authority: the `genlock_grid` + `genlock_n2_grid` unit tests; the probe mirror's N>=2 tests are the
+  `#[path]` child `src/probe/genlock_n2_tests.rs` (`--features probe`). The probe sims tick on the
+  per-second grid, up to 2 ms LATE, never early — the #401-era ±2 ms alternating slew puts every
+  other tick 2 ms early, off the grid, which a real render tick never is.
+- Parity mutation proof: a scratch tree (`CARGO_MANIFEST_DIR` at compile time) with
   a mutated `obs-source.c` + a copy of `obs-genlock-grid.h` + the test and `tests/genlock_n1_lift/`,
   recompiled per mutant (9/9 RED at landing: slack, kind compare, pick index, age base, snap,
   off-grid wall, canvas grid, saturation, pin; then 6/6 for the drop-cap helper: tick round-up,

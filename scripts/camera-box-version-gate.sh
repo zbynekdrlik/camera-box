@@ -5,7 +5,8 @@
 set -euo pipefail
 #
 # WHY THIS GATE EXISTS (issue 875, a deliberate follow-up split from issue 862). The camera-box
-# binary is deployed CONTINUOUSLY (`1.7.0-dev.NNN` grows on almost every PR), so a box can silently
+# binary is deployed CONTINUOUSLY (a new patch release on almost every merge since issue 1476, the
+# historical `1.7.0-dev.NNN` builds before it), so a box can silently
 # fall behind and run objectively different behaviour than the rest of the fleet with nothing
 # shouting about it — live 2026-07-29 cam4 ran three builds behind cam1/2/3 and was the ONLY box
 # missing the publish-30p fix, found only by hand. The existing preconditions do not catch this:
@@ -36,7 +37,8 @@ set -euo pipefail
 # via the SAME CAMBOX_OFFLINE_ACK / rig-fleet.txt mechanism scripts/lib/cambox-offline-ack.sh already
 # provides (#758/#827), reused verbatim exactly as issue 862's gate does — never a second mechanism.
 #
-# VERSION SOURCE. `/usr/local/bin/camera-box --version` prints `camera-box X.Y.Z-dev.NNN` and is read
+# VERSION SOURCE. `/usr/local/bin/camera-box --version` prints `camera-box X.Y.Z` (a historical
+# build: `camera-box 1.7.0-dev.NNN`; both forms parse, issue 1476) and is read
 # over the SAME SSH transport (absolute path, NOT relied on via the remote PATH — mirrors
 # scripts/deploy-fleet.sh's own per-box version read).
 #
@@ -53,13 +55,16 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cambox-offline-ack.sh
 . "$HERE/lib/cambox-offline-ack.sh"
+# shellcheck source=scripts/lib/release-version.sh
+. "$HERE/lib/release-version.sh"
 
 DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
 # camera_box_version_from_version_output TEXT -> the camera-box version found in TEXT (the raw
-# stdout of `camera-box --version`, i.e. "camera-box X.Y.Z-dev.NNN"). The LAST match wins — purely
+# stdout of `camera-box --version`, i.e. "camera-box X.Y.Z", or a historical "camera-box
+# 1.7.0-dev.NNN"). The LAST match wins — purely
 # defensive robustness against an SSH banner/MOTD ever landing ahead of the real line, mirroring
 # dantesync_version_from_version_output. "" when TEXT has no match (UNKNOWN downstream — an
 # unreachable/unread box, never guessed).
@@ -192,7 +197,10 @@ camera_box_pin_verdict() {
     return 11
   fi
   if [ "$version" != "$pin" ]; then
-    printf '  %-14s %-16s PIN-DRIFT (expected main %s)\n' "$name" "$version" "$pin"
+    # issue 1476: name the direction -- OLDER (a historical 1.7.0-dev.N or a missed deploy, the
+    # common case) vs NEWER (a box running a dev build ahead of main).
+    printf '  %-14s %-16s PIN-DRIFT (expected main %s; %s than main %s)\n' "$name" "$version" "$pin" \
+      "$(release_version_order_word "$version" "$pin")" "$pin"
     return 20
   fi
   printf '  %-14s %-16s OK\n' "$name" "$version"

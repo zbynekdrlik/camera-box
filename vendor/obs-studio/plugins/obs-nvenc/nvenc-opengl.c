@@ -7,17 +7,29 @@
 
 void cuda_opengl_free(struct nvenc_data *enc)
 {
-	if (!enc->cu_ctx)
+	if (!enc->cu_ctx || !enc->input_textures.num)
 		return;
 
-	cu->cuCtxPushCurrent(enc->cu_ctx);
+	/* issue 1462: the textures were registered inside obs_enter_graphics()
+	 * (cuda_opengl_encode). The encoder is destroyed from the output's stop
+	 * thread with no GL context current, and a GL-interop unregister there
+	 * fails, which pinned the GPU memory of every encoder start/stop. The
+	 * CUDA context wraps the graphics context, the order cuda_opengl_encode
+	 * takes them in. */
+	if (!cuda_error_check(enc, cu->cuCtxPushCurrent(enc->cu_ctx), __FUNCTION__,
+			      "cu->cuCtxPushCurrent(enc->cu_ctx)"))
+		return;
+	obs_enter_graphics();
 	for (size_t i = 0; i < enc->input_textures.num; i++) {
 		CUgraphicsResource res_y = enc->input_textures.array[i].res_y;
 		CUgraphicsResource res_uv = enc->input_textures.array[i].res_uv;
-		cu->cuGraphicsUnregisterResource(res_y);
-		cu->cuGraphicsUnregisterResource(res_uv);
+		cuda_error_check(enc, cu->cuGraphicsUnregisterResource(res_y), __FUNCTION__,
+				 "cu->cuGraphicsUnregisterResource(res_y)");
+		cuda_error_check(enc, cu->cuGraphicsUnregisterResource(res_uv), __FUNCTION__,
+				 "cu->cuGraphicsUnregisterResource(res_uv)");
 	}
-	cu->cuCtxPopCurrent(NULL);
+	obs_leave_graphics();
+	cuda_error_check(enc, cu->cuCtxPopCurrent(NULL), __FUNCTION__, "cu->cuCtxPopCurrent(NULL)");
 }
 
 /* ------------------------------------------------------------------------- */

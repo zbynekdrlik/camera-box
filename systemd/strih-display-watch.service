@@ -1,0 +1,31 @@
+[Unit]
+# issue 1424 (owner 24.10.2026: "to musi vediet fungovat aj bez monitora aj po zapojeni monitora aj po
+# zapnuti!!!"; design 6386467303 layer 2) -- the session display watch: an operator monitor that comes on
+# joins the X layout (--auto, primary), a fixed HDMI output of the drm-output config stays out of it, and
+# with no operator monitor the screen is kept usable (>= 1920x1080) so tint2 and OBS always have one.
+# Installed by setup-strih step 16d (scripts/lib/strih-session-apps.sh), started at login by the kiosk
+# autostart, graded by verify-strih's (display-watch) + (display-watch-pass) rows.
+Description=Display watch -- operator monitors into X, fixed HDMI outputs kept out, a screen without monitors (issue 1424)
+Documentation=https://github.com/zbynekdrlik/camera-box
+# issue 1465: After= the target too (a target orders itself after every unit it Wants)
+After=graphical-session.target
+# Never give up: the box must recover from every monitor state by itself.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The kiosk's plain Xorg session; Xlib reads ~/.Xauthority.
+Environment=DISPLAY=:0
+# issue 1424: the role's HDMI policy (setup-strih step 16d): STRIH_DISPLAY_WATCH_HDMI=off on the strih role
+EnvironmentFile=-%h/.config/strih-display-watch.env
+ExecStart=/usr/bin/python3 /usr/local/bin/strih_display_watch.py --state-file %t/strih-display-watch.json
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=strih-display-watch
+
+[Install]
+# openbox never reaches graphical-session.target: the kiosk autostart STARTS this unit at every login.
+WantedBy=graphical-session.target

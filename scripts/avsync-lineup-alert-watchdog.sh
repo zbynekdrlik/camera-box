@@ -44,6 +44,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/avsync-heartbeat.sh"
 # shellcheck source=scripts/lib/avsync-venues.sh
 . "$HERE/lib/avsync-venues.sh"
+# shellcheck source=scripts/lib/rig-mode-state.sh
+. "$HERE/lib/rig-mode-state.sh"
+# shellcheck source=scripts/lib/avsync-production.sh
+. "$HERE/lib/avsync-production.sh"
 # avsync-heartbeat.sh sets `-e` for ITS OWN sourcing safety, and that `-e` LEAKS into this caller
 # (source runs in the same shell). `set -uo pipefail` alone does NOT clear it (it only turns options
 # ON), so we EXPLICITLY `set +e` -- otherwise a `var="$(decider)"` assignment where the decider
@@ -131,6 +135,7 @@ VENUE=""
 VENUE_LABEL=""
 VENUE_BOX=""
 STREAM_OBS_WS_HOST=""
+VENUE_PRODUCTION="unknown"
 
 # select_venue VENUE -> set the VENUE_* globals; rc 1 (logged) when the table has no stream box for it.
 select_venue() {
@@ -309,6 +314,14 @@ run_liveness_pass() {
   reason="$(printf '%s\n' "$out" | sed -n 's/^action=[A-Za-z]* reason=\(.*\) sig=[A-Za-z0-9-]*$/\1/p' | tail -1)"
   sig="$(printf '%s\n' "$out" | sed -n 's/.* sig=\([A-Za-z0-9-]*\)$/\1/p' | tail -1)"
   log "$VENUE: stream_active=$STREAM_ACTIVE_JSON heartbeat_epoch=${HEARTBEAT_EPOCH:-<none>} status='${HEARTBEAT_STATUS:-<none>}' -> action=${action:-<none>} sig=${sig:-<none>}"
+  # issue 1441: the line and offset alarms page only during a production (SNV EVENT mode, PP
+  # streaming); a development stream's dead line is development, never a page. Read once per venue
+  # pass and reused by run_offset_pass.
+  VENUE_PRODUCTION="$(avsync_venue_production "$VENUE" "$STREAM_ACTIVE_JSON")"
+  if [ "$VENUE_PRODUCTION" = "no" ] && [ "$action" = "ALARM" ]; then
+    log "$VENUE: ALARM ($sig) during development (no production) -- never a page"
+    action="SUPPRESSED"
+  fi
 
   # confirm/throttle ONLY on ALARM; OK and SUPPRESSED both reset the pending state (a live-again OK,
   # or an off-air stream, clears any pending confirmation -- same "reset on clean signal" discipline
@@ -375,6 +388,10 @@ run_offset_pass() {
   reason="$(printf '%s\n' "$out" | sed -n 's/^action=[A-Za-z]* reason=\(.*\) sig=[A-Za-z0-9-]*$/\1/p' | tail -1)"
   sig="$(printf '%s\n' "$out" | sed -n 's/.* sig=\([A-Za-z0-9-]*\)$/\1/p' | tail -1)"
   log "$VENUE offset: stream_active=$STREAM_ACTIVE_JSON status='${HEARTBEAT_STATUS:-<none>}' -> offset_action=${action:-<none>} sig=${sig:-<none>}"
+  if [ "${VENUE_PRODUCTION:-unknown}" = "no" ] && [ "$action" = "ALARM" ]; then
+    log "$VENUE offset: ALARM ($sig) during development (no production) -- never a page"
+    action="SUPPRESSED"
+  fi
 
   # confirm/throttle ONLY on ALARM; OK and SUPPRESSED reset the pending state (same discipline as
   # the liveness arm). SUPPRESSED is DELIBERATELY never an alarm (stream off / not measured / low

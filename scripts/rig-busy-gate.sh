@@ -88,8 +88,9 @@ RIG_LEASE_JOB="${RIG_LEASE_JOB:-${GITHUB_JOB:-full-path}}"
 # recording step that follows it in the same CI job) -- written into holder.json so a foreign
 # gate can decide whether to wait us out or fail fast.
 RIG_LEASE_HOLD_SECS="${RIG_LEASE_HOLD_SECS:-2700}"
-# Stale threshold comfortably ABOVE this job's own `timeout-minutes: 75` cap (full-path-e2e.yml)
-# so a genuinely-still-running holder is NEVER reclaimed on heartbeat age alone -- a dead/crashed
+# Stale threshold on the HEARTBEAT age: the keep-alive below beats it every 30 s for the whole hold
+# (issue 1383, up to the hold ceiling = full-path-e2e.yml's 105-min timeout since issue 1404), so a
+# genuinely-still-running holder is NEVER reclaimed on heartbeat age alone -- a dead/crashed
 # holder is still bounded-reclaimable, just not instantly (mirrors the #657 self-heal principle).
 RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
 # How long WE are willing to wait for a live foreign holder to release before giving up. Defaults
@@ -274,6 +275,18 @@ rig_busy_idle_hold() {
   done
   return 0
 }
+
+# issue 1404: a full-path E2E that was cancelled mid-broadcast can leave the stream OBS streaming to
+# YouTube (the job is killed seconds after its SIGINT). That stream is OURS, and the busy loop below
+# would refuse every later run on it. The YouTube stage's dev1 marker names it: `recover` stops the
+# stream only when the stream's own age matches our publish (never a foreign broadcast), and leaves
+# the restreamer session to the next run's stage start (which has the ssh password). No marker = no-op.
+YOUTUBE_LEG_MARKER="${YOUTUBE_LEG_MARKER:-$HOME/.camera-box/youtube-leg-live.json}"
+if [ -f "$YOUTUBE_LEG_MARKER" ]; then
+  timeout 120 python3 "$HERE/youtube_leg_e2e.py" --dir /nonexistent --host "$STREAM_HOST" \
+    --marker "$YOUTUBE_LEG_MARKER" recover \
+    || echo "[rig-busy-gate] WARNING: the YouTube-stage leftover recovery failed (issue 1404) -- continuing"
+fi
 
 LAST_OUTPUT=""
 LEASE_HELD=1   # rig_lease_acquire_or_wait above returned with the lease held

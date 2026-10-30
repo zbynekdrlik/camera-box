@@ -428,11 +428,12 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
 - **Facts:** `STRIH_PROGRAM_VBAN_STREAMS` / `_PORT` / `_RESERVE_MS`: stream-pp `stream` / `6980` /
   `40`, stream-snv `stream` / `6980` / `80` (finding 6348583939: mbc's gaps reached 52 ms under the
   22.10.2026 production load, lv1's are 26-29 ms; R - one packet - the 2 ms deadline margin must sit
-  above the sender's worst gap, pinned by the pytest); strih-snv `strih-obs` / `6981` / `30` (phase 2), strih-pp `none` x 3 (hub-fed);
+  above the sender's worst gap, pinned by the pytest); strih-snv `strih-obs` / `6981` / `30` (phase 2), strih-pp `strih-obs` / `6981` / `40` (24.10.2026,
+  lv1 straight to the rig NIC, R = lv1's proven stream-pp value);
   the loader takes on the strih role all four program facts or all four `none`, and refuses a stream
   role without exactly ONE stream). `none` is a sentinel, never a stream name.
   `STRIH_PROGRAM_AUDIO_INPUT` (issue 1462) names the OBS program-audio input per box: stream-pp
-  `Zvuk z mixu`, stream-snv `mbc` (the SNV stream tooling keys on it), strih-snv `ASIO zvuk`, strih-pp `none`. The seed
+  `Zvuk z mixu`, stream-snv `mbc` (the SNV stream tooling keys on it), strih-snv `ASIO zvuk`, strih-pp `ASIO zvuk`. The seed
   manifest, verify item 9 (`strih_program_vban_grade`'s default NAME), the stream-monitor row and the
   Development-scene guard read it; never a role constant.
 - **stream-snv (issue 1462):** a Linux stream box like stream-pp since 22.10.2026. mbc.lan sends the SNV
@@ -476,6 +477,11 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   vban-src-out thread; a status line without the token, from an older build, is not graded on it; the
   counters note says how many of the lost slots were concealed and how many went out as silence, the
   live row names `reordered=`; an older line without those tokens names nothing for them);
+  the per-channel row (issue 1439, 25.10.2026: strih-snv's program had its right channel empty and item 9
+  passed): `strih_program_vban_channels_row` reads OBS's own per-channel meter of the input over 3 s
+  (`measurement_audio_meter_probe.py --per-channel`, pure `channel_balance`): a channel under -90 dBFS
+  while another is over -60 FAILs naming it, a quiet program NOTEs; the grader tests feed it through
+  `STRIH_PROGRAM_VBAN_CHANNELS_FILE`;
   the hub-only rows of item 9 (the program
   rx, the hub's HDMI leg, the MiniFuse talkback) run only in its hub branch.
 - **Windows (review round 1):** both Windows genlock builds compile the same `vban-source.c`, so a
@@ -502,8 +508,8 @@ Owner: "interkom-hub ma byt separatna vec, nema nic preposielat do strih obs". T
 for the hub (one UDP port has one receiver). The console-side setting is the owner's, never provisioning.
 
 - **One design, facts only.** The same four facts as the stream role. The loader takes, on the strih
-  role, all four set or all four `none` (a hub-fed strih: strih-pp until its console sends it a
-  program stream). Every consumer follows the facts, never the role:
+  role, all four set or all four `none` (a hub-fed strih; none is deployed since strih-pp took lv1's
+  `strih-obs`, 24.10.2026). Every consumer follows the facts, never the role:
   - the seed: ONE renderer `strih_lx_program_audio_vban_json` (strih-provision.sh) for both manifests;
     the strih manifest carries `program_audio_input` + `program_audio_vban` when the facts declare them
     (a hub-fed strih's manifest is byte-identical), and the role-free seeder switches `ASIO zvuk` from
@@ -533,6 +539,32 @@ for the hub (one UDP port has one receiver). The console-side setting is the own
   port=6981 stream='strih-obs' source='ASIO zvuk'` with `emit_missed=0`, verify item 9, and the hub's
   `/api/state` without `program_out`. The OBS input must be live before the hub TOML loses
   `program_out` (otherwise a gap in the program audio).
+
+### strih-pp (issue 1439, design 6385519443, 24.10.2026)
+
+- **What lv1 sends** (tcpdump on strih-pp, 24.10.2026 ~16:45, read by the main): lv1 10.77.8.230 sends
+  `strih-obs` to 10.77.8.202:6981 (48 kHz, 103 frames per packet, 2 ch, PCM16, ~460 packets/s) and
+  `strih` to :6980 for the hub (the cutters' MG-XU cans + the vestibule HDMI).
+- **Facts:** `strih-obs` / 6981 / R 40 / `ASIO zvuk`, no VBAN-only leg (`_LEG` / `_LEG_ADDR` /
+  `_SENDER` = none, like stream-pp's lv1). R 40 is lv1's proven stream-pp value (lost 0, ~27 ms spare);
+  the pytest pins R - one 103-frame packet - the 2 ms margin above lv1's worst gap (29 ms) and R <= 40.
+  That gap was read on lv1's 256-frame `stream` to stream-pp, NOT on the 103-frame `strih-obs`: the
+  first production read (below) is what proves it for this stream.
+- **The collection port** (`obs_collection_port.py --preset strih-pp`) converts `ASIO zvuk` to the same
+  obs-vban source (strih-obs / 6981 / 40), pinned to the facts by the pytest.
+- **The hub TOML** lost `program_out` (adapter pipewire, the `strih-program` sink) and its two lv1 points:
+  8 participants, 74 points. So the issue-1440 condition reads PURGE for strih-pp too.
+- **Rollout (supervisor, the order matters):**
+  1. the strih bundle with obs-vban on strih-pp (the genlock deploy stops OBS, runs setup-strih: step 6
+     the seed manifest, step 12 the PipeWire purge, step 13 the hub TOML + the no-pipewire hub drop-in);
+  2. start OBS: the seed switches `ASIO zvuk` to obs-vban; read `obs-vban receive: ... rate=48000 ...
+     receive_buffer_ms=40 ... port=6981 stream='strih-obs' source='ASIO zvuk'` with `emit_missed=0`;
+  3. only then `systemctl restart intercom-hub` onto the new TOML and drop-in;
+  4. the host reboot clears the still-running PipeWire processes (owner approval first);
+  5. verify-strih items 9 (program-vban + the card and HDMI legs), 9b (six rows), 16;
+  6. after the first production on it, read the `obs-vban receive:` status lines for `lost=`, `late=`,
+     `concealed=`, `emit_missed=` and `max_late_ms` (the in-time budget R - one packet - 2 ms = 35.9 ms):
+     a loss there means R 40 is too low for `strih-obs`, a finding for the main, never a silent raise.
 
 ## The VBAN-only leg: a second NIC or a tagged VLAN on the audio VLAN (ROZHODNUTÉ 6360417876)
 
@@ -618,24 +650,21 @@ VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, ne
   lacks the off-leg counter, so verify FAILs `(vban-leg) filter` there until then. On stream-snv the
   run touches no NM state; on strih-snv neither (the VLAN exists): no link reset on either.
 
-## Verify locally (Tier-0, no cargo)
+## Verify
 
-- `rustc --test --edition 2021 src/vban_receive_timeline.rs` (unit tests + the bench) and
-  `clippy-driver --edition 2021 --test -D warnings` on the same file. Compile WITHOUT `-O`: CI runs
-  the debug profile, where an unsigned underflow panics; an `-O` build wraps it silently (round 3
-  shipped two GREEN commits that only passed under `-O`). Where the C header wraps, the Rust twin
-  uses `wrapping_sub`, and test arrivals are monotonic like the real receive thread.
-- `CARGO_MANIFEST_DIR=<wt> rustc --test --edition 2021 tests/vban_receive_timeline_parity_1439.rs`
-  (the C-vs-Rust trace, bit-for-bit doubles under `-ffp-contract=off`), the same for
-  `tests/vban_receive_wiring_1439.rs` (the ASRC lift, the source wiring and the workflow pins; split
+- `cargo test --lib vban_receive_timeline` (unit tests + the bench), in the debug profile like CI,
+  where an unsigned underflow panics; an `-O` build wraps it silently (round 3 shipped two GREEN
+  commits that only passed under `-O`). Where the C header wraps, the Rust twin uses `wrapping_sub`,
+  and test arrivals are monotonic like the real receive thread.
+- `tests/vban_receive_timeline_parity_1439.rs` (the C-vs-Rust trace, bit-for-bit doubles under
+  `-ffp-contract=off`), `tests/vban_receive_wiring_1439.rs` (the ASRC lift, the source wiring and the workflow pins; split
   out in review round 1, both share `tests/support/vban_c_1439.rs`) and `tests/vban_source_loss_1439.rs`
   (the SHIPPED `vban-source.c` lifted into a C driver with libobs stubs: loss = silence, contiguous
   stamps, the status line's fields).
 - The plugin sources: `gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wformat=2 -Werror` with a generated
   `plugin-macros.generated.h` + a two-define `obsconfig.h` (the pacing rule's recipe).
-- ROZHODNUTÉ 6352253147: `rustc --test --edition 2021 src/vban_conceal.rs` (the math), the same with
-  `CARGO_MANIFEST_DIR` for `tests/vban_conceal_parity_1439.rs`, `tests/vban_source_reorder_1439.rs`
-  and `tests/vban_source_conceal_1439.rs` (the shipped source through the lift driver, whose `out`
+- ROZHODNUTÉ 6352253147: `src/vban_conceal.rs` (the math), `tests/vban_conceal_parity_1439.rs`,
+  `tests/vban_source_reorder_1439.rs` and `tests/vban_source_conceal_1439.rs` (the shipped source through the lift driver, whose `out`
   line carries each output's `mid=` and `last=` sample and `logs=`, the plugin's log lines written
   before it, atomic: both threads log). The real-thread driver with a reorder and
   short losses in it runs clean under ThreadSanitizer.

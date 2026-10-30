@@ -288,7 +288,24 @@ def _setup_changes(rpc, state_path, state, facts, settings, track, sleep, monoto
     return state
 
 
-def teardown(rpc, state):
+# OBS lists a removed input until its release runs (live strih-snv 28.10.2026: one read right after
+# RemoveInput still listed it), so the read-back is a bounded settle poll, never one read.
+REMOVE_SETTLE_READS = 20
+REMOVE_SETTLE_STEP_S = 0.25
+
+
+def _input_still_listed(rpc, name, sleep):
+    """True while `name` is still in the input list after REMOVE_SETTLE_READS reads (unreadable = listed)."""
+    for i in range(REMOVE_SETTLE_READS):
+        inputs = (rpc("GetInputList", ignore_err=True) or {}).get("inputs")
+        if inputs is not None and not any(x.get("inputName") == name for x in inputs):
+            return False
+        if i + 1 < REMOVE_SETTLE_READS:
+            sleep(REMOVE_SETTLE_STEP_S)
+    return True
+
+
+def teardown(rpc, state, sleep=time.sleep):
     """Undo what `state` says setup did. Returns {ok, actions, left}."""
     actions, left = [], []
     name = state.get("input_name")
@@ -302,8 +319,7 @@ def teardown(rpc, state):
                 settings = (rpc("GetInputSettings", {"inputName": name}, ignore_err=True) or {}).get("inputSettings")
                 if matches_bench_input(hit[0].get("inputKind"), settings, state.get("port"), state.get("stream_name")):
                     rpc("RemoveInput", {"inputName": name}, ignore_err=True)
-                    still = [i for i in (rpc("GetInputList", ignore_err=True) or {}).get("inputs") or []
-                             if i.get("inputName") == name]
+                    still = _input_still_listed(rpc, name, sleep)
                     (left if still else actions).append(
                         ("the input %r is still there after RemoveInput" if still else "removed the input %r") % name)
                 else:

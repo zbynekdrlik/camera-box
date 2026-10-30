@@ -37,6 +37,15 @@
 #                                                 # CAMBOX_OFFLINE_ACK) is SKIPPED by name, never a
 #                                                 # failure. Not the home rig, not with CAMERA_SET or
 #                                                 # --frame-probe (the painter is the home rig's cam2).
+#   scripts/deploy-fleet.sh --binary ./dist/camera-box --relay-binary ./dist-relay/bkshading-relay
+#                                                 # issue 1452: the bkshading RELAY comes along on every
+#                                                 # box that has one, from the SAME CI run (with --run
+#                                                 # or the resolved run: the run's bkshading-linux-amd64,
+#                                                 # no flag needed). Swapped by bkshading-deploy-relay.sh
+#                                                 # itself; a box without a relay reads "not installed";
+#                                                 # a relay failure is named in FAILED. --no-relay =
+#                                                 # camera-box only (the E2E [0/8] parity align). The last
+#                                                 # line names every box's camera-box + relay version.
 #
 # Env:
 #   SSH_PASS   camera root password (default: newlevel)
@@ -70,6 +79,10 @@ USER_CAMERA_SET="${CAMERA_SET:-}"
 . "$HERE/lib/cam2-painter-deadman.sh"  # cam2_painter_deadman_arm_cmds() — the #1351 re-arm of the TRANSIENT deadman timer (a stopped systemd-run unit is GC'd, so `systemctl start` cannot revive it)
 # shellcheck source=scripts/lib/ro-window.sh
 . "$HERE/lib/ro-window.sh"  # ro_window_close_cmds / ro_window_holders — the ONE verified ro close of every rw window (issue 1407)
+# shellcheck source=scripts/lib/bkshading-relay-version.sh
+. "$HERE/lib/bkshading-relay-version.sh"  # issue 1452: the box's camera-box + relay versions, read in one ssh call
+# shellcheck source=scripts/lib/bkshading-deploy-runtime.sh
+. "$HERE/lib/bkshading-deploy-runtime.sh"  # issue 1452: the relay artifact + binary names (one source of truth)
 # The deadman re-fire window used when RESTORING a prior-armed deadman after the swap (#1351). The
 # canonical value is 5 min (#1072); overridable, matching cam2-painter-deadman.sh's own convention.
 CAM2_PAINTER_DEADMAN_MINUTES="${CAM2_PAINTER_DEADMAN_MINUTES:-5}"
@@ -88,6 +101,10 @@ BINARY=""
 FRAME_PROBE_BIN=""
 # issue 1413: --venue <name> = another venue's camboxes (see the usage above).
 VENUE=""
+# issue 1452: the bkshading relay of the SAME CI run (--relay-binary, or downloaded from RUN_ID);
+# --no-relay = camera-box only.
+RELAY_BIN=""
+NO_RELAY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -95,12 +112,17 @@ while [ $# -gt 0 ]; do
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
     --frame-probe) FRAME_PROBE_BIN="${2:?--frame-probe needs a path}"; shift 2 ;;
     --venue)  VENUE="${2:?--venue needs a venue name}"; shift 2 ;;
-    -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
+    --relay-binary) RELAY_BIN="${2:?--relay-binary needs a path}"; shift 2 ;;
+    --no-relay) NO_RELAY=1; shift ;;
+    -h|--help) sed -n '2,/^set -euo pipefail$/{/^set -euo pipefail$/!p}' "$0"; exit 0 ;;
     *) echo "deploy-fleet: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
 
 command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get install sshpass)"; exit 1; }
+if [ "$NO_RELAY" = 1 ] && [ -n "$RELAY_BIN" ]; then
+  err "--no-relay and --relay-binary contradict each other"; exit 2
+fi
 
 # --- issue 1413: --venue derives the set from the venue's strih fact file ------------------------
 # The cameras and their dev1 addresses come from the dantesync fleet's venue camera rows (the ONE
@@ -338,6 +360,83 @@ deploy_frame_probe_to_painter() {
   echo ""
 }
 
+# --- issue 1452: the bkshading relay comes along ------------------------------------------
+# relay_step CAM IP: read the box's camera-box + relay versions (ONE ssh call), then bring the relay
+# to RELAY_BIN through scripts/bkshading-deploy-relay.sh -- the ONE relay swap (rig-lease + rig-busy
+# gate, relay stop/restore, staged copy + atomic rename, byte-verify, the verified ro close), never a
+# copy of it here. Record-continue-fold (the issue-868 pattern): a relay failure is a FAILED entry,
+# the next box still runs. A box with no relay is "not installed" (never a failure, nothing installed
+# there); a box whose own camera-box close left the root unverified gets no relay deploy (nothing more
+# is written to a writable root). Every path adds one VERSION_ROWS row.
+relay_step() {  # $1=cam $2=ip
+  local cam="$1" ip="$2" out rc=0 cbv rlv
+  out="$(ssh_box "$ip" "$(bkshading_relay_versions_cmd)" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    err "[$cam] could not read the camera-box + relay versions (ssh rc $rc)"
+    FAILED+=("$cam-relay(versions unreadable: ssh rc $rc)"); VERSION_ROWS+=("$cam unreadable"); return 0
+  fi
+  cbv="$(bkshading_relay_versions_field "$out" camera-box)"
+  rlv="$(bkshading_relay_versions_field "$out" relay)"
+  if [ "$rlv" = absent ]; then
+    info "[$cam] bkshading relay not installed on this box -- nothing to upgrade"
+    VERSION_ROWS+=("$cam camera-box=$cbv relay=not installed"); return 0
+  fi
+  # The box's root, READ now (never inferred from a FAILED label: the camera-box close and the cam2
+  # painter close both record theirs, under different labels). A cambox runs read-only; anything
+  # else (a close that failed, an unreadable root) gets no relay write.
+  if [ "$(ro_root_mount_mode "$(bkshading_relay_versions_field "$out" root)")" != ro ]; then
+    warn "[$cam] relay not deployed: the root is not verified read-only (it reads '$(bkshading_relay_versions_field "$out" root)')"
+    FAILED+=("$cam-relay(not deployed: the root is not verified read-only)")
+    VERSION_ROWS+=("$cam camera-box=$cbv relay=$rlv (relay not deployed: the root is not verified read-only)"); return 0
+  fi
+  if [ "$NO_RELAY" = 1 ]; then
+    VERSION_ROWS+=("$cam camera-box=$cbv relay=$rlv (not deployed: --no-relay)"); return 0
+  fi
+  if [ -z "$RELAY_BIN" ]; then
+    err "[$cam] its bkshading relay ($rlv) is not upgraded: --binary was given without --relay-binary"
+    FAILED+=("$cam-relay(no relay binary: pass --relay-binary <bkshading-relay of the same CI run>, or --no-relay)")
+    VERSION_ROWS+=("$cam camera-box=$cbv relay=$rlv"); return 0
+  fi
+  info "[$cam] bkshading relay $rlv -> $RELAY_VER (scripts/bkshading-deploy-relay.sh)"
+  rc=0
+  if [ -n "$VENUE" ]; then
+    # An away venue: its OWN strih/stream feed the relay deploy's rig-busy guard (a PP broadcast
+    # refuses a PP relay, an SNV one does not), and the lease is judged for its own cameras
+    # (the issue-1450 resource `<venue>-cams`): an SNV holder never blocks a PP relay.
+    STRIH_HOST="$(obs_fleet_host "strih-$VENUE")" STREAM_HOST="$(obs_fleet_host "stream-$VENUE")" \
+      BKSHADING_DEPLOY_LEASE_RESOURCE="$VENUE-cams" SSH_PASS="$SSH_PASS" \
+      "$HERE/bkshading-deploy-relay.sh" --host "$ip" --binary "$RELAY_BIN" || rc=$?
+  else
+    SSH_PASS="$SSH_PASS" "$HERE/bkshading-deploy-relay.sh" --host "$ip" --binary "$RELAY_BIN" || rc=$?
+  fi
+  case "$rc" in
+    0) : ;;
+    6) err "[$cam] relay deploy refused: the rig lease is held by another run"
+       FAILED+=("$cam-relay(rig lease held by another run: not upgraded)") ;;
+    *) err "[$cam] relay deploy failed (rc $rc, its lines above name the step)"
+       FAILED+=("$cam-relay(deploy-failed rc $rc)") ;;
+  esac
+  out="$(ssh_box "$ip" "$(bkshading_relay_versions_cmd)" 2>/dev/null)" || out=""
+  cbv="$(bkshading_relay_versions_field "$out" camera-box)"
+  rlv="$(bkshading_relay_versions_field "$out" relay)"
+  if [ "$rc" -eq 0 ] && [ "$rlv" != "$RELAY_VER" ]; then
+    err "[$cam] relay reads '${rlv:-<unread>}' after the deploy, expected $RELAY_VER"
+    FAILED+=("$cam-relay(version=${rlv:-unread})")
+  fi
+  VERSION_ROWS+=("$cam camera-box=${cbv:-unread} relay=${rlv:-unread}")
+}
+
+relay_phase() {
+  local entry
+  [ "${#REACHED[@]}" -gt 0 ] || return 0
+  echo "================================================================"
+  echo ">> bkshading relay (issue 1452): $([ "$NO_RELAY" = 1 ] && echo 'versions only (--no-relay)' || echo "${RELAY_VER:-no relay binary given}")"
+  echo "================================================================"
+  for entry in "${REACHED[@]}"; do
+    relay_step "${entry%%|*}" "${entry#*|}"
+  done
+}
+
 # Clean up a downloaded-artifact temp dir on exit (no-op when --binary was used).
 DIST=""
 # issue 1407: "ip|box|label" while a box's rw window is open (set just BEFORE the rw remount, cleared
@@ -437,11 +536,41 @@ NEW_VER="$("$BINARY" --version 2>/dev/null | awk '{print $NF}')"
 # must match it
 BINARY_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
 [ -n "$BINARY_SHA" ] || { err "could not hash the binary $BINARY"; exit 1; }
+
+# --- issue 1452: the bkshading relay of the SAME build ------------------------------------
+# The relay comes from the run camera-box came from: --relay-binary next to --binary, or the run's
+# own bkshading-linux-amd64 artifact. It must print camera-box's version (one workspace version),
+# else it is not the same build and nothing is touched. --binary without --relay-binary leaves
+# RELAY_BIN empty: a box with a relay then FAILS by name (never a silent old relay).
+RELAY_VER=""
+if [ "$NO_RELAY" = 0 ]; then
+  if [ -z "$RELAY_BIN" ] && [ -n "$RUN_ID" ]; then
+    relay_artifact="$(bkshading_deploy_artifact_name)"
+    info "Downloading the relay artifact '$relay_artifact' from the same run $RUN_ID..."
+    [ -n "$DIST" ] || DIST="$(mktemp -d)"  # --binary together with --run downloaded no camera-box
+    if ! gh run download "$RUN_ID" --repo "$REPO" -n "$relay_artifact" --dir "$DIST/relay"; then
+      err "run $RUN_ID carries no '$relay_artifact' -- nothing deployed (pass --no-relay to deploy camera-box alone)"
+      exit 1
+    fi
+    RELAY_BIN="$DIST/relay/$(bkshading_deploy_relay_artifact_bin)"
+  fi
+  if [ -n "$RELAY_BIN" ]; then
+    [ -f "$RELAY_BIN" ] || { err "--relay-binary '$RELAY_BIN' not found"; exit 1; }
+    chmod +x "$RELAY_BIN"
+    RELAY_VER="$("$RELAY_BIN" --version 2>/dev/null | awk '{print $NF}')"
+    if [ "$RELAY_VER" != "$NEW_VER" ]; then
+      err "the relay binary reads '${RELAY_VER:-<no version>}' but camera-box reads $NEW_VER -- not from the same build; nothing deployed"
+      exit 2
+    fi
+  fi
+fi
 log "Deploying camera-box $NEW_VER to: $SET"
 echo ""
 
 # --- 2 + 3. Deploy + verify per box -------------------------------------------------------
 declare -a FAILED=()
+# issue 1452: the boxes that answered (cam|ip), and one "camN camera-box=X relay=Y" row per box
+declare -a REACHED=() VERSION_ROWS=()
 for cam in $SET; do
   PENDING_START=""
   if [ -n "$VENUE" ]; then
@@ -468,6 +597,7 @@ for cam in $SET; do
     err "[$cam] unreachable — skipping"; FAILED+=("$cam(unreachable)"); continue
   fi
   info "[$cam] current version: $before"
+  REACHED+=("$cam|$ip")
 
   if [ "$before" = "$NEW_VER" ]; then
     log "[$cam] already on $NEW_VER — re-pushing anyway to guarantee byte-identical binary"
@@ -591,6 +721,14 @@ if [ -n "$FRAME_PROBE_BIN" ]; then
   PENDING_START=""
 fi
 
+# --- issue 1452: the bkshading relay of the same build, on every box that answered ---------
+relay_phase
+
+# The per-box versions, appended to the final summary line.
+VERSIONS=""
+for row in "${VERSION_ROWS[@]}"; do VERSIONS="${VERSIONS:+$VERSIONS, }$row"; done
+VERSIONS="${VERSIONS:+; versions: $VERSIONS}"
+
 # --- Summary ------------------------------------------------------------------------------
 echo "================================================================"
 if [ -n "$VENUE" ]; then
@@ -605,16 +743,16 @@ if [ -n "$VENUE" ]; then
     if [ -z "$deployed" ]; then
       log "VENUE $VENUE: no camera of venue $VENUE was reachable and un-acked -- nothing deployed"
     else
-      log "VENUE $VENUE ALIGNED: [$deployed] on $NEW_VER and genlocking"
+      log "VENUE $VENUE ALIGNED: [$deployed] on $NEW_VER and genlocking$VERSIONS"
     fi
     exit 0
   fi
-  err "VENUE $VENUE NOT FULLY ALIGNED — issues: ${FAILED[*]}"
+  err "VENUE $VENUE NOT FULLY ALIGNED — issues: ${FAILED[*]}$VERSIONS"
   exit 1
 fi
 if [ "${#FAILED[@]}" -eq 0 ]; then
-  log "FLEET ALIGNED: all of [$SET] on $NEW_VER and genlocking"
+  log "FLEET ALIGNED: all of [$SET] on $NEW_VER and genlocking$VERSIONS"
   exit 0
 fi
-err "FLEET NOT FULLY ALIGNED — issues: ${FAILED[*]}"
+err "FLEET NOT FULLY ALIGNED — issues: ${FAILED[*]}$VERSIONS"
 exit 1

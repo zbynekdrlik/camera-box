@@ -8,7 +8,9 @@ Design comment 6362045028 (Approach 1):
   1. the headphone card: with no explicit --pcm-match the player prefers the playback PCM of the ONE USB
      audio interface (a /proc/asound card with a `usbid` file: stream-snv's Scarlett Solo 4th Gen, card
      id `Gen`, PCM `USB Audio`); none = the ` Analog$` jack as before (stream-pp's `ALC257 Analog`);
-     two or more USB playback PCMs = named once, the jack. An explicit --pcm-match keeps its old meaning;
+     two or more USB playback PCMs = named once, the jack. An explicit --pcm-match keeps its old meaning.
+     REVISED by ROZHODNUTE 6383739315 (owner 24.10.2026): the notebook jack on every stream box and NEVER a
+     USB interface -- a plugged-in one is named once and left unused (only --pcm-match can name it);
   2. no blinking: pl_play only while OBS really publishes to the URL -- an `obs` process holding an
      ESTABLISHED TCP connection to the URL's host:port (/proc/net/tcp + tcp6, the obs pids' socket fds);
   3. the login ordering cycle (strih-stream-monitor after strih-obs after graphical-session.target after
@@ -63,12 +65,15 @@ def test_the_pcm_walk_marks_a_usb_card(tmp_path):
     assert usb == {("Generic", 3): False, ("Generic", 7): False, ("Generic_1", 0): False, ("Gen", 0): True}
 
 
-def test_the_one_usb_interface_wins_over_the_jack(tmp_path):
+def test_a_usb_interface_is_never_the_headphones(tmp_path):
+    # ROZHODNUTE 6383739315 (owner 24.10.2026): the notebook jack on every stream box, never a USB interface;
+    # the plugged-in Focusrite is named once and left unused
     m = _mod()
     root, _proc = asound(tmp_path)
     add_usb_card(root, 2, "Gen")
     pcm, why, note = _pick(m, root)
-    assert why is None and note is None and m.alsa_device(pcm) == "plughw:CARD=Gen,DEV=0", (why, note)
+    assert why is None and m.alsa_device(pcm) == "plughw:CARD=Generic_1,DEV=0", (why, note)
+    assert "Gen:0 USB Audio" in note and "never" in note, note
 
 
 def test_no_usb_interface_keeps_the_jack(tmp_path):
@@ -86,7 +91,7 @@ def test_two_usb_playback_pcms_are_named_and_the_jack_plays(tmp_path):
     add_usb_card(root, 3, "Device", name="USB PnP Sound Device")
     pcm, why, note = _pick(m, root)
     assert why is None and m.alsa_device(pcm) == "plughw:CARD=Generic_1,DEV=0"
-    assert "2 USB audio playback PCMs" in note and "Gen:0 USB Audio" in note and "Device:0" in note, note
+    assert "Gen:0 USB Audio" in note and "Device:0" in note and "never" in note, note
 
 
 def test_one_usb_card_with_two_playback_pcms_is_ambiguous_too(tmp_path):
@@ -118,23 +123,24 @@ def test_no_usb_and_no_jack_is_no_card_with_the_reason(tmp_path):
 
 def test_the_rule_line_names_how_the_card_is_picked():
     m = _mod()
-    assert "ONE USB audio interface" in m.headphone_rule(None) and "Analog" in m.headphone_rule(None)
+    rule = m.headphone_rule(None)
+    assert "jack" in rule and "Analog" in rule and "never a USB audio interface" in rule, rule
     assert m.headphone_rule("^USB Audio$") == "the playback PCM matching '^USB Audio$' (--pcm-match)"
 
 
 # --- 1. the card through the real loop ------------------------------------------------------------------------
 
-def test_the_loop_plays_to_the_usb_interface_and_says_why(tmp_path):
+def test_the_loop_plays_to_the_jack_with_a_usb_interface_plugged_in_and_says_why(tmp_path):
     rig = Rig(tmp_path)
     add_usb_card(rig.root, 2, "Gen")
     rig.publish()
     r = rig.run(2.0)
     assert r.returncode == 0, r.stderr
     argv = rig.vlc_argv()
-    assert len(argv) == 1 and "--alsa-audio-device=plughw:CARD=Gen,DEV=0" in argv[0], argv
+    assert len(argv) == 1 and "--alsa-audio-device=plughw:CARD=Generic_1,DEV=0" in argv[0], argv
     watching = [ln for ln in r.stdout.splitlines() if ln.startswith("watching ")]
-    assert len(watching) == 1 and "ONE USB audio interface" in watching[0], r.stdout
-    assert rig.st()["device"] == "plughw:CARD=Gen,DEV=0" and rig.st()["card"] == 2
+    assert len(watching) == 1 and "never a USB audio interface" in watching[0], r.stdout
+    assert rig.st()["device"] == "plughw:CARD=Generic_1,DEV=0" and rig.st()["card"] == 1
 
 
 def test_the_loop_keeps_an_explicit_pcm_match(tmp_path):
@@ -158,7 +164,7 @@ def test_two_usb_interfaces_are_named_once_over_every_vlc_start(tmp_path):
     assert r.returncode == 0, r.stderr
     assert len(rig.vlc_argv()) == 2, rig.log()
     assert all("--alsa-audio-device=plughw:CARD=Generic_1,DEV=0" in a for a in rig.vlc_argv())
-    named = [ln for ln in r.stdout.splitlines() if "2 USB audio playback PCMs" in ln]
+    named = [ln for ln in r.stdout.splitlines() if "Gen:0 USB Audio" in ln and "Device:0" in ln]
     assert len(named) == 1, r.stdout
 
 
@@ -289,13 +295,14 @@ def test_check_state_passes_a_monitor_waiting_for_obs(tmp_path):
 
 # --- review round 1 -------------------------------------------------------------------------------------------
 
-def test_a_usb_headphone_box_keeps_its_own_mixer(tmp_path):
+def test_a_usb_headphone_box_named_by_pcm_match_keeps_its_own_mixer(tmp_path):
     # snd-usb-audio names many headsets' / dongles' main output `Speaker`: the jack's speaker mute would
-    # silence the very box the operator listens on, and a 0 dB write on its own volume is full scale
+    # silence the very box the operator listens on, and a 0 dB write on its own volume is full scale.
+    # Since ROZHODNUTE 6383739315 only an explicit --pcm-match can name a USB box.
     rig = Rig(tmp_path)
     add_usb_card(rig.root, 2, "Gen")
     rig.publish()
-    r = rig.run(2.0)
+    r = rig.run(2.0, "--pcm-match", "^USB Audio$")
     assert r.returncode == 0, r.stderr
     assert "--alsa-audio-device=plughw:CARD=Gen,DEV=0" in rig.vlc_argv()[0]
     assert not [a for a in rig.amixer() if " Gen " in " %s " % a], rig.amixer()

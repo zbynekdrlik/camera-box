@@ -58,9 +58,9 @@ finder heal-wait hit it (a burn-leak on the fresh OBS). The ssh bound is 45 s. A
 ssh/auth/timeout failure) → rc 3 → the orchestrator fails loud and never counts it against the
 restart budget as performed. The orchestrator's messages name
 `strih-obs.service` on Linux and AutoHotkey64 on Windows. There is NO AHK on strih-snv — never port the
-AHK guard/kill there. Tier-0: `tests/python/test_strih_windows_remnants_1317.py` runs the router with
-a fake `sshpass` on PATH (argv capture) for both platforms. The live restart itself stays
-UNVERIFIED at Tier-0 (never restart the rig's OBS from a lane).
+AHK guard/kill there. `tests/python/test_strih_windows_remnants_1317.py` runs the router with a fake
+`sshpass` on PATH (argv capture) for both platforms; the live restart stays UNVERIFIED there (never
+restart the rig's OBS from a lane).
 
 ## Headless strih-OBS restart (WINDOWS strih) — force-kill over ssh, AHK respawns (NEVER an ssh GUI launch)
 
@@ -102,14 +102,13 @@ seam for tests), so a failed re-open never fails a recovered run. strih runs `Sa
 but with an EMPTY `SavedProjectors`, and a force-kill never repopulates it — so OBS's own
 save/restore cannot cover this gap; the active re-open is what restores the operator's view.
 
-## Tier-0 testing
+## Testing
 
 All pure/builder pieces are unit-tested with fakes on PATH (the #833/#716 pattern) —
 `tests/harness_mv_reverify_escalate_1093.rs`. The env override seams (`MV_REVERIFY_RECEIVED_CMD`,
 `MV_REVERIFY_OBS_RESTART_CMD`, `MV_REVERIFY_SWEEP_CMD`, `MV_REVERIFY_REOPEN_MV_CMD` (#1098),
-`MV_REVERIFY_OBS_WS_WAIT_ITERS=0`,
-`MV_REVERIFY_*_GAP_S=0`) let the orchestrator's decision flow run offline with zero ssh/OBS/network.
-The LIVE strih-OBS restart itself is NOT exercisable at Tier-0 — flag it UNVERIFIED for the E2E run.
+`MV_REVERIFY_OBS_WS_WAIT_ITERS=0`, `MV_REVERIFY_*_GAP_S=0`) let the orchestrator's decision flow run offline with zero ssh/OBS/network.
+The LIVE strih-OBS restart itself is NOT exercisable offline — flag it UNVERIFIED for the E2E run.
 
 ## After a CLEAR-then-SET receiver reset, give the fresh finder a bounded re-resolve WINDOW (#1114)
 
@@ -188,10 +187,10 @@ failing run.
   decodes back to the exact `gc/gci … -Tail N` command with pipes intact.
 - **Inlined `iconv -f UTF-8 -t UTF-16LE | base64 -w0`, NOT `. win-ssh-exec.sh`** — that helper carries
   its own top-level `set -euo pipefail`, which would leak strict mode into this source-only lib's
-  non-strict callers (the frozen-input watchdog + the Tier-0 harness). Self-guard the encode
+  non-strict callers (the frozen-input watchdog + the test harness). Self-guard the encode
   (`_enc="$(… 2>/dev/null)" || _enc=""`) and numeric-clamp any tail override (`case '' | *[!0-9]* → 400`)
   so a metachar override can never inject into the encoded payload.
-- **Tier-0 without ssh (`.claude/rules/win-ssh-vs-mcp.md`: agent sessions read strih via win-* MCP, never
+- **Testing without ssh (`.claude/rules/win-ssh-vs-mcp.md`: agent sessions read strih via win-* MCP, never
   ssh):** a fake `sshpass` on PATH echoing its argv proves the invocation shape — naive→`-Command "gc`
   (RED), fixed→`-EncodedCommand` whose payload `base64 -d | iconv -f UTF-16LE -t UTF-8` decodes exactly to
   the tail command (GREEN), for both the -Tail 400 default and the frozen-cam -Tail 800 override
@@ -232,7 +231,7 @@ comments. `mv_reverify_probe_raw`'s OWN inline encode was retired by issue 1360:
 the shared platform-resolved `strih_log_tail` (`scripts/lib/strih-log-read.sh`, same `-EncodedCommand`
 payload byte-for-byte on a Windows strih, plain ssh `tail` on strih-snv — `.claude/rules/strih-log-read.md`).
 
-**Tier-0 test the migrated sites the same fake-sshpass way** (`tests/harness_ps_encoded_fleet_1259.rs`):
+**Test the migrated sites the same fake-sshpass way** (`tests/harness_ps_encoded_fleet_1259.rs`):
 source the watchdog (its `[[ "${BASH_SOURCE[0]}" == "$0" ]] && main` guard means sourcing only defines
 functions), call `fetch_box_log`/`probe_received`/`probe_mv_log` with a fake `sshpass` on PATH that
 appends its argv to a log FILE (probe_received post-processes stdout, so the file — not stdout — is the
@@ -274,12 +273,12 @@ every DIRECT consumer of the same `genlock-fifo audit '<src>': received=` tap fa
   sibling #1259-migrated watchdog reading the SAME tap family via the SAME `ps_encoded_command` fetch.
 - `frozen_input_cambox_sources` (`scripts/lib/frozen-input-health.sh`) — the enumeration reader
   sharing the SAME raw `mv_reverify_probe_raw` stream via `probe_enumerate`; fixed DEFENSIVELY
-  (`grep -aoE` + `LC_ALL=C sed -E`) — its specific `-o`+piped-stdin shape did NOT reproduce a Tier-0
+  (`grep -aoE` + `LC_ALL=C sed -E`) — its specific `-o`+piped-stdin shape did NOT reproduce a
   RED via a pipe (any fixture size tried), though the IDENTICAL byte DOES trip GNU grep's binary
   detection through a direct FILE argument on the same grep binary — the hazard class is real even
   though this one shape resisted pipe-mode reproduction in this sandbox.
 
-**Test recipe (Tier-0, `tests/harness_received_tap_byte_safety_1258.rs`):** write a raw multi-line
+**Test recipe (`tests/harness_received_tap_byte_safety_1258.rs`):** write a raw multi-line
 fixture as literal Rust BYTES (`b"...\xa0..."`, never a `&str` — a genuine invalid-UTF-8 byte cannot
 live in a Rust string literal) to a temp FILE, `cat` it into the sourced function via `bash -c`. Two
 lines carry the invalid byte (one of them the TARGET line itself, right after `received=N`) to prove

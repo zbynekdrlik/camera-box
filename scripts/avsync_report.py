@@ -24,7 +24,19 @@ Vocabulary (from avsync-watchdog.ps1 / av_sync_measure.py, verified in avsync_li
   a CONFIDENT clip parses "AV offset ±N fr (±X ms) conf C" with C >= OFFSET_CONF_FLOOR (4.0);
   everything else in a session (UNMEASURABLE band/graphics windows, low-conf clips) is "nemerateľné".
 
-CLI: avsync_report.py --state <json file> --rows <tsv file> [--now EPOCH]
+Issue 1441 (owner 28.10.2026: "nech to nebol spam ale len podstatne hlasky"): the 20-min PERIODIC
+post and the 1st-clip START post are gone. A session posts at most:
+  FIRST VERDICT -- once, the first time the 20-min window holds >= 3 confident clips;
+  CHANGE        -- each SEDÍ<->NESEDÍ flip after that, once;
+  END           -- one summary when the session stops.
+And only a PRODUCTION session posts at all (`production`: the caller's per-pass reading of the
+venue -- SNV = rig EVENT mode, PP = every measured session, since the measurer only gets a clip
+while stream-pp streams). A session latches production once any pass inside it read "yes" or
+"unknown" (an unreadable mode never silences a real broadcast); a session that only ever read "no"
+(SNV TEST-mode development streams) posts nothing, not even its END.
+
+CLI: avsync_report.py --state <json file> --rows <tsv file> [--now EPOCH] [--knob-input NAME]
+  [--production yes|no|unknown]
   Reads the rows TSV + the JSON state, prints one message per line (UTF-8), REWRITES the state file
   in place, exits 0. A missing/garbled state file starts fresh; a missing rows file = no rows.
 """
@@ -61,17 +73,16 @@ except Exception:  # pragma: no cover -- no tzdata: fall back to naive local tim
 # (after >= 1 measured row) ends the current one. 600 s = 10 min, comfortably above the ~90 s
 # measurement cadence, so an ordinary between-clip gap never splits a live broadcast.
 SESSION_GAP_S = 600
-# The trailing window the periodic/change verdict is computed over (20 min).
+# The trailing window the first-verdict/change verdict is computed over (20 min).
 WINDOW_S = 1200
 # The window verdict needs at least this many CONFIDENT clips to be a real verdict (never a lone clip).
 MIN_CONFIDENT = 3
 
 DEFAULT_STATE = {
     "session_start": None,       # epoch of the current session's first measured row (None = idle)
-    "start_posted": False,       # the START message has been posted for the current session
+    "production": False,         # issue 1441: the current session was read as a production (latched)
     "last_measured_epoch": None, # epoch of the last measured row seen (session-end detection)
-    "last_periodic_epoch": None, # tick anchor of the last PERIODIC message (== session_start at start)
-    "last_verdict": None,        # "SEDI" | "NESEDI" | None -- last DEFINITE window verdict evaluated
+    "last_verdict": None,        # "SEDI" | "NESEDI" | None -- last DEFINITE window verdict POSTED
     "end_posted": True,          # the END message has been posted for the current/last session
     # Observability only: the max row epoch processed so far. NOT consumed for dedup (idempotency
     # comes entirely from the session state machine above, which re-derives from all fetched rows);
@@ -109,17 +120,25 @@ def _median(vals):
     return _percentile(sorted(vals), 50)
 
 
-def _advice(median_ms):
-    """PURE: the operator knob advice, byte-parity with av_sync_measure.py's own verdict text --
-    audio ahead (median > 0) -> "ZNIZ '2ME PGM' latency o <median>"; video ahead (median < 0) ->
-    "ZVYS '2ME PGM' latency o <|median|>". No diacritics -- matches av_sync_measure.py exactly so a
-    ZNIZ/ZVYS grep and the operator's muscle memory read the same string everywhere."""
-    m = int(round(median_ms))
-    if m > 0:
-        return "ZNIZ '2ME PGM' latency o {}".format(m)
-    if m < 0:
-        return "ZVYS '2ME PGM' latency o {}".format(abs(m))
-    return "A/V sync OK"
+def knob_advice(offset_ms, knob_input=None):
+    """PURE (issue 1459): the operator knob advice for an A/V offset in ms (SyncNet sign: + = audio
+    leads video). With the venue's program audio input it names that input's sync offset, and more
+    audio delay fixes audio leading: + -> "ZVYS '<input>' sync offset o N", - -> "ZNIZ ...". Without
+    one (a caller not upgraded yet) it keeps the old 2ME PGM latency text. 0 -> "A/V sync OK".
+    Byte-identical in av_sync_measure.py and avsync_report.py (tests/python/
+    test_avsync_knob_advice_1459.py); no diacritics, so a ZNIZ/ZVYS grep reads it everywhere."""
+    m = int(round(offset_ms))
+    if m == 0:
+        return "A/V sync OK"
+    if knob_input:
+        return "{} '{}' sync offset o {}".format("ZVYS" if m > 0 else "ZNIZ", knob_input, abs(m))
+    return "{} '2ME PGM' latency o {}".format("ZNIZ" if m > 0 else "ZVYS", abs(m))
+
+
+def _advice(median_ms, knob_input=None):
+    """PURE: the operator knob advice for a window median, byte-parity with av_sync_measure.py's
+    own verdict text (one shared knob_advice shape)."""
+    return knob_advice(median_ms, knob_input)
 
 
 class _Row:
@@ -183,11 +202,11 @@ def _window_verdict(offsets):
     return ("SEDI" if abs(med) <= OFFSET_ALARM_MS_DEFAULT else "NESEDI"), med
 
 
-def _verdict_tail(verdict, median):
+def _verdict_tail(verdict, median, knob_input=None):
     """PURE: the ' -> SEDÍ' / ' -> NESEDÍ o X ms -> <advice>' suffix for a definite verdict."""
     if verdict == "SEDI":
         return " → SEDÍ"
-    return " → NESEDÍ o {} ms → {}".format(abs(int(round(median))), _advice(median))
+    return " → NESEDÍ o {} ms → {}".format(abs(int(round(median))), _advice(median, knob_input))
 
 
 def _median_paren(offsets):
@@ -201,7 +220,7 @@ def _median_paren(offsets):
     )
 
 
-def _end_message(session_rows):
+def _end_message(session_rows, knob_input=None):
     """PURE: the end-of-broadcast summary line for a whole session."""
     ss = session_rows[0].epoch
     se = session_rows[-1].epoch
@@ -216,17 +235,37 @@ def _end_message(session_rows):
     if verdict is None:
         # < 3 confident over the WHOLE session -- report the median but no SEDÍ/NESEDÍ verdict.
         return head + body + " — < 3 spoľahlivé, bez verdiktu"
-    return head + body + _verdict_tail(verdict, median)
+    return head + body + _verdict_tail(verdict, median, knob_input)
 
 
-def decide(rows, state, now_epoch):
+PRODUCTION_VALUES = ("yes", "no", "unknown")
+
+
+def _end_worth_posting(session_rows, st):
+    """PURE (issue 1441): the END summary of a production session is posted when the session posted a
+    verdict, or ran at least one verdict window (WINDOW_S) without ever reaching one -- a long
+    broadcast the measurement could not judge is worth one line; a few-minute blip before the real
+    broadcast is not."""
+    if not st["production"]:
+        return False
+    if st["last_verdict"] is not None:
+        return True
+    return session_rows[-1].epoch - session_rows[0].epoch >= WINDOW_S
+
+
+def decide(rows, state, now_epoch, knob_input=None, production="yes"):
     """PURE: given the fetched rows [(epoch, status)...], the previous report state (a dict), and the
     evaluation time now_epoch, return (messages, new_state). IDEMPOTENT: a second call with the same
-    rows and the returned state emits nothing new. See the module docstring for the message kinds."""
+    rows and the returned state emits nothing new. See the module docstring for the message kinds.
+    knob_input (issue 1459) = the venue's program audio input the NESEDÍ advice names (None = the
+    old 2ME PGM latency text). production (issue 1441) = this pass's reading of the venue: "yes",
+    "no" or "unknown"; anything else is read as "unknown"."""
     st = dict(DEFAULT_STATE)
     if state:
         st.update({k: state.get(k, DEFAULT_STATE[k]) for k in DEFAULT_STATE})
     now = int(now_epoch)
+    if production not in PRODUCTION_VALUES:
+        production = "unknown"
     messages = []
 
     parsed = _parse_rows(rows)
@@ -245,65 +284,57 @@ def decide(rows, state, now_epoch):
     # (1) A PREVIOUS session that ended without an END yet (a new session has since started).
     if st["session_start"] is not None and not st["end_posted"] and st["session_start"] != ss:
         prev = next((s for s in sessions if s[0].epoch == st["session_start"]), None)
-        if prev is not None:
-            messages.append(_end_message(prev))
+        if prev is not None and _end_worth_posting(prev, st):
+            messages.append(_end_message(prev, knob_input))
         st["end_posted"] = True
 
-    # (2) Enter/refresh the current session's tracking on a session switch.
-    if st["session_start"] != ss:
+    # (2) Enter the current session's tracking on a session switch.
+    first_look = st["session_start"] != ss
+    if first_look:
         st["session_start"] = ss
-        st["start_posted"] = False
-        st["last_periodic_epoch"] = ss
+        st["production"] = False
         st["last_verdict"] = None
         st["end_posted"] = False
     st["last_measured_epoch"] = se
 
-    n_sess, _k_sess, confident_sess = _counts(last_session)
-
-    # (3) START -- the first confident clip of the session.
-    if not st["start_posted"] and confident_sess:
-        first = next(r for r in last_session if r.confident)
-        messages.append(
-            "📐 A/V overené {} (začiatok vysielania): 1. meranie {:+d} ms conf {:.1f}"
-            " — verdikt po ≥ 3 meraniach".format(_hm(first.epoch), first.offset_ms, first.conf)
-        )
-        st["start_posted"] = True
+    # (3) Production latch: a pass DURING the live session that reads yes/unknown marks it. A
+    # session first seen only after it ended (dev1 was down through it) takes this pass's reading,
+    # the closest one there is.
+    if production != "no" and (live or not st["end_posted"] and first_look):
+        st["production"] = True
 
     if not live:
-        # (4a) Session ended -> END (once). No further periodic/change for a finished broadcast.
+        # (4a) Session ended -> END (once), only for a production session.
         if not st["end_posted"]:
-            messages.append(_end_message(last_session))
+            if _end_worth_posting(last_session, st):
+                messages.append(_end_message(last_session, knob_input))
             st["end_posted"] = True
         return messages, st
 
-    # (4b) Live session -> CHANGE (verdict flip, at once) + PERIODIC (every 20 min).
+    if not st["production"]:
+        return messages, st
+
+    # (4b) Live production -> the FIRST verdict once, then each CHANGE once.
     window = [r for r in last_session if now - WINDOW_S <= r.epoch <= now]
     w_conf = [r.offset_ms for r in window if r.confident]
     verdict, median = _window_verdict(w_conf)
-
-    if verdict is not None and st["last_verdict"] is not None and verdict != st["last_verdict"]:
-        tail = _verdict_tail(verdict, median)
+    if verdict is None or verdict == st["last_verdict"]:
+        return messages, st
+    tail = _verdict_tail(verdict, median, knob_input)
+    if st["last_verdict"] is None:
+        n_win, k_win, _cw = _counts(window)
+        messages.append(
+            "📐 A/V overené {} (vysielanie): za 20 min {} meraní ({} nemerateľných), {}{}".format(
+                _hm(now), n_win, k_win, _median_paren(w_conf), tail
+            )
+        )
+    else:
         messages.append(
             "📐 A/V overené {}: verdikt sa zmenil{} (medián {:+d} ms, {} spoľahlivých)".format(
                 _hm(now), tail, int(round(median)), len(w_conf)
             )
         )
-    if verdict is not None:
-        st["last_verdict"] = verdict
-
-    if now >= st["last_periodic_epoch"] + WINDOW_S:
-        n_win, k_win, _cw = _counts(window)
-        head = "📐 A/V overené {}: za 20 min {} meraní ({} nemerateľných)".format(
-            _hm(now), n_win, k_win
-        )
-        if verdict is None:
-            messages.append(head + " — zatiaľ < 3 spoľahlivé, bez verdiktu")
-        else:
-            messages.append(head + ", " + _median_paren(w_conf) + _verdict_tail(verdict, median))
-        # Advance past every missed tick (dev1 down / gaps) so a backlog posts ONE summary, not many.
-        missed = (now - st["last_periodic_epoch"]) // WINDOW_S
-        st["last_periodic_epoch"] = st["last_periodic_epoch"] + missed * WINDOW_S
-
+    st["last_verdict"] = verdict
     return messages, st
 
 
@@ -352,12 +383,19 @@ def main(argv=None):
     ap.add_argument("--state", required=True, help="path to the JSON report-state file (rewritten)")
     ap.add_argument("--rows", required=True, help="path to the TSV rows file (<epoch>\\t<status>)")
     ap.add_argument("--now", type=int, default=None, help="evaluation epoch (default: time.time())")
+    ap.add_argument("--knob-input", default=None,
+                    help="issue 1459: the venue's program audio input the advice names "
+                         "(absent = the old 2ME PGM latency text)")
+    ap.add_argument("--production", default="yes", choices=PRODUCTION_VALUES,
+                    help="issue 1441: is the venue in a production this pass "
+                         "(no = development, nothing is posted for the session)")
     args = ap.parse_args(argv)
 
     now = args.now if args.now is not None else int(time.time())
     rows = _read_rows(args.rows)
     state = _read_state(args.state)
-    messages, new_state = decide(rows, state, now)
+    messages, new_state = decide(rows, state, now, knob_input=args.knob_input,
+                                 production=args.production)
     for m in messages:
         sys.stdout.write(m + "\n")
     _write_state(args.state, new_state)

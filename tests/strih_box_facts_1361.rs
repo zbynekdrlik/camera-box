@@ -140,6 +140,10 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_HTTPS_PUBLIC",
     // issue 1462: the stream box's Development design (nested-pro | clip | none).
     "STRIH_STREAM_DEV_SCENE",
+    // issue 808 (owner ruling 5977504457): the per-cambox shading relay overrides of the cam1..cam7 panel.
+    "STRIH_BKSHADING_RELAYS",
+    // issue 1425 (design 6443440513): the box's FIXED OBS audio buffering, ms (0..960).
+    "STRIH_AUDIO_BUFFERING_MS",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -209,6 +213,10 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_HTTPS_PUBLIC=yes",
         // issue 1462: the strih role has no stream Development scene.
         "STRIH_STREAM_DEV_SCENE=none",
+        // issue 808: cam3's camera is the handheld with the Teradek, controlled by the handheld-1 SBC.
+        "STRIH_BKSHADING_RELAYS=3=sbc-relay@register:handheld-1",
+        // issue 1425: strih-snv drew 0 ms on its last 10 launches; the fact fixes it there.
+        "STRIH_AUDIO_BUFFERING_MS=0",
         "LOADED=strih-snv",
     ] {
         assert!(
@@ -715,6 +723,11 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
         "strih-snv",
         &[
             ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 5"),
+            // issue 808 (owner 26.10.2026): a relay override must name one of the box's cameras.
+            (
+                "STRIH_BKSHADING_RELAYS=3=sbc-relay@register:handheld-1",
+                "STRIH_BKSHADING_RELAYS=none",
+            ),
             (
                 "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
                 "STRIH_CG_SENDER=none",

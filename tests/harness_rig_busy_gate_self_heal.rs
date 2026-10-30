@@ -126,6 +126,10 @@ fn run_gate(fake_py: &str, iterations: &str, sleep_secs: &str, threshold: &str) 
         .env("STRAY_HEAL_THRESHOLD", threshold)
         .env("STRIH_HOST", "10.77.9.202")
         .env("STREAM_HOST", "10.77.9.204")
+        .env(
+            "YOUTUBE_LEG_MARKER",
+            lease_dir.join("no-youtube-leg-marker.json"),
+        )
         .env("RIG_LEASE_DIR", lease_dir)
         .env_remove("GITHUB_STEP_SUMMARY")
         .output()

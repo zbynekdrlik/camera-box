@@ -94,70 +94,60 @@ def test_advice_text_parity_with_av_sync_measure_for_plus_120ms():
     assert ar._advice(0) == "A/V sync OK"
 
 
-# ── decide(): START ──────────────────────────────────────────────────────────
+# ── decide(): FIRST VERDICT (issue 1441 replaced the 1st-clip START + the 20-min PERIODIC) ──
 
 
-def test_start_fires_once_on_the_first_confident_clip():
+def test_a_lone_first_clip_posts_nothing():
     rows = _run(BASE, 1, offset_ms=120, conf=5.4)
     msgs, st = ar.decide(rows, {}, BASE + 10)
-    assert any("📐 A/V overené" in m and "začiatok vysielania" in m for m in msgs)
-    assert any("1. meranie +120 ms conf 5.4" in m for m in msgs)
-    assert st["start_posted"] is True
-    # idempotent: the same rows + returned state emit nothing new.
-    msgs2, _st2 = ar.decide(rows, st, BASE + 10)
-    assert msgs2 == []
+    assert msgs == []
+    assert st["last_verdict"] is None
 
 
-def test_start_does_not_fire_when_the_only_clips_are_low_confidence():
-    rows = _run(BASE, 2, offset_ms=80, conf=3.2)
-    msgs, st = ar.decide(rows, {}, BASE + 100)
-    assert not any("začiatok vysielania" in m for m in msgs)
-    assert st["start_posted"] is False
-
-
-# ── decide(): PERIODIC (20-min) ──────────────────────────────────────────────
-
-
-def test_periodic_summary_after_20_minutes_sedi():
+def test_first_verdict_posts_once_sedi():
     # >= 3 confident clips within the trailing 1200 s window, median 0 -> SEDÍ.
-    rows = _run(BASE, 14, step=90, offset_ms=0, conf=6.0)  # 14*90 = 1260 s of clips
+    rows = _run(BASE, 14, step=90, offset_ms=0, conf=6.0)
     now = BASE + 1200
     msgs, st = ar.decide(rows, {}, now)
-    periodic = [m for m in msgs if "za 20 min" in m]
-    assert len(periodic) == 1
-    assert "→ SEDÍ" in periodic[0]
-    assert "medián +0 ms" in periodic[0]
+    assert len(msgs) == 1
+    assert "(vysielanie)" in msgs[0] and "→ SEDÍ" in msgs[0]
+    assert "medián +0 ms" in msgs[0]
     assert st["last_verdict"] == "SEDI"
+    # idempotent, and no periodic repeat 20 or 40 min later while it still fits.
+    more = rows + _run(BASE + 14 * 90, 28, step=90, offset_ms=0, conf=6.0)
+    for later in (now, now + 1200, now + 2400):
+        m, st = ar.decide(more, st, later)
+        assert m == []
 
 
-def test_periodic_summary_nesedi_carries_the_knob_advice():
+def test_first_verdict_nesedi_carries_the_knob_advice():
     rows = _run(BASE, 14, step=90, offset_ms=120, conf=6.0)
-    now = BASE + 1200
-    msgs, _st = ar.decide(rows, {}, now)
-    periodic = [m for m in msgs if "za 20 min" in m]
-    assert len(periodic) == 1
-    assert "NESEDÍ o 120 ms" in periodic[0]
-    assert "ZNIZ '2ME PGM' latency o 120" in periodic[0]
+    msgs, _st = ar.decide(rows, {}, BASE + 1200)
+    assert len(msgs) == 1
+    assert "NESEDÍ o 120 ms" in msgs[0]
+    assert "ZNIZ '2ME PGM' latency o 120" in msgs[0]
 
 
-def test_periodic_counts_nemerateľne_clips():
+def test_first_verdict_counts_nemeratelne_clips():
     # 5 confident + 3 unmeasurable within the window -> N=8, K=3.
     rows = _run(BASE, 5, offset_ms=0, conf=6.0)
     rows += [(BASE + 5 * 90 + i * 90, _unmeasurable()) for i in range(3)]
-    now = BASE + 1200
-    msgs, _st = ar.decide(rows, {}, now)
-    periodic = [m for m in msgs if "za 20 min" in m][0]
-    assert "8 meraní (3 nemerateľných)" in periodic
+    msgs, _st = ar.decide(rows, {}, BASE + 1200)
+    assert "8 meraní (3 nemerateľných)" in msgs[0]
 
 
-def test_periodic_below_three_confident_has_no_verdict():
-    # Only 2 confident clips, but the session stays LIVE (unmeasurable rows keep flowing to near now).
+def test_below_three_confident_posts_nothing():
     rows = _run(BASE, 2, offset_ms=0, conf=6.0)
-    rows += [(BASE + 180 + i * 90, _unmeasurable()) for i in range(12)]  # last ~BASE+1170
-    now = BASE + 1200
-    msgs, st = ar.decide(rows, {}, now)
-    periodic = [m for m in msgs if "za 20 min" in m][0]
-    assert "bez verdiktu" in periodic
+    rows += [(BASE + 180 + i * 90, _unmeasurable()) for i in range(12)]
+    msgs, st = ar.decide(rows, {}, BASE + 1200)
+    assert msgs == []
+    assert st["last_verdict"] is None
+
+
+def test_low_confidence_clips_never_make_a_verdict():
+    rows = _run(BASE, 14, offset_ms=80, conf=3.2)
+    msgs, st = ar.decide(rows, {}, BASE + 1200)
+    assert msgs == []
     assert st["last_verdict"] is None
 
 
@@ -191,8 +181,8 @@ def test_no_change_on_the_first_definite_verdict():
 
 
 def test_end_summary_when_the_session_stops_for_600s():
-    rows = _run(BASE, 14, step=90, offset_ms=120, conf=6.0)
-    se = BASE + 13 * 90
+    rows = _run(BASE, 15, step=90, offset_ms=120, conf=6.0)  # 1260 s >= one verdict window
+    se = BASE + 14 * 90
     now = se + 700  # no measured row for >600 s -> the session has ended
     msgs, st = ar.decide(rows, {}, now)
     end = [m for m in msgs if "📐 A/V počas vysielania" in m]
@@ -241,15 +231,15 @@ def test_cli_prints_messages_and_rewrites_state(tmp_path, capsys):
     rows_file = tmp_path / "rows.tsv"
     state_file = tmp_path / "state.json"
     with open(rows_file, "w", encoding="utf-8") as fh:
-        for epoch, status in _run(BASE, 1, offset_ms=120, conf=5.4):
+        for epoch, status in _run(BASE, 14, offset_ms=120, conf=5.4):
             fh.write("{}\t{}\n".format(epoch, status))
-    rc = ar.main(["--state", str(state_file), "--rows", str(rows_file), "--now", str(BASE + 10)])
+    rc = ar.main(["--state", str(state_file), "--rows", str(rows_file), "--now", str(BASE + 1200)])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "📐 A/V overené" in out and "začiatok vysielania" in out
+    assert "📐 A/V overené" in out and "(vysielanie)" in out
     assert state_file.exists()
     import json
 
     st = json.loads(state_file.read_text(encoding="utf-8"))
-    assert st["start_posted"] is True
-    assert st["last_row_epoch"] == BASE
+    assert st["last_verdict"] == "NESEDI"
+    assert st["last_row_epoch"] == BASE + 13 * 90

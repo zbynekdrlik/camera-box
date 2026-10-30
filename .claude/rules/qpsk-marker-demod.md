@@ -18,7 +18,7 @@ paths:
   - "tests/fixtures/qpsk_channel_pick_parity.tsv"
 ---
 
-# QPSK A/V-sync marker demod — the word's full redundancy + Tier-0 verification of a gate change
+# QPSK A/V-sync marker demod — the word's full redundancy + verification of a gate change
 
 ## The 20-bit marker word carries 12 bits of redundancy over an 8-bit index — gate ALL of it (#1153)
 `payload_word(index) = (0xF000 | index) << 4 | crc4(...)`. Bit layout (verify with a rustc scratch, the
@@ -81,19 +81,13 @@ index is only the 8-bit frame_id low byte, which cycles every ~4.3s, so any inde
 → the CLUSTER is the only real discriminator. `locked=yes` + crc_ok flowing ⇒ audio level is fine (rules out
 the #689 silence/clipping class), so a weak matched/mad is a discrimination problem, not a level one.
 
-## Tier-0 verification of a demod / parity-kernel change (cargo is BLOCKED, incl. --no-run per #557)
-No local cargo compiles the probe/vendor code. The working proof chain, all local:
-1. **rustc scratch** — copy the pure decode kernel + emitter into a standalone `.rs`, add OLD/NEW gate
-   variants, render the case (a synthesized word) + a real marker + noise, `rustc -O` it and run. Proves
-   RED→GREEN (OLD accepts / NEW rejects) and real-marker preservation without cargo. Enumerate the accept
-   space exhaustively here too to QUANTIFY the change (e.g. 4096→256 = 16×), never estimate it.
-2. **Direct g++ self-test** — the C++ mirror's self-test is dependency-free STL; compile it DIRECTLY (this is
-   NOT cargo, so Tier-0 allows it): `g++ -std=c++17 -Wall -Wextra -Werror -o /tmp/st
-   vendor/av-sync-dock/test/camera-box-selftest.cpp && /tmp/st` → `ALL PASS`. Add a CHECK for your new gate
-   case; the "all 256 indices round-trip" case proves no real marker is dropped. This is the SAME proof the
-   `av_sync_dock_cpp_mirror_gate` CI job runs.
-3. **`cargo fmt --all --check`** (non-compiling, Tier-0-allowed) — proves the Rust (incl. probe-gated + new
-   test files) parses / is brace-balanced. CI is the FIRST place the Rust actually type-checks + runs.
+## Verification of a demod / parity-kernel change
+1. **`cargo test`** — RED→GREEN (OLD accepts / NEW rejects) and real-marker preservation. Enumerate the
+   accept space exhaustively to QUANTIFY the change (e.g. 4096→256 = 16×), never estimate it.
+2. **Direct g++ self-test** — the C++ mirror's self-test is dependency-free STL: `g++ -std=c++17 -Wall
+   -Wextra -Werror -o /tmp/st vendor/av-sync-dock/test/camera-box-selftest.cpp && /tmp/st` → `ALL PASS`.
+   Add a CHECK for your new gate case; the "all 256 indices round-trip" case proves no real marker is
+   dropped. This is the SAME proof the `av_sync_dock_cpp_mirror_gate` CI job runs.
 To render an ARBITRARY (non-marker) word in a test, both sides expose a pure `marker_signal_for_word(word,p)`
 (Rust) / `marker_signal_from_word(word)` (C++ self-test); `marker_signal(index)` delegates to it.
 
@@ -153,10 +147,7 @@ ruled the skew is not his to fix — the gate must be robust to it.
   between two runs now means channel 0 crossed the floor.
 - **Real-signal fixture:** `tests/fixtures/mbc-stereo-skew-1367/mbc-stereo-2s.wav` (the first 2 s of
   that recording): downmix cluster 0, L 3 (below the floor of 4), R 4 — so both a downmix and a fixed
-  "always channel 0" pick FAIL there and only the per-channel pick passes. Tier-0 proof: a plain
-  `rustc --test` crate that `#[path]`-includes the real `qpsk_marker` / `qpsk_probe_decision` /
-  `qpsk_channel_select` (serde derives sed-stripped) + the real test files, with
-  `CARGO_MANIFEST_DIR` set for the fixture path; `clippy-driver --test -D warnings` on the same crate.
+  "always channel 0" pick FAIL there and only the per-channel pick passes.
 - **Not yet re-measured:** the 16.9 drowned-chain recordings were never re-run per channel (they are
   not on dev1). Per-channel reads of two local noise-flooded stereo captures (17 s and 120 s, 18.9)
   stayed at cluster 2, below the floor of 4.
@@ -234,10 +225,7 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   lists), since pwsh only runs on the Windows runner. The pwsh slices keep comments, so a comment
   inside `st_raw_audio_camera_box` must never spell `acc +=`, `/ (float)ch`,
   `std::vector<float> mono`, `mono.data()` or `camerabox::StreamingMarkerDecoder(`.
-- **Tier-0 verify:** the plain-rustc replica above (with the new test files included; add
-  `-A clippy::duplicate_mod` to its clippy-driver run, since two test files there share one
-  `#[path]` module — in the real layout each test file is its own crate), each std-only anchor test
-  also through `clippy-driver --test -D warnings` as its own crate, `g++ -std=c++11 -Wall -Wextra
+- **Verify:** `cargo test` + `cargo clippy --all-targets -- -D warnings`, `g++ -std=c++11 -Wall -Wextra
   -Werror` on both test programs, and `-fsyntax-only` of each dock output TU (`sync-test-output{,-video,-audio}.cpp`) with the two
   stub headers (`.claude/rules/av-sync-dock-decode-worker.md`). The dock change is live only after a
   FULL-bundle Windows deploy (`.claude/rules/rig-state-inspection.md`).

@@ -176,7 +176,7 @@ def test_the_pp_boxes_are_traveling_linux_name_rows(name):
 
 # issue 1441 (owner 15.10.2026, one solution for PP and SNV): the PP boxes join the four content
 # watchdogs whose :8899 facets they serve; every other facet stays SNV-only for now.
-PP_WATCHED_FACETS = ("genlock-lock", "render-freeze", "audio-mixer", "obs-handles")
+PP_WATCHED_FACETS = ("genlock-lock", "render-freeze", "audio-mixer", "obs-handles", "audio-lag")  # issue 1460: + audio-lag
 
 
 @pytest.mark.parametrize("facet", PP_WATCHED_FACETS)
@@ -189,7 +189,7 @@ def test_the_pp_boxes_are_in_the_content_watchdog_facets(facet):
 
 
 def test_the_pp_boxes_are_in_no_other_facet():
-    facets = ("audio-lag av-step vb-matrix bundle-state network-reach obs-liveness "
+    facets = ("av-step vb-matrix bundle-state network-reach obs-liveness "
               "ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline")
     r = _bash('for f in %s; do printf "%%s=%%s\\n" "$f" "$(obs_fleet_facet_members "$f")"; done' % facets,
               sources=(FLEET,))
@@ -548,26 +548,29 @@ KNOWN_ROLES = {"cambox", "program_ref", "cutters", "phones", "speakers", "line34
 
 def test_the_pp_matrix_satisfies_the_hub_load_rules():
     """ROZHODNUTE 13.10.2026 (owner: "prehod to"): the Poprad camera intercom runs on this hub, the SNV
-    shape for the PP cameras cam1/4/6/7, the phones (Janus) and the cutters, plus the unchanged
-    program path lv1 -> program_out."""
+    shape for the PP cameras cam1/4/6/7, the phones (Janus) and the cutters. Issue 1439 on strih-pp
+    (24.10.2026, design 6385519443): the hub forwards nothing into OBS -- lv1 sends `strih-obs` straight into
+    the OBS obs-vban source -- so there is no program_out and no pipewire participant at all (issue 1440)."""
     m = tomllib.loads(PP_TOML.read_text())
     assert m["hub"]["sample_rate"] == 48000 and m["hub"]["block_frames"] > 0
     parts = m["participant"]
     assert len({p["name"] for p in parts}) == len(parts)
     assert all(p["role"] in KNOWN_ROLES and p["adapter"] in {"vban", "none", "janus", "pipewire", "alsa_hdmi", "alsa"} for p in parts)
-    # the program path is exactly what it was: lv1 ch1/ch2 -> program_out ch1/ch2 at unity
-    assert sorted((pt["src"], pt["in_ch"], pt["out_ch"], pt.get("gain_db", 0.0))
-                  for pt in m["point"] if pt["dst"] == "program_out") == [("lv1", 1, 1, 0.0), ("lv1", 2, 2, 0.0)]
-    outs = [p for p in parts if p["role"] == "program_out"]
-    assert len(outs) == 1
-    o = outs[0]
-    assert o["adapter"] == "pipewire" and o["pipewire_target"] == "strih-program" and "pipewire_source" not in o
-    assert o["source_streams"] == ["strih"]
+    assert not any(p["role"] == "program_out" or p["name"] == "program_out" for p in parts)
+    assert not any(pt["src"] == "program_out" or pt["dst"] == "program_out" for pt in m["point"])
+    assert not any(p["adapter"] == "pipewire" for p in parts), "nothing on strih-pp needs PipeWire (issue 1440)"
+    # issue 1431: cam1-7, so a joint event's SNV cameras are served here too
+    assert len(parts) == 11 and len(m["point"]) == 164, (len(parts), len(m["point"]))
+    # lv1's `strih` still feeds the vestibule at unity and the cutters' cans 8 dB down
+    assert sorted((pt["dst"], pt["in_ch"], pt["out_ch"], pt.get("gain_db", 0.0)) for pt in m["point"]
+                  if pt["src"] == "lv1") == [("cutters", 1, 1, -8.0), ("cutters", 2, 2, -8.0),
+                                             ("vestibule", 1, 1, 0.0), ("vestibule", 2, 2, 0.0)]
     src = next(p for p in parts if p["name"] == "lv1")
     assert (src["role"], src["host"], src["in_channels"], src["in_stream"]) == ("program_ref", "lv1.lan", 2, "strih")
 
 
-PP_CAMS = {"cam1": "10.77.9.61", "cam4": "10.77.9.64", "cam6": "10.77.9.66", "cam7": "10.77.9.67"}
+# issue 1431: every camera, each at its fixed 10.77.9.6N (the same address at both venues)
+PP_CAMS = {f"cam{n}": f"10.77.9.6{n}" for n in range(1, 8)}
 
 
 def test_the_pp_matrix_carries_the_camera_intercom():

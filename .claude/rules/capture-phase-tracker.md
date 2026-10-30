@@ -55,6 +55,40 @@ ONE missing frame per crossing.
     the stream ~2 s on the raw path = the 1/1 residual. Never move the fit onto a delivery delay.
     The re-seed logs `#1371 capture phase re-seed: reason=outlier-run resid_us=[..]` with the
     whole run.
+  - **A constant-offset run is a card re-timing STEP, absorbed, never a re-seed (issue 1482,
+    ROZHODNUTÉ 6445636799).** When the run reaches its 30 frames AND every residual lies within
+    `max(4 x fit RMS, RESEED_FLOOR_NS / 2)` (500 us on a clean stream) of the run's median
+    (`constant_step_ns`), the tracker moves every window sample's time by that median
+    (`absorb_step`) and folds the run's 30 samples on the new phase. The `FitSums` are relative to
+    the oldest sample, which moves with the rest, so every sum stays exactly what it was: only the
+    intercept moves; the slope (the card's rate), the jitter and the lock are kept. One
+    `PhaseNote::PhaseStep` and one line `#1482 capture phase step: <+us> us (card re-timing), lock
+    kept`; `phase_steps=` counts them. Still a re-seed: a ramp or scattered run, a half-period
+    step, a sequence back/jump, a time stall, a gap. Runs shorter than 30 still HOLD (the
+    issue-1371 delivery-delay rule is untouched).
+  - **A STAIRCASE of stacked catch-ups is ONE step too (issue 1482 design step 3, comment
+    6452540834).** cam2's card sometimes catches up twice within one 30-frame run (live:
+    `+1414 x19, +3244 x11`, `+2325 x16, +2386 x8, +4688 x6`); with only the one-offset rule each
+    such run re-seeded (8 in 30 min on 1.8.1) and every re-seed reset the source fit
+    (`src_ppm=na`). `run_shape` splits the run into contiguous plateaus (a new one where a
+    residual leaves the plateau's FIRST residual by more than the same tolerance), each constant
+    by `constant_step_ns`: at most `MAX_STACKED_STEPS` (3), every increment with the first
+    plateau's sign (a card catches up one way) = a step to the LAST plateau's median, folding only
+    that plateau's samples (the earlier ones sit on an intermediate phase). A last plateau under
+    `STEP_MIN_PLATEAU_FRAMES` (4) is `Forming`: the run is held up to `MAX_STAIRCASE_RUN` (60
+    frames), then re-seeds. Ramp, scatter, settling, up-then-down and 4+ plateaus still re-seed.
+    Known limit: a lone late frame inside a step's run splits it into extra plateaus and
+    re-seeds as before. The cost of a step: during its 30 held frames
+    (~0.5 s) the stamps still come from the old phase, then the step reaches the stamps in one
+    move; the slot chooser keeps the slot when the moved instant stays inside the 500 us
+    hysteresis and makes exactly one duplicate or one missing slot when it crosses an edge.
+  - **Why (the owner's ruling):** no capture card, camera, monitor or HDMI source is ever assumed
+    to run on the genlock clock, and no fix asks for replacement hardware. cam2's Cam Link reads
+    +45 ppm against the SAME splitter signal cam3/cam5 read at +18 ppm: it re-times the frames on
+    its own clock and catches up in constant +1.8..+2.6 ms steps (once -6.3 ms) at 1.4..75 s intervals, one per
+    ~20 s on average (live
+    27.10.2026: 2329 re-seeds on cam2 vs 10 on cam3/cam5). The cambox absorbs it, so the card's
+    clock never travels further than the cambox.
   - A backward/stalled sequence (a device re-open), a step above `MAX_SEQ_ADVANCE` (8, hidden
     frames included), a timestamp that does not advance, or a gap longer than
     (sequence step + 1) x `MAX_FRAME_PERIOD_NS` (100 ms) re-seeds at any sample count (the `+ 1`
@@ -75,6 +109,30 @@ ONE missing frame per crossing.
     while seeding inflates the fit RMS and would widen its own bound. The O(window) check runs only
     while unlocked, every `WHITENESS_CHECK_EVERY` (16) frames after a failure. The prediction
     error at the newest frame is `2 sigma / sqrt(n)`, 1/8 of the raw jitter.
+- **`SourcePhase`** (`src/capture_phase/source_phase.rs`, issue 1482 step 2, design 6449255649):
+  the long-horizon SOURCE phase, so a re-timing card's sawtooth never reaches the stamp.
+  - Step 1 kept the lock through every card step, but the short fit (~4 s) follows each TOOTH:
+    cam2's card runs +45 ppm between steps and catches up later by +1.0..+2.9 ms, ~2 ms peak to
+    peak, four times the 500 us hysteresis. Live after step 1 (comment 6449236338): 11 crossings
+    + 4 hidden drops in 30 min vs cam3's 2 + 0 on the same signal.
+  - A least-squares `t = a + P * x` over the last `SOURCE_FIT_SECONDS` (180 s) of the samples the
+    short fit FOLDS, RAW: the card's steps are not removed, so the slope is the source's long-term
+    rate and the intercept its mean phase (the sawtooth averaged). The sequence position `x` is the
+    short fit's own (hidden drops already re-indexed). One point per `SOURCE_DECIMATION_FRAMES`
+    (10) of `x`, at most `SOURCE_FIT_MAX_POINTS` (4096): ~1080 points at 60 fps. The same exact
+    `i128` `FitSums` + the shared `line_predict_ns`; the range arithmetic is in the module doc.
+  - Fed from `CapturePhaseTracker::push` (so an absorbed run's raw samples reach it and a held
+    delivery delay never does), reset from `seed()`: every seed and re-seed (half-period step,
+    an outlier run that is no constant step, sequence back/jump, time stall, gap) starts it over;
+    an absorbed card step does NOT.
+  - `stamp_frame`: while the short fit is locked AND the source fit spans
+    `SOURCE_FIT_MIN_SECONDS` (60 s), the smoothed instant is the SOURCE prediction at the frame's
+    `x`; before that the short fit's, as before step 2. The slot chooser, the gate, the band check
+    (still on the short fit's rate) and the sender path are unchanged.
+  - A pass-through card (cam3/cam5): both fits agree within jitter (the unit test bounds the
+    difference under 60 us), so its stamps are today's.
+  - Cost: for the first 60 s after a start or a real re-seed a stepping card still stamps from
+    the short fit and can flip at an edge, as with step 1 only.
 - **`SlotHysteresis`** places the smoothed realtime instant in a grid slot that advances by
   exactly the SEQUENCE advance (a drop expects +2, never a false crossing). A slot one earlier or
   one later is accepted only once the instant is `SLOT_HYSTERESIS_NS` (500 us) past the edge: one
@@ -178,20 +236,30 @@ over-rate.
 ## Observability
 
 The 5 s `#707 emit-1s: [..] cap-1s: [..] (1-second buckets, oldest first)` line appends
-` phase_lock=seed|band|stamp phase_ppm=+15.9 jitter_us=41 crossings=2 reseeds=0 hidden_drops=0`:
+` phase_lock=seed|band|stamp phase_ppm=+15.9 src_ppm=+15.7 jitter_us=41 crossings=2 reseeds=0
+hidden_drops=0 phase_steps=0`:
 
 - `phase_lock`: `seed` = seeding (raw path), `band` = locked but outside the 1:1 band (raw path),
   `stamp` = stamp-driven, `off` = genlock off (no emit grid).
 - `phase_ppm`: the camera frame RATE offset from the emit rate (positive = faster = its crossings
   drop a duplicate slot). The LS slope noise is ~3 ppm (1 sigma) at 60 us jitter, so read a trend,
   not one line.
+- `src_ppm` (issue 1482 step 2): the SOURCE fit's rate, same sign as `phase_ppm`; `na` until
+  the source fit spans its 60 s. On a pass-through card it reads `phase_ppm` within noise; on a
+  re-timing card it reads the source's rate while `phase_ppm` keeps the card's local rate (cam2:
+  `phase_ppm` ~+45, `src_ppm` ~ what cam3's `phase_ppm` reads on the same signal).
 - `jitter_us`: the fit RMS (the raw V4L2 timestamp jitter).
 - `crossings` / `reseeds` / `hidden_drops`: cumulative since the process start. `crossings` counts
   camera-edge crossings only (a realtime clock step re-anchors, uncounted); `hidden_drops` counts
   frames the device skipped without a sequence step (each costs one starvation repeat), so a lone
   repeat with no `crossings` increase is attributable.
+- `phase_steps`: cumulative card re-timing steps absorbed with the lock kept (issue 1482). A
+  re-timing card (cam2, one step per ~20 s live) grows it ~3/min while `reseeds=` stays flat; a
+  pass-through card stays at 0.
 
-Every re-seed and every hidden drop also logs ONE line with what caused it (issue 1371),
+Every absorbed card step logs ONE `#1482 capture phase step: <+us> us (card re-timing), lock kept`
+line (`PhaseNote::log_line()`, the whole line main.rs writes). Every re-seed and every hidden drop
+also logs ONE line with what caused it (issue 1371),
 `#1371 capture phase re-seed: reason=<r> ...` or `#1371 capture phase hidden drop: frames=<k>
 resid_us=<+n>`. Reasons: `outlier-run resid_us=[a,b,c]` (the 3 residuals, oldest first),
 `half-period resid_us=<n>`, and `sequence-back` / `sequence-jump` / `time-stall` / `gap` with
@@ -234,30 +302,55 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
     give the same stamps.
   - At the design's 0.3 ms i.i.d. Gaussian timestamp jitter the tracker still gives exactly 1 per
     crossing (2 crossings, 0 receiver flips, 0 re-seeds).
+  - **Re-timing card (issue 1482)**, cam2's live numbers: a +45 ppm card clock, 48 seeded catch-up
+    steps of +1.8..+2.6 ms (the 8th -6.3 ms) at random 2..75 s intervals (the design's band, one
+    per ~38 s on average, half the live rate) over 30 min, seed
+    `0x1482_ca2d`. With step 1: 48 `phase_steps`, 0 re-seeds, 5 crossings for the 5 edge crossings
+    of the card's stepped instants = 2 blind sheds + 3 starvation repeats, 0 receiver dup/gap, 0
+    SKIPs. With step 2 the slot follows this schedule's source line (~-9 ppm): 1 crossing, 1
+    starvation repeat, pinned. Before it (the
+    RED commit): 48 re-seeds, 3 receiver gaps, 3 SKIPs; the raw path alone 109 sheds + 110 repeats
+    and 48 dup + 101 gap at the receiver.
 
-## Verifying a change (Tier-0)
+  - **Sawtooth card (issue 1482 step 2)**, `a_sawtooth_card_stamps_the_source_phase_1482`: a
+    self-consistent model of cam2's live sawtooth. The card's clock runs +45 ppm, the source
+    -59 ppm, and the card catches up LATER by a step drawn from +1.0..+2.9 ms each time its offset
+    to the source reaches 0. The sawtooth stays bounded (0..2.9 ms) and the step contribution is
+    exactly the rate difference: +104 ppm, ~95 steps in 30 min, one per ~19 s. So the source rate
+    = the local rate minus the step contribution (45 - 104). The live figures (+45 local, +104 of
+    steps, +18 on cam3) cannot all hold at once under that identity; the bench takes the card's two
+    measured numbers and derives the source. 30 min through the REAL `DecimationGate`, seeds
+    `0x1482_5a7e` / `0x1482_0001` / `0x1482_0002`: 6 source edge crossings each (16-18 tooth
+    crossings). Step 1 only (the RED commit): 6 / 6 / 10 tracked crossings, the third = 2 blind
+    sheds + 8 repeats (a tooth crossing an edge back and forth); raw path 35-46 sheds + 41-52
+    repeats, 68-77 dup + 90-105 gap at the receiver. With step 2: 6 / 6 / 6, every one a
+    starvation repeat (the source is slower than the grid), 0 receiver dup/gap, 0 re-seeds, 0 SKIPs.
+    The same card over a SLOW source, +18 ppm as cam3/cam5 read live
+    (`a_sawtooth_card_over_a_slow_source_stamps_the_source_phase_1482`, ~+27 ppm of steps): the
+    source line lingers near each edge for minutes. Step 1 only: 2 / 6 / 8 tracked crossings for 2
+    source edges (blind sheds AND repeats: back and forth). With step 2: 2 / 2 / 2, each one blind
+    shed (the source is faster), 0 receiver dup/gap, 0 re-seeds.
+    The same slow source with 15 % of its catch-ups SPLIT in two 5-29 frames apart
+    (`a_sawtooth_card_with_split_steps_never_reseeds_1482`, design step 3): 3 re-seeds on step 2
+    (seed `0x1482_5a7e`), 0 / 0 / 0 with the staircase rule, 2 / 2 / 2 crossings, 0 dup/gap.
 
-- The pure modules + the bench compile standalone: a scratch crate whose `lib.rs` declares
-  `genlock_grid`, `genlock_pacing`, `genlock_stamp`, `dupe_decimation`, `capture_phase` and
-  `capture_phase_bench` as plain `mod` items with the source files SYMLINKED in (so the child
-  modules `capture_phase/tests.rs` and `dupe_decimation/stamp/tests.rs` resolve normally), plus
-  `genlock_wall_step` since issue 1372 (`genlock_stamp` uses its bracket and threshold). Add a
-  stub `ndi.rs` holding the real `floor_boundary_100ns` (awk it out of `src/ndi.rs`) and copy the
-  `lib.rs` const-assert. Then `rustc --edition 2021 --test -D warnings lib.rs` and run it, and
-  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 175 tests in
-  ~1 s. Put the steps in a script file: the worktree guard refuses variable-driven one-liners.
-- `tests/harness_send_stagger_1242.rs` reads main.rs text only: build it with plain `rustc
-  --test` and run it from the worktree root with `CARGO_MANIFEST_DIR` set (again from a script).
+## Verifying a change
+
+- **A bench must FAIL on the old code, and one seed may not show it** (issue 1482 step 2): the
+  live-shaped sawtooth (-59 ppm source) separated step 1 from step 2 on only 1 of 3 seeds (6/6/10
+  vs 6/6/6); a SLOW source (+18 ppm, the line lingers at an edge) separated it on 2 of 3 (2/6/8 vs
+  2/2/2). Sweep the rate and a few seeds against the OLD tree before picking the bench case (a
+  throwaway exploration test appended to the bench, removed before commit), and record the old
+  numbers in the test doc.
 - A module moved between files loses the intra-doc links its old glob import resolved. Adding a
   `use super::*` to keep them trips `unused_imports` (doc links do not count as uses; checked with
   rustc 1.97). Add link reference definitions instead (`/// [`X`]: crate::path::X`), as
   `dupe_decimation/shed_log.rs` does.
 - **A NEW test against the OLD code** (proving a test would have caught a bug after the fix already
-  landed): never check out another commit in the worktree. Copy the current `src/` pieces into a
-  scratch tree, overwrite only the files under test with `git -C <worktree> show <old-sha>:<path>`
-  (plus the old `lib.rs`, whose const-assert names the old constants), and point the replica
-  script at that tree. Round 3 proved the clock-step-inside-the-hysteresis test this way.
-- A debug replica (`rustc --test`, no `-O`) has overflow checks on, so an `i128` product that
+  landed): never check out another commit in the worktree; overwrite only the files under test in a
+  scratch copy with `git -C <worktree> show <old-sha>:<path>` (plus the old `lib.rs`, whose
+  const-assert names the old constants). Round 3 proved the clock-step-inside-the-hysteresis test this way.
+- A debug build (`cargo test`, no `--release`) has overflow checks on, so an `i128` product that
   would wrap silently in the release binary panics there: build the worst-case window in a test
   (`a_slow_stream_with_outlier_runs_never_overflows_the_fit`) instead of trusting a bound comment.
 - **A bench clock step applies at the instant the code READS the clock** (issue 1372 review round 1):
@@ -265,7 +358,6 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   just before a step and dequeued after it already reads the stepped wall. Keying the step on the
   capture time made the bench's "exactly as main.rs" read unfaithful and hid that early frame. Step
   every modelled read (the per-frame bracket and the poll) at its own instant.
-- `main.rs` compiles first on CI.
 
 ## Live acceptance (supervisor)
 
@@ -277,7 +369,10 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
    (success: sheds + repeats <= 2 per crossing). strih `genlock-fifo audit 'NDI cam5'`
    `stamp_gap=` + `stamp_dup=` <= 1 per crossing, 0 new relocks, `n2_early=` unchanged.
 3. Then the fleet. cam1/cam2 (over-rate ShadowCast) must read `phase_lock=band`: today's path.
-4. Then an E2E and the restart-matrix `cambox` kind, recording each window's position in the
+4. Issue 1482 step 2, cam2 (the re-timing card), 30 min: `reseeds=0`, `crossings=` and
+   `hidden_drops=` at cam3's level (one per real ~17-min source edge), `src_ppm` ~ cam3's
+   `phase_ppm` while cam2's `phase_ppm` keeps its card's ~+45.
+5. Then an E2E and the restart-matrix `cambox` kind, recording each window's position in the
    17 min cycle (finding 5881791402).
 
 ## Known limits
@@ -287,3 +382,25 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
 - The one-frame wrap every ~17 min is physics for a free-running camera; D2 makes it one clean
   event.
 - A seeding or re-seeding stream (2 s after a start or a re-open) runs today's path.
+- Issue 1482 step 2: the source fit needs 60 s after every start or real re-seed; until then a
+  re-timing card stamps from the short fit and may flip at an edge. The switch itself moves the
+  smoothed instant from the short fit's tooth onto the source line (up to about half a tooth), so
+  near an edge it can make one slot event, like a tooth return.
+- A LONE absorbed step (live once: -6.3 ms among cam2's catch-ups, or a constant delivery delay
+  absorbed and later reversed) is NOT reset away: the source line walks onto the new phase over the
+  180 s window, its least-squares end value overshooting by up to a third of the step. Pinned by
+  `a_lone_absorbed_step_walks_the_source_onto_the_new_phase_in_one_crossing_1482`: a -6.3 ms step
+  that moves the camera one slot = exactly one crossing, the estimate at most the step after the
+  capture (6.3 ms, inside the ~11 ms capture-to-send margin) and 2.1 ms before it. A guard (reset
+  the source fit on a step beyond the sawtooth band) was not added: the design keeps every absorbed
+  step in the fit. A card whose source rate
+  itself changes within 180 s (not seen live) would be followed with the window's lag.
+- Issue 1482's constant-offset test has a floor of 0.5 ms around the run's median, so a run whose
+  residuals span 1 ms or less is absorbed as ONE step even when it is a slow ramp (the next run of
+  the ramp is absorbed again, step-wise); only a wider ramp re-seeds. Pinned by
+  `the_constant_offset_tolerance_edges_1482`.
+- A delivery delay that stays CONSTANT for 30 frames or more is now absorbed as a step, and the
+  return to the true phase as a second step of the opposite sign. Each direction costs ~0.5 s of
+  stamps on the stale phase and, near an edge, one dup or one gap that `crossings=` counts like
+  camera drift. Read a `phase_steps=` pair of opposite sign close together as a delivery delay,
+  not as card behaviour (a re-timing card steps one way, the other only rarely).

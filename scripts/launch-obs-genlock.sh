@@ -591,6 +591,9 @@ main() {
       echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is strih-snv, a Linux box launched by its strih-obs.service user unit, never this Windows planner" >&2
       usage >&2; exit 2 ;;
   esac
+  # issue 1474: the ONE class gate -- a linux-genlock box (strih-snv; stream-snv since issue 1462) is
+  # restarted by its strih-obs.service user unit, never by a Windows program.
+  obs_fleet_refuse_linux_target "$box" launch-obs-genlock.sh || exit 2
   if ! mcp="$(fleet_box_mcp "$box")" || ! box_ip="$(fleet_box_ip "$box")"; then
     echo "ERROR: --box must be a Windows genlock box: 'stream' or 'resolume' (got '${box}')" >&2; usage >&2; exit 2
   fi

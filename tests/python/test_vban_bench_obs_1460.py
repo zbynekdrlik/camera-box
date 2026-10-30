@@ -46,6 +46,8 @@ class FakeObs:
         self.active = set()
         self.calls = []
         self.fail = {}
+        self.removing = {}
+        self.remove_lag = 0
         self.__dict__.update(over)
 
     def rpc(self, rtype, rdata=None, ignore_err=False):
@@ -58,7 +60,12 @@ class FakeObs:
         if rtype == "GetInputKindList":
             return {"inputKinds": self.kinds}
         if rtype == "GetInputList":
-            return {"inputs": [{"inputName": n, "inputKind": i["kind"]} for n, i in self.inputs.items()]}
+            listed = [{"inputName": n, "inputKind": i["kind"]} for n, i in self.inputs.items()]
+            # A removed input OBS still lists while its release runs (live strih-snv 28.10.2026).
+            if self.removing and self.remove_lag > 0:
+                self.remove_lag -= 1
+                listed += [{"inputName": n, "inputKind": k} for n, k in self.removing.items()]
+            return {"inputs": listed}
         if rtype == "GetInputSettings":
             return {"inputSettings": self.inputs[d["inputName"]]["settings"]} if d["inputName"] in self.inputs else {}
         if rtype == "GetInputAudioTracks":
@@ -97,7 +104,9 @@ class FakeObs:
                 self.active.add(d["inputName"])
             return {}
         if rtype == "RemoveInput":
-            self.inputs.pop(d["inputName"], None)
+            gone = self.inputs.pop(d["inputName"], None)
+            if gone is not None:
+                self.removing[d["inputName"]] = gone["kind"]
             self.active.discard(d["inputName"])
             return {}
         if rtype == "SetInputAudioMonitorType":
@@ -399,6 +408,27 @@ def test_teardown_removes_the_input_and_restores_rectracks(tmp_path):
     assert vo.teardown(obs.rpc, st)["ok"]               # idempotent
 
 
+def test_teardown_waits_for_obs_to_release_a_removed_input(tmp_path):
+    # Live 28.10.2026: the bench aborted with "still there after RemoveInput" on a healthy OBS; the
+    # input was gone a moment later. The read-back is a bounded settle poll, never one read.
+    obs = FakeObs()
+    st = _setup(obs, tmp_path)
+    obs.remove_lag = 3
+    slept = []
+    res = vo.teardown(obs.rpc, st, sleep=slept.append)
+    assert res["ok"], res
+    assert any("removed the input" in a for a in res["actions"]), res
+    assert slept and sum(slept) <= 10, slept
+
+
+def test_teardown_still_names_an_input_that_never_goes_away(tmp_path):
+    obs = FakeObs()
+    st = _setup(obs, tmp_path)
+    obs.remove_lag = 10 ** 6
+    res = vo.teardown(obs.rpc, st, sleep=lambda s: None)
+    assert not res["ok"] and any("still there after RemoveInput" in x for x in res["left"]), res
+
+
 def test_teardown_leaves_a_foreign_input_and_a_foreign_rectracks_alone(tmp_path):
     obs = FakeObs()
     st = _setup(obs, tmp_path)
@@ -520,6 +550,20 @@ def test_a_late_slot_on_an_earlier_status_row_fails():
     good = "13:01:20.000: vban-source '%s': received=2000 lost=0 late=0 reanchors=0" % NAME
     g = vl.grade(vl.rows([ASRC_OK, bad, good], NAME), expected_lost=0)
     assert any("late=1" in x for x in g["reasons"])
+
+
+def test_the_end_of_stream_fill_is_not_a_lost_packet():
+    # Live 28.10.2026: when the emulator stops, the receiver fills the slots up to its stretch end
+    # (`missing 181 packet(s) before the stretch ended`). That is the sender stopping, never a loss
+    # inside the run: the bench read it as "logged 181 missing packet(s), the emulator dropped 0".
+    lines = [ASRC_OK, "13:03:00.000: source '%s': missing 1 packet(s) before frame 22503 -- concealed: "
+             "the previous packet repeated, crossfaded" % NAME,
+             "13:12:00.000: source '%s': missing 181 packet(s) before the stretch ended -- silence for "
+             "those slots" % NAME]
+    r = vl.rows(lines, NAME)
+    assert r["missing_packets_total"] == 1 and r["missing_packets_events"] == 1, r
+    g = vl.grade(r, expected_lost=1)
+    assert not any("missing packet(s)" in x for x in g["reasons"]), g["reasons"]
 
 
 def test_the_log_cli(tmp_path):

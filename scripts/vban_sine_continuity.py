@@ -25,9 +25,16 @@ THE MEASUREMENT (`analyze`, pure, numpy):
      wobble (+-0.2 samples, measured) averages out, a real step does not. A local maximum over
      `min_jump` samples is an event: a STEP when it is concentrated on one or two block boundaries,
      a SLEW (a resampler's correction spread over many blocks, reported, not a fault) otherwise.
-  4. Bridges: across every gap between two runs (a silence slot, a damaged block) the phase is
-     projected from both sides with the local slope; a mismatch over `min_jump` is a step. So a loss
-     handled right reads 0 across its silence, a loss whose slot was DROPPED or padded reads its size.
+  4. Bridges: across every gap between two runs (a silence slot, a damaged block, an excluded
+     window) the phase is projected from both sides with the local slope; a mismatch over
+     `min_jump` is a step. Each bridge reads the two runs' OWN phases (never the chained one), so
+     a move is reported once, at its own gap. So a loss handled right reads 0 across its silence, a loss whose slot was
+     DROPPED or padded reads its size. A CONCEALED loss (the issue-1439 receiver repeats the previous
+     packet for a run of <= CONCEAL_MAX_SLOTS lost slots) has no silence, and the step detector
+     cannot judge it (a repeat with the timeline intact reads +2..+6 samples inside it), so
+     `analyze_scheduled` maps those losses onto the recording (r0 = the pilot onset - the frames the
+     receiver held) and analyzes again with their windows EXCLUDED: the bridge across each window
+     measures the timeline there (`conceal_windows` names the loss).
   5. Rate: one least-squares line through the continuous phase (every step and bridge removed)
      after `settle_s` -> the measured offset in ppm and its standard error.
   6. Cleanliness: the per-block fit residual relative to the pilot; another source mixed into the
@@ -39,14 +46,17 @@ slot's length tells the size of a loss.
 
 THE VERDICT (`grade`, pure) against the emulator's schedule (scripts/vban_emulator_plan.py
 `schedule_document`): FAIL on any step outside a scheduled loss; on a scheduled loss without a
-silence slot of its length (+-LEN_TOL samples) at its place, or with a phase step across it; on a
+silence slot of its length (+-LEN_TOL samples) at its place, or with a phase step across it -- a loss
+of <= CONCEAL_MAX_SLOTS packets with no silence slot is CONCEALED when the bridge across its window
+held (under `min_jump`), else "timeline moved"; on a
 silence slot no loss explains; on a measured rate off the injected ppm by more than `ppm_bound`; on
 a pilot missing for part of the run (coverage); on a dirty track; on a lead that was not silent before
 the emulator started. Slews are reported. PASS otherwise.
 
 Usage:
   vban_sine_continuity.py FILE [--schedule S.json] [--stream K] [--channel C] [--pilot-hz F]
-                          [--ppm-bound P] [--expect-ppm X] [--lead-s S] [--settle-s S] [--json]
+                          [--ppm-bound P] [--expect-ppm X] [--lead-s S] [--settle-s S]
+                          [--hold-frames N] [--json]
 FILE is any audio/video file ffmpeg reads (the bench pulls an MKA of the test track); --stream picks
 the K-th audio stream, --channel the channel inside it. Exit: 0 PASS, 1 FAIL, 2 the file cannot be
 read or holds no pilot to analyse, 3 usage error.
@@ -82,12 +92,26 @@ MIN_RATE_BLOCKS = 100
 # grading defaults
 PPM_BOUND = 5.0
 LEN_TOL = 64
-ALIGN_SEARCH = 9600
+# The receiver holds its first second (it plays from ~frame 187, issue 1439 ROZHODNUTÉ 6345255813),
+# so the pilot onset sits up to ~1 s of sender time after the schedule's start: search 1.25 s.
+ALIGN_SEARCH = 60000
+RECEIVER_HOLD_S = 1.0   # the same first-second hold: never played, never a short pilot
 ALIGN_TOL = 960
 MIN_COVERAGE = 0.9
 DIRTY_DB = -30.0
 LEAD_SILENT_DB = -60.0
 FRAMES_PER_PACKET = 256
+# The issue-1439 receiver CONCEALS a run of at most this many lost slots between two received
+# packets (the previous packet repeated, crossfaded) instead of playing silence. Pinned to
+# `#define VBAN_RECV_CONCEAL_MAX_SLOTS` in vendor/obs-vban/src/vban-receive-timeline.h by a test.
+CONCEAL_MAX_SLOTS = 3
+# The receiver's first-second hold in sender frames (its `receive emitting: ... frame=N` line);
+# the bench measured 187 on every run, the default when the line is absent.
+DEFAULT_HOLD_FRAMES = 187
+# Each concealable loss's window is widened by this much on both sides: its mapping onto the
+# recording (the pilot onset at 16-sample resolution, the codec's smear of the crossfades) is not
+# sample-exact.
+CONCEAL_PAD = 2 * BLOCK
 
 
 class AnalysisError(ValueError):
@@ -188,9 +212,11 @@ def _run_events(psi, d_slope, starts, omega, min_jump_rad, window):
 
 
 def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, silence_db=SILENCE_DB,
-            settle_s=SETTLE_S, lead_s=0.0):
+            settle_s=SETTLE_S, lead_s=0.0, exclude=()):
     """The measurement dict of one recorded pilot track (module doc). Raises AnalysisError when
-    there is no pilot to analyse."""
+    there is no pilot to analyse. exclude: (lo, hi[, tag]) recording-sample windows whose blocks are
+    not used (a concealed loss), so the bridge across each measures the timeline there; a bridge
+    lists the tags (default: the window's index) of the windows it spans in `conceal_windows`."""
     if fs != FS:
         raise AnalysisError("only %d Hz is supported" % FS)
     x = np.asarray(x, dtype=np.float64)
@@ -219,6 +245,9 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
     usable &= (starts >= active_start + EDGE_SAMPLES) & (starts + block <= active_end - EDGE_SAMPLES)
     for s, n in slots:
         usable &= ~((starts + block > s - GUARD_SAMPLES) & (starts < s + n + GUARD_SAMPLES))
+    windows = [(int(w[0]), int(w[1]), w[2] if len(w) > 2 else k) for k, w in enumerate(exclude)]
+    for lo, hi, _tag in windows:
+        usable &= ~((starts + block > lo) & (starts < hi))
     good = np.flatnonzero(usable)
     if good.size < 2:
         raise AnalysisError("no usable pilot blocks (pilot frequency %.3f Hz?)" % pilot_hz)
@@ -239,27 +268,39 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
         for ev in evs:
             corr[starts[idx] >= ev["sample"]] -= ev["size_samples"] * omega
         slope = float(np.median(d_slope)) if d_slope.size else 0.0
+        # the run's own phase with its events removed, referred to its LAST level (each event added
+        # back), so an event near either edge never leaks into the bridge's averaging window
+        own_end = corr + sum(ev["size_samples"] for ev in evs) * omega
         if prev is not None:
-            p_idx, p_corr, p_slope = prev
+            p_idx, p_corr, p_slope, p_end = prev
             gap_blocks_mid = (idx[0] + p_idx[-1]) / 2.0
             s_mid = (p_slope + slope) / 2.0 if p_idx.size > 1 and idx.size > 1 else (slope if idx.size > 1 else p_slope)
             w = min(STEP_WINDOW, p_idx.size)
-            left = np.mean(p_corr[-w:] + s_mid * (gap_blocks_mid - p_idx[-w:]))
             w2 = min(STEP_WINDOW, idx.size)
-            right = np.mean(corr[:w2] - s_mid * (idx[:w2] - gap_blocks_mid))
-            dev = float(_wrap(right - left))
+
+            def across(before, after):
+                # the phase after the gap minus the phase before it, both projected to the gap's middle
+                left = np.mean(before[-w:] + s_mid * (gap_blocks_mid - p_idx[-w:]))
+                return np.mean(after[:w2] - s_mid * (idx[:w2] - gap_blocks_mid)) - left
+
+            # issue 1460: the bridge reads the two runs' OWN phases. The chained phase already carries
+            # every earlier step (a bridge, an in-run event), so measured on it each earlier move came
+            # back at every later gap (live p4: the 81 s placement read -13.5 at all four losses).
+            # The previous run is read at its last level, this one at its first level.
+            dev = float(_wrap(across(p_end, corr)))
             gap_lo, gap_hi = int(starts[p_idx[-1]] + block), int(starts[idx[0]])
             inside = [s for s, n in slots if s >= gap_lo - GUARD_SAMPLES and s < gap_hi + GUARD_SAMPLES]
+            concealed = [tag for lo, hi, tag in windows if lo < gap_hi and hi > gap_lo]
             bridges.append({"from_sample": gap_lo, "to_sample": gap_hi, "size_samples": dev / omega,
-                            "silence_slots": inside})
+                            "silence_slots": inside, "conceal_windows": concealed})
             if abs(dev) >= min_jump_rad:
                 events.append({"sample": gap_hi, "size_samples": dev / omega, "kind": "step",
-                               "where": "bridge", "silence_slots": inside})
+                               "where": "bridge", "silence_slots": inside, "conceal_windows": concealed})
             # chain the run onto the previous one with the mismatch (and any 2 pi of the separate
             # unwrap) removed, so the rate line sees one continuous phase
-            corr = corr - (right - left)
+            corr = corr - across(p_corr, corr)
         pieces.append((starts[idx], corr))
-        prev = (idx, corr, slope)
+        prev = (idx, corr, slope, own_end)
     # the rate line over the continuous phase after the settle
     all_s = np.concatenate([p[0] for p in pieces]).astype(np.float64)
     all_psi = np.concatenate([p[1] for p in pieces])
@@ -289,12 +330,14 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
         "active_start_s": active_start / fs, "active_s": (active_end - active_start) / fs,
         "pilot_dbfs": 20.0 * math.log10(ref * math.sqrt(2.0)),
         "blocks": int(starts.size), "usable_blocks": int(good.size),
+        # excluded windows count as unused: a few concealed losses cost < 0.1 % of a profile
         "coverage": float(good.size * block / max(1, active_end - active_start)),
         "silence_slots": [{"sample": s, "length": n, "time_s": s / fs} for s, n in slots],
         "events": events,
         "steps": [ev for ev in events if ev["kind"] == "step"],
         "slews": [ev for ev in events if ev["kind"] == "slew"],
         "bridges": bridges,
+        "excluded": [{"from_sample": lo, "to_sample": hi, "tag": tag} for lo, hi, tag in windows],
         "rate_ppm": rate_ppm, "rate_stderr_ppm": rate_se,
         "rate_blocks": int(np.count_nonzero(keep)),
         "residual_db_p99": float(20.0 * np.log10(max(np.percentile(resid_rel, 99), 1e-12))),
@@ -302,11 +345,19 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
     }
 
 
-def _match_losses(analysis, schedule, ratio, align_search, align_tol):
-    """Pair each scheduled loss with a silence slot -> ({loss_i: slot_i}, the fitted r0)."""
+def _r0_start(analysis, schedule, ratio, hold_frames):
+    """The recording sample of sender sample 0: the pilot onset minus the frames the receiver held
+    (never played). hold_frames None = the onset itself (the slot fit then has to find the hold)."""
+    fpp = schedule.get("frames_per_packet", FRAMES_PER_PACKET)
+    return float(analysis["active_start"]) - (hold_frames or 0) * fpp / ratio
+
+
+def _match_losses(analysis, schedule, ratio, align_search, align_tol, r0=None):
+    """Pair each scheduled loss with a silence slot -> ({loss_i: slot_i}, the fitted r0). r0 is
+    where the fit starts (default: the pilot onset)."""
     slots = analysis["silence_slots"]
     losses = schedule.get("losses") or []
-    r0 = float(analysis["active_start"])
+    r0 = float(analysis["active_start"]) if r0 is None else float(r0)
     offsets = []
     for lo in losses:
         exp = r0 + lo["sample"] / ratio
@@ -327,16 +378,55 @@ def _match_losses(analysis, schedule, ratio, align_search, align_tol):
     return pairs, r0
 
 
+def conceal_windows(analysis, schedule, hold_frames=DEFAULT_HOLD_FRAMES, pad=CONCEAL_PAD,
+                    align_search=ALIGN_SEARCH, align_tol=ALIGN_TOL, expect_ppm=None):
+    """The recording-sample windows of every scheduled loss the receiver may conceal (count <=
+    CONCEAL_MAX_SLOTS), as (lo, hi, loss index) for `analyze(exclude=...)`. The losses are mapped
+    with r0 = the pilot onset - the receiver's held frames, refined by the silence slots the
+    analysis found (the same fit `grade` uses)."""
+    schedule = schedule or {}
+    ratio = _ratio(analysis, schedule, expect_ppm)
+    fpp = schedule.get("frames_per_packet", FRAMES_PER_PACKET)
+    _pairs, r0 = _match_losses(analysis, schedule, ratio, align_search, align_tol,
+                               _r0_start(analysis, schedule, ratio, hold_frames))
+    out = []
+    for i, lo in enumerate(schedule.get("losses") or []):
+        if lo["count"] > CONCEAL_MAX_SLOTS:
+            continue
+        a = r0 + lo["sample"] / ratio
+        out.append((int(math.floor(a - pad)), int(math.ceil(a + lo["count"] * fpp / ratio + pad)), i))
+    return out
+
+
+def analyze_scheduled(x, schedule=None, hold_frames=DEFAULT_HOLD_FRAMES, expect_ppm=None, **kw):
+    """Two passes: analyze, map the concealable losses onto the recording, analyze again with
+    those windows excluded so each is measured by the bridge across it. No such loss = one pass.
+    The result carries `hold_frames`, which `grade` reads."""
+    analysis = analyze(x, **kw)
+    windows = conceal_windows(analysis, schedule, hold_frames, expect_ppm=expect_ppm) if schedule else []
+    if windows:
+        analysis = analyze(x, exclude=windows, **kw)
+    analysis["hold_frames"] = hold_frames
+    return analysis
+
+
+def _ratio(analysis, schedule, expect_ppm=None):
+    """1 + the rate offset the losses are mapped with: the measured one, else the injected one."""
+    inj = schedule.get("ppm", expect_ppm)
+    meas = analysis["rate_ppm"]
+    return 1.0 + (meas if meas is not None else (inj or 0.0)) * 1e-6
+
+
 def grade(analysis, schedule=None, ppm_bound=PPM_BOUND, expect_ppm=None, len_tol=LEN_TOL,
           align_search=ALIGN_SEARCH, align_tol=ALIGN_TOL, min_coverage=MIN_COVERAGE,
-          dirty_db=DIRTY_DB, lead_silent_db=LEAD_SILENT_DB):
+          dirty_db=DIRTY_DB, lead_silent_db=LEAD_SILENT_DB, hold_frames=None):
     """The PASS/FAIL verdict of one analysis (module doc). Returns {verdict, reasons, notes,
     losses: [...], ...}."""
     schedule = schedule or {}
     reasons, notes = [], []
     inj = schedule.get("ppm", expect_ppm)
     meas = analysis["rate_ppm"]
-    ratio = 1.0 + (meas if meas is not None else (inj or 0.0)) * 1e-6
+    ratio = _ratio(analysis, schedule, expect_ppm)
     fpp = schedule.get("frames_per_packet", FRAMES_PER_PACKET)
     if analysis["coverage"] < min_coverage:
         reasons.append("the pilot is usable in only %.1f %% of the active span (< %.0f %%)"
@@ -344,7 +434,7 @@ def grade(analysis, schedule=None, ppm_bound=PPM_BOUND, expect_ppm=None, len_tol
     dur = schedule.get("duration_s")
     if dur:
         want = dur / ratio
-        if analysis["active_s"] < want - 1.0:
+        if analysis["active_s"] < want - 1.0 - RECEIVER_HOLD_S:
             reasons.append("the pilot plays %.1f s of the %.1f s the emulator sent" % (analysis["active_s"], want))
     if analysis["residual_db_p99"] > dirty_db:
         reasons.append("the track is not clean: fit residual p99 %.1f dB relative to the pilot (> %.0f dB) "
@@ -353,14 +443,28 @@ def grade(analysis, schedule=None, ppm_bound=PPM_BOUND, expect_ppm=None, len_tol
     if lead is not None and lead > lead_silent_db:
         reasons.append("the track carried %.1f dBFS before the emulator started (> %.0f dBFS) -- another "
                        "source feeds the test track" % (lead, lead_silent_db))
-    pairs, r0 = _match_losses(analysis, schedule, ratio, align_search, align_tol)
+    if hold_frames is None:
+        hold_frames = analysis.get("hold_frames")
+    pairs, r0 = _match_losses(analysis, schedule, ratio, align_search, align_tol,
+                              _r0_start(analysis, schedule, ratio, hold_frames))
     slots = analysis["silence_slots"]
     loss_rows = []
     for i, lo in enumerate(schedule.get("losses") or []):
         row = {"packet": lo["packet"], "count": lo["count"], "time_s": lo.get("time_s")}
         want_len = lo["count"] * fpp / ratio
         j = pairs.get(i)
-        if j is None:
+        across = [b for b in analysis["bridges"] if i in (b.get("conceal_windows") or ())]
+        if j is None and lo["count"] <= CONCEAL_MAX_SLOTS and across:
+            # concealed (the previous packet repeated): no silence, and the timeline must hold
+            moved = [b for b in across if abs(b["size_samples"]) >= analysis["min_jump_samples"]]
+            row["bridge_samples"] = (moved or across)[0]["size_samples"]
+            if moved:
+                row["result"] = "timeline moved"
+                reasons.append("across the concealed loss of %d packet(s) at %.3f s the timeline moved by "
+                               "%+.2f samples" % (lo["count"], lo.get("time_s") or 0.0, moved[0]["size_samples"]))
+            else:
+                row["result"] = "concealed"
+        elif j is None:
             row["result"] = "no silence slot"
             reasons.append("the loss of %d packet(s) at %.3f s has no silence slot at its place (a dropped "
                            "or padded slot)" % (lo["count"], lo.get("time_s") or 0.0))
@@ -386,7 +490,7 @@ def grade(analysis, schedule=None, ppm_bound=PPM_BOUND, expect_ppm=None, len_tol
         if s["sample"] not in matched_slots:
             reasons.append("unscheduled silence at %.3f s (%d samples)" % (s["time_s"], s["length"]))
     for ev in analysis["steps"]:
-        if set(ev.get("silence_slots") or ()) & matched_slots:
+        if set(ev.get("silence_slots") or ()) & matched_slots or ev.get("conceal_windows"):
             continue   # already a "timeline moved" reason of its loss
         reasons.append("phase step of %+.2f samples at %.3f s" % (ev["size_samples"], ev["time_s"]))
     for ev in analysis["slews"]:
@@ -412,6 +516,9 @@ def _args(argv):
     ap.add_argument("--min-jump", type=float, default=MIN_JUMP_SAMPLES)
     ap.add_argument("--lead-s", type=float, default=0.0)
     ap.add_argument("--settle-s", type=float, default=SETTLE_S)
+    ap.add_argument("--hold-frames", type=int, default=DEFAULT_HOLD_FRAMES,
+                    help="the frames the receiver held before it played (its `receive emitting: ... "
+                         "frame=N` line), default %d" % DEFAULT_HOLD_FRAMES)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--ffmpeg", default="ffmpeg")
     return ap.parse_args(argv)
@@ -425,26 +532,32 @@ def main(argv=None):
             with open(a.schedule) as fh:
                 schedule = json.load(fh)
         pilot = a.pilot_hz or (schedule or {}).get("pilot_hz") or 997.0
-        if a.stream < 0 or a.channel < 0 or a.min_jump <= 0:
-            raise ValueError("--stream / --channel must be >= 0 and --min-jump > 0")
+        if a.stream < 0 or a.channel < 0 or a.min_jump <= 0 or a.hold_frames < 0:
+            raise ValueError("--stream / --channel / --hold-frames must be >= 0 and --min-jump > 0")
     except (OSError, ValueError) as e:
         print("vban-sine-continuity: %s" % e, file=sys.stderr)
         return 3
     try:
         x = read_channel(a.file, a.stream, a.channel, a.ffmpeg)
-        analysis = analyze(x, pilot_hz=pilot, min_jump=a.min_jump, settle_s=a.settle_s, lead_s=a.lead_s)
+        analysis = analyze_scheduled(x, schedule, a.hold_frames, a.expect_ppm, pilot_hz=pilot,
+                                     min_jump=a.min_jump, settle_s=a.settle_s, lead_s=a.lead_s)
     except AnalysisError as e:
         doc = {"verdict": "ERROR", "reasons": [str(e)]}
         print(json.dumps(doc) if a.json else "verdict=ERROR %s" % e)
         return 2
     verdict = grade(analysis, schedule, a.ppm_bound, a.expect_ppm)
     if a.json:
-        print(json.dumps({"verdict": verdict["verdict"], "grade": verdict, "analysis": analysis}, sort_keys=True))
+        print(json.dumps({"verdict": verdict["verdict"], "grade": verdict, "analysis": analysis,
+                          "hold_frames": a.hold_frames}, sort_keys=True))
     else:
         print("verdict=%s rate_ppm=%s steps=%d slews=%d silence_slots=%d coverage=%.3f residual_p99_db=%.1f"
               % (verdict["verdict"], "n/a" if analysis["rate_ppm"] is None else "%+.3f" % analysis["rate_ppm"],
                  len(analysis["steps"]), len(analysis["slews"]), len(analysis["silence_slots"]),
                  analysis["coverage"], analysis["residual_db_p99"]))
+        for row in verdict["losses"]:
+            if row["result"] == "concealed":
+                print("  note: the loss of %d packet(s) at %.3f s was concealed, the timeline held (%+.2f samples)"
+                      % (row["count"], row.get("time_s") or 0.0, row["bridge_samples"]))
         for r in verdict["reasons"]:
             print("  FAIL: " + r)
         for n in verdict["notes"]:

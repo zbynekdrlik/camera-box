@@ -1,6 +1,7 @@
 #include "OBSBasicStatusBar.hpp"
 #include "ui_StatusBarWidget.h"
 #include "GenlockLockState.hpp"
+#include "GenlockJxsWidget.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
@@ -620,6 +621,11 @@ OBSBasicStatusBar::OBSBasicStatusBar(QWidget *parent)
 	genlockTimer = new QTimer(this);
 	connect(genlockTimer, &QTimer::timeout, this, &OBSBasicStatusBar::UpdateGenlockLabel);
 	genlockTimer->start(1000);
+
+	/* camera-box issue 1387: the JPEG XS indicator right of the LOCK label -- OFF (grey) on a box
+	 * with no JPEG XS source or running output, and on every build without them (Windows). */
+	jxsWidget = new GenlockJxsWidget(this);
+	addPermanentWidget(jxsWidget, 0);
 }
 
 void OBSBasicStatusBar::Activate()

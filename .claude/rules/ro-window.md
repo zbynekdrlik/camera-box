@@ -103,11 +103,13 @@ Three dev1-side pure parsers:
 | dantesync upgrade (`dantesync_linux_upgrade_cmd`) | backup, `systemctl stop dantesync`, install | `systemctl restart dantesync` |
 | dantesync rollback | stop, `.bak` restore, the master's date-state delete | restart |
 | `bkshading-relay-mode.sh` stop / start | `disable` / `enable` | (start only) `systemctl start` |
-| `bkshading-deploy-relay.sh` (`remount_ro_checked`) | relay stop, scp + rename | the relay restore (`start` if it ran) |
+| `bkshading-deploy-relay.sh` (`remount_ro_checked`; also run per box by `deploy-fleet.sh`'s relay phase, issue 1452) | relay stop, scp + rename | the relay restore (`start` if it ran) |
 | `cam2-painter-ro-persist.sh` (issue 1405) | `enable` / `disable` | (enable-now) `systemctl start` |
 | `ndi-discovery.sh --cambox-apply` | the config/drop-in removal | `systemctl daemon-reload` |
 | `rt-kernel-plan.sh` printed runbook (print-only) | the step's apt / grub work, its rc kept | (nothing started) the work's own FAIL / OK line |
 | `cambox-ro-units.sh` apply (`scripts/cambox-ro-units-apply.sh`, issue 1394) | (the apt units stopped just before it) the logrotate drop-in + netconsole unit (temp file + rename), with the box's log sink also the netconsole setup script (0755), journal-upload.conf + the upload drop-in (the venue-strih re-point), `systemctl mask --no-reload` of the apt units | daemon-reload, reset-failed, `start logrotate`, `restart cambox-netconsole`, `restart systemd-journal-upload` when its files changed, the `is-system-running` read-back |
+| `cambox-egress-pacing.sh` apply (`cambox_egress_pacing_apply_program`, issue 1387) | the boot script (0755) and the unit (0644), each a temp file + rename, `systemctl enable` when not enabled | daemon-reload, `systemctl restart cambox-egress-pacing` (applies the tree), the `tc qdisc` + `tc filter` read-back graded by the lib's verdict |
+| `rig-test-feed.sh` direct-feed drop-ins (`_rig_test_feed_persist_cmds`, issue 1482; rig-mode TEST writes, the optical feed and EVENT remove) | mkdir, a `.new` temp file + `mv -f` rename, `rm` / `rmdir` of the `/etc/systemd/system` drop-ins; NO window when every drop-in already reads its wanted state | `systemctl daemon-reload` (the painter / EVENT builders), the caller's camera-box restart |
 | `cambox-zram.sh` apply (`cambox_zram_apply_program`, issue 1428) | the `systemd-zram-generator` apt install (dpkg file writes only: the package has no maintainer scripts; the .deb lands in the /var/cache tmpfs), the drop-in (temp file + rename) | daemon-reload, `modprobe zram`, `systemctl start dev-zram0.swap`, the swapon read-back |
 
 - **cambox-ro-units apply (issue 1394):** a cambox-only site, so a root found writable is also
@@ -327,7 +329,7 @@ stdin-reading work still closes; an unfilled placeholder refuses before any moun
 loud naming the writer; a pasted step never ends the session; the driver prints each step below its
 token.
 
-## Tests (Tier-0, no cargo, no rig)
+## Tests (no rig)
 
 - `tests/python/ro_window_fakes_1407.py`: a stub-only PATH box whose `mount`, `findmnt`, `systemctl`,
   `fuser`, `lsof`, `sync`, `systemd-run` share ONE root state and log `<tool> <args> root=<mode>`.

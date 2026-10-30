@@ -45,6 +45,7 @@ RECEIVE_KEYS = ("received", "lost", "late", "reanchors", "re_anchors")
 _KV_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*)=(-?\d+(?:\.\d+)?)")
 _BASIS_RE = re.compile(r"\bbasis=([A-Za-z_]+)")
 _MISSING_RE = re.compile(r"missing (\d+) packet\(s\)")
+STREAM_END_MARK = "before the stretch ended"
 
 
 def _kv(text):
@@ -76,7 +77,9 @@ def rows(lines, input_name):
         if quoted in line:
             receive.append(line)
             m = _MISSING_RE.search(line)
-            if m:
+            # The slots filled after the sender STOPPED (the receiver's 1 s starve up to its stretch
+            # end, live 28.10.2026) are the end of the stream, never a loss inside the run.
+            if m and STREAM_END_MARK not in line:
                 missing.append(int(m.group(1)))
     status = []
     for r in receive:

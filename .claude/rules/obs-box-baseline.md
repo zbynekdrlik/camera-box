@@ -112,7 +112,12 @@ Rules for the facet:
   (`obs_box_brightness_helper_text`, `obs_box_backlight_udev_rule`, sha256 checked 25.9.2026).
   Change them only together with the box.
 - **rc.xml is MERGED, never replaced.** `obs_box_openbox_rc_with_brightness_keys` is a pure stdin
-  filter and the kiosk's only rc.xml writer.
+  filter, the ONE rc.xml merge. Since issue 1465 it is
+  `obs_box_openbox_rc_with_keys obs_box_brightness_keybinds_xml`: the same filter takes the keybind list as
+  an argument. It has two idempotent callers, each merging only its own missing lines through
+  `obs_box_write_if_changed`: the kiosk's brightness facet, and setup-strih step 12 on the stream role (the
+  headphone volume keys, `obs_box_panel_headphones_keybinds_xml`, which also refuses a symlinked rc.xml).
+  Never a third way to write rc.xml.
   - It inserts only the missing lines of `obs_box_brightness_keybinds_xml` (the comment only when a
     keybind is missing) right before the first `</keyboard>` line.
   - An rc.xml that already has both keybinds comes back unchanged. Without `</keyboard>` it returns 1
@@ -349,7 +354,7 @@ render tick, the audio thread and the NDI receive threads. The governor/EPP pins
     `tests/obs_box_cpu_latency_1357.rs` rewrites the path to a fixture tree and swaps the sleep
     for a counter write, so it never races the gather's timing.
 
-## Tests + the Tier-0 equivalence net
+## Tests + the equivalence net
 
 The imag content guards (`setup_imag_guards.rs`, `setup_imag_maxperf_791.rs`, ...) read
 setup-imag.sh PLUS the baseline libs; box-literal anchors are the `${BOX}` forms plus an anchor that

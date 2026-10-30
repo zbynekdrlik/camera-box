@@ -159,7 +159,9 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     # no time bucket). They are DELIBERATELY absent from this allowlist so a re-added bucket in either
     # FAILS test_only_allowlisted_watchdogs_time_bucket_their_key.
     "ndi-portmap-alert-watchdog.sh",       # #1181 -- NDI sender port-map moved
-    "avsync-heartbeat-alert-watchdog.sh",  # #812  -- A/V-sync heartbeat stale
+    # issue 1441 (owner 28.10.2026, "len podstatne hlasky"): avsync-heartbeat-alert-watchdog.sh
+    # (#812) left this class -- a dead A/V measurement pages only during a production, ONCE per
+    # incident (a stable key), so a re-added bucket there FAILS the sweep below.
     "imag-obs-alert-watchdog.sh",          # #882  -- imag OBS down / latency-drift / restart-storm
     "measurement-audio-alert-watchdog.sh", # #1310 -- mbc measurement-audio chain reads digital silence
     "render-freeze-alert-watchdog.sh",     # #1320 -- PROGRAM render freeze / receiver relock storm
@@ -178,11 +180,6 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     # notifies (the liveness arm avsync-lineup-liveness + the preflight-nogo arm) stay STABLE keys --
     # allowlisting the FILE permits the bucketed offset line without requiring every line to bucket.
     "avsync-lineup-alert-watchdog.sh",    # #1331 -- offset ALARM arm (on-air A/V rozladenie)
-    # issue 1372 part C -- a VBAN stream arriving at strih-snv off its nominal rate or losing packets
-    # is ON-AIR audio (the FOH/program feed slips or clicks) and is invisible without a page; its rate
-    # is measured by the frame COUNTER (the quality-gated input the re-ping doctrine requires: a
-    # stream too short to grade reads SHORT, never a page). Ships DISABLED, report-only.
-    "vban-rate-alert-watchdog.sh",        # issue 1372 -- inter-PC VBAN rate / loss
     # issue 1381 -- an OBS audio mixer off real time (BEHIND / OVERLOADED) or an obs-vban sender
     # losing audio (VBAN_LOSS) is audible on air (27.9: FOH dropouts for over an hour, noticed by
     # ear 55 min late). Its inputs are quality-gated: the mixer arm grades one complete dump window

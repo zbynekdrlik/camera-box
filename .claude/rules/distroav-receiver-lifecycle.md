@@ -47,10 +47,8 @@ a crate-root module to parity-check it. Make the gate self-contained (`distroav_
 `distroav_recv_create_retry_1080.rs`): Facet A `fs::read_to_string` source-anchors the tokens (revert
 protection against a `git subtree pull`); Facet B lifts the helper VERBATIM by signature → first
 `\n}\n`, compiles it with `cc -Werror -Wconversion -Wformat=2` against a tiny `<stdint.h>` stub, and
-runs a hand-written truth table (the truth table IS the spec). Runs BOTH under `cargo test` AND
-offline via the #1026 recipe: `CARGO_MANIFEST_DIR=<worktree-abs> rustc --test --edition 2021
-tests/<file>.rs -o /tmp/x && /tmp/x`. **Watch the truth table go RED under a scratch mutation** — a
-gate never seen fail is unproven (#1003). Mirror the key token anchors into BOTH
+runs a hand-written truth table (the truth table IS the spec) under `cargo test`. **Watch the truth
+table go RED under a scratch mutation** — a gate never seen fail is unproven (#1003). Mirror the key token anchors into BOTH
 `windows-genlock.yml` AND `windows-genlock-fast.yml` (the fast path hot-swaps `distroav.dll`
 un-gated, #912) — verify each pwsh literal offline against the `re.sub(r'\s+',' ',text)`-squished
 file (pwsh is not on dev1). A source anchor that only the truth table can't reach (e.g. an
@@ -214,7 +212,7 @@ sender (`STRIH-SNV (2ME PGM)` — this EXCLUDES the separate Arena/CG-bridge Spo
 whose port never participates in the OBS reshuffle), and diffs it against the checked-in
 `scripts/ndi-portmap-baseline.json`. A CONFIRMED moved port fires ONE Slovak Discord alert naming
 the affected senders + the operator action above (re-open the stock receivers; re-capture if the
-change was intentional). The pure map-diff (`scripts/lib/ndi-portmap-health.sh`) is Tier-0-testable
+change was intentional). The pure map-diff (`scripts/lib/ndi-portmap-health.sh`) is testable
 offline (avahi `-p` `\DDD` DECIMAL escapes, hostname-group isolation, OK/MOVED/ABSENT/UNSET →
 CHANGED-only-on-MOVED), fed a `NDI_PORTMAP_AVAHI_FIXTURE` in tests. An empty/anchor-absent live map
 is a GATHER ERROR (exit 2), never a page — OBS-down/box-reachability is #1001's job. Ships DISABLED
@@ -611,7 +609,7 @@ holds connect-on-show):
    a click selects the program scene).
 6. FULL-bundle deploy (vendored DistroAV + frontend), then the `foh1_video ether2` tx-drop delta.
 
-## Tier-0 syntax check of `ndi-source.cpp` (no cargo, no CMake) — issue 1242
+## Syntax check of `ndi-source.cpp` (no CMake) — issue 1242
 
 CI is the first real compile, but a `g++ -fsyntax-only -std=c++17 -fPIC -Wall -Wextra` of
 `vendor/distroav/src/ndi-source.cpp` passes locally (clean, zero warnings, ~seconds) with ONE stub
