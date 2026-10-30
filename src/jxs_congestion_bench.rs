@@ -54,6 +54,10 @@ struct Scenario {
     phase_sawtooth: bool,
     /// Receiver wall steps: (at s, by us).
     rx_steps: &'static [(f64, f64)],
+    /// SENDER wall steps (the fleet date step): (at s, by us). The genlock timecode follows the
+    /// stepped wall; the sender's own first-send delay is read on its wall minus its own steps, so
+    /// per frame the step cancels -- but the two ends' frame sets differ around it (review round 3).
+    tx_steps: &'static [(f64, f64)],
     delay_signal: bool,
     end_s: f64,
 }
@@ -138,7 +142,13 @@ fn run(sc: Scenario) -> Outcome {
     for k in 0..frames {
         let t0 = k as f64 * FRAME_US;
         let t_s = t0 / 1e6;
-        let tc = TC0_100NS + (t0 * 10.0) as u64;
+        let tx_step: f64 = sc
+            .tx_steps
+            .iter()
+            .filter(|(at, _)| t_s >= *at)
+            .map(|(_, by)| by)
+            .sum();
+        let tc = (TC0_100NS as i64 + ((t0 + tx_step) * 10.0) as i64) as u64;
         if auto.target() != bpp {
             bpp = auto.target();
             auto.applied(bpp, tc);
@@ -213,6 +223,7 @@ fn run(sc: Scenario) -> Outcome {
         }
         let first_send = first_send.unwrap_or(last_send);
         pace.on_wire((last_send - first_send) / 1000.0);
+        // the sender's wall minus its own steps: the step is in the timecode only
         pace.on_first_send(tc, (first_send * 10.0) as i64 + TC0_100NS as i64);
         let sent = groups * GROUP;
         let lost = sent.saturating_sub(got);
@@ -283,6 +294,7 @@ const STRIH_TO_STREAM: Scenario = Scenario {
     encode_us: 10_000.0,
     phase_sawtooth: false,
     rx_steps: &[],
+    tx_steps: &[],
     delay_signal: true,
     end_s: 420.0,
 };
@@ -362,6 +374,7 @@ fn a_line_rate_cambox_with_a_phase_sawtooth_and_clock_steps_never_reads_congesti
         encode_us: 13_800.0,
         phase_sawtooth: true,
         rx_steps: &[(70.0, 5_000.0), (90.0, -5_000.0)],
+        tx_steps: &[],
         delay_signal: true,
         end_s: 120.0,
     });
@@ -375,4 +388,23 @@ fn a_line_rate_cambox_with_a_phase_sawtooth_and_clock_steps_never_reads_congesti
         (0, Some(PaceSource::LineRate)),
         "a cambox is never paced"
     );
+}
+
+/// Review round 3: the nightly fleet DATE step on the SENDER (+200 ms, later -200 ms) on a quiet
+/// paced path. Per frame the step cancels (timecode and own delay move together), but the
+/// receiver's frames of one period and the sender's timecode window around the newest one are not
+/// the same frames across the step: a mean over each must never read as a queue.
+#[test]
+fn a_sender_date_step_never_reads_as_a_queue() {
+    let o = run(Scenario {
+        cross: quiet,
+        tx_steps: &[(70.5, 200_000.0), (100.4, -200_000.0)],
+        end_s: 130.0,
+        ..STRIH_TO_STREAM
+    });
+    eprintln!("{o:?}");
+    assert_eq!(o.congestion_steps, 0, "never a congestion step");
+    assert_eq!(o.lossy_frames, 0);
+    assert_eq!(o.bpp_at_end, 8);
+    assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
 }
