@@ -958,8 +958,8 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   A fifth is the live 30.10.2026 pattern: an 11.8 ms encoder-bound send and a 250 KB NDI burst at
   stream's port near each frame's end (the old raw rule there: bpp 4 all run, a 72-change pace
   sawtooth; now 8 bpp within the first minute, 900, no pace change after 30 s, 0 congestion
-  steps). A sixth adds the download to it: the burst holds a quarter of the 1 MB buffer each frame,
-  so the path overflows within ~1 s of the ramp whatever the controller does (a version-1 receiver:
+  steps). A sixth adds the download to it: at 8 bpp the burst holds a quarter of the 1 MB buffer
+  each frame, so the path overflows within ~1 s of the ramp (a version-1 receiver:
   134 lossy frames, still losing after 70 s, pinned by its own test); with the signal the first
   step comes before the first loss, 55 lossy frames, none after 70 s, back to 8 bpp and 900, no
   pace change after 200 s. The trade-off, stated: the OLD raw rule lost none there, because its
@@ -968,10 +968,15 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   900, settled. In the download the
   first datagram's queue barely moves (0.60 -> 0.62 ms) while the stretch grows 1.6 -> 4.3 ms: the
   GROWN stretch is the early signal, so it still asks the auto bpp; only a stretch at its base
-  never does. The defaults were tuned on it: at
+  never does. An eighth grows the burst past the bound (50 -> 600 KB at 90 s): 2 congestion
+  steps, then the 8-bpp base re-learns after 30 steady seconds and the link settles at 8 bpp and
+  900 (with the base aged by count only, it and the re-learn unit test fail). The defaults were tuned on it: at
   25 % stretch and two reports before the bpp ask the loss came first; with a 2 s settle between
   asks it cost 49 lossy frames.
-- **Known limits:** the signal is one report a second, so a queue that fills in under a second
+- **Known limits:** stepping down through levels during a download, a level climbed through more
+  than 30 steady seconds earlier has no base: its first report is judged on the queue and loss
+  only, and the next ones against a base learnt under the congestion (the bench shows no harm: 55
+  lossy frames with the burst, 2 congestion steps); the signal is one report a second, so a queue that fills in under a second
   (a burst far larger than the port buffer) still costs a loss first (the FEC below repairs an
   isolated one); the queuing delay uses the FIRST datagram of a frame, which a queue that drains
   between frames does not delay (the span stretch catches that case); the bench's cross traffic

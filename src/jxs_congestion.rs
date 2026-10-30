@@ -213,10 +213,11 @@ pub struct Congestion {
     last_seq: Option<u32>,
     last_bpp_down_s: Option<f64>,
     state: PathState,
-    /// Per send regime, its last [`BASE_REPORTS`] measured stretches (arrival span - send span,
-    /// us): their minimum is the quiet base the stretch is judged against. A regime's entries age
-    /// only with that regime's own reports, so a step back to a bpp left a minute ago judges
-    /// against the base it learnt then (before the congestion), never a new one.
+    /// Per send regime, its measured stretches (arrival span - send span, us) stamped on the
+    /// steady clock, at most [`BASE_REPORTS`]: their minimum over the last [`STRETCH_BASE_S`]
+    /// steady seconds is the quiet base the stretch is judged against. A level left longer than
+    /// that re-learns its base (that first report recorded, not judged); time after an overuse
+    /// never ages it.
     stretch_history:
         std::collections::BTreeMap<Option<u32>, std::collections::VecDeque<(f64, i64)>>,
     /// The caller's time of the previous judged report, and the seconds spent after an overuse
@@ -269,6 +270,36 @@ impl Congestion {
         }
     }
 
+    /// Whether `r`'s span stretch grew over its regime's quiet base by more than the bound (module
+    /// doc); records it into the base. No base yet (a new or re-learnt level): recorded, not judged.
+    fn judge_stretch(&mut self, r: &PathReport, now_s: f64) -> bool {
+        let (Some(rx), Some(tx)) = (r.recv_span_us, r.send_span_us) else {
+            return false;
+        };
+        if r.stretch_mode == StretchMode::Skip {
+            return false;
+        }
+        let stretch = rx as i64 - tx as i64;
+        let steady_now = now_s - self.congested_s;
+        let history = self.stretch_history.entry(r.stretch_regime).or_default();
+        // the base ages by steady time: a level left longer than the window learns it anew, a
+        // congested stretch of time never ages it
+        while history
+            .front()
+            .is_some_and(|(t, _)| steady_now - t > STRETCH_BASE_S)
+        {
+            history.pop_front();
+        }
+        let base = history.iter().map(|(_, s)| *s).min();
+        history.push_back((steady_now, stretch));
+        while history.len() > BASE_REPORTS {
+            history.pop_front();
+        }
+        let c = self.cfg;
+        let bound = (c.stretch_overuse_us as f64).max(c.stretch_overuse_frac * tx as f64);
+        base.is_some_and(|b| (stretch - b) as f64 > bound)
+    }
+
     /// Judge `r` at `now_s` (the caller's seconds). A report already judged (the same seq) holds.
     pub fn on_report(&mut self, r: &PathReport, now_s: f64) -> CongestionStep {
         if self.last_seq == Some(r.seq) {
@@ -283,30 +314,7 @@ impl Congestion {
             }
         }
         self.last_report_s = Some(now_s);
-        let stretch_over = match (r.recv_span_us, r.send_span_us) {
-            (Some(rx), Some(tx)) if r.stretch_mode != StretchMode::Skip => {
-                let stretch = rx as i64 - tx as i64;
-                let steady_now = now_s - self.congested_s;
-                let history = self.stretch_history.entry(r.stretch_regime).or_default();
-                // the base ages by steady time: a level left longer than the window learns it
-                // anew, a congested stretch of time never ages it
-                while history
-                    .front()
-                    .is_some_and(|(t, _)| steady_now - t > STRETCH_BASE_S)
-                {
-                    history.pop_front();
-                }
-                let base = history.iter().map(|(_, s)| *s).min();
-                history.push_back((steady_now, stretch));
-                while history.len() > BASE_REPORTS {
-                    history.pop_front();
-                }
-                let bound = (c.stretch_overuse_us as f64).max(c.stretch_overuse_frac * tx as f64);
-                // no base yet (a new or re-learnt level): recorded, not judged
-                base.is_some_and(|b| (stretch - b) as f64 > bound)
-            }
-            _ => false,
-        };
+        let stretch_over = self.judge_stretch(r, now_s);
         let queue_over = r.queue_delay_us.is_some_and(|q| q > c.queue_overuse_us);
         let delay_over = queue_over || stretch_over;
         let before = self.factor;
