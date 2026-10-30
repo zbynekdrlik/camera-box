@@ -58,6 +58,10 @@ struct Scenario {
     /// stepped wall; the sender's own first-send delay is read on its wall minus its own steps, so
     /// per frame the step cancels -- but the two ends' frame sets differ around it (review round 3).
     tx_steps: &'static [(f64, f64)],
+    /// A burst of other traffic every frame at the receiver's port: (bytes, us after the frame's
+    /// timecode). The strih program's NDI frame leaves strih's 10 GbE NIC as one burst and shares
+    /// stream-snv's 1 GbE port with the JPEG XS frame (live 30.10.2026).
+    cross_burst: Option<(f64, f64)>,
     delay_signal: bool,
     end_s: f64,
 }
@@ -103,6 +107,8 @@ struct Outcome {
     bpp_at_60s: u32,
     first_congestion_step_s: Option<f64>,
     congestion_steps: u32,
+    /// Pace changes after the first 30 s (a settled link has none: no sawtooth).
+    pace_changes_after_30s: u32,
     first_jxs_drop_s: Option<f64>,
     /// Frames with any lost datagram while the download ran (60..120 s) and after 70 s.
     lossy_frames_download: u32,
@@ -156,6 +162,9 @@ fn run(sc: Scenario) -> Outcome {
         pace.on_frames(1920, 1080, bpp);
         if let Some(d) = pace.changed() {
             pace_mbps = d.mbps;
+            if t_s >= 30.0 {
+                out.pace_changes_after_30s += 1;
+            }
         }
         let code = 1920.0 * 1080.0 * bpp as f64 / 8.0;
         // the data datagrams plus one FEC parity per 12 (per slice: ~1 in 11)
@@ -186,6 +195,15 @@ fn run(sc: Scenario) -> Outcome {
             events.push((nic_free_us, true));
         }
         let span_end = t0 + FRAME_US;
+        if let Some((bytes, at)) = sc.cross_burst {
+            for g in 0..(bytes / (GROUP as f64 * DGRAM_WIRE)).ceil() as usize {
+                // the burst leaves strih's 10 GbE NIC at line rate
+                events.push((
+                    t0 + at + g as f64 * GROUP as f64 * DGRAM_WIRE * 8.0 / 10_000.0,
+                    false,
+                ));
+            }
+        }
         while next_cross_us < span_end {
             let c = (sc.cross)(next_cross_us / 1e6);
             if c < 1.0 {
@@ -300,6 +318,7 @@ const STRIH_TO_STREAM: Scenario = Scenario {
     phase_sawtooth: false,
     rx_steps: &[],
     tx_steps: &[],
+    cross_burst: None,
     delay_signal: true,
     end_s: 420.0,
 };
@@ -380,6 +399,7 @@ fn a_line_rate_cambox_with_a_phase_sawtooth_and_clock_steps_never_reads_congesti
         phase_sawtooth: true,
         rx_steps: &[(70.0, 5_000.0), (90.0, -5_000.0)],
         tx_steps: &[],
+        cross_burst: None,
         delay_signal: true,
         end_s: 120.0,
     });
@@ -411,5 +431,55 @@ fn a_sender_date_step_never_reads_as_a_queue() {
     assert_eq!(o.congestion_steps, 0, "never a congestion step");
     assert_eq!(o.lossy_frames, 0);
     assert_eq!(o.bpp_at_end, 8);
+    assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
+}
+
+/// Live 30.10.2026 (strih-snv -> stream-snv, the coordinator's run of the merged branch): the
+/// encoder hands a frame over ~13.4 ms, and the program's NDI frame (~400 KB) reaches stream-snv's
+/// 1 GbE port as one burst near the end of each JPEG XS frame. The arrival span reads ~2-3 ms
+/// longer than the send span every report while the first datagram's queue stays ~0 and nothing
+/// is lost. It read "path overuse" every ~8 s, so the pace sawed 900 -> 738 and the auto bpp was
+/// asked down at each one: it stayed at 4 (the fixed-pace build had reached 8 in ~40 s). It must
+/// climb to 8, keep the receiver-link pace without a sawtooth, and never take a congestion step.
+#[test]
+fn the_programs_ndi_burst_sharing_the_port_is_not_congestion() {
+    let o = run(Scenario {
+        cross: quiet,
+        encode_us: 13_400.0,
+        cross_burst: Some((400_000.0, 13_000.0)),
+        end_s: 180.0,
+        ..STRIH_TO_STREAM
+    });
+    eprintln!("{o:?}");
+    assert_eq!(o.congestion_steps, 0, "never a congestion step");
+    assert_eq!(o.lossy_frames, 0);
+    assert_eq!(o.bpp_at_60s, 8, "8 bpp within the first minute");
+    assert_eq!(o.bpp_at_end, 8);
+    assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
+    assert_eq!(o.pace_changes_after_30s, 0, "no pace sawtooth");
+}
+
+/// The same NDI burst plus the owner's saturating download: the link still backs off before the
+/// buffer overflows and climbs back afterwards (the burst must not blind the real signal).
+#[test]
+fn with_the_ndi_burst_a_saturating_download_still_backs_off_and_recovers() {
+    let o = run(Scenario {
+        cross_burst: Some((400_000.0, 13_000.0)),
+        encode_us: 13_400.0,
+        ..STRIH_TO_STREAM
+    });
+    eprintln!("{o:?}");
+    let first_step = o.first_congestion_step_s.expect("a congestion step");
+    assert!(
+        (60.0..66.0).contains(&first_step),
+        "first step {first_step}"
+    );
+    assert!(
+        o.lossy_frames_download <= 5,
+        "at most a few lossy frames: {}",
+        o.lossy_frames_download
+    );
+    assert_eq!(o.lossy_frames_after_70s, 0);
+    assert_eq!(o.bpp_at_end, 8, "back to 8 bpp");
     assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
 }

@@ -339,24 +339,79 @@ mod tests {
     }
 
     #[test]
-    fn a_stretched_arrival_span_is_over_use_and_a_small_one_is_not() {
+    fn a_stretch_that_grows_over_its_quiet_base_is_over_use_and_a_small_one_is_not() {
+        // the quiet base: arrival = send span
+        let quiet = |c: &mut Congestion, from: u32, tx: u32| {
+            for k in from..from + 5 {
+                c.on_report(&rep(k, 0, tx, tx), k as f64);
+            }
+        };
         let mut c = Congestion::default();
+        quiet(&mut c, 1, 20_000);
         // 20 ms sent, 23.5 ms arrived: 3.5 ms > max(1.5 ms, 15 % = 3 ms)
         assert_eq!(
-            c.on_report(&rep(1, 0, 23_500, 20_000), 1.0).state,
+            c.on_report(&rep(10, 0, 23_500, 20_000), 10.0).state,
             PathState::Overuse
         );
         let mut c = Congestion::default();
+        quiet(&mut c, 1, 20_000);
         // 20 ms sent, 22.5 ms arrived: 2.5 ms <= 3 ms
         assert_eq!(
-            c.on_report(&rep(1, 0, 22_500, 20_000), 1.0).state,
+            c.on_report(&rep(10, 0, 22_500, 20_000), 10.0).state,
             PathState::Clean
         );
         // a short send span takes the 1.5 ms floor: 4 ms sent, 6.5 ms arrived
+        let mut c = Congestion::default();
+        quiet(&mut c, 1, 4_000);
         assert_eq!(
-            c.on_report(&rep(2, 0, 6_500, 4_000), 2.0).state,
+            c.on_report(&rep(10, 0, 6_500, 4_000), 10.0).state,
             PathState::Overuse
         );
+    }
+
+    /// Live 30.10.2026 (strih-snv -> stream-snv, coordinator): the arrival span read 13.5-13.8 ms
+    /// against a send span of 11.5-12.2 ms report after report, with the queue at 0.0-0.1 ms and
+    /// no loss -- a CONSTANT offset of the two measurements (the program's NDI burst sharing the
+    /// receiver's port each frame, the encoder-bound send), never a growing bottleneck. It read
+    /// "overuse" every ~8 s, cut the pace and asked the auto bpp down each time: the bpp stayed
+    /// at 4. A constant offset is the stretch's quiet base, never overuse.
+    #[test]
+    fn a_constant_span_offset_with_no_queue_is_never_over_use() {
+        let mut c = Congestion::default();
+        for k in 1..120u32 {
+            // the live pairs: the send span moves with the pace, the arrival span with the encoder
+            let (rx, tx) = if k % 2 == 0 {
+                (13_800, 12_200)
+            } else {
+                (13_500, 11_500)
+            };
+            let s = c.on_report(&rep(k, 100, rx, tx), k as f64);
+            assert_ne!(s.state, PathState::Overuse, "report {k}");
+            assert!(!s.bpp_down, "report {k}");
+        }
+        assert!(
+            (c.factor() - 1.0).abs() < 1e-9,
+            "the pace factor stays at 100 %"
+        );
+    }
+
+    /// A stretch with no queue (the arrival span grows, the first datagram's delay does not) may
+    /// thin the pace, but never asks the auto bpp for a step: only a growing QUEUE does
+    /// (coordinator 30.10.2026: "a burst-spread overuse with no queue must never step the bpp
+    /// down").
+    #[test]
+    fn a_stretch_alone_never_asks_for_a_bpp_step() {
+        let mut c = Congestion::default();
+        for k in 1..6 {
+            c.on_report(&rep(k, 0, 20_000, 20_000), k as f64);
+        }
+        for k in 6..20 {
+            let s = c.on_report(&rep(k, 0, 26_000, 20_000), k as f64);
+            assert_eq!(s.state, PathState::Overuse, "report {k}");
+            assert!(!s.bpp_down, "report {k}: a stretch alone never asks");
+        }
+        assert!(c.factor() < 1.0, "the pace thins");
+        assert!(c.on_report(&rep(30, 6_000, 26_000, 20_000), 30.0).bpp_down);
     }
 
     #[test]
