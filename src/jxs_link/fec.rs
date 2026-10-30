@@ -109,7 +109,7 @@ impl FecRepair {
             return true;
         }
         if let Some(oldest) = self.frames.iter().copied().min() {
-            if tc + BACKWARD_STEP_100NS < oldest && false {
+            if tc + BACKWARD_STEP_100NS < oldest {
                 // the wall stepped back (the nightly date step): the kept frames are of the old
                 // timeline, forget them all (the assembler's own clock-step rule)
                 self.frames.clear();

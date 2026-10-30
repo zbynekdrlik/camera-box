@@ -801,7 +801,9 @@ is on, and per source whether it comes over NDI or JPEG XS.
 - **The back channel: ONE 56-byte receiver report per second** (`jxs_link::ReceiverReport`,
   layout in the `src/jxs_link.rs` module doc next to the slice datagram: magic `'R'`, version 2,
   camera id, max bpp, seq, frames, lost slices, late frames, decode p99 us, last timecode, then
-  link speed, delay p50 (i32), delay spread, arrival span p50, FEC repaired, 4 reserved bytes). A 32-byte version 1 (slices 1-3) is
+  link speed, delay MEAN (i32), delay spread, arrival span p50, FEC repaired, 4 reserved bytes;
+  version 2 was 48 bytes for a few never-deployed commits of this lane, the version byte did not
+  move). A 32-byte version 1 (slices 1-3) is
   still read, its version-2 fields unknown. **Cutover:** an OLD sender drops a v2 report as
   `BadVersion`, so a new receiver (the OBS bundle) with an old cambox holds that cambox's auto bpp
   at its floor until camera-box is upgraded too; deploy the camboxes with the same release. The
@@ -871,8 +873,10 @@ react to a GROWING QUEUE, before the switch buffer overflows.
 
 - **The receiver's signal (`src/jxs_link/congestion_meter.rs`, pure),** per report period, into
   report v2:
-  - `delay_p50_us` (i32): per frame `d` = first datagram arrival - genlock timecode, the period's
-    p50; `delay_spread_us`: its p90 - p10; `span_p50_us`: p50 of last - first arrival over the
+  - `delay_mean_us` (i32): per frame `d` = first datagram arrival - genlock timecode, the
+    period's MEAN (review round 2: a p50 of a sawtooth jumps by the whole slot when the sets of the
+    two ends differ by one frame, a mean by that one frame over 30); `delay_spread_us`: its p90 -
+    p10; `span_p50_us`: p50 of last - first arrival over the
     period's WHOLE frames. The arrivals are on the wall clock MINUS its own steps (`WallSteps`:
     `CLOCK_REALTIME - CLOCK_MONOTONIC` moves only on a dantesync step), so a step on the receiver
     never reads as delay.
@@ -882,14 +886,18 @@ react to a GROWING QUEUE, before the switch buffer overflows.
     it (review round 1 of item 2), so:
 - **The sender's half (`PathDelay` in `src/jxs_congestion.rs`):** its own first-send delay per
   frame (`PaceControl::on_first_send`, wall minus steps, its own `WallSteps`) over the timecodes
-  the report's second covers; path = the receiver's p50 - its own p50 = the path delay + the clock
-  offset, constant on a quiet path; the queue = the path above its minimum over the last 30
-  reports. A jump over 3 ms while the receiver's spread stays under 2 ms is a clock step neither
-  `WallSteps` caught (every frame moved alike): the base moves with it. A path 100 ms above the
-  base starts over (nothing reported for that report).
+  the report's second covers; path = the receiver's mean - its own mean = the path delay + the
+  clock offset, constant on a quiet path; the queue = the path above its minimum over the last 30
+  reports. A path 100 ms above the base is a step neither end's `WallSteps` saw (the nightly date
+  step) and starts over (nothing reported for that report). Review round 2 REMOVED a rule that
+  moved the base on a "tight" jump over 3 ms: a real queue that drains at once (the download
+  stops) then left a phantom queue as big as the drain, and a queue that appears at once was
+  hidden. Small steps never reach `PathDelay` (both ends subtract `WallSteps`).
 - **The sender's controller (`src/jxs_congestion.rs`, pure, crate root like `jxs_auto_bpp.rs`),**
   owned by `PaceControl`, one decision per new report seq:
-  - **overuse** = queue > 4 ms, or the arrival span longer than this sender's own send span by
+  - **overuse** = queue > 4 ms, or (only while PACED: at line rate the sender's own NIC is the
+    bottleneck by construction, and on a cambox NDI leaves ahead of JPEG XS in the egress priority
+    band, review round 2) the arrival span longer than this sender's own send span by
     more than max(1.5 ms, 15 %) -- the send span = max(`wire_ms` p50 over its last 30 frames, the
     frame's wire bytes over its OWN link: a 1 GbE cambox's NIC needs ~19 ms for an 8 bpp frame its
     encoder hands over in ~14 ms, never a stretched path) -- or a lost slice: the pace
@@ -915,7 +923,8 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   bpp down to 4, back to 8 bpp and the 900 receiver-link pace afterwards. Without it (a v1
   receiver): 87 lossy frames, still losing after 70 s, at 6 bpp when the 130 s run ends. A third
   scenario runs a 1 GbE cambox at line rate into the 10 GbE strih with the phase sawtooth and
-  +-5 ms receiver steps: 0 congestion steps, 8 bpp, never paced. The defaults were tuned on it: at
+  +-5 ms receiver steps (removed by the meter's `WallSteps` except in the one frame that arrives
+  across the step): 0 congestion steps, 8 bpp, never paced. The defaults were tuned on it: at
   25 % stretch and two reports before the bpp ask the loss came first; with a 2 s settle between
   asks it cost 49 lossy frames.
 - **Known limits:** the signal is one report a second, so a queue that fills in under a second
@@ -938,7 +947,10 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   exactly ONE datagram, rebuilds it whole (header from the slice's own fields, payload length from
   `slice_len`) and hands it to the assembler like a received one, before the assembler gives the
   frame up (it waits for the next frame): no added latency, no retransmission. Two losses in one
-  group stay lost and are concealed as before. Groups of the 3 newest timecodes are kept.
+  group stay lost and are concealed as before. Groups of the 3 newest timecodes are kept; a
+  timecode more than 50 ms behind every kept one (the assembler's `RESYNC_BACKWARD_100NS`, the
+  nightly date step) clears them and starts over, so the repair never stops for a clock step back
+  (review round 2).
   `fec_repaired=` on the `jxs recv:` line, the OBS source's 5 s line, report v2 bytes 44..48, the
   sender's `fec_repaired=` (from the reports) and both C ABI 3 stats; a datagram with the parity
   magic that is not a valid parity counts as `fec_malformed=`.

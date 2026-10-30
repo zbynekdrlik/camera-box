@@ -62,13 +62,6 @@ impl PathDelay {
     /// delay in us (`None` right after a big clock step).
     pub fn update(&mut self, rx_mean_us: i64, own_mean_us: i64) -> Option<u32> {
         let path = rx_mean_us - own_mean_us;
-        if let Some(prev) = self.history.back().copied() {
-            if (path - prev).abs() > 3_000 {
-                for h in self.history.iter_mut() {
-                    *h += path - prev;
-                }
-            }
-        }
         let base = self.history.iter().copied().fold(path, i64::min);
         if path - base > STEP_RESET_US {
             self.history.clear();

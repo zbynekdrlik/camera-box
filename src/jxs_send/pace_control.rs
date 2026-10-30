@@ -140,14 +140,12 @@ impl PaceControl {
     /// a frame (it finalizes a frame one frame late); a mean moves by a fraction of that one frame.
     fn own_delay_mean_us(&self, r: &ReceiverReport) -> Option<i64> {
         let newest = r.last_timecode_100ns;
-        let mut v: Vec<i64> = self
+        let (sum, n) = self
             .own_delays
             .iter()
             .filter(|(tc, _)| *tc <= newest && *tc + 10_000_000 > newest)
-            .map(|(_, d)| *d)
-            .collect();
-        v.sort_unstable();
-        (!v.is_empty()).then(|| v[(v.len() - 1) / 2] / 10)
+            .fold((0i128, 0i128), |(s, n), (_, d)| (s + *d as i128, n + 1));
+        (n > 0).then(|| (sum / n / 10) as i64)
     }
 
     /// A frame's first send: its timecode and the wall clock (`CLOCK_REALTIME`, 100 ns) then.
