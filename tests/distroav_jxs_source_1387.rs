@@ -238,6 +238,16 @@ fn the_genlock_whitelist_keys_apply_through_the_runtime_resolved_exports() {
     // enumerate both input kinds, obs_burn_filter.BURN_INPUT_KINDS), default off, applied live
     assert!(s.contains("\"genlock_burn\"") && ndi.contains("\"genlock_burn\""));
     assert!(s.contains("\"obs_source_set_genlock_burn\""));
+    // issue 1387: a JPEG XS camera (30 fps, N == 1) takes the NDI cameras' fixed grid release
+    // through the per-source opt-in, default ON (the camera behaviour), applied live
+    assert!(s.contains("#define PROP_GENLOCK_GRID \"genlock_grid\""));
+    assert!(s.contains("\"obs_source_set_genlock_grid\""));
+    let defaults = function_body(&s, "static void jxs_source_getdefaults(");
+    assert!(defaults.contains("obs_data_set_default_bool(settings, PROP_GENLOCK_GRID, true);"));
+    let update = function_body(&s, "static void jxs_source_update(");
+    assert!(
+        update.contains("g.set_grid(s->source, obs_data_get_bool(settings, PROP_GENLOCK_GRID));")
+    );
     let defaults = function_body(&s, "static void jxs_source_getdefaults(");
     assert!(defaults.contains("obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true);"));
     assert!(defaults.contains(

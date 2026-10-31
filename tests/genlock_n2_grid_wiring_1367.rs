@@ -273,3 +273,44 @@ fn the_drop_cap_budgets_the_grid_age_of_an_n2_source_1367() {
         "the headroom is added after the canvas-rate budget, so it counts once"
     );
 }
+
+/// Issue 1387 (live 31.10.2026): the JPEG XS cameras send 30 fps (N == 1) and fell to the N==1
+/// shallow latch, which re-latched cam5 inside a soak window and moved its A/V 20 -> 89 ms. A
+/// source that opts in (`obs_source_set_genlock_grid`) takes the SAME grid release with N = 1,
+/// right after the unchanged N>=2 line and before the boundary conveyor, and the drop cap budgets
+/// its grid age like an N>=2 source.
+#[test]
+fn an_opted_in_n1_source_takes_the_same_grid_release_with_n_1_1387() {
+    let src = squish(&read(OBS_SOURCE));
+    let tick = body_after(
+        &src,
+        "static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64_t present_ts, size_t due,",
+    );
+    let n2 = tick
+        .find("if (release_n >= 2) return genlock_release_tick_n2_grid(")
+        .expect("the N>=2 grid line");
+    let opt = tick
+        .find(
+            "if (source->genlock_grid_release) return genlock_release_tick_n2_grid(source, wall_now, \
+             present_ts, interval, reserve_ms, 1, now_ns);",
+        )
+        .expect("issue 1387: an opted-in N==1 source does not take the grid release with N = 1");
+    let conveyor = tick.find("size_t release;").expect("the conveyor");
+    assert!(
+        n2 < opt && opt < conveyor,
+        "N>=2 line, then the opt-in, then the conveyor"
+    );
+    assert!(
+        src.contains("if (source->genlock_last_known_n >= 2 || source->genlock_grid_release) {"),
+        "the drop cap budgets the grid age of an opted-in source too"
+    );
+    assert!(src.contains("void obs_source_set_genlock_grid(obs_source_t *source, bool enabled) {"));
+    assert!(src.contains("bool obs_source_get_genlock_grid(const obs_source_t *source) {"));
+    let h = squish(&read("vendor/obs-studio/libobs/obs.h"));
+    assert!(
+        h.contains("EXPORT void obs_source_set_genlock_grid(obs_source_t *source, bool enabled);")
+    );
+    assert!(h.contains("EXPORT bool obs_source_get_genlock_grid(const obs_source_t *source);"));
+    let internal = squish(&read("vendor/obs-studio/libobs/obs-internal.h"));
+    assert!(internal.contains("bool genlock_grid_release;"));
+}

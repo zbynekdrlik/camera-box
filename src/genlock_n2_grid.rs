@@ -522,6 +522,21 @@ mod tests {
     /// authority silently. Every canvas tick of one second must present the row's age or ONE ns more
     /// (the per-second grid alternates its slot lengths); a fractional canvas rate ticks on the
     /// 1970 grid.
+    /// Issue 1387: a 30 fps source on the grid with N = 1 (a JPEG XS camera) is presented at the
+    /// same age as a 60 fps NDI camera with N = 2 at pin 3: 66.7 ms (two 30 fps slots back).
+    #[test]
+    fn a_30fps_source_on_the_grid_with_n_1_is_presented_at_the_ndi_cameras_age_1387() {
+        for j in 2..30 {
+            let n1 = n2_target_stamp_ns(tick(j), PIN3, I30, 1);
+            assert_eq!(n1, tick(j - 2), "slot {j}");
+            assert_eq!(
+                n1,
+                n2_target_stamp_ns(tick(j), PIN3, I30, 2),
+                "slot {j}: N=1 vs N=2"
+            );
+        }
+    }
+
     #[test]
     fn present_age_table_shared_with_the_python_twin_1367() {
         use crate::genlock_grid::{integer_fps, NS_PER_SECOND};
