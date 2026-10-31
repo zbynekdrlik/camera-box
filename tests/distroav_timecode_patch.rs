@@ -86,7 +86,7 @@ fn output_video_timecode_uses_real_wall_clock_not_synthesize() {
     // both the floor helper's presence and the ceil helper's ABSENCE are pinned, so a
     // subtree pull restoring the old helper silently re-biasing the stamps fails HERE.
     assert!(
-        src.contains("return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);"),
+        src.contains("const int64_t send_floor = genlock_floor_boundary_100ns(wall_now_100ns, fps);"),
         "{NDI_OUTPUT}: #1009 — the emit timecode no longer stamps the FLOOR boundary          (genlock_floor_boundary_100ns); the sender future-bias that armed the issue-1007          backward-step hair-trigger is back. Re-apply the floor-stamp patch."
     );
     assert!(
@@ -146,7 +146,9 @@ fn windows_genlock_workflow_gates_on_the_timecode_patch() {
          guard that catches a silent #78 revert. Re-add the pwsh source-patch gate."
     );
     assert!(
-        wf.contains("return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);"),
+        wf.contains(
+            "const int64_t send_floor = genlock_floor_boundary_100ns(wall_now_100ns, fps);"
+        ),
         "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #1009 FLOOR emit \
          stamp — a subtree bump could restore the future-biased ceil stamp (the issue-1007 \
          hair-trigger arming) while the version pin still passes. Re-add the pwsh #1009 gate."
@@ -156,7 +158,9 @@ fn windows_genlock_workflow_gates_on_the_timecode_patch() {
     // bypass the slow build's gate entirely.
     let wff = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
     assert!(
-        wff.contains("return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);"),
+        wff.contains(
+            "const int64_t send_floor = genlock_floor_boundary_100ns(wall_now_100ns, fps);"
+        ),
         "{WINDOWS_GENLOCK_FAST_WF}: the FAST build (which ships distroav.dll for hot-swap) \
          does not assert the #1009 FLOOR emit stamp; add the pwsh gate, mirroring \
          windows-genlock.yml."

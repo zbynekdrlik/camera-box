@@ -487,7 +487,7 @@ jobs:
           # un-gated by pwsh (the Tier-0 Rust guard tests/distroav_timecode_patch.rs still
           # gates the merge, this closes the direct-dispatch path).
           $out = (Get-Content "vendor/distroav/src/ndi-output.cpp" -Raw) -replace '\s+', ' '
-          if ($out -notmatch [regex]::Escape('return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);')) { Write-Error "ndi-output.cpp: #1009 floor emit stamp (genlock_floor_boundary_100ns) gone — the sender future-bias (issue 1007 hair-trigger arming) is back"; exit 1 }
+          if ($out -notmatch [regex]::Escape('const int64_t send_floor = genlock_floor_boundary_100ns(wall_now_100ns, fps);')) { Write-Error "ndi-output.cpp: #1009 floor emit stamp (genlock_floor_boundary_100ns) gone — the sender future-bias (issue 1007 hair-trigger arming) is back"; exit 1 }
           if ($out -match 'genlock_next_boundary_100ns') { Write-Error "ndi-output.cpp: #1009 — the pre-1009 ceil boundary helper name is back; emit stamps may be future-dated again"; exit 1 }
           # camera-box #1185: PGM-first-NDI-port reservation. This FAST path ships distroav.dll for
           # hot-swap, so gate the reserve-and-adopt source patch HERE too -- mirrors

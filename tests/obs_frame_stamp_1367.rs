@@ -50,7 +50,7 @@ fn a_late_send_run_never_duplicates_or_skips_a_slot_1367() {
     let mut prev: Option<i64> = None;
     for k in 0..60 {
         let tick = slot(k, 30);
-        let late_100ns = ((k * 7_919) % 400_001) as i64;
+        let late_100ns = (k * 7_919) % 400_001;
         let s = stamp(tick, 0, tick + late_100ns, 30);
         assert_eq!(s, tick, "frame {k} sent {late_100ns} x100 ns late");
         if let Some(p) = prev {

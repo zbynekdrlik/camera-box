@@ -1673,7 +1673,7 @@ jobs:
           # 2026-08-07 overnight -900 ms hold collapse). Both the floor helper's presence AND
           # the ceil helper's ABSENCE are gated (a subtree pull restoring the old helper name
           # would silently re-bias the stamps).
-          if ($src -notmatch [regex]::Escape('return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);')) {
+          if ($src -notmatch [regex]::Escape('const int64_t send_floor = genlock_floor_boundary_100ns(wall_now_100ns, fps);')) {
             Write-Error "ndi-output.cpp: #1009 floor emit stamp (genlock_floor_boundary_100ns) gone — the sender future-bias (issue 1007 hair-trigger arming) is back"; exit 1
           }
           if ($src -match 'genlock_next_boundary_100ns') {
