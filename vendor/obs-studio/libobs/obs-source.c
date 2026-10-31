@@ -7952,6 +7952,9 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	if (source->genlock_audio_step_relock_pending)
 		relock = true;
 	source->genlock_audio_step_relock_pending = false;
+	/* camera-box issue 1387: a source on the grid release (the opt-in) is presented like an N>=2 source,
+	 * so like one it is never shallow-eligible: the latch below clears its state and never latches */
+	const bool shallow_eligible = source->genlock_last_known_n < 2 && !source->genlock_grid_release;
 	const bool was_latched = !source->genlock_shallow_measuring && source->genlock_shallow_target_frames != 0;
 	const uint32_t rejects_before = source->genlock_shallow_rejects;
 	/* design 5844353368: the STICKY content floor first; the latch below never goes under it. The audio
@@ -7960,7 +7963,7 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	const uint64_t sticky_floor = genlock_n1_shallow_sticky_track(
 		&source->genlock_shallow_sticky_frames, &source->genlock_shallow_sticky_seen_ns,
 		&source->genlock_shallow_sticky_obs_ticks, source->genlock_shallow_sticky_obs_hist,
-		source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
+		shallow_eligible, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
 		source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_min_latency_box(),
 		genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames, tick_wall);
 	const bool latched =
@@ -7968,7 +7971,7 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 				      &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks,
 				      &source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring,
 				      &source->genlock_shallow_capped,
-				      source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
+				      shallow_eligible, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
 				      genlock_n1_depth_frames(tick_wall, newest_stamp, interval),
 				      genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames,
 				      genlock_n1_is_deep_source(wall_now > newest_stamp ? wall_now - newest_stamp : 0,
