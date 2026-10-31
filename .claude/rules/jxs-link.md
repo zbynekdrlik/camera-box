@@ -466,6 +466,16 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
 7. Leave nothing behind unasked: the `JXS cam5` scene stays only if the owner wants it on the
    program; remove the cambox drop-in (step 4 of the slice-1 runbook) when the run is over.
 
+### The measurement burn on a JPEG XS input (live 31.10.2026, design 6543355618)
+
+The JPEG XS source carries `genlock_burn` like ndi-source (default off, applied live through the
+runtime-resolved `obs_source_set_genlock_burn`; the QR burn filter reads the parent's flag). It is
+safe only because the ONE burn enumeration `obs_burn_filter.BURN_INPUT_KINDS` lists
+`camera_box_jxs_source` next to `ndi_source`: sweep-check / sweep-off, the EVENT contract and the
+E2E restore see a JPEG XS burn. Never add a burn-carrying input kind without adding it to that set.
+The soak measures the JPEG XS path with `AV_SOAK_STRIH_INPUT_FMT="JXS %s src"` +
+`STREAM_PROG_SOURCE="JXS PGM src"` (the restart matrix inherits both from its environment).
+
 ### Slice 2 known limits
 
 - **Not proven before the strih build ran:** that DistroAV links with the static library on the

@@ -43,11 +43,12 @@
 #define PROP_JXS_PORT "jxs_port"
 #define PROP_JXS_CAMERA "jxs_camera"
 #define PROP_JXS_MAX_BPP "jxs_max_bpp"
-/* the genlock whitelist keys of ndi-source.cpp that apply to this source. NOT genlock_burn: the
- * burn sweeps (obs_burn_filter.py, the EVENT contract, the leak guards) enumerate ndi_source inputs
- * only, so a burn left on here would escape them and burn on the strih program. */
+/* the genlock whitelist keys of ndi-source.cpp that apply to this source, the measurement burn
+ * included (live 31.10.2026: the burn sweeps -- obs_burn_filter.py BURN_INPUT_KINDS, the EVENT
+ * contract, the leak guards -- enumerate this input kind too, so a burn here is never invisible) */
 #define PROP_GENLOCK_FIFO "genlock_fifo"
 #define PROP_GENLOCK_LATENCY_MS_SRC "genlock_latency_ms_src"
+#define PROP_BURN "genlock_burn"
 
 /* How long one receiver poll waits (bounds the stop latency). */
 #define JXS_POLL_MS 100u
@@ -72,6 +73,7 @@ struct jxs_genlock_api {
 	jxs_set_bool_fn set_fifo;
 	jxs_set_u32_fn set_latency_ms;
 	jxs_set_bool_fn set_connected;
+	jxs_set_bool_fn set_burn;
 };
 
 static const jxs_genlock_api &jxs_genlock()
@@ -80,6 +82,7 @@ static const jxs_genlock_api &jxs_genlock()
 		(jxs_set_bool_fn)jxs_resolve("obs_source_set_genlock_fifo"),
 		(jxs_set_u32_fn)jxs_resolve("obs_source_set_genlock_latency_ms"),
 		(jxs_set_bool_fn)jxs_resolve("obs_source_set_genlock_connected"),
+		(jxs_set_bool_fn)jxs_resolve("obs_source_set_genlock_burn"),
 	};
 	return api;
 }
@@ -328,6 +331,7 @@ static void jxs_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, PROP_JXS_MAX_BPP, 0);
 	obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true);
 	obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, CB_JXS_LATENCY_MS_MIN);
+	obs_data_set_default_bool(settings, PROP_BURN, false);
 }
 
 static obs_properties_t *jxs_source_getproperties(void *)
@@ -340,6 +344,7 @@ static obs_properties_t *jxs_source_getproperties(void *)
 	obs_properties_add_bool(props, PROP_GENLOCK_FIFO, "Genlock");
 	obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC, "Genlock latency (ms)", CB_JXS_LATENCY_MS_MIN,
 			       CB_JXS_LATENCY_MS_MAX, 1);
+	obs_properties_add_bool(props, PROP_BURN, "Measurement burn (test only)");
 	return props;
 }
 
@@ -362,6 +367,8 @@ static void jxs_source_update(void *data, obs_data_t *settings)
 	if (g.set_latency_ms)
 		g.set_latency_ms(s->source,
 				 cb_jxs_clamp_latency_ms(obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC)));
+	if (g.set_burn)
+		g.set_burn(s->source, obs_data_get_bool(settings, PROP_BURN));
 }
 
 static void *jxs_source_create(obs_data_t *settings, obs_source_t *source)

@@ -91,6 +91,8 @@ set -euo pipefail
 #   always removed), STRIH_HOST / STREAM_HOST (default from scripts/lib/obs-fleet.sh), PAINTER_IP
 #   (default cam2 from scripts/camera-set.sh), STRIH_CAPTURE_FPS / STREAM_CAPTURE_FPS (30, as
 #   recording-e2e.sh), STREAM_PROG_SOURCE ("NDI 2ME PGM", as recording-e2e.sh / rig-mode.sh),
+#   AV_SOAK_STRIH_INPUT_FMT (printf pattern of a strih camera input, default "NDI %s"; issue 1387:
+#   "JXS %s src" with STREAM_PROG_SOURCE="JXS PGM src" measures the JPEG XS path),
 #   AV_SOAK_MERGE_TIMEOUT_S (90), AV_SOAK_OVERHEAD_S (90, the per-slot pre/stop/upload budget),
 #   AV_SOAK_DECODE_TIMEOUT_S (default: what the slot leaves = slot - window - merge - overhead),
 #   AV_SOAK_OBS_TIMEOUT_S (30), AV_SOAK_BROADCAST_READS (3) / AV_SOAK_BROADCAST_RETRY_S (20, the
@@ -223,6 +225,7 @@ camera_resolve cam2
 PAINTER_IP="${PAINTER_IP:-$CAMERA_IP}"
 MARKER_LOG="${AV_SOAK_MARKER_LOG:-/run/rig-qpsk-markers.csv}"
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}"
+STRIH_INPUT_FMT="${AV_SOAK_STRIH_INPUT_FMT:-NDI %s}"
 STREAM_DEV_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}"
 STRIH_CAPTURE_FPS="${STRIH_CAPTURE_FPS:-30}"
 STREAM_CAPTURE_FPS="${STREAM_CAPTURE_FPS:-30}"
@@ -651,7 +654,10 @@ burn_state() {  # IP INPUT -> True / False / "" (unreadable)
   burn check --host "$1" --input "$2" 2>/dev/null | sed -n 's/.*burn_on=\(True\|False\).*/\1/p' | head -n 1 || true
 }
 BURN_TARGETS=()
-for _c in $SOAK_CAMS; do BURN_TARGETS+=("$STRIH_HOST|NDI $_c"); done
+for _c in $SOAK_CAMS; do
+  # shellcheck disable=SC2059  # the pattern is the operator's input-name format
+  BURN_TARGETS+=("$STRIH_HOST|$(printf "$STRIH_INPUT_FMT" "$_c")")
+done
 BURN_TARGETS+=("$STREAM_HOST|$STREAM_PROG_SOURCE")
 BURNS_OFF=()
 for _t in "${BURN_TARGETS[@]}"; do
