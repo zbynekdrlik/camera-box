@@ -170,3 +170,23 @@ fn the_codec_is_an_optional_linux_dependency_behind_the_jxs_feature() {
     let dev = c.find("[dev-dependencies]").unwrap();
     assert!(linux < dep && dep < dev, "a Linux-only dependency");
 }
+
+/// Live 31.10.2026 (cam5 `ps -L`, verify-device `(ah)` on cam2/3/5): upstream
+/// `svt_jxs_create_thread` raised every worker it created to SCHED_FIFO 99 whenever the process
+/// ran as root, so the cambox encoder ran ABOVE the capture thread (FIFO 90). The one local patch:
+/// a worker keeps its creator's scheduling (SCHED_OTHER, or the opt-in `CAMERA_BOX_JXS_FIFO_PRIO`
+/// the feeder takes before it opens a session).
+#[test]
+fn the_vendored_codec_never_raises_its_workers_to_a_realtime_policy() {
+    let t = read("vendor/svt-jpeg-xs/Source/Lib/Common/Codec/Threads/SvtThreads.c");
+    assert!(
+        !t.contains("pthread_setschedparam("),
+        "no realtime policy set by the library itself"
+    );
+    assert!(!t.contains("sched_priority = 99"), "no FIFO 99 worker");
+    let pin = read("vendor/svt-jpeg-xs/CAMERA-BOX-VENDOR.md");
+    assert!(
+        pin.contains("SvtThreads.c") && !pin.contains("**No local patches.**"),
+        "the patch is recorded in CAMERA-BOX-VENDOR.md"
+    );
+}
