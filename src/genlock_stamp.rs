@@ -84,6 +84,39 @@ pub fn stamp_arrival_divergence_100ns(
         - crate::ndi::floor_boundary_100ns(capture_realtime_100ns, fps)
 }
 
+/// The oldest frame (media-clock age at the stamp call) [`obs_frame_stamp_100ns`] still stamps
+/// from its own timestamp; an older one is stamped at the call (1 s: libobs never holds a raw
+/// frame that long, so an older value is a bogus timestamp, not a late frame).
+pub const OBS_FRAME_STAMP_MAX_AGE_NS: u64 = 1_000_000_000;
+
+/// Issue 1367 — the genlock stamp of a frame an OBS output sends (the DistroAV NDI and JPEG XS
+/// program outputs), the OBS twin of the camera's capture-instant stamp
+/// ([`genlock_emit_timecode_100ns`], #286).
+///
+/// libobs hands the output its frame AFTER the render tick, with the tick's own media-clock
+/// instant as `frame_ts_ns` (`video_sleep`: `vframe_info.timestamp = cur_time`, the tick's grid
+/// point). Stamping the floor of the wall clock at SEND time (the pre-1367 sender) put a frame
+/// the output thread handed over more than one slot late into the NEXT slot, and the following
+/// on-time frame into that same slot again: `stamp_gap` + `stamp_dup` on the receiver, and the
+/// stream's N==1 `NDI 2ME PGM` FIFO shed a frame.
+///
+/// The frame's instant is mapped to wall with the offset read at the call
+/// (`wall_now − (mono_now − frame_ts)`), and the NEAREST grid boundary is taken (the tick sits
+/// ON its grid point; a floor of a mapping a few µs early would flip it a slot back), clamped to
+/// the floor of `wall_now` so a stamp is never future-dated (#1009). A frame timestamp that is
+/// 0, in the future or older than [`OBS_FRAME_STAMP_MAX_AGE_NS`] is stamped at the call, the
+/// pre-1367 rule. `fps <= 0` stamps `wall_now`. Mirrored by `genlock_frame_stamp_100ns` in
+/// `vendor/distroav/src/ndi-output.cpp` (parity gate `tests/obs_frame_stamp_parity_1367.rs`).
+pub fn obs_frame_stamp_100ns(
+    wall_now_100ns: i64,
+    mono_now_ns: u64,
+    frame_ts_ns: u64,
+    fps: i64,
+) -> i64 {
+    let _ = (mono_now_ns, frame_ts_ns);
+    crate::ndi::floor_boundary_100ns(wall_now_100ns, fps)
+}
+
 /// How many CONSECUTIVE captured frames elapse before the monotonic->realtime offset
 /// (`capture_realtime_100ns`'s `mono_to_real_offset_100ns` input) is due for a re-sample.
 /// 100 frames is ~1.7s at 60fps / ~3.3s at 30fps. A slewing clock (dantesync's `adjtimex`
