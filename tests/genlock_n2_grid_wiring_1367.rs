@@ -343,4 +343,3 @@ fn an_opted_in_source_is_never_shallow_eligible_1387() {
     );
     assert!(!latch.contains("source->genlock_last_known_n < 2, relock,"));
 }
-
