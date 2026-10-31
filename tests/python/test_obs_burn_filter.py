@@ -325,3 +325,16 @@ def test_cmd_session_probe_nonzero_when_stats_unreadable(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc != 0
     assert out.strip() == "", "no integer must be printed when renderTotalFrames is unreadable"
+
+
+def test_burn_enumeration_covers_the_jpeg_xs_inputs_1387():
+    """Issue 1387 (live 31.10.2026: the strih cameras and the stream program run on JPEG XS): a
+    burn on a `camera_box_jxs_source` input must be seen by every sweep, so the ONE enumeration
+    lists both input kinds."""
+    names = obs_burn_filter.ndi_source_input_names([
+        {"inputName": "NDI cam1", "inputKind": "ndi_source"},
+        {"inputName": "JXS cam5 src", "inputKind": "camera_box_jxs_source"},
+        {"inputName": "Colour Bars", "inputKind": "color_source_v3"},
+        {"inputName": "JXS PGM src", "inputKind": "camera_box_jxs_source"},
+    ])
+    assert names == ["NDI cam1", "JXS cam5 src", "JXS PGM src"]

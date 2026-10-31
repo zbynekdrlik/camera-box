@@ -234,9 +234,10 @@ fn the_genlock_whitelist_keys_apply_through_the_runtime_resolved_exports() {
     for key in ["\"genlock_fifo\"", "\"genlock_latency_ms_src\""] {
         assert!(s.contains(key) && ndi.contains(key), "{key}");
     }
-    // no burn on this source: the burn sweeps enumerate ndi_source inputs only, a burn left on here
-    // would escape every leak guard
-    assert!(!s.contains("\"genlock_burn\"") && !s.contains("set_genlock_burn"));
+    // live 31.10.2026: the measurement burn applies here like on an ndi_source (the sweeps
+    // enumerate both input kinds, obs_burn_filter.BURN_INPUT_KINDS), default off, applied live
+    assert!(s.contains("\"genlock_burn\"") && ndi.contains("\"genlock_burn\""));
+    assert!(s.contains("\"obs_source_set_genlock_burn\""));
     let defaults = function_body(&s, "static void jxs_source_getdefaults(");
     assert!(defaults.contains("obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true);"));
     assert!(defaults.contains(

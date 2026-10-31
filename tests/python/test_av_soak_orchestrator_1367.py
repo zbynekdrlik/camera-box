@@ -1377,3 +1377,14 @@ def test_an_explicit_av_expected_ms_wins_over_the_feed_1482(rig):
     out = _soak(env, "--plan").stdout
     line = _merge_line(out)
     assert "--av-expected-ms -12" in line and "-45" not in line
+
+
+def test_the_soak_measures_the_jpeg_xs_inputs_when_asked_1387(rig):
+    """Issue 1387 (live 31.10.2026): the live path runs on JPEG XS, so the soak burns the strih
+    camera inputs `JXS <cam> src` and the stream program input `JXS PGM src` when told to."""
+    env, p = rig
+    env = dict(env, AV_SOAK_STRIH_INPUT_FMT="JXS %s src", STREAM_PROG_SOURCE="JXS PGM src")
+    _soak(env, "--run")
+    burns = _calls(p["log"], "burn")
+    added = {c[c.index("--input") + 1] for c in burns if c[0] == "add"}
+    assert added == {"JXS cam1 src", "JXS cam3 src", "JXS PGM src"}, added
