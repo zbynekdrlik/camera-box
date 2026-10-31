@@ -538,6 +538,17 @@ impl JxsReceiver {
 mod tests {
     use super::*;
 
+    /// Live 31.10.2026: the strih program input on stream-snv holds 1087 ms in its genlock FIFO
+    /// and read every frame decoded over 100 ms after its timecode as late, stepping the program
+    /// link's bpp down. A frame is late only past what the input holds, never under 100 ms.
+    #[test]
+    fn a_frame_is_late_only_past_the_inputs_genlock_latency_never_under_100_ms() {
+        assert_eq!(late_ms_for_latency(3), 100.0);
+        assert_eq!(late_ms_for_latency(100), 100.0);
+        assert_eq!(late_ms_for_latency(101), 101.0);
+        assert_eq!(late_ms_for_latency(1087), 1087.0);
+    }
+
     fn report(tc: u64) -> FrameReport {
         FrameReport {
             timecode: tc,
