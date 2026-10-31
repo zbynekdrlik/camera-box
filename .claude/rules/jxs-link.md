@@ -927,6 +927,17 @@ react to a GROWING QUEUE, before the switch buffer overflows.
     stream's 1 GbE port once a frame -- and read 1.6-2.0 ms apart report after report with the
     queue at 0.0-0.1 ms and nothing lost; judged raw against the 1.75 ms bound it read "overuse"
     every ~8 s, sawed the pace 900 -> 738 and asked the auto bpp down each time: the bpp stayed at 4.
+    **The quiet ENVELOPE (live 31.10.2026, the first end-to-end run):** the NDI frame lands at a
+    different point of the JPEG XS frame each second, so the stretch is not constant but varies
+    report to report by up to the burst's own time on the port (~3 ms for a 400 KB frame); over the
+    minimum an ordinary report crossed the bound (39 overuses in 7 min, the pace 900 -> 720, the
+    link at 4 bpp). A stretch now reads overuse only when it is ALSO more than `ENVELOPE_MARGIN_US`
+    (0.5 ms) above its level's envelope = the largest stretch of the level's last 30 FULL-pace
+    reports. Fed only at factor 1 (so a download's cut-pace reports never widen it), kept by count
+    and never aged (a level left during a download still has it). The bench's
+    `cross_burst_wander_us` scenarios (the burst moves each second, splitmix64) pin both halves: the
+    varying burst alone reaches 8 bpp with no congestion step, and with the download it still steps
+    at 63 s and recovers to 8 bpp / 900; every older scenario's outcome is unchanged.
     The send span = max(`wire_ms` p50 over its last 30 frames, the
     frame's wire bytes over its OWN link: a 1 GbE cambox's NIC needs ~19 ms for an 8 bpp frame its
     encoder hands over in ~14 ms, never a stretched path). Or a lost slice. Then the pace
