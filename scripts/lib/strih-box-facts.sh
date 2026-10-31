@@ -46,7 +46,9 @@ strih_box_fact_keys() {
     STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC \
     STRIH_STREAM_DEV_SCENE \
     STRIH_BKSHADING_RELAYS \
-    STRIH_AUDIO_BUFFERING_MS
+    STRIH_AUDIO_BUFFERING_MS \
+    STRIH_JXS_CAMERAS STRIH_JXS_CAMERA_PIN_MS \
+    STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -431,7 +433,77 @@ strih_box_validate() {
   if [[ ! "${f[STRIH_AUDIO_BUFFERING_MS]}" =~ ^[0123456789]{1,3}$ ]] || [ "$((10#${f[STRIH_AUDIO_BUFFERING_MS]}))" -gt 960 ]; then
     echo "strih-box ${name}: STRIH_AUDIO_BUFFERING_MS '${f[STRIH_AUDIO_BUFFERING_MS]}' must be the box's fixed OBS audio buffering in ms (an integer 0..960)" >&2; bad=1
   fi
+  strih_box_jxs_facts_ok "${f[STRIH_ROLE]}" "${f[STRIH_CAMERAS]}" "${f[STRIH_JXS_CAMERAS]}" "${f[STRIH_JXS_CAMERA_PIN_MS]}" \
+    "${f[STRIH_JXS_PROGRAM_PORT]}" "${f[STRIH_JXS_PROGRAM_PIN_MS]}" "strih-box ${name}: " || bad=1
   [ "$bad" = 0 ]
+}
+
+# issue 1387 (owner 31.10.2026: the JPEG XS path camera -> strih -> stream, live): the link's facts. PP
+# is deferred by the owner, so every PP file declares none.
+#   STRIH_JXS_CAMERAS (strih role) = `N:PORT` per camera on the link: N one of STRIH_CAMERAS, PORT the
+#     UDP port its `JXS camN src` input listens on (the camera's CAMERA_BOX_JXS_TARGET port); each N and
+#     each port once. STRIH_JXS_CAMERA_PIN_MS = their genlock pin (ROZHODNUTE 6546700019: 36 ms, the
+#     fixed 100 ms grid age).
+#   STRIH_JXS_PROGRAM_PORT (stream role) = the UDP port `JXS PGM src` receives the venue strih's program
+#     on; STRIH_JXS_PROGRAM_PIN_MS = its genlock pin (the stream A/V pin: a re-calibration is this line).
+# A pin is the jxs-source clamp range (vendor/distroav/src/jxs-source-decide.h CB_JXS_LATENCY_MS_MIN /
+# _MAX), a port 1024..65535; a value is none exactly when its partner is none. Digit sets spelled out.
+STRIH_BOX_JXS_PIN_MS_MIN=3
+STRIH_BOX_JXS_PIN_MS_MAX=2000
+
+# _strih_box_jxs_port VALUE -> 0 iff VALUE is a UDP port 1024..65535 (no leading zero).
+_strih_box_jxs_port() {
+  [[ "${1-}" =~ ^[123456789][0123456789]{3,4}$ ]] && [ "$1" -le 65535 ]
+}
+
+# _strih_box_jxs_pin VALUE -> 0 iff VALUE is a whole ms pin inside the jxs-source clamp range.
+_strih_box_jxs_pin() {
+  [[ "${1-}" =~ ^[123456789][0123456789]{0,3}$ ]] && [ "$1" -ge "$STRIH_BOX_JXS_PIN_MS_MIN" ] \
+    && [ "$1" -le "$STRIH_BOX_JXS_PIN_MS_MAX" ]
+}
+
+# strih_box_jxs_facts_ok ROLE CAMERAS JXS_CAMERAS CAM_PIN PROG_PORT PROG_PIN PREFIX -> 0 iff the four
+# JPEG XS facts hold together (above); one `PREFIX...` stderr line per problem.
+strih_box_jxs_facts_ok() {
+  local role="${1-}" cams="${2-}" jc="${3-}" cpin="${4-}" pport="${5-}" ppin="${6-}" p="${7-}" e n port bad=0
+  local seen_n=" " seen_p=" " pins="${STRIH_BOX_JXS_PIN_MS_MIN}..${STRIH_BOX_JXS_PIN_MS_MAX}"
+  if [ "$jc" = none ]; then
+    [ "$cpin" = none ] || { echo "${p}STRIH_JXS_CAMERA_PIN_MS '${cpin}' must be none while STRIH_JXS_CAMERAS is none" >&2; bad=1; }
+  elif [ "$role" != strih ]; then
+    echo "${p}STRIH_JXS_CAMERAS '${jc}' must be none on the ${role} role (the cameras arrive on the strih)" >&2; bad=1
+  else
+    for e in $jc; do
+      n="${e%%:*}"; port="${e#*:}"
+      # (the port check runs its own =~, so the match groups are never read after it)
+      if [[ ! "$e" =~ ^[123456789][0123456789]*:[0123456789]+$ ]] || ! _strih_box_jxs_port "$port"; then
+        echo "${p}STRIH_JXS_CAMERAS entry '${e}' is not N:PORT (a camera number : a UDP port 1024..65535)" >&2; bad=1; continue
+      fi
+      [[ " ${cams} " == *" ${n} "* ]] || { echo "${p}STRIH_JXS_CAMERAS entry '${e}': camera ${n} is not one of this box's STRIH_CAMERAS (${cams})" >&2; bad=1; }
+      [[ "$seen_n" == *" ${n} "* ]] && { echo "${p}STRIH_JXS_CAMERAS lists camera ${n} twice" >&2; bad=1; }
+      [[ "$seen_p" == *" ${port} "* ]] && { echo "${p}STRIH_JXS_CAMERAS gives UDP port ${port} to two cameras (one port = one input)" >&2; bad=1; }
+      seen_n="${seen_n}${n} "; seen_p="${seen_p}${port} "
+    done
+    _strih_box_jxs_pin "$cpin" || { echo "${p}STRIH_JXS_CAMERA_PIN_MS '${cpin}' must be the JPEG XS cameras' genlock pin in ms (${pins})" >&2; bad=1; }
+  fi
+  if [ "$pport" = none ]; then
+    [ "$ppin" = none ] || { echo "${p}STRIH_JXS_PROGRAM_PIN_MS '${ppin}' must be none while STRIH_JXS_PROGRAM_PORT is none" >&2; bad=1; }
+  elif [ "$role" != stream ]; then
+    echo "${p}STRIH_JXS_PROGRAM_PORT '${pport}' must be none on the ${role} role (the program arrives on the stream box)" >&2; bad=1
+  else
+    _strih_box_jxs_port "$pport" || { echo "${p}STRIH_JXS_PROGRAM_PORT '${pport}' must be a UDP port 1024..65535" >&2; bad=1; }
+    _strih_box_jxs_pin "$ppin" || { echo "${p}STRIH_JXS_PROGRAM_PIN_MS '${ppin}' must be the program input's genlock pin in ms (${pins})" >&2; bad=1; }
+  fi
+  [ "$bad" = 0 ]
+}
+
+# strih_box_jxs_port_of JXS_CAMERAS N -> the UDP port STRIH_JXS_CAMERAS gives camera N, or `none` when
+# it lists no such camera (or is none). Pure; always rc 0 (a validated fact never holds a bad token).
+strih_box_jxs_port_of() {
+  local e
+  for e in ${1-}; do
+    case "$e" in "${2-}":*) printf '%s\n' "${e#*:}"; return 0 ;; esac
+  done
+  printf 'none\n'
 }
 
 # strih_box_alias_of NAME -> print the box NAME is an issue-1414 transition alias of, rc 0; rc 1 (no

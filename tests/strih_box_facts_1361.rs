@@ -144,6 +144,12 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_BKSHADING_RELAYS",
     // issue 1425 (design 6443440513): the box's FIXED OBS audio buffering, ms (0..960).
     "STRIH_AUDIO_BUFFERING_MS",
+    // issue 1387: the JPEG XS link -- the strih's N:PORT cameras + their pin, the stream's program
+    // port + its pin (none on every PP box: the PP rollout is deferred).
+    "STRIH_JXS_CAMERAS",
+    "STRIH_JXS_CAMERA_PIN_MS",
+    "STRIH_JXS_PROGRAM_PORT",
+    "STRIH_JXS_PROGRAM_PIN_MS",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -217,6 +223,11 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_BKSHADING_RELAYS=3=sbc-relay@register:handheld-1",
         // issue 1425: strih-snv drew 0 ms on its last 10 launches; the fact fixes it there.
         "STRIH_AUDIO_BUFFERING_MS=0",
+        // issue 1387: cam2/3/5 on the JPEG XS link at their live ports, the 100 ms grid-age pin.
+        "STRIH_JXS_CAMERAS=2:7002 3:7003 5:7000",
+        "STRIH_JXS_CAMERA_PIN_MS=36",
+        "STRIH_JXS_PROGRAM_PORT=none",
+        "STRIH_JXS_PROGRAM_PIN_MS=none",
         "LOADED=strih-snv",
     ] {
         assert!(
@@ -723,6 +734,11 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
         "strih-snv",
         &[
             ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 5"),
+            // issue 1387: a JPEG XS camera must be one of the box's cameras.
+            (
+                "STRIH_JXS_CAMERAS=2:7002 3:7003 5:7000",
+                "STRIH_JXS_CAMERAS=2:7002 5:7000",
+            ),
             // issue 808 (owner 26.10.2026): a relay override must name one of the box's cameras.
             (
                 "STRIH_BKSHADING_RELAYS=3=sbc-relay@register:handheld-1",
@@ -894,6 +910,11 @@ fn every_fact_dependent_output_follows_a_different_box() {
                 "STRIH_CG_SENDER=none",
             ),
             ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=1 3"),
+            // issue 1387: a JPEG XS camera must be one of the box's cameras.
+            (
+                "STRIH_JXS_CAMERAS=2:7002 3:7003 5:7000",
+                "STRIH_JXS_CAMERAS=3:7003",
+            ),
         ],
     );
     let dir = d.path().to_string_lossy().into_owned();
