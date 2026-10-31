@@ -65,6 +65,10 @@ struct Scenario {
     /// From this time on (s) the burst carries these bytes (the program goes from black to
     /// cameras and its NDI frame grows).
     cross_burst_grows: Option<(f64, f64)>,
+    /// The burst's offset moves each second to another point within +- this many us of its `at`
+    /// (live 31.10.2026: the NDI program frame lands at a different point of the JPEG XS frame
+    /// from one second to the next, so the stretch varies report to report).
+    cross_burst_wander_us: f64,
     delay_signal: bool,
     end_s: f64,
 }
@@ -139,6 +143,7 @@ fn cross_events(sc: &Scenario, t0: f64, next_cross_us: &mut f64, events: &mut Ve
         Some((from_s, grown)) if t_s >= from_s => (grown, at),
         _ => (b, at),
     }) {
+        let at = at + sc.cross_burst_wander_us * wander_unit(t_s.floor() as u64);
         for g in 0..(bytes / (GROUP as f64 * DGRAM_WIRE)).ceil() as usize {
             // the burst leaves strih's 10 GbE NIC at line rate
             events.push((
@@ -157,6 +162,15 @@ fn cross_events(sc: &Scenario, t0: f64, next_cross_us: &mut f64, events: &mut Ve
         events.push((*next_cross_us, false));
         *next_cross_us += (GROUP as f64 * DGRAM_WIRE * 8.0) / c;
     }
+}
+
+/// A fixed pseudo-random value in -1..=1 per second (splitmix64), so a run is reproducible.
+fn wander_unit(second: u64) -> f64 {
+    let mut z = second.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
 }
 
 fn run(sc: Scenario) -> Outcome {
@@ -344,6 +358,7 @@ const STRIH_TO_STREAM: Scenario = Scenario {
     tx_steps: &[],
     cross_burst: None,
     cross_burst_grows: None,
+    cross_burst_wander_us: 0.0,
     delay_signal: true,
     end_s: 420.0,
 };
@@ -426,6 +441,7 @@ fn a_line_rate_cambox_with_a_phase_sawtooth_and_clock_steps_never_reads_congesti
         tx_steps: &[],
         cross_burst: None,
         cross_burst_grows: None,
+        cross_burst_wander_us: 0.0,
         delay_signal: true,
         end_s: 120.0,
     });
@@ -581,4 +597,53 @@ fn the_ndi_burst_growing_past_the_bound_relearns_and_settles() {
     assert_eq!(o.bpp_at_end, 8);
     assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
     assert_eq!(o.pace_changes_after_300s, 0, "settled");
+}
+
+/// Live 31.10.2026 09:21-09:30 (strih-snv -> stream-snv, bundle 7d763ad2ab, the first end-to-end
+/// JPEG XS run): the NDI program frame lands at a DIFFERENT point of the JPEG XS frame from one
+/// second to the next, so the stretch varies report to report (the overuse lines read
+/// `span_rx/tx_ms` 14.3/12.0, 13.9/12.4, 15.2/12.8 with queue_ms 0.2-0.3, nothing lost). Judged
+/// against the MINIMUM of 30 s, an ordinary report crossed the bound: 39 overuses in ~7 min, the
+/// pace sawed 900 -> 720 and the program link never left 4 bpp. A varying stretch with no queue is
+/// not congestion: 8 bpp, the receiver-link pace, no congestion step, no sawtooth.
+#[test]
+fn an_ndi_burst_landing_at_a_varying_point_is_not_congestion() {
+    let o = run(Scenario {
+        cross: quiet,
+        encode_us: 11_800.0,
+        cross_burst: Some((400_000.0, 14_000.0)),
+        cross_burst_wander_us: 6_000.0,
+        end_s: 180.0,
+        ..STRIH_TO_STREAM
+    });
+    eprintln!("{o:?}");
+    assert_eq!(o.congestion_steps, 0, "never a congestion step");
+    assert_eq!(o.lossy_frames, 0);
+    assert_eq!(o.bpp_at_60s, 8, "8 bpp within the first minute");
+    assert_eq!(o.bpp_at_end, 8);
+    assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
+    assert_eq!(o.pace_changes_after_30s, 0, "no pace sawtooth");
+}
+
+/// The same varying burst plus the owner's saturating download: the link must still back off and
+/// recover (a base that tolerates the varying burst must not blind the real signal).
+#[test]
+fn with_a_varying_ndi_burst_a_saturating_download_still_backs_off_and_recovers() {
+    let o = run(Scenario {
+        encode_us: 11_800.0,
+        cross_burst: Some((400_000.0, 14_000.0)),
+        cross_burst_wander_us: 6_000.0,
+        ..STRIH_TO_STREAM
+    });
+    eprintln!("{o:?}");
+    let first = o.first_congestion_step_s.expect("the download is seen");
+    assert!((60.0..66.0).contains(&first), "first step at {first}");
+    assert!(o.min_bpp_download < 8, "it steps down during the download");
+    assert!(
+        o.lossy_frames_after_70s == 0,
+        "{}",
+        o.lossy_frames_after_70s
+    );
+    assert_eq!(o.bpp_at_end, 8);
+    assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
 }
