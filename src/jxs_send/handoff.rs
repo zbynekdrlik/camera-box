@@ -693,10 +693,14 @@ fn send(
         let mut first_wall: Option<(i64, i64)> = None;
         let mut last_sent: Option<Instant> = None;
         let mut paced_ns = 0u64;
+        let mut codec = jxs_link::pace::CodecClock::default();
+        let since_submit = |t: Instant| t.saturating_duration_since(submitted).as_nanos() as u64;
         let result = out.recv_frame(|index, packet, _last| {
+            codec.enter(since_submit(Instant::now()));
             stats.progress_ms.store(monotonic_ms(), Ordering::Relaxed);
             if index >= count || count > 255 {
                 packet_errors += 1;
+                codec.exit(since_submit(Instant::now()));
                 return;
             }
             let base = PacketHeader {
@@ -730,6 +734,7 @@ fn send(
                 }
                 Err(_) => packet_errors += 1,
             }
+            codec.exit(since_submit(Instant::now()));
         });
         // in flight from its submit to its last packet (or its failure)
         stats.in_flight.fetch_sub(1, Ordering::Relaxed);
@@ -750,9 +755,14 @@ fn send(
                     if let Some((w, steps)) = first_wall {
                         bpp.pace.on_first_send(timecode.max(0) as u64, w, steps);
                     }
-                    // the auto bpp judges the codec, not the paced wire: a pace too slow for
-                    // the frames shows as dropped_busy, which steps it down on its own
-                    bpp.on_frame_sent(jxs_link::pace::codec_ms(encode_ms, paced_ns));
+                    // the auto bpp judges the codec, not the wire: the time to the first packet
+                    // plus the waits for the encoder (live 31.10.2026); a link too slow for the
+                    // frames shows as dropped_busy, which steps it down on its own
+                    bpp.on_frame_sent(
+                        codec
+                            .codec_ms()
+                            .unwrap_or_else(|| jxs_link::pace::codec_ms(encode_ms, paced_ns)),
+                    );
                 } else {
                     window.encode_errors += 1;
                     bpp.on_frame_error();

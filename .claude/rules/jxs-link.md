@@ -801,6 +801,17 @@ is on, and per source whether it comes over NDI or JPEG XS.
   the proc handler is registered once at module load and never removed (libobs has no removal), safe
   because the frontend's status bar is gone before modules unload.
 
+**The codec time the auto bpp judges (live 31.10.2026):** `jxs_link::pace::CodecClock` on the
+sender's packet loop = the time from the frame's submit to its FIRST packet plus every wait for the
+encoder's NEXT packet; the sender's own work on a packet (send calls, pace sleeps) is never counted.
+The old `encode_ms - paced_ns` subtracted only the pace SLEEPS: on strih-snv's program link at 8 bpp
+into stream's 1 GbE port the send span is ~21-23 ms and the send calls between sleeps read as codec
+time (~20 ms against a codec that the on-box `jxs-encode-bench` measured at p99 10.44 ms), so the
+link never had the 60 % headroom to climb past 6-7. An encoder slower than the link still reads slow
+(its waits count); a link too slow for the frames shows as `dropped_busy`. `codec_ms` stays as the
+fallback for a frame with no packet. Test: `the_codec_time_counts_only_the_waits_for_the_encoder_never_the_send_work`.
+
+
 ## The automatic bpp (issue 1387, owner decision 6495938345)
 
 - **The back channel: ONE 56-byte receiver report per second** (`jxs_link::ReceiverReport`,

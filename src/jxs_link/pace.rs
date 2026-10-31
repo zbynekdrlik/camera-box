@@ -98,6 +98,40 @@ pub fn codec_ms(encode_ms: f64, paced_ns: u64) -> f64 {
     (encode_ms - paced_ns as f64 / 1e6).max(0.0)
 }
 
+/// The codec time of one frame, measured on the sender's packet loop (live 31.10.2026): the time
+/// from the submit to the first packet plus every wait for the encoder's NEXT packet. The sender's
+/// own work on a packet (its send calls, its pace sleeps) is never counted, so a link slower than
+/// the codec no longer reads as a slow codec; an encoder slower than the link still does, through
+/// the waits. Times are nanoseconds since the frame's submit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodecClock {
+    first_ns: Option<u64>,
+    last_exit_ns: Option<u64>,
+    waited_ns: u64,
+}
+
+impl CodecClock {
+    /// The sender got a packet from the encoder at `now_ns`.
+    pub fn enter(&mut self, now_ns: u64) {
+        match (self.first_ns, self.last_exit_ns) {
+            (None, _) => self.first_ns = Some(now_ns),
+            (Some(_), Some(exit)) => self.waited_ns += now_ns.saturating_sub(exit),
+            (Some(_), None) => {}
+        }
+    }
+
+    /// The sender finished with that packet at `now_ns` and asks the encoder for the next one.
+    pub fn exit(&mut self, now_ns: u64) {
+        self.last_exit_ns = Some(now_ns);
+    }
+
+    /// The codec time in ms, `None` when no packet came.
+    pub fn codec_ms(&self) -> Option<f64> {
+        self.first_ns
+            .map(|first| (first + self.waited_ns) as f64 / 1e6)
+    }
+}
+
 /// The running send schedule of one paced link (module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaceSchedule {
