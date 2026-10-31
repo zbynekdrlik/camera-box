@@ -1119,9 +1119,12 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
     `jxs_target` = the VENUE's stream box (the stream-role fact file of the same `STRIH_VENUE`: its
     `STRIH_IP` + `STRIH_JXS_PROGRAM_PORT`, `strih_jxs_program_target`) + `jxs_stream_id` 100. The
     operator's `jxs_bpp_*` / `jxs_cores` / `jxs_pace_mbps` and any other key are KEPT; the render of the
-    live file is the live file byte-for-byte (147 bytes). An unparseable file is backed up, then
-    rewritten. A venue with no program port leaves the file alone. Written through
-    `obs_box_write_if_changed` as the desktop user, 0644. The plugin reads it at the next OBS start.
+    live file is the live file byte-for-byte (147 bytes). Root works in the user's tree, so a symlinked
+    file is REFUSED, every read is O_NOFOLLOW + a regular-file check, and an unparseable file is moved
+    aside with `mv -T` (never copied through a planted link), then rewritten. A venue with no program
+    port gets an ENABLED file disabled (`"enabled": false`, every other key kept) so setup converges to
+    what verify grades; anything else is left alone. Written through `obs_box_write_if_changed` as the
+    desktop user, 0644. The plugin reads it at the next OBS start.
 - `strih-obs-start.sh` runs `obs_jxs_inputs.py --bootstrap` after the strih_scenes seed when the
   manifest exists, best effort (a WARN never stops OBS):
   - an existing JPEG XS input gets ONE `SetInputSettings` overlay of the declared keys that differ
@@ -1130,16 +1133,25 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
     shape), never in an operator scene: `Cam N`, `Moderatori`, `MULTIVIEW` and `PRO` are the operator's
     arrangement, and no tool writes the production scene;
   - an input of another kind under the declared name is never touched (reported);
-  - `genlock_burn` is never written (the burn sweeps own it, TEST mode turns it on).
+  - `genlock_burn` is never written (the burn sweeps own it, TEST mode turns it on);
+  - nothing is written while OBS streams or records, or when that cannot be read (`obs_live`): a
+    latency never changes on air (owner rule); at the launch nothing is live yet;
+  - **pin ownership:** the declared pin is the FACT. A tool that writes another pin onto a JPEG XS
+    input over WS (an E2E measurement profile with `STREAM_PROG_SOURCE="JXS PGM src"`, a hand
+    calibration) is reverted at the next OBS start; a new pin is a fact change.
 - verify-strih item 49 gained `strih_jxs_config_verify_row "$USER_HOME"` (one line):
   - `(jxs-seed)`: the installed manifest = the facts' render, the installed seeder = the checkout's;
   - `(jxs-inputs)` + `(jxs-place)`: `obs_jxs_inputs.py --verify` against the FACTS' render over
-    obs-websocket (`STRIH_JXS_OBS_HOST` / `_PORT` seams): every declared input present, of the kind,
-    the declared settings (EFFECTIVE = the kind's defaults under the explicit ones: a live input whose
-    `genlock_grid` sits at its default true reads on); a report-only NOTE names the scenes it is shown
-    in; OBS not running = a NOTE;
-  - `(jxs-output)` (strih role): `enabled true`, the derived target, stream id 100; a hand-enabled file on
-    a venue that declares no program FAILs.
+    obs-websocket (verify-strih's `WS_HOST`; `STRIH_JXS_OBS_PORT` is the test seam): every declared
+    input present, of the kind, the declared settings (EFFECTIVE = the kind's defaults under the explicit
+    ones: a live input whose `genlock_grid` sits at its default true reads on); a report-only NOTE names
+    the scenes it is shown in; an unreachable websocket is a NOTE only while no obs process runs
+    (`strih_operator_obs_running`, the studio-mode row's rule), else a FAIL;
+  - `(jxs-output-live)` (strih role, `--output-target`): the RUNNING `camera-box JPEG XS program` output
+    exists, is active and runs the derived target + stream id (`GetOutputStatus` / `GetOutputSettings`):
+    a stopped output or a WS re-target lives in OBS only, the file cannot show it;
+  - `(jxs-output)` (strih role): the file reads `enabled true`, the derived target, stream id 100; a
+    hand-enabled file on a venue that declares no program FAILs (setup step 6 disables it).
 - Read-only check of the live boxes on 31.10.2026: `obs_jxs_inputs.py --verify` from dev1 against
   strih-snv and stream-snv PASSes every input with the declared facts, so the first setup-strih run there
   is a pure read for the inputs and `unchanged` for jxs-output.json.
@@ -1155,16 +1167,20 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
    target is baked in), then `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@<camN> bash -s < "$prog"`
    -> `PLAN (...): ... drop-in write; runtime drop-ins: .../jxs.conf; camera-box runs 10.77.9.202:700N`,
    the verified close, `removed the runtime drop-in`, `camera-box already runs the declared target -- not
-   restarted`, `READBACK (...): OK`. Then `./scripts/verify-device.sh CAMn`: `(ay)` PASS.
+   restarted`, `READBACK (...): OK`. A `NOTE: ... also sets ...` line names any other hand knob the removed
+   runtime file carried (a slice-1 `CAMERA_BOX_JXS_BPP` etc.): it is dropped with it. `rm -f "$prog"`.
+   Then `./scripts/verify-device.sh CAMn`: `(ay)` PASS.
 2. strih-snv + stream-snv: the next genlock deploy runs setup-strih (or `sudo ./scripts/setup-strih.sh
    --box <box>` from a checkout): step 6 prints `jxs-seed.json written`, `jxs-output.json unchanged` on
-   strih-snv. The inputs are healed at the next OBS start; `python3 /usr/local/bin/obs_jxs_inputs.py
-   --bootstrap` applies them at once (a pure read on the live state). The saved collection gets the 36 ms
-   pin when OBS next saves it (on exit).
-3. `sudo ./scripts/verify-strih.sh --box <box>`: `(jxs-seed)`, `(jxs-inputs)` and (strih) `(jxs-output)` PASS.
+   strih-snv. The inputs are healed at the next OBS start (a pure read on the live state: every live
+   input already matches); a hand `python3 /usr/local/bin/obs_jxs_inputs.py --bootstrap` refuses every
+   write while OBS streams or records. The saved collection gets the 36 ms pin when OBS next saves it
+   (on exit).
+3. `sudo ./scripts/verify-strih.sh --box <box>`: `(jxs-seed)`, `(jxs-inputs)` and (strih) `(jxs-output-live)`
+   + `(jxs-output)` PASS.
 4. After the stream A/V re-measure: change `STRIH_JXS_PROGRAM_PIN_MS` in `stream-snv.env`, merge, re-run
-   setup-strih on stream-snv, restart its OBS (or `--bootstrap`); never a WS-only pin change (the seeder
-   heals it back at the next OBS start).
+   setup-strih on stream-snv, restart its OBS while it is off air (the pin is written at the launch,
+   never on air); never a WS-only pin change (the seeder heals it back at the next OBS start).
 
 ## Supervisor runbook: the saturation test (owner scenario, strih-snv -> stream-snv)
 

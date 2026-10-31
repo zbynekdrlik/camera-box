@@ -15,12 +15,20 @@ runs `--bootstrap` after the strih_scenes seed:
   * an ABSENT input is created in its own holding scene (`JXS camN` / `JXS PGM`, the slice-2/3 runbook
     shape), never in an operator scene: the scene arrangement (Cam N, Moderatori, MULTIVIEW, PRO) is
     the operator's, and the production scene PRO is never written by a tool;
-  * `genlock_burn` is never written (the burn sweeps own it), nor any other key.
+  * `genlock_burn` is never written (the burn sweeps own it), nor any other key;
+  * nothing at all is written while OBS streams or records (or when that cannot be read): the owner's
+    rule is that a latency never changes on air. At the launch nothing is live yet.
 
 `--verify` prints PASS / FAIL / NOTE rows for verify-strih item 49 (read-only): every declared input
 present, of the JPEG XS kind, with the declared settings, plus a report-only NOTE naming the scenes it
-is shown in. Pure given an injected obs-websocket `rpc(request_type, data=None, ignore_err=False)`;
-main() owns the connection (the strih_scenes.Obs client installed beside this file).
+is shown in; with `--output-target` (the strih) also the RUNNING program output (`camera-box JPEG XS
+program`: exists, active, the declared target + stream id). Pure given an injected obs-websocket
+`rpc(request_type, data=None, ignore_err=False)`; main() owns the connection (the strih_scenes.Obs client
+installed beside this file).
+
+Pin ownership: the declared pin is the box FACT. A tool that writes another pin onto a JPEG XS input
+over obs-websocket (an E2E measurement profile, a hand calibration) is reverted at the next OBS start;
+a new value is a fact change (STRIH_JXS_CAMERA_PIN_MS / STRIH_JXS_PROGRAM_PIN_MS).
 """
 import argparse
 import collections
@@ -29,6 +37,7 @@ import os
 import sys
 
 INPUT_KIND = "camera_box_jxs_source"
+OUTPUT_NAME = "camera-box JPEG XS program"
 MANIFEST_PATH = "/opt/camera-box/jxs-seed.json"
 INT_KEYS = ("jxs_port", "jxs_camera", "jxs_max_bpp", "genlock_latency_ms_src")
 BOOL_KEYS = ("genlock_fifo", "genlock_grid")
@@ -126,16 +135,32 @@ def _fmt(v):
     return json.dumps(v)
 
 
-def bootstrap(rpc, specs):
+def obs_live(rpc):
+    """True when OBS streams or records, or when either state cannot be read (fail closed): a seeder
+    never changes an input while OBS is live (owner rule: no latency change during operation)."""
+    for req in ("GetStreamStatus", "GetRecordStatus"):
+        resp = rpc(req, {}, ignore_err=True) or {}
+        if resp.get("outputActive") is not False:
+            return True
+    return False
+
+
+def bootstrap(rpc, specs, live=False):
     """Apply the plan of every spec. Returns (lines, ok): one log line per input, ok False when an input
     was refused. Writes only CreateScene / CreateInput (an absent input, in its holding scene) and
-    SetInputSettings (the differing declared keys, overlay); a failed write raises through rpc."""
+    SetInputSettings (the differing declared keys, overlay); a failed write raises through rpc. With
+    `live` (OBS streams or records) nothing is written: every needed write is refused by name."""
     kinds = _kinds(rpc)
     scenes = {s.get("sceneName") for s in (rpc("GetSceneList", {}, ignore_err=True) or {}).get("scenes", []) or []}
     lines, ok = [], True
     for spec in specs:
         eff = _effective(rpc, spec.name) if kinds.get(spec.name) == INPUT_KIND else {}
         action, detail = plan_input(spec, kinds, eff)
+        if live and action in ("create", "update"):
+            ok = False
+            lines.append(f"jxs inputs: REFUSED to {action} '{spec.name}' while OBS streams or records -- an input "
+                         f"never changes on air; the next OBS start heals it")
+            continue
         if action == "create":
             if spec.scene not in scenes:
                 rpc("CreateScene", {"sceneName": spec.scene})
@@ -205,6 +230,25 @@ def verify_rows(rpc, specs):
     return rows
 
 
+def output_rows(rpc, target, stream_id):
+    """[(level, text)] for the strih's RUNNING program output (vendor/distroav/src/jxs-output.cpp creates
+    OUTPUT_NAME from jxs-output.json at FINISHED_LOADING): it exists, is active, and runs the declared
+    target + stream id. The file alone is not proof: a stop or a WS re-target lives in OBS only."""
+    status = rpc("GetOutputStatus", {"outputName": OUTPUT_NAME}, ignore_err=True) or {}
+    if "outputActive" not in status:
+        return [("FAIL", f"(jxs-output-live) OBS has no output '{OUTPUT_NAME}' -- the strih DistroAV build without "
+                         f"the JPEG XS output, or it failed to load (read the OBS log's jxs-output lines) (issue 1387)")]
+    if status.get("outputActive") is not True:
+        return [("FAIL", f"(jxs-output-live) '{OUTPUT_NAME}' is not running -- the program is not on the JPEG XS link; "
+                         f"restart OBS (it starts from jxs-output.json) or StartOutput (issue 1387)")]
+    st = (rpc("GetOutputSettings", {"outputName": OUTPUT_NAME}, ignore_err=True) or {}).get("outputSettings") or {}
+    have = (st.get("jxs_target"), st.get("jxs_stream_id"))
+    if have != (target, stream_id):
+        return [("FAIL", f"(jxs-output-live) '{OUTPUT_NAME}' runs to {have[0]} stream id {have[1]}, not {target} stream "
+                         f"id {stream_id} -- a WS change jxs-output.json does not carry; restart OBS (issue 1387)")]
+    return [("PASS", f"(jxs-output-live) '{OUTPUT_NAME}' running: the program to {target} (stream id {stream_id})")]
+
+
 def _client(args):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import strih_scenes  # the minimal OBS-WS client installed beside this file
@@ -217,10 +261,16 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=4455)
     ap.add_argument("--password", default=os.environ.get("OBS_PASSWORD") or None)
     ap.add_argument("--manifest", default=MANIFEST_PATH)
+    ap.add_argument("--output-target", default=None,
+                    help="with --verify on a strih: also grade the RUNNING program output against this target")
+    ap.add_argument("--output-stream-id", type=int, default=None)
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--bootstrap", action="store_true", help="create / heal the declared inputs")
     mode.add_argument("--verify", action="store_true", help="read-only: print PASS/FAIL/NOTE rows")
     args = ap.parse_args(argv)
+    if (args.output_target is None) != (args.output_stream_id is None):
+        ap.error("--output-target and --output-stream-id go together")
+    specs = []
     try:
         with open(args.manifest) as fh:
             text = fh.read()
@@ -230,31 +280,36 @@ def main(argv=None):
                   "STRIH_JXS_PROGRAM_PORT none) -- nothing to grade (issue 1387)")
         else:
             print("jxs inputs: this box declares no JPEG XS input -- nothing to seed")
-        return 0
-    try:
-        specs = parse_manifest(text)
-    except ManifestError as e:
-        if args.verify:
+            return 0
+    else:
+        try:
+            specs = parse_manifest(text)
+        except ManifestError as e:
+            if not args.verify:
+                print(f"jxs inputs: FAIL the manifest {args.manifest} is not valid: {e}", file=sys.stderr)
+                return 2
             print(f"FAIL (jxs-inputs) the manifest {args.manifest} is not valid: {e} -- re-run setup-strih.sh "
                   f"step 6 (issue 1387)")
-            return 0
-        print(f"jxs inputs: FAIL the manifest {args.manifest} is not valid: {e}", file=sys.stderr)
-        return 2
+    if args.verify and not specs and args.output_target is None:
+        return 0
     try:
         obs = _client(args)
     except Exception as e:  # noqa: BLE001 -- OBS not running is a state to report, never a crash
         if args.verify:
             print(f"NOTE (jxs-inputs) OBS WebSocket {args.host}:{args.port} not reachable ({e}) -- OBS not "
-                  f"running? the JPEG XS inputs are not graded (issue 1387)")
+                  f"running? the JPEG XS inputs and output are not graded (issue 1387)")
             return 0
         print(f"jxs inputs: FAIL OBS WebSocket {args.host}:{args.port} not reachable ({e})", file=sys.stderr)
         return 1
     rpc = obs.req
     if args.verify:
-        for level, text in verify_rows(rpc, specs):
+        rows = verify_rows(rpc, specs)
+        if args.output_target is not None:
+            rows += output_rows(rpc, args.output_target, args.output_stream_id)
+        for level, text in rows:
             print(f"{level} {text}")
         return 0
-    lines, ok = bootstrap(rpc, specs)
+    lines, ok = bootstrap(rpc, specs, live=obs_live(rpc))
     for ln in lines:
         print(ln)
     return 0 if ok else 3

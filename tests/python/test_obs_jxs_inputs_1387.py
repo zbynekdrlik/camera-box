@@ -41,14 +41,25 @@ class FakeObs:
     """A fake OBS: inputs {name: (kind, explicit settings)}, scenes {scene: [(source, enabled)]}. Logs every
     request; a write mutates the state the way obs-websocket does."""
 
-    def __init__(self, inputs=None, scenes=None):
+    def __init__(self, inputs=None, scenes=None, streaming=False, recording=False, output=None):
         self.inputs = {k: (v[0], dict(v[1])) for k, v in (inputs or {}).items()}
         self.scenes = {k: list(v) for k, v in (scenes or {}).items()}
+        self.streaming, self.recording = streaming, recording
+        self.output = output  # None = no such output, else (active, settings)
         self.log = []
 
     def rpc(self, req, data=None, ignore_err=False):
         data = data or {}
         self.log.append((req, json.loads(json.dumps(data))))
+        if req == "GetStreamStatus":
+            return {} if self.streaming is None else {"outputActive": self.streaming}
+        if req == "GetRecordStatus":
+            return {"outputActive": self.recording}
+        if req == "GetOutputStatus":
+            assert data["outputName"] == oji.OUTPUT_NAME
+            return {} if self.output is None else {"outputActive": self.output[0]}
+        if req == "GetOutputSettings":
+            return {} if self.output is None else {"outputSettings": dict(self.output[1])}
         if req == "GetInputList":
             return {"inputs": [{"inputName": n, "inputKind": k} for n, (k, _) in self.inputs.items()]}
         if req == "GetSceneList":
@@ -198,6 +209,44 @@ def test_no_write_ever_names_genlock_burn_or_a_production_scene():
     assert obs.inputs["JXS PGM src"][1]["genlock_burn"] is True  # a TEST-mode burn is the sweeps' business
 
 
+def test_nothing_is_written_while_obs_streams_or_records():
+    # owner rule: a latency never changes on air -- a hand --bootstrap on a live box refuses every write
+    for kw in ({"streaming": True}, {"recording": True}, {"streaming": None}):
+        obs = FakeObs({"JXS cam2 src": (oji.INPUT_KIND, _live_cam2(genlock_latency_ms_src=3))}, {}, **kw)
+        live = oji.obs_live(obs.rpc)
+        assert live is True, kw  # an unreadable stream state is live (fail closed)
+        lines, ok = oji.bootstrap(obs.rpc, oji.parse_manifest(_manifest(CAM2, PGM)), live=live)
+        assert not ok and obs.writes() == []
+        assert [ln.split("'")[0] for ln in lines] == ["jxs inputs: REFUSED to update ", "jxs inputs: REFUSED to create "]
+    obs = FakeObs({"JXS cam2 src": (oji.INPUT_KIND, _live_cam2())}, {})
+    assert oji.obs_live(obs.rpc) is False
+    lines, ok = oji.bootstrap(obs.rpc, oji.parse_manifest(_manifest(CAM2)), live=True)
+    assert ok and obs.writes() == []  # a matching input needs no write, so live is no refusal
+
+
+# --- the running program output (strih) ------------------------------------------------------------------
+
+def test_output_rows_grade_the_running_output():
+    good = {"jxs_target": "10.77.9.204:7100", "jxs_stream_id": 100, "jxs_pace_mbps": 0}
+    cases = [
+        (None, "FAIL", "has no output"),
+        ((False, good), "FAIL", "is not running"),
+        ((True, dict(good, jxs_target="10.77.9.204:7101")), "FAIL", "runs to 10.77.9.204:7101"),
+        ((True, dict(good, jxs_stream_id=5)), "FAIL", "stream id 5"),
+        ((True, good), "PASS", "running: the program to 10.77.9.204:7100 (stream id 100)"),
+    ]
+    for output, level, text in cases:
+        obs = FakeObs(output=output)
+        (row,) = oji.output_rows(obs.rpc, "10.77.9.204:7100", 100)
+        assert row[0] == level and text in row[1], (output, row)
+        assert obs.writes() == []
+
+
+def test_the_output_name_is_the_shipped_one():
+    src = (REPO / "vendor" / "distroav" / "src" / "jxs-output.cpp").read_text()
+    assert f'#define JXS_OUTPUT_NAME "{oji.OUTPUT_NAME}"' in src
+
+
 # --- --verify ------------------------------------------------------------------------------------------
 
 def test_verify_passes_the_live_state_and_names_the_scenes():
@@ -256,6 +305,17 @@ def test_cli_with_obs_down_notes_verify_and_fails_bootstrap(tmp_path, capsys):
     assert oji.main(["--verify", "--manifest", str(m), "--port", port]) == 0
     assert "NOTE (jxs-inputs) OBS WebSocket 127.0.0.1:" in capsys.readouterr().out
     assert oji.main(["--bootstrap", "--manifest", str(m), "--port", port]) == 1
+    # a strih with no input manifest still grades its program output (it tries to connect)
+    assert oji.main(["--verify", "--manifest", str(tmp_path / "absent"), "--port", port,
+                     "--output-target", "10.77.9.204:7100", "--output-stream-id", "100"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("NOTE (jxs-inputs) this box declares no JPEG XS input")
+    assert out[1].startswith("NOTE (jxs-inputs) OBS WebSocket")
+
+
+def test_cli_output_target_needs_its_stream_id(tmp_path):
+    with pytest.raises(SystemExit):
+        oji.main(["--verify", "--manifest", str(tmp_path / "x"), "--output-target", "10.77.9.204:7100"])
 
 
 # --- pinned to the shipped DistroAV source --------------------------------------------------------------

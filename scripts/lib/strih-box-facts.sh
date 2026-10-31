@@ -453,7 +453,7 @@ STRIH_BOX_JXS_PIN_MS_MAX=2000
 
 # _strih_box_jxs_port VALUE -> 0 iff VALUE is a UDP port 1024..65535 (no leading zero).
 _strih_box_jxs_port() {
-  [[ "${1-}" =~ ^[123456789][0123456789]{3,4}$ ]] && [ "$1" -le 65535 ]
+  [[ "${1-}" =~ ^[123456789][0123456789]{3,4}$ ]] && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
 }
 
 # _strih_box_jxs_pin VALUE -> 0 iff VALUE is a whole ms pin inside the jxs-source clamp range.

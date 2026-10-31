@@ -262,6 +262,26 @@ def test_ay_fails_a_target_on_an_undeclared_camera_and_every_drift(tmp_path):
     assert "could not be read" in _verdict(_gather(box), "10.77.9.202:7003")
 
 
+def test_ay_fails_a_provisioned_but_not_restarted_camera_box(tmp_path):
+    # setup-device is enable-only: file + loaded unit right, the running process still has no target
+    box = _box(tmp_path, etc=_content("10.77.9.202:7003"), running=None)
+    block = _gather(box)
+    assert "JXS_LOADED=10.77.9.202:7003" in block and "JXS_RUNNING=__NONE__" in block
+    v = _verdict(block, "10.77.9.202:7003")
+    assert v == ("FAIL: the running camera-box has CAMERA_BOX_JXS_TARGET=<unset>, not 10.77.9.202:7003 -- it "
+                 "was not restarted onto the declared target; fix: bash scripts/lib/cambox-jxs-target.sh "
+                 "--apply-program <this box> | ssh root@<this box> bash -s (issue 1387)\n")
+
+
+def test_ay_fails_a_loaded_unit_that_differs_from_the_file(tmp_path):
+    # the file and the running process right, the loaded unit not (a reload missing, an overriding drop-in)
+    box = _box(tmp_path, etc=_content("10.77.9.202:7003"), running="10.77.9.202:7003")
+    (box["state"] / "loaded").write_text("10.77.9.202:7000\n")
+    v = _verdict(_gather(box), "10.77.9.202:7003")
+    assert v.startswith("FAIL: camera-box.service loads CAMERA_BOX_JXS_TARGET=10.77.9.202:7000, not 10.77.9.202:7003")
+    assert v.count("FAIL:") == 1, v
+
+
 def test_ay_verdict_fails_closed():
     assert _verdict("", "10.77.9.202:7003").count("FAIL:") == 4
     assert _verdict("JXS_DROPIN_SHA=__ABSENT__", "").startswith("FAIL: no JPEG XS target resolved")
@@ -355,6 +375,38 @@ def test_apply_on_a_busy_root_fails_loud_and_reloads_restarts_nothing(tmp_path):
     assert "root is NOT read-only" in r.stderr
     lines = log(box)
     assert not any(ln.startswith(("systemctl restart", "systemctl daemon-reload")) for ln in lines), lines
+
+
+def test_apply_failure_inside_the_window_closes_it_and_restarts_nothing(tmp_path):
+    box = _box(tmp_path, run="10.77.9.202:7000", running="10.77.9.202:7000")
+    blocker = box["state"] / "fs" / "blocker"
+    blocker.write_text("a file where the drop-in dir must go\n")
+    box["env"]["CAMBOX_JXS_DROPIN"] = str(blocker / "jxs.conf")
+    r = run_text(box, _program(box, "10.77.9.202:7005"), strict="set -euo pipefail", **box["fake"])
+    assert r.returncode != 0 and "could not write" in r.stderr
+    lines = log(box)
+    assert index(lines, "mount -o remount,rw /") < index(lines, "mount -o remount,ro /")
+    assert root(box) == "ro"  # the EXIT trap ran the verified close
+    assert not any(ln.startswith(("systemctl restart", "systemctl daemon-reload")) for ln in lines), lines
+
+
+def test_apply_after_a_failed_reload_restarts_nothing(tmp_path):
+    box = _box(tmp_path, run="10.77.9.202:7000", running="10.77.9.202:7000")
+    r = run_text(box, _program(box, "10.77.9.202:7005"), strict="set -euo pipefail", FAKE_DAEMON_RELOAD_RC="1",
+                 **box["fake"])
+    assert r.returncode != 0 and "daemon-reload failed" in r.stderr and "NOT restarted" in r.stderr
+    assert not any(ln.startswith("systemctl restart") for ln in log(box)), log(box)
+
+
+def test_apply_names_every_other_knob_a_removed_runtime_dropin_carried(tmp_path):
+    box = _box(tmp_path, run="10.77.9.202:7003")
+    rt = pathlib.Path(box["env"]["CAMBOX_JXS_RUNTIME_DIR"]) / "jxs.conf"
+    rt.write_text("[Service]\nEnvironment=CAMERA_BOX_JXS_TARGET=10.77.9.202:7003\nEnvironment=CAMERA_BOX_JXS_BPP=8\n"
+                  "Environment=CAMERA_BOX_JXS_FIFO_PRIO=50\n")
+    r = run_text(box, _program(box, "10.77.9.202:7003"), strict="set -euo pipefail", **box["fake"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"NOTE: {rt} also sets CAMERA_BOX_JXS_BPP=8 CAMERA_BOX_JXS_FIFO_PRIO=50 -- hand state" in r.stdout
+    assert not rt.exists()
 
 
 def test_apply_never_starts_a_stopped_camera_box(tmp_path):

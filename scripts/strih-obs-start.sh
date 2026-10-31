@@ -184,9 +184,10 @@ fi
 # that declares none has no manifest). Created in their own holding scene when absent, the declared
 # settings (port, camera, pin, grid) healed onto an existing one; never an operator scene. Best effort
 # like the seed above: a failure is a WARN, never a reason to stop a live OBS.
-JXS_SEED="${STRIH_JXS_SEED_BIN:-/usr/local/bin/obs_jxs_inputs.py}"
-if [ -f "${STRIH_JXS_SEED_MANIFEST:-/opt/camera-box/jxs-seed.json}" ]; then
-  if python3 "$JXS_SEED" --bootstrap; then
+JXS_SEED="${STRIH_JXS_SEEDER_BIN:-/usr/local/bin/obs_jxs_inputs.py}"
+JXS_MANIFEST="${STRIH_JXS_SEED_MANIFEST:-/opt/camera-box/jxs-seed.json}"
+if [ -f "$JXS_MANIFEST" ]; then
+  if python3 "$JXS_SEED" --bootstrap --manifest "$JXS_MANIFEST"; then
     echo "OK: JPEG XS inputs seeded (obs_jxs_inputs.py --bootstrap)."
   else
     echo "WARN issue 1387: obs_jxs_inputs.py --bootstrap FAILED (non-fatal) -- OBS stays UP. Re-seed: python3 ${JXS_SEED} --bootstrap."

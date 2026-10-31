@@ -271,6 +271,12 @@ _cjx_run0="$(_cjx_running)"
 _cjx_wantrun="$_cjx_want"
 [ "$_cjx_want" != none ] || _cjx_wantrun=__NONE__
 echo "PLAN ($_cjx_box): root $_cjx_mode; JPEG XS target $_cjx_want; drop-in $([ "$_cjx_do" = 1 ] && { [ "$_cjx_want" = none ] && echo remove || echo write; } || echo in-place); runtime drop-ins:${_cjx_rt:- none}; camera-box runs ${_cjx_run0}"
+# A runtime drop-in goes WHOLE: name every other assignment it carries (a hand CAMERA_BOX_JXS_BPP /
+# _FIFO_PRIO / _CORES from the slice-1 runbook), so nothing is dropped unseen.
+for _cjx_f in $_cjx_rt; do
+  _cjx_other="$(awk -v k="$_cjx_var=" '/^Environment=/ { a = substr($0, 13); if (index(a, k) != 1) printf "%s ", a }' "$_cjx_f")"
+  [ -z "$_cjx_other" ] || echo "NOTE: $_cjx_f also sets ${_cjx_other% } -- hand state, dropped with it (declare it in provisioning if it must stay)"
+done
 _cjx_rc=0
 # --- 2. the rw window, closed by the ONE verified close ---
 _cjx_open=0
@@ -312,6 +318,8 @@ if ! systemctl daemon-reload; then
 fi
 if [ "$_cjx_run0" = __UNREAD__ ]; then
   echo "NOTE: camera-box is not running on $_cjx_box -- never started here; it takes the target at its next start"
+elif [ "$_cjx_rc" != 0 ]; then
+  echo "FAIL: [issue 1387] camera-box NOT restarted on $_cjx_box: a step above failed, a restart would only reload the old unit" >&2
 elif [ "$_cjx_run0" != "$_cjx_wantrun" ]; then
   if systemctl restart camera-box; then
     echo "  restarted camera-box ($_cjx_run0 -> $_cjx_want)"

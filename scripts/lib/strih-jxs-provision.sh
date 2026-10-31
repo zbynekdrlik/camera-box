@@ -19,10 +19,13 @@
 #       ONLY persistent store of the program output, vendor/distroav/src/jxs-output.cpp): enabled +
 #       jxs_target = the VENUE's stream box (the stream-role fact file of this box's STRIH_VENUE: its
 #       STRIH_IP + STRIH_JXS_PROGRAM_PORT) + jxs_stream_id; the operator's bpp / cores / pace keys are
-#       kept. A venue whose stream box declares no program port leaves the file untouched.
+#       kept. A venue whose stream box declares no program port gets an enabled file DISABLED (every
+#       other key kept), anything else left alone. setup runs as root in the user's tree: a symlinked
+#       file is refused, the reads are O_NOFOLLOW, an unparseable file is moved aside (mv -T).
 #   verify-strih item 49 (strih_jxs_config_verify_row, next to the lost-slices row): `(jxs-seed)`,
-#     `(jxs-inputs)` + `(jxs-place)` over obs-websocket (obs_jxs_inputs.py --verify against the
-#     facts' render), `(jxs-output)`.
+#     `(jxs-inputs)` + `(jxs-place)` + (strih) `(jxs-output-live)` over obs-websocket
+#     (obs_jxs_inputs.py --verify against the facts' render and the derived target; an unreachable
+#     websocket FAILs while an obs process runs), `(jxs-output)` (the file the output is made from).
 # Tests: tests/python/test_strih_jxs_provision_1387.py, tests/python/test_obs_jxs_inputs_1387.py.
 
 # Overridable (test seams); the defaults are the box paths.
@@ -115,28 +118,42 @@ strih_jxs_program_target() {
   )
 }
 
-# strih_jxs_output_render FILE TARGET STREAM_ID -> the jxs-output.json text (+ newline) with enabled,
-# jxs_target and jxs_stream_id set, every other key of the existing FILE kept (the operator's bpp /
-# cores / pace), the plugin's keys defaulted when absent; the plugin's key order first, then any other
-# key. rc 3 (nothing printed) when FILE exists but is not a JSON object.
+# strih_jxs_output_render FILE TARGET STREAM_ID [disable] -> the jxs-output.json text (+ newline) with
+# enabled, jxs_target and jxs_stream_id set, every other key of the existing FILE kept (the operator's
+# bpp / cores / pace), the plugin's keys defaulted when absent; the plugin's key order first, then any
+# other key. `disable` keeps every key and sets only enabled false. setup runs as root in the desktop
+# user's tree, so FILE is opened O_NOFOLLOW and must be a regular file: rc 4 (nothing printed) for a
+# symlink or anything else; rc 3 when it is not a JSON object.
 strih_jxs_output_render() {
-  python3 - "${1-}" "${2-}" "${3-}" <<'PY'
-import json, os, sys
-path, target, sid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+  python3 - "${1-}" "${2-}" "${3-}" "${4-}" <<'PY'
+import json, os, stat, sys
+path, target, sid, mode = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 old = {}
-if os.path.exists(path):
-    try:
-        with open(path, encoding="utf-8-sig") as fh:
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    fd = None
+except OSError:
+    sys.exit(4)  # ELOOP: a symlink, never followed
+if fd is not None:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        sys.exit(4)
+    with os.fdopen(fd, encoding="utf-8-sig") as fh:
+        try:
             old = json.load(fh)
-    except ValueError:
-        sys.exit(3)
+        except ValueError:
+            sys.exit(3)
     if not isinstance(old, dict):
         sys.exit(3)
-out = {"enabled": True, "jxs_target": target, "jxs_stream_id": sid,
-       "jxs_bpp_min": old.get("jxs_bpp_min", 0), "jxs_bpp_max": old.get("jxs_bpp_max", 0),
-       "jxs_cores": old.get("jxs_cores", ""), "jxs_pace_mbps": old.get("jxs_pace_mbps", 0)}
-for k, v in old.items():
-    out.setdefault(k, v)
+if mode == "disable":
+    out = dict(old, enabled=False)
+else:
+    out = {"enabled": True, "jxs_target": target, "jxs_stream_id": sid,
+           "jxs_bpp_min": old.get("jxs_bpp_min", 0), "jxs_bpp_max": old.get("jxs_bpp_max", 0),
+           "jxs_cores": old.get("jxs_cores", ""), "jxs_pace_mbps": old.get("jxs_pace_mbps", 0)}
+    for k, v in old.items():
+        out.setdefault(k, v)
 print(json.dumps(out))
 PY
 }
@@ -167,27 +184,63 @@ strih_jxs_provision() {
     return 0
   fi
   file="${cfg}/${STRIH_JXS_OUTPUT_REL}"
+  # root in the desktop user's tree: a planted symlink is never followed (read or write).
+  if [ -L "$file" ]; then
+    echo "strih-jxs: ${file} is a symlink -- refusing to read or write through it as root (issue 1387)" >&2
+    return 1
+  fi
   if [ "$target" = none ]; then
-    echo "  JPEG XS program output: the venue's stream box declares no STRIH_JXS_PROGRAM_PORT -- ${file} left as it is"
+    if [ "$(_strih_jxs_output_state "$file")" = enabled ]; then
+      # converge to what verify grades: a venue with no program declares the link off
+      out="$(strih_jxs_output_render "$file" none 0 disable)" || { echo "strih-jxs: cannot render ${file}" >&2; return 1; }
+      printf '%s\n' "$out" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" \
+        "JPEG XS program output (disabled: the venue declares no STRIH_JXS_PROGRAM_PORT)"
+    else
+      echo "  JPEG XS program output: the venue's stream box declares no STRIH_JXS_PROGRAM_PORT -- nothing enabled, ${file} left as it is"
+    fi
     return 0
   fi
   strih_user_home_dir "$home" "$user" "${file%/*}" || return 1
   rc=0
   out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID")" || rc=$?
   if [ "$rc" = 3 ]; then
-    cp -p "$file" "${file}.bak-$(date +%Y%m%dT%H%M%S)" || return 1
-    echo "  WARN: ${file} is not a JSON object -- backed up, rewritten"
+    # moved aside (a rename never follows a link at the destination; -T never moves INTO a directory)
+    mv -T "$file" "${file}.bak-$(date +%Y%m%dT%H%M%S)" || return 1
+    echo "  WARN: ${file} is not a JSON object -- moved aside, rewritten"
     rc=0
-    out="$(strih_jxs_output_render /nonexistent/jxs-output.json "$target" "$STRIH_JXS_PROGRAM_STREAM_ID")" || rc=$?
+    out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID")" || rc=$?
   fi
-  [ "$rc" = 0 ] && [ -n "$out" ] || { echo "strih-jxs: cannot render ${file} (rc ${rc})" >&2; return 1; }
+  [ "$rc" = 0 ] && [ -n "$out" ] || { echo "strih-jxs: cannot render ${file} (rc ${rc}: 4 = not a regular file)" >&2; return 1; }
   printf '%s\n' "$out" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" "JPEG XS program output (-> ${target})"
+}
+
+# _strih_jxs_output_state FILE -> enabled | disabled | absent | unreadable (a symlink or anything that is
+# not a regular JSON object). O_NOFOLLOW, like the render.
+_strih_jxs_output_state() {
+  python3 - "${1-}" <<'PY' 2>/dev/null || printf 'unreadable\n'
+import json, os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    print("absent"); sys.exit(0)
+except OSError:
+    print("unreadable"); sys.exit(0)
+if not stat.S_ISREG(os.fstat(fd).st_mode):
+    print("unreadable"); sys.exit(0)
+try:
+    with os.fdopen(fd, encoding="utf-8-sig") as fh:
+        d = json.load(fh)
+except ValueError:
+    print("unreadable"); sys.exit(0)
+print("enabled" if isinstance(d, dict) and d.get("enabled") is True else "disabled" if isinstance(d, dict) else "unreadable")
+PY
 }
 
 # strih_jxs_config_verify_row USER_HOME -> verify-strih item 49's config rows (the caller's ok / bad /
 # note); always rc 0.
 strih_jxs_config_verify_row() {
   local home="${1-}" co man tmp out line level text target file have
+  local -a args
   co="$(strih_jxs_checkout)"
   man="$(strih_jxs_seed_manifest_json)" || { bad "(jxs-seed) the box facts do not load -- cannot grade the JPEG XS path (issue 1387)"; return 0; }
   # (jxs-seed): the installed manifest = the facts' render, the installed seeder = the checkout's.
@@ -204,12 +257,19 @@ strih_jxs_config_verify_row() {
   else
     ok "(jxs-seed) ${STRIH_JXS_SEED_MANIFEST} = the box facts, the launch seeder installed"
   fi
-  # (jxs-inputs) + (jxs-place): over obs-websocket, against the FACTS' render (never the installed copy).
-  if [ -n "$man" ]; then
+  # The venue's program target (strih role only; `none` elsewhere).
+  target=none
+  if [ "$(strih_box_fact STRIH_ROLE)" = strih ]; then
+    target="$(strih_jxs_program_target)" || { bad "(jxs-output) the venue's program target does not resolve (above) (issue 1387)"; target=unresolved; }
+  fi
+  # (jxs-inputs) + (jxs-place) + (jxs-output-live): over obs-websocket (verify-strih's WS_HOST), against
+  # the FACTS' render (never the installed copy) and the derived program target.
+  if [ -n "$man" ] || { [ "$target" != none ] && [ "$target" != unresolved ]; }; then
     tmp="$(mktemp -d)" || { bad "(jxs-inputs) cannot create a scratch dir"; return 0; }
-    printf '%s\n' "$man" >"${tmp}/jxs-seed.json"
-    out="$(timeout 30 python3 "${co}/scripts/obs_jxs_inputs.py" --verify --manifest "${tmp}/jxs-seed.json" \
-      --host "${STRIH_JXS_OBS_HOST:-127.0.0.1}" --port "${STRIH_JXS_OBS_PORT:-4455}" 2>&1 || true)"
+    [ -z "$man" ] || printf '%s\n' "$man" >"${tmp}/jxs-seed.json"
+    args=(--verify --manifest "${tmp}/jxs-seed.json" --host "${WS_HOST:-127.0.0.1}" --port "${STRIH_JXS_OBS_PORT:-4455}")
+    case "$target" in none | unresolved) ;; *) args+=(--output-target "$target" --output-stream-id "$STRIH_JXS_PROGRAM_STREAM_ID") ;; esac
+    out="$(timeout 30 python3 "${co}/scripts/obs_jxs_inputs.py" "${args[@]}" 2>&1 || true)"
     rm -rf "$tmp"
     [ -n "$out" ] || bad "(jxs-inputs) obs_jxs_inputs.py --verify printed nothing (issue 1387)"
     while IFS= read -r line; do
@@ -217,33 +277,28 @@ strih_jxs_config_verify_row() {
       level="${line%% *}"; text="${line#* }"
       case "$level" in
         PASS) ok "$text" ;;
-        NOTE) note "$text" ;;
+        NOTE)
+          # an unreachable websocket is a NOTE only while OBS is down (the studio-mode row's rule)
+          if [[ "$text" == "(jxs-inputs) OBS WebSocket "* ]] && strih_operator_obs_running; then
+            bad "${text%% -- OBS not running?*} -- OBS runs but its websocket does not answer (issue 1387)"
+          else
+            note "$text"
+          fi
+          ;;
         FAIL) bad "$text" ;;
         *) bad "(jxs-inputs) unexpected verifier output: ${line}" ;;
       esac
     done <<<"$out"
   fi
-  # (jxs-output): the strih program output's settings file vs the venue's stream box.
+  # (jxs-output): the program output's settings file (the plugin re-creates the output from it at every
+  # OBS start) vs the venue's stream box.
+  case "$target" in unresolved) return 0 ;; esac
   [ "$(strih_box_fact STRIH_ROLE)" = strih ] || return 0
-  target="$(strih_jxs_program_target)" || { bad "(jxs-output) the venue's program target does not resolve (above) (issue 1387)"; return 0; }
   file="${home}/.config/obs-studio/${STRIH_JXS_OUTPUT_REL}"
-  have="$(python3 - "$file" <<'PY' 2>/dev/null || true
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8-sig") as fh:
-        d = json.load(fh)
-except FileNotFoundError:
-    print("absent"); sys.exit(0)
-except ValueError:
-    print("unparseable"); sys.exit(0)
-if not isinstance(d, dict):
-    print("unparseable"); sys.exit(0)
-print("%s %s %s" % (json.dumps(d.get("enabled")), d.get("jxs_target"), json.dumps(d.get("jxs_stream_id"))))
-PY
-)"
+  have="$(_strih_jxs_output_fields "$file")"
   if [ "$target" = none ]; then
     case "$have" in
-      "true "*) bad "(jxs-output) ${file} enables the program output (${have}), but the venue declares no JPEG XS program (STRIH_JXS_PROGRAM_PORT none) -- hand state (issue 1387)" ;;
+      "true "*) bad "(jxs-output) ${file} enables the program output (${have}), but the venue declares no JPEG XS program (STRIH_JXS_PROGRAM_PORT none) -- hand state; setup-strih step 6 disables it (issue 1387)" ;;
       *) note "(jxs-output) the venue declares no JPEG XS program (STRIH_JXS_PROGRAM_PORT none) -- nothing to grade (issue 1387)" ;;
     esac
   elif [ "$have" = "true ${target} ${STRIH_JXS_PROGRAM_STREAM_ID}" ]; then
@@ -252,4 +307,28 @@ PY
     bad "(jxs-output) ${file} reads '${have:-unreadable}', not 'true ${target} ${STRIH_JXS_PROGRAM_STREAM_ID}' (enabled, target, stream id) -- re-run setup-strih.sh step 6, then restart OBS (issue 1387)"
   fi
   return 0
+}
+
+# _strih_jxs_output_fields FILE -> `<enabled> <jxs_target> <jxs_stream_id>` (JSON spellings), or absent |
+# unreadable (a symlink, not a regular file, not a JSON object). O_NOFOLLOW: verify runs as root too.
+_strih_jxs_output_fields() {
+  python3 - "${1-}" <<'PY' 2>/dev/null || printf 'unreadable\n'
+import json, os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    print("absent"); sys.exit(0)
+except OSError:
+    print("unreadable"); sys.exit(0)
+if not stat.S_ISREG(os.fstat(fd).st_mode):
+    print("unreadable"); sys.exit(0)
+try:
+    with os.fdopen(fd, encoding="utf-8-sig") as fh:
+        d = json.load(fh)
+except ValueError:
+    print("unreadable"); sys.exit(0)
+if not isinstance(d, dict):
+    print("unreadable"); sys.exit(0)
+print("%s %s %s" % (json.dumps(d.get("enabled")), d.get("jxs_target"), json.dumps(d.get("jxs_stream_id"))))
+PY
 }

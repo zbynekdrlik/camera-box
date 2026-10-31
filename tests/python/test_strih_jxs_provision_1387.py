@@ -114,6 +114,9 @@ def test_the_pin_range_is_the_jxs_source_clamp():
     (("stream", "none", "none", "none", "7100", "none"), False, "STRIH_JXS_PROGRAM_PIN_MS"),
     (("stream", "none", "none", "none", "none", "1087"), False, "must be none while STRIH_JXS_PROGRAM_PORT"),
     (("stream", "none", "none", "none", "70000", "1087"), False, "UDP port 1024..65535"),
+    (("stream", "none", "none", "none", "1000", "1087"), False, "UDP port 1024..65535"),
+    (("strih", "2 3 5", "2:1023", "36", "none", "none"), False, "not N:PORT"),
+    (("strih", "2 3 5", "2:1024", "36", "none", "none"), True, ""),
 ])
 def test_the_jxs_facts_validator(args, ok, why):
     r = _bash('strih_box_jxs_facts_ok "$1" "$2" "$3" "$4" "$5" "$6" "T: "', *args)
@@ -243,7 +246,7 @@ def test_step6_on_a_pp_box_writes_nothing_jxs(tmp_path):
     assert "left as it is" in r.stdout
 
 
-def test_step6_backs_up_an_unparseable_output_file(tmp_path):
+def test_step6_moves_an_unparseable_output_file_aside(tmp_path):
     out = tmp_path / "home/.config/obs-studio/plugin_config/distroav/jxs-output.json"
     out.parent.mkdir(parents=True)
     out.write_text("not json")
@@ -251,6 +254,38 @@ def test_step6_backs_up_an_unparseable_output_file(tmp_path):
     assert r.returncode == 0, r.stderr
     assert out.read_text() == LIVE_OUTPUT
     assert [p.read_text() for p in out.parent.glob("jxs-output.json.bak-*")] == ["not json"]
+
+
+def test_step6_never_reads_or_writes_through_a_planted_symlink(tmp_path):
+    # setup runs as root in the desktop user's tree: a link to a root-only JSON file must leak nothing
+    secret = tmp_path / "root-only.json"
+    secret.write_text('{"api_key": "SECRET-ROOT-ONLY-VALUE"}')
+    out = tmp_path / "home/.config/obs-studio/plugin_config/distroav/jxs-output.json"
+    out.parent.mkdir(parents=True)
+    out.symlink_to(secret)
+    r, _ = _provision(tmp_path, "strih-snv")
+    assert r.returncode != 0 and "is a symlink" in r.stderr
+    assert out.is_symlink() and secret.read_text() == '{"api_key": "SECRET-ROOT-ONLY-VALUE"}'
+    # the render alone refuses the link too (O_NOFOLLOW), and a non-regular file
+    assert _bash('strih_jxs_output_render "$1" t 100', out).returncode == 4
+    fifo = tmp_path / "fifo.json"
+    os.mkfifo(fifo)
+    assert _bash('strih_jxs_output_render "$1" t 100', fifo).returncode == 4
+
+
+def test_step6_disables_a_hand_enabled_output_where_the_venue_declares_none(tmp_path):
+    out = tmp_path / "home/.config/obs-studio/plugin_config/distroav/jxs-output.json"
+    out.parent.mkdir(parents=True)
+    out.write_text(LIVE_OUTPUT)
+    r, home = _provision(tmp_path, "strih-pp")
+    assert r.returncode == 0, r.stderr
+    d = json.loads(out.read_text())
+    assert d["enabled"] is False and d["jxs_target"] == "10.77.9.204:7100" and d["jxs_pace_mbps"] == 0
+    r = _verify(tmp_path, "strih-pp", home)
+    assert "FAIL" not in r.stdout, r.stdout
+    # a disabled file is left alone
+    r, _ = _provision(tmp_path, "strih-pp")
+    assert "nothing enabled" in r.stdout
 
 
 # --- verify-strih item 49's config rows ------------------------------------------------------------------
@@ -263,10 +298,17 @@ def _closed_port():
     return port
 
 
-def _verify(tmp_path, box, home):
-    env = dict(_seams(tmp_path), STRIH_JXS_OBS_PORT=str(_closed_port()))
+def _verify(tmp_path, box, home, obs_runs=False):
+    env = dict(_seams(tmp_path), STRIH_JXS_OBS_PORT=str(_closed_port()),
+               STRIH_OPERATOR_OBS_RUNNING_CMD="true" if obs_runs else "false")
     return _bash('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
                  'strih_box_load "$1"\nstrih_jxs_config_verify_row "$2"', box, home, env=env)
+
+
+def test_verify_fails_an_unreachable_websocket_while_obs_runs(tmp_path):
+    _, home = _provision(tmp_path, "strih-snv")
+    lines = _verify(tmp_path, "strih-snv", home, obs_runs=True).stdout.splitlines()
+    assert lines[1].startswith("FAIL (jxs-inputs) OBS WebSocket 127.0.0.1:") and "OBS runs" in lines[1]
 
 
 def test_verify_passes_a_provisioned_strih_with_obs_down(tmp_path):
@@ -334,10 +376,12 @@ def test_strih_provision_sources_the_lib():
 def test_the_launcher_runs_the_jxs_seed_after_the_scene_seed_only_with_a_manifest():
     w = START.read_text()
     scn = w.index('python3 "$SCN" --bootstrap')
-    guard = w.index('if [ -f "${STRIH_JXS_SEED_MANIFEST:-/opt/camera-box/jxs-seed.json}" ]; then')
-    jxs = w.index('if python3 "$JXS_SEED" --bootstrap; then')
+    guard = w.index('if [ -f "$JXS_MANIFEST" ]; then')
+    jxs = w.index('if python3 "$JXS_SEED" --bootstrap --manifest "$JXS_MANIFEST"; then')
     assert scn < guard < jxs < w.index('wait "$OBS_PID"')
-    assert 'JXS_SEED="${STRIH_JXS_SEED_BIN:-/usr/local/bin/obs_jxs_inputs.py}"' in w
+    # the launcher reads the same overrides as the lib
+    assert 'JXS_SEED="${STRIH_JXS_SEEDER_BIN:-/usr/local/bin/obs_jxs_inputs.py}"' in w
+    assert 'JXS_MANIFEST="${STRIH_JXS_SEED_MANIFEST:-/opt/camera-box/jxs-seed.json}"' in w
     # the launcher's default paths are the lib's
     lib = LIB.read_text()
     assert 'STRIH_JXS_SEED_MANIFEST="${STRIH_JXS_SEED_MANIFEST:-/opt/camera-box/jxs-seed.json}"' in lib
