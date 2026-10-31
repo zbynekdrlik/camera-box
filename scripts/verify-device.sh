@@ -246,6 +246,11 @@
 #        use), is the STRIH_IP of a strih-role fact file (scripts/strih-boxes/*.env); the OK line names
 #        the box. No answer, a stream box or any other address FAILs naming it (the router record decides
 #        the venue at a joint event, scripts/lib/strih-follow.sh).
+#   (ay) the JPEG XS link target (issue 1387) -- HARD FAIL: the target its venue declares (the venue
+#        strih's STRIH_IP + the camera's STRIH_JXS_CAMERAS port, or none) is the persistent drop-in
+#        camera-box.service.d/jxs.conf, the LOADED unit environment and the RUNNING camera-box's
+#        environ; a target on a camera its venue does not declare, and a runtime (/run) drop-in that
+#        sets it, FAIL (scripts/lib/cambox-jxs-target.sh, whose --apply-program fixes a live box).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -307,6 +312,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/remote-logging.sh
 # shellcheck source=scripts/lib/strih-follow.sh
 . "$HERE/lib/strih-follow.sh"  # strih_follow_gather_remote_snippet/strih_follow_verdict -- the (ax) check (issue 1431)
+# shellcheck source=scripts/lib/cambox-jxs-target.sh
+. "$HERE/lib/cambox-jxs-target.sh"  # cambox_jxs_target/_gather_remote_snippet/_verdict -- the (ay) check (issue 1387)
 # shellcheck source=scripts/lib/remote-logging.sh
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
@@ -993,6 +1000,9 @@ Checks:
       at power-on); the remedy is the HWE kernel via scripts/rt-kernel-upgrade.sh
   (ax) which strih this cambox follows (issue 1431): strih.lan resolved on the box is a strih
       box's STRIH_IP (scripts/strih-boxes/*.env), named in the OK line
+  (ay) the JPEG XS link target (issue 1387): the target the venue fact files declare (or none) is the
+      persistent camera-box.service.d/jxs.conf, the loaded unit env and the running camera-box's
+      environ; no runtime drop-in sets it
   (aw) fleet kernel line (issue 1446): linux-lowlatency-hwe-24.04 installed (held reads installed),
       the running kernel booted with preempt=full, and uname -r = the image the installed
       linux-image-generic-hwe-24.04 meta depends on; a box off the line is moved by
@@ -1885,6 +1895,27 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> ${REMOTELOG_SINK}:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> $(remote_log_journal_url "$REMOTELOG_SINK") (this box's venue strih; the next #1309 stick death ships its kernel+journal off-box, #1311, issue 1394)"
+fi
+
+# (ay) the JPEG XS link target (issue 1387) -- HARD FAIL ------------------------------------------
+# camera-box sends its JPEG XS copy to CAMERA_BOX_JXS_TARGET. The hand-made target lived in a /run
+# drop-in and a reboot dropped it. The declared target (the venue strih's STRIH_IP + this camera's
+# STRIH_JXS_CAMERAS port, or none) must be the persistent drop-in, the loaded unit env and the running
+# process's environ; one read-only ssh gather, graded by the lib. Inserted after the (ak) check and before
+# the (ax) one: outside the slices other tests EXECUTE, before the .bak cruft check, which stays last. No
+# comment line here may start with a check marker (the slice tests cut at one).
+ayrc=0
+JXS_BLOCK="$(ssh_box "$(cambox_jxs_gather_remote_snippet)")" || ayrc=$?
+JXS_WANT="$(cambox_jxs_target "$CAMERA_NAME")" || JXS_WANT=""   # the reason goes to stderr
+JXS_VERDICT="$(cambox_jxs_verdict "$JXS_BLOCK" "$JXS_WANT")"
+if [ "$ayrc" -ne 0 ]; then
+  fail "could not reach the box to read the JPEG XS link target (ssh rc=$ayrc, issue 1387)"
+elif [ "$JXS_VERDICT" != "ok" ]; then
+  fail "JPEG XS link target: $(cambox_jxs_verdict_oneline "$JXS_VERDICT")"
+elif [ "$JXS_WANT" = none ]; then
+  ok "JPEG XS link: none declared for this camera by its venue -- NDI only, no drop-in, no target loaded or running (issue 1387)"
+else
+  ok "JPEG XS link target ${JXS_WANT} (this box's venue strih): persistent drop-in, loaded and running (issue 1387)"
 fi
 
 # (ax) which strih this cambox follows (issue 1431) -- HARD FAIL -------------------------------------

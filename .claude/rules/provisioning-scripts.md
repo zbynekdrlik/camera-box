@@ -196,7 +196,10 @@ executes `(aw)` up to the next `\n# (` marker, and `(ak)`'s own pytest slice sti
 marker, now `(aw)`). `(ax)` (issue 1431, which strih the cambox follows: `strih.lan` resolved on the
 box must be a strih-role fact file's STRIH_IP, `scripts/lib/strih-follow.sh`) sits after `(ak)`, before
 `(aw)` (`tests/python/test_strih_follow_1431.py` executes `(ax)` up to the next `\n# (` marker, so no
-comment line inside a check block may START with a check marker); the next free letter is `(ay)`.
+comment line inside a check block may START with a check marker). `(ay)` (issue 1387, the JPEG XS
+link target, `scripts/lib/cambox-jxs-target.sh`) sits after `(ak)`, before `(ax)`
+(`tests/python/test_cambox_jxs_target_1387.py` executes `(ay)` up to the next `\n# (` marker); the next
+free letter is `(az)`.
 
 ## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
 

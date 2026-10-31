@@ -112,6 +112,10 @@ fail() {
                                        # [egress-pacing] sub-step installs -- also sourced by
                                        # verify-device.sh's (ap) check + the E2E [0/8] row
 
+# shellcheck source=scripts/lib/cambox-jxs-target.sh
+. "$HERE/lib/cambox-jxs-target.sh"  # issue 1387: the JPEG XS link target from the venue fact files
+                                    # (STEP 7's drop-in) -- also sourced by verify-device.sh's (ay) check
+
 # shellcheck source=scripts/lib/ndi-discovery.sh
 . "$HERE/lib/ndi-discovery.sh"  # ndi_discovery_cambox_plan / ndi_discovery_cambox_apply_plan
                                 # (issue 1389) -- also sourced by verify-device.sh's (an) check +
@@ -550,6 +554,10 @@ resolve_device_name "$DEVICE_NAME_ARG"
 # (scripts/lib/remote-logging.sh remote_log_sink_ip), resolved before anything is written.
 REMOTE_LOG_SINK_IP="$(remote_log_sink_ip "$CAMERA_NAME")" \
     || fail "no venue log sink for ${CAMERA_NAME} -- a strih fact file in scripts/strih-boxes/ must list it in STRIH_CAMERAS (issue 1394)"
+# issue 1387: the JPEG XS link target = the same venue strih's STRIH_IP + this camera's STRIH_JXS_CAMERAS
+# port, or `none` (NDI only); STEP 7 writes / removes the drop-in from it.
+CAMBOX_JXS_TARGET="$(cambox_jxs_target "$CAMERA_NAME")" \
+    || fail "no JPEG XS target resolves for ${CAMERA_NAME} from the venue fact files (issue 1387)"
 
 case "$RIG_MODE_ARG" in
     test | event) ;;
@@ -1036,6 +1044,11 @@ cat > /etc/systemd/system/camera-box.service.d/genlock.conf << EOF
 [Service]
 Environment=CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}
 EOF
+# issue 1387: the JPEG XS link target its venue declares (resolved above) as a PERSISTENT drop-in (the
+# hand-made one lived in /run and a reboot dropped it); removed for a camera that stays NDI only.
+# verify-device.sh (ay) grades it; a live box gets it from scripts/lib/cambox-jxs-target.sh --apply-program.
+cambox_jxs_dropin_install "" "$CAMBOX_JXS_TARGET" \
+    || fail "could not write the JPEG XS drop-in ${CAMBOX_JXS_DROPIN} (issue 1387)"
 # #772 -- ExecStartPre device-free bake-in: a small helper + drop-in so EVERY camera-box start
 # (the on-box dead-man, cleanup(), the next-run preflight, or a manual operator restart) first
 # frees /dev/video from a killed E2E run's stray capture burn, instead of crash-looping on
