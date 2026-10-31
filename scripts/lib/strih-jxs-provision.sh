@@ -240,7 +240,7 @@ PY
 # note); always rc 0.
 strih_jxs_config_verify_row() {
   local home="${1-}" co man tmp out line level text target file have
-  local -a args
+  local -a seed_args
   co="$(strih_jxs_checkout)"
   man="$(strih_jxs_seed_manifest_json)" || { bad "(jxs-seed) the box facts do not load -- cannot grade the JPEG XS path (issue 1387)"; return 0; }
   # (jxs-seed): the installed manifest = the facts' render, the installed seeder = the checkout's.
@@ -267,9 +267,9 @@ strih_jxs_config_verify_row() {
   if [ -n "$man" ] || { [ "$target" != none ] && [ "$target" != unresolved ]; }; then
     tmp="$(mktemp -d)" || { bad "(jxs-inputs) cannot create a scratch dir"; return 0; }
     [ -z "$man" ] || printf '%s\n' "$man" >"${tmp}/jxs-seed.json"
-    args=(--verify --manifest "${tmp}/jxs-seed.json" --host "${WS_HOST:-127.0.0.1}" --port "${STRIH_JXS_OBS_PORT:-4455}")
-    case "$target" in none | unresolved) ;; *) args+=(--output-target "$target" --output-stream-id "$STRIH_JXS_PROGRAM_STREAM_ID") ;; esac
-    out="$(timeout 30 python3 "${co}/scripts/obs_jxs_inputs.py" "${args[@]}" 2>&1 || true)"
+    seed_args=(--verify --manifest "${tmp}/jxs-seed.json" --host "${WS_HOST:-127.0.0.1}" --port "${STRIH_JXS_OBS_PORT:-4455}")
+    case "$target" in none | unresolved) ;; *) seed_args+=(--output-target "$target" --output-stream-id "$STRIH_JXS_PROGRAM_STREAM_ID") ;; esac
+    out="$(timeout 30 python3 "${co}/scripts/obs_jxs_inputs.py" "${seed_args[@]}" 2>&1 || true)"
     rm -rf "$tmp"
     [ -n "$out" ] || bad "(jxs-inputs) obs_jxs_inputs.py --verify printed nothing (issue 1387)"
     while IFS= read -r line; do
