@@ -33,6 +33,12 @@ paths:
   - "src/jxs_congestion_bench.rs"
   - "scripts/lib/strih-jxs-verify.sh"
   - "tests/python/test_strih_jxs_verify_1387.py"
+  - "scripts/lib/cambox-jxs-target.sh"
+  - "scripts/lib/strih-jxs-provision.sh"
+  - "scripts/obs_jxs_inputs.py"
+  - "tests/python/test_cambox_jxs_target_1387.py"
+  - "tests/python/test_strih_jxs_provision_1387.py"
+  - "tests/python/test_obs_jxs_inputs_1387.py"
 ---
 
 # The cambox JPEG XS link (issue 1387, slices 1, 1b, 2 + 3, and the in-OBS indicator)
@@ -1057,6 +1063,108 @@ newest timestamped line is RUNNING: any `lost_slices` > 0 summed over its last 1
 FAILs naming it; a clean one PASSes; a source that stopped writing and no source at all are NOTEs.
 The OBS indicator reads DEGRADED from the same counters. Pytest:
 `tests/python/test_strih_jxs_verify_1387.py` (the lines rendered from the SHIPPED C format string).
+
+## The JPEG XS path is PROVISIONED from the box facts (issue 1387, owner: no hand state)
+
+Until 31.10.2026 the whole path was hand state: the cambox target in a `/run` drop-in (gone at a
+reboot), the strih inputs' 36 ms pin only in the running OBS (the saved collection read 3), the strih
+`jxs-output.json` hand-written, the stream `JXS PGM src` created over WS. Now every value is a FACT and
+everything else is derived.
+
+**The four facts** (`scripts/strih-boxes/<box>.env`, validated by `strih_box_jxs_facts_ok` in the loader):
+
+| Fact | Role | strih-snv / stream-snv | PP boxes |
+|---|---|---|---|
+| `STRIH_JXS_CAMERAS` | strih: `N:PORT` per camera on the link, N in STRIH_CAMERAS, each N and port once | `2:7002 3:7003 5:7000` (the live ports, kept) | `none` |
+| `STRIH_JXS_CAMERA_PIN_MS` | strih: their genlock pin, 3..2000 (the jxs-source clamp) | `36` (ROZHODNUTE 6546700019: the fixed 100 ms grid age) | `none` |
+| `STRIH_JXS_PROGRAM_PORT` | stream: the UDP port `JXS PGM src` listens on | `7100` | `none` |
+| `STRIH_JXS_PROGRAM_PIN_MS` | stream: its genlock pin = the stream A/V pin | `1087` (re-measured after the 100 ms step: a new value is this one line) | `none` |
+
+A value is `none` exactly when its partner is; the camera facts are `none` on the stream role and the
+program facts `none` on the strih role. **PP is deferred by the owner**: every PP file declares `none`,
+so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
+
+**The cambox (`scripts/lib/cambox-jxs-target.sh`).**
+- `cambox_jxs_target camN` = the venue strih's `STRIH_IP` + the camera's port, or `none`. It rides the
+  ONE camera -> venue-strih lookup of issue 1394: `_remote_log_strih_row` (remote-logging.sh) prints a
+  third field, the camera's `STRIH_JXS_CAMERAS` port (`strih_box_jxs_port_of`) or `none`.
+- setup-device resolves it right after the log sink (fail when none resolves) and STEP 7 writes
+  `/etc/systemd/system/camera-box.service.d/jxs.conf` (`[Service]` + `Environment=CAMERA_BOX_JXS_TARGET=...`)
+  next to genlock.conf, enable-only; a camera that stays NDI only gets the file REMOVED. The name equals
+  the runtime file's, so `/etc` masks `/run` for the same name.
+- verify-device `(ay)` (after `(ak)`, before `(ax)`): the file byte-identical to the renderer (or absent
+  for `none`), the LOADED unit environment's last `CAMERA_BOX_JXS_TARGET` (a missing daemon-reload, an
+  overriding drop-in), the RUNNING camera-box's `/proc/<MainPID>/environ`, and no `/run` drop-in that
+  sets it. A target on a camera its venue does not declare FAILs (hand state). Unread = FAIL.
+- **A live box: `bash scripts/lib/cambox-jxs-target.sh --apply-program camN`** piped into
+  `sshpass ... ssh -o UserKnownHostsFile=/dev/null root@<box> bash -s`. It reads first (PLAN line), writes
+  or removes the drop-in inside ONE rw window closed by `ro_window_close_cmds` (`.claude/rules/ro-window.md`),
+  then after the close removes the `/run` drop-ins that set the variable, daemon-reloads, RESTARTS
+  camera-box only when its running target differs (a ~3 s camera outage; never a start of a stopped
+  camera-box) and reads back the loaded + running target. A busy root fails by name and reloads /
+  restarts nothing. On cam2/3/5 today the declared target equals the running one: no restart.
+- Tests: `tests/python/test_cambox_jxs_target_1387.py` (the resolver over the real and synthetic fact
+  files, the drop-in, the gather + verdict on the fake box, `(ay)` executed, the apply on the issue-1407
+  fake read-only-root box with a systemctl wrapper modelling the loaded and running environment).
+
+**The workstation boxes (`scripts/lib/strih-jxs-provision.sh`, sourced by strih-provision.sh).**
+- setup-strih step 6, ONE call (`strih_jxs_provision`, setup-strih is at its 1000-line budget):
+  - installs `scripts/obs_jxs_inputs.py` to `/usr/local/bin` and renders `/opt/camera-box/jxs-seed.json`
+    (`strih_jxs_seed_manifest_json`): `JXS camN src` per camera (scene `JXS camN`, port, camera N, the
+    camera pin, `genlock_fifo` + `genlock_grid` ON, `jxs_max_bpp` 0 = full quality) on the strih role,
+    `JXS PGM src` (scene `JXS PGM`, the program port, camera = `STRIH_JXS_PROGRAM_STREAM_ID` 100 =
+    `CB_JXS_OUT_STREAM_ID_DEFAULT`, the program pin, grid OFF) on the stream role; none declared = no
+    manifest;
+  - strih role: upserts `~/.config/obs-studio/plugin_config/distroav/jxs-output.json` = enabled +
+    `jxs_target` = the VENUE's stream box (the stream-role fact file of the same `STRIH_VENUE`: its
+    `STRIH_IP` + `STRIH_JXS_PROGRAM_PORT`, `strih_jxs_program_target`) + `jxs_stream_id` 100. The
+    operator's `jxs_bpp_*` / `jxs_cores` / `jxs_pace_mbps` and any other key are KEPT; the render of the
+    live file is the live file byte-for-byte (147 bytes). An unparseable file is backed up, then
+    rewritten. A venue with no program port leaves the file alone. Written through
+    `obs_box_write_if_changed` as the desktop user, 0644. The plugin reads it at the next OBS start.
+- `strih-obs-start.sh` runs `obs_jxs_inputs.py --bootstrap` after the strih_scenes seed when the
+  manifest exists, best effort (a WARN never stops OBS):
+  - an existing JPEG XS input gets ONE `SetInputSettings` overlay of the declared keys that differ
+    (update-only; a matching input is a pure read);
+  - an ABSENT input is created in its own holding scene `JXS camN` / `JXS PGM` (the slice-2/3 runbook
+    shape), never in an operator scene: `Cam N`, `Moderatori`, `MULTIVIEW` and `PRO` are the operator's
+    arrangement, and no tool writes the production scene;
+  - an input of another kind under the declared name is never touched (reported);
+  - `genlock_burn` is never written (the burn sweeps own it, TEST mode turns it on).
+- verify-strih item 49 gained `strih_jxs_config_verify_row "$USER_HOME"` (one line):
+  - `(jxs-seed)`: the installed manifest = the facts' render, the installed seeder = the checkout's;
+  - `(jxs-inputs)` + `(jxs-place)`: `obs_jxs_inputs.py --verify` against the FACTS' render over
+    obs-websocket (`STRIH_JXS_OBS_HOST` / `_PORT` seams): every declared input present, of the kind,
+    the declared settings (EFFECTIVE = the kind's defaults under the explicit ones: a live input whose
+    `genlock_grid` sits at its default true reads on); a report-only NOTE names the scenes it is shown
+    in; OBS not running = a NOTE;
+  - `(jxs-output)` (strih role): `enabled true`, the derived target, stream id 100; a hand-enabled file on
+    a venue that declares no program FAILs.
+- Read-only check of the live boxes on 31.10.2026: `obs_jxs_inputs.py --verify` from dev1 against
+  strih-snv and stream-snv PASSes every input with the declared facts, so the first setup-strih run there
+  is a pure read for the inputs and `unchanged` for jxs-output.json.
+- Tests: `tests/python/test_strih_jxs_provision_1387.py` (the facts + validator, the manifest, the
+  program target, the output render, step 6 end to end on temp paths, the verify rows, the wiring and
+  budgets), `tests/python/test_obs_jxs_inputs_1387.py` (the seeder against a fake obs-websocket, the
+  kind and keys pinned to jxs-source.cpp).
+
+### Supervisor apply (the lane was code-only)
+
+1. Camboxes cam2 / cam3 / cam5 (no E2E holding the rig lease, never a reboot):
+   `prog="$(mktemp)"; bash scripts/lib/cambox-jxs-target.sh --apply-program camN > "$prog"` (read it: the
+   target is baked in), then `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@<camN> bash -s < "$prog"`
+   -> `PLAN (...): ... drop-in write; runtime drop-ins: .../jxs.conf; camera-box runs 10.77.9.202:700N`,
+   the verified close, `removed the runtime drop-in`, `camera-box already runs the declared target -- not
+   restarted`, `READBACK (...): OK`. Then `./scripts/verify-device.sh CAMn`: `(ay)` PASS.
+2. strih-snv + stream-snv: the next genlock deploy runs setup-strih (or `sudo ./scripts/setup-strih.sh
+   --box <box>` from a checkout): step 6 prints `jxs-seed.json written`, `jxs-output.json unchanged` on
+   strih-snv. The inputs are healed at the next OBS start; `python3 /usr/local/bin/obs_jxs_inputs.py
+   --bootstrap` applies them at once (a pure read on the live state). The saved collection gets the 36 ms
+   pin when OBS next saves it (on exit).
+3. `sudo ./scripts/verify-strih.sh --box <box>`: `(jxs-seed)`, `(jxs-inputs)` and (strih) `(jxs-output)` PASS.
+4. After the stream A/V re-measure: change `STRIH_JXS_PROGRAM_PIN_MS` in `stream-snv.env`, merge, re-run
+   setup-strih on stream-snv, restart its OBS (or `--bootstrap`); never a WS-only pin change (the seeder
+   heals it back at the next OBS start).
 
 ## Supervisor runbook: the saturation test (owner scenario, strih-snv -> stream-snv)
 

@@ -180,6 +180,18 @@ if python3 "$SCN" --bootstrap; then
 else
   echo "WARN issue 1317: strih_scenes.py --bootstrap FAILED (non-fatal) -- OBS stays UP; collection may be unseeded. Re-seed: python3 ${SCN} --bootstrap. NOT aborting the unit (would flap a live OBS)."
 fi
+# issue 1387: the JPEG XS inputs the box facts declare (setup-strih step 6 renders the manifest; a box
+# that declares none has no manifest). Created in their own holding scene when absent, the declared
+# settings (port, camera, pin, grid) healed onto an existing one; never an operator scene. Best effort
+# like the seed above: a failure is a WARN, never a reason to stop a live OBS.
+JXS_SEED="${STRIH_JXS_SEED_BIN:-/usr/local/bin/obs_jxs_inputs.py}"
+if [ -f "${STRIH_JXS_SEED_MANIFEST:-/opt/camera-box/jxs-seed.json}" ]; then
+  if python3 "$JXS_SEED" --bootstrap; then
+    echo "OK: JPEG XS inputs seeded (obs_jxs_inputs.py --bootstrap)."
+  else
+    echo "WARN issue 1387: obs_jxs_inputs.py --bootstrap FAILED (non-fatal) -- OBS stays UP. Re-seed: python3 ${JXS_SEED} --bootstrap."
+  fi
+fi
 
 # #882: BLOCK until obs itself exits, then propagate ITS exit status -- makes obs (not this wrapper)
 # the process a Type=simple unit tracks. A signal death (segfault) reports non-zero and

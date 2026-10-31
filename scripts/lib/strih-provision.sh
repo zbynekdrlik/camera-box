@@ -138,6 +138,11 @@ if ! declare -F strih_jxs_verify_row >/dev/null; then
   # shellcheck source=scripts/lib/strih-jxs-verify.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-jxs-verify.sh"
 fi
+# issue 1387: the JPEG XS path from the box facts (setup step 6 + verify item 49's config rows).
+if ! declare -F strih_jxs_provision >/dev/null; then
+  # shellcheck source=scripts/lib/strih-jxs-provision.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-jxs-provision.sh"
+fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
 # the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4

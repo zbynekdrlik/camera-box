@@ -373,11 +373,11 @@ mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/n
 # ---------------------------------------------------------------------------------------------
 step 6 "NDI input/output seed manifest + seeding tooling (obs_phase2.py + strih_scenes.py seeder)"
 install -d -m 755 /opt/camera-box
-# issue 1317: the notebook runs the OPERATOR (production) collection, so the manifest carries the
-# canonical strih input names as EXPLICIT-name objects {sender,input,scene} + "mode":"update-only"
-# (heal the certified genlock class onto EXISTING inputs, never CreateScene/CreateInput -> no more
-# duplicate `NDI CAMn (usb)` receivers). The full DATA name-map is strih_lx_seed_manifest_json.
+# issue 1317: the OPERATOR collection, so the manifest carries the canonical strih input names as EXPLICIT-name
+# objects {sender,input,scene} + "mode":"update-only" (heal the certified genlock class onto EXISTING inputs,
+# never CreateScene/CreateInput -> no duplicate `NDI CAMn (usb)` receivers); the DATA map: strih_lx_seed_manifest_json.
 obs_box_seed_manifest_json > /opt/camera-box/strih-seed.json   # issue 1412: the stream role's manifest on a stream box
+strih_jxs_provision "$OBS_CFG" "$DESKTOP_USER" "$USER_HOME" "${HERE}/.." || fail "issue 1387: the JPEG XS inputs / program output could not be provisioned from the box facts (above)"
 echo "  wrote /opt/camera-box/strih-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
 # issue 1346: the fixed HDMI output's config ~/.camera-box/drm-output.json (Program / built-in Multiview,
 # the box's backend fact) -- the whole step lives in scripts/lib/strih-drm-output.sh.

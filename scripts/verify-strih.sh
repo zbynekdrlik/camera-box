@@ -906,6 +906,7 @@ fi
 strih_nic_grade_report /sys "$(ip -o -4 addr show 2>/dev/null || true)" || bad "(nic) the rig-NIC grader printed no row"
 obs_audio_buffering_verify_row "$(strih_lx_audio_buffering_ms)" "$USER_HOME" "$LOG"   # 48) the FIXED OBS audio buffering == the box fact (issue 1425)
 strih_jxs_verify_row "$LOG"   # 49) every running JPEG XS source: lost_slices=0 over its last minute (issue 1387, scripts/lib/strih-jxs-verify.sh)
+strih_jxs_config_verify_row "$USER_HOME"   # 49) + the JPEG XS config vs the box facts: manifest, inputs, program output (issue 1387, strih-jxs-provision.sh)
 
 # 35) Downstream Keyer OBS plugin (issue 1361): setup-strih.sh step 4c installs the pinned upstream
 #     plugin into the /usr prefix OBS loads; FAIL unless the installed .so has the pinned sha256 (the
