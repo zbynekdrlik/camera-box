@@ -502,6 +502,10 @@ fn the_strih_build_hands_the_sender_header_to_distroav_and_checks_the_output_is_
         "'src/jxs_send.rs'",
         "'src/jxs_send/**'",
         "'src/affinity.rs'",
+        // live 31.10.2026: the sender's congestion control and auto bpp are crate-root modules
+        // the archive carries too; a change there must rebuild the strih bundle
+        "'src/jxs_congestion.rs'",
+        "'src/jxs_auto_bpp.rs'",
     ] {
         assert!(wf.contains(p), "trigger path {p}");
     }
