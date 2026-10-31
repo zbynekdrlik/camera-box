@@ -348,9 +348,14 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
 - Calls: `cbjxs_open(port, camera, max_bpp, err, err_len)` (0.0.0.0; camera 0 = the first heard;
   max_bpp 0 = no limit, sent in every report), `cbjxs_next_frame(rx, timeout_ms, &frame)` (1 / 0 /
   -1 socket error / -2 NULL or a panic), `cbjxs_set_max_bpp` (the report's cap, no reopen),
+  `cbjxs_set_late_ms` (ABI 4, live 31.10.2026: the bound past which a decoded frame counts as late
+  in the report; the source sets `cb_jxs_late_ms(genlock latency)` = the latency, never under
+  100 ms, at every open and on a latency change, no reopen -- a 1087 ms strih program input on
+  stream-snv read 100 ms as late and stepped the program link down to 4-6 bpp),
   `cbjxs_recv_buffer_bytes`, `cbjxs_get_stats`, `cbjxs_take_error`, `cbjxs_local_port`,
   `cbjxs_abi_version` (`CBJXS_ABI_VERSION` 2 since slice 3's `cbjxs_frame.chroma`, 3 since
-  `cbjxs_stats.link_mbps` + `fec_repaired`; bump it on any struct or signature change), and
+  `cbjxs_stats.link_mbps` + `fec_repaired`, 4 since `cbjxs_set_late_ms`; bump it on any struct
+  or signature change), and
   `cbjxs_close`. The stats call is `cbjxs_get_stats`: C cannot have a function named like the
   `cbjxs_stats` typedef. The frame's planes stay valid until the next `next_frame` / `close`.
 - No panic crosses into C (`catch_unwind`). A panic poisons the receiver: `-2` from then on, close it.

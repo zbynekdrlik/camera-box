@@ -21,7 +21,7 @@ extern "C" {
 #endif
 
 /* Bumped on any change of a struct or a signature below. */
-#define CBJXS_ABI_VERSION 3u /* 3: cbjxs_stats.link_mbps + fec_repaired (issue 1387) */
+#define CBJXS_ABI_VERSION 4u /* 3: cbjxs_stats.link_mbps + fec_repaired; 4: cbjxs_set_late_ms (issue 1387) */
 
 /* cbjxs_frame.chroma (ABI 2, issue 1387 slice 3: the strih program reaches the stream as 4:2:0).
  * The same numbers as the sender's CBJXS_SEND_I420 / _I422 / _I444. */
@@ -101,6 +101,11 @@ int cbjxs_next_frame(cbjxs_receiver *rx, uint32_t timeout_ms, cbjxs_frame *out);
  * socket, the decoder and the report sequence stay, so the sender steps at once (a receiver cap).
  * 0 = done, -1 = NULL. */
 int cbjxs_set_max_bpp(cbjxs_receiver *rx, uint8_t max_bpp);
+
+/* Change the bound past which a decoded frame counts as late in the report (ms after its
+ * timecode). Like the bpp cap: the socket, the decoder and the report sequence stay.
+ * 0 = done, -1 = NULL. */
+int cbjxs_set_late_ms(cbjxs_receiver *rx, uint32_t late_ms);
 
 /* The kernel's effective receive buffer of the socket in bytes (SO_RCVBUF as the kernel reports
  * it, capped by net.core.rmem_max); -1 for NULL or an unreadable value. */

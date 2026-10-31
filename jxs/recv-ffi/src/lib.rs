@@ -24,7 +24,7 @@ use svt_jpegxs_sys::ChromaFormat;
 pub use jxs_send_ffi;
 
 /// `CBJXS_ABI_VERSION` of `include/camera_box_jxs.h`.
-pub const CBJXS_ABI_VERSION: u32 = 3;
+pub const CBJXS_ABI_VERSION: u32 = 4;
 
 /// `cbjxs_frame.chroma` (`CBJXS_CHROMA_*`; the same numbers as the sender's `CBJXS_SEND_I420` /
 /// `_I422` / `_I444`).
@@ -256,6 +256,20 @@ pub unsafe extern "C" fn cbjxs_set_max_bpp(rx: *mut CbjxsReceiver, max_bpp: u8) 
     match rx.as_mut() {
         Some(r) => {
             r.rx.set_max_bpp(max_bpp);
+            0
+        }
+        None => -1,
+    }
+}
+
+/// # Safety
+/// `rx` is NULL or a live receiver from `cbjxs_open`.
+#[no_mangle]
+pub unsafe extern "C" fn cbjxs_set_late_ms(rx: *mut CbjxsReceiver, late_ms: u32) -> i32 {
+    match rx.as_mut() {
+        Some(r) => {
+            // the floor holds whatever the caller passes (a latency of 3 ms is never 3 ms late)
+            r.rx.set_late_ms(camera_box::jxs_recv::late_ms_for_latency(late_ms));
             0
         }
         None => -1,

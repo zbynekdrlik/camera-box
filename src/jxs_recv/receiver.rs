@@ -64,6 +64,13 @@ impl ReceiverConfig {
     }
 }
 
+/// The late bound of an input whose genlock FIFO holds `latency_ms` (live 31.10.2026: a strih
+/// program input on stream-snv holds 1087 ms and read every frame over 100 ms as late, stepping the
+/// program link down): a frame is late only past what the input holds, never under 100 ms.
+pub fn late_ms_for_latency(latency_ms: u32) -> f64 {
+    f64::from(latency_ms).max(100.0)
+}
+
 /// One decoded frame, borrowed from the receiver until the next [`JxsReceiver::poll`].
 #[derive(Debug)]
 pub struct DecodedFrame {
@@ -291,6 +298,12 @@ impl JxsReceiver {
     /// steps at once (a receiver cap) without a reopen.
     pub fn set_max_bpp(&mut self, max_bpp: u8) {
         self.cfg.max_bpp = max_bpp;
+    }
+
+    /// Change the bound past which a decoded frame counts as late in the report (ms after its
+    /// timecode); the next report carries the new count.
+    pub fn set_late_ms(&mut self, late_ms: f64) {
+        self.cfg.late_ms = late_ms;
     }
 
     /// The speed of the link the slices arrive on (Mb/s), as the last report carried it (`None` =

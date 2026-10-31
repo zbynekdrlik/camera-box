@@ -63,7 +63,15 @@ struct cb_jxs_config {
 	uint16_t port;
 	uint8_t camera;
 	uint8_t max_bpp;
+	uint32_t latency_ms; /* the input's genlock latency: sets the late bound, never reopens */
 };
+
+/* A frame is late only past what this input's genlock FIFO holds, never under 100 ms (live
+ * 31.10.2026: a 1087 ms strih program input read 100 ms as late and stepped its sender down). */
+static inline uint32_t cb_jxs_late_ms(uint32_t latency_ms)
+{
+	return latency_ms > 100u ? latency_ms : 100u;
+}
 
 static inline bool cb_jxs_reopen_needed(struct cb_jxs_config a, struct cb_jxs_config b)
 {

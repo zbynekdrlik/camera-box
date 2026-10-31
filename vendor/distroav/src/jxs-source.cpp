@@ -89,7 +89,7 @@ struct jxs_source {
 	std::thread thread;
 	std::atomic<bool> running{false};
 	std::mutex config_mutex;
-	cb_jxs_config config = {CB_JXS_PORT_DEFAULT, 0, 0};
+	cb_jxs_config config = {CB_JXS_PORT_DEFAULT, 0, 0, CB_JXS_LATENCY_MS_MIN};
 	std::atomic<uint64_t> config_gen{0};
 };
 
@@ -240,6 +240,14 @@ static void jxs_thread(jxs_source *s)
 				obs_source_get_name(s->source), (unsigned)open_cfg.max_bpp, (unsigned)cfg.max_bpp);
 			open_cfg.max_bpp = cfg.max_bpp;
 		}
+		if (rx && cfg.latency_ms != open_cfg.latency_ms) {
+			/* the late bound follows the genlock latency through the report, no reopen */
+			cbjxs_set_late_ms(rx, cb_jxs_late_ms(cfg.latency_ms));
+			obs_log(LOG_INFO, "jxs-source '%s': late after %u ms (genlock latency %u ms) (issue 1387)",
+				obs_source_get_name(s->source), (unsigned)cb_jxs_late_ms(cfg.latency_ms),
+				(unsigned)cfg.latency_ms);
+			open_cfg.latency_ms = cfg.latency_ms;
+		}
 		if (!rx) {
 			err[0] = '\0';
 			rx = cbjxs_open(cfg.port, cfg.camera, cfg.max_bpp, err, sizeof err);
@@ -255,6 +263,7 @@ static void jxs_thread(jxs_source *s)
 			}
 			open_failure_logged = false;
 			open_cfg = cfg;
+			cbjxs_set_late_ms(rx, cb_jxs_late_ms(cfg.latency_ms));
 			jxs_state_entry(s, cfg);
 			if (opens++ > 0)
 				reopens_window++;
@@ -340,7 +349,8 @@ static void jxs_source_update(void *data, obs_data_t *settings)
 	auto s = static_cast<jxs_source *>(data);
 	const cb_jxs_config cfg = {cb_jxs_port(obs_data_get_int(settings, PROP_JXS_PORT)),
 				   cb_jxs_camera(obs_data_get_int(settings, PROP_JXS_CAMERA)),
-				   cb_jxs_max_bpp(obs_data_get_int(settings, PROP_JXS_MAX_BPP))};
+				   cb_jxs_max_bpp(obs_data_get_int(settings, PROP_JXS_MAX_BPP)),
+				   cb_jxs_clamp_latency_ms(obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC))};
 	{
 		std::lock_guard<std::mutex> lock(s->config_mutex);
 		s->config = cfg;
