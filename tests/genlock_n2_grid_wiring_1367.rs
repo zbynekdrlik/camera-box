@@ -301,7 +301,10 @@ fn an_opted_in_n1_source_takes_the_same_grid_release_with_n_1_1387() {
         "N>=2 line, then the opt-in, then the conveyor"
     );
     assert!(
-        src.contains("if (source->genlock_last_known_n >= 2 || source->genlock_grid_release) {"),
+        src.contains(
+            "if (source->genlock_last_known_n < 2 && source->genlock_grid_release) { const uint32_t \
+             grid_extra = genlock_n2_drop_cap_extra_frames(fps_num, fps_den);"
+        ),
         "the drop cap budgets the grid age of an opted-in source too"
     );
     assert!(src.contains("void obs_source_set_genlock_grid(obs_source_t *source, bool enabled) {"));
