@@ -194,6 +194,49 @@ mod tests {
         assert_eq!(codec_ms(1.0, 5_000_000), 0.0, "never negative");
     }
 
+    /// Live 31.10.2026 (strih-snv program link, 8 bpp into stream's 1 GbE port): the codec
+    /// finishes a frame in ~10 ms (`jxs-encode-bench` p99 10.44 ms on the box), but the sender
+    /// spends ~20 ms pushing its 2.25 MB out, part of it in send calls rather than pace sleeps,
+    /// and `encode_ms - paced_ns` read ~20 ms, so the auto bpp never found the 60 % headroom to
+    /// climb back to 8. The codec time is the time to the first packet plus the time the sender
+    /// WAITED for the encoder between packets; its own send work never counts.
+    #[test]
+    fn the_codec_time_counts_only_the_waits_for_the_encoder_never_the_send_work() {
+        let ms = 1_000_000u64;
+        let mut c = CodecClock::default();
+        // first packet 1 ms after the submit, then 30 packets the encoder already holds: each
+        // send takes 0.7 ms of the sender's own work, no wait in between
+        let mut t = ms;
+        for _ in 0..30 {
+            c.enter(t);
+            t += 700_000;
+            c.exit(t);
+        }
+        let v = c.codec_ms().expect("packets seen");
+        assert!((v - 1.0).abs() < 1e-9, "21 ms of sends, codec 1 ms: {v}");
+
+        // an encoder slower than the link: 2 ms waits between packets are codec time
+        let mut c = CodecClock::default();
+        let mut t = ms;
+        for _ in 0..10 {
+            c.enter(t);
+            t += 100_000;
+            c.exit(t);
+            t += 2 * ms;
+        }
+        let v = c.codec_ms().unwrap();
+        assert!(
+            (v - 19.0).abs() < 1e-9,
+            "1 ms to the first + 9 waits of 2 ms: {v}"
+        );
+
+        assert_eq!(
+            CodecClock::default().codec_ms(),
+            None,
+            "no packet: nothing measured"
+        );
+    }
+
     #[test]
     fn the_pace_setting_is_line_rate_or_a_bounded_rate() {
         assert_eq!(check_pace_mbps(0), Ok(0));
