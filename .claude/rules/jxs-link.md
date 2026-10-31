@@ -1241,6 +1241,14 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
   sign handling fast/full doubles the cost; significance coding off saves ~1 ms but codes less
   efficiently. The defaults (rc 1, signs 0, sigf 1, vpred 0, deadzone) stay.
 - SCHED_FIFO 50 on an idle core pair: 13.5/14.0 ms vs 13.8/14.8 SCHED_OTHER.
+- **The library itself must never set a realtime policy (live 31.10.2026).** Upstream
+  `svt_jxs_create_thread` raised every worker to SCHED_FIFO 99 when `geteuid() == 0`; camera-box runs
+  as root, so until the vendored patch (CAMERA-BOX-VENDOR.md, pinned by
+  `the_vendored_codec_never_raises_its_workers_to_a_realtime_policy`) the cambox encoder ran ABOVE the
+  capture thread (four `jxs-feed` threads FF 99 in `ps -L` on cam5, verify-device `(ah)` FAIL on
+  cam2/3/5). Every root-run `jxs-encode-bench` number before that patch (the N150 table below, its
+  "SCHED_OTHER" row included) was measured with FIFO 99 workers. OBS runs as the desktop user, so the
+  strih program output was never affected.
 - **The encoder SCHED_FIFO is OPT-IN** (`CAMERA_BOX_JXS_FIFO_PRIO`, `affinity::JXS_ENCODER_FIFO_PRIORITY`
   = 50 is the suggested value, below the capture's 90). The feeder raises itself with
   `affinity::set_current_thread_fifo_inherited` (FIFO WITHOUT reset-on-fork) right before it opens

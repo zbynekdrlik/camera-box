@@ -295,23 +295,11 @@ Handle_t svt_jxs_create_thread(void *(*thread_function)(void *), void *thread_co
 
     pthread_attr_destroy(&attr);
 
-    /* We can only use realtime priority if we are running as root, so
-     * check if geteuid() == 0 (meaning either root or sudo).
-     * If we don't do this check, we will eventually run into memory
-     * issues if the encoder is uninitialized and re-initialized multiple
-     * times in one executable due to a bug in glibc.
-     * https://sourceware.org/bugzilla/show_bug.cgi?id=19511
-     *
-     * We still need to exclude the case of thread sanitizer because we
-     * run the test as root inside the container and trying to change
-     * the thread priority will __always__ fail the thread sanitizer.
-     * https://github.com/google/sanitizers/issues/1088
-     */
-    if (!POINTER_TYPE_THREAD_SANITIZER_ENABLED && !geteuid()) {
-        if (pthread_setschedparam(*th, SCHED_FIFO, &(struct sched_param){.sched_priority = 99}))
-            SVT_WARN("Failed to set thread priority\n");
-        // ignore if this failed
-    }
+    /* camera-box local patch (issue 1387, CAMERA-BOX-VENDOR.md): upstream raised every worker to
+     * SCHED_FIFO 99 here whenever the process ran as root. camera-box runs as root, so its encoder
+     * ran above the capture thread (SCHED_FIFO 90). A worker keeps its creator's scheduling
+     * instead: SCHED_OTHER, or the opt-in CAMERA_BOX_JXS_FIFO_PRIO the feeder takes before it
+     * opens a session. */
     thread_handle = th;
 #endif // _WIN32
 
