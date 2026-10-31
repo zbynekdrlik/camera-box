@@ -317,3 +317,30 @@ fn an_opted_in_n1_source_takes_the_same_grid_release_with_n_1_1387() {
     let internal = squish(&read("vendor/obs-studio/libobs/obs-internal.h"));
     assert!(internal.contains("bool genlock_grid_release;"));
 }
+
+/// Issue 1387 (live 31.10.2026, after cb05641b26): an opted-in N==1 source took the grid release,
+/// but the N==1 shallow latch kept measuring it (`genlock-shallow-lock` / `remeasure
+/// reason=unreachable` every few seconds on each JPEG XS camera), and the audio's video-delay lock
+/// reads that latched depth. Like an N>=2 source, an opted-in source is not shallow-eligible: the
+/// latch clears its state and never latches.
+#[test]
+fn an_opted_in_source_is_never_shallow_eligible_1387() {
+    let src = squish(&read(OBS_SOURCE));
+    let latch = body_after(
+        &src,
+        "static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint64_t wall_now, uint64_t interval, uint32_t reserve_ms, bool relock) {",
+    );
+    assert!(
+        latch.contains(
+            "const bool shallow_eligible = source->genlock_last_known_n < 2 && !source->genlock_grid_release;"
+        ),
+        "issue 1387: the shallow latch must treat an opted-in source like an N>=2 one"
+    );
+    assert_eq!(
+        latch.matches("shallow_eligible, relock,").count(),
+        2,
+        "both the sticky floor and the latch take the eligibility"
+    );
+    assert!(!latch.contains("source->genlock_last_known_n < 2, relock,"));
+}
+
