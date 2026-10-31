@@ -113,9 +113,24 @@ pub fn obs_frame_stamp_100ns(
     frame_ts_ns: u64,
     fps: i64,
 ) -> i64 {
-    let _ = (mono_now_ns, frame_ts_ns);
-    crate::ndi::floor_boundary_100ns(wall_now_100ns, fps)
+    let send_floor = crate::ndi::floor_boundary_100ns(wall_now_100ns, fps);
+    if fps <= 0
+        || frame_ts_ns == 0
+        || frame_ts_ns > mono_now_ns
+        || mono_now_ns - frame_ts_ns > OBS_FRAME_STAMP_MAX_AGE_NS
+    {
+        return send_floor;
+    }
+    // The frame's render tick on the wall clock, through the offset read at this call.
+    let tick_wall_100ns = wall_now_100ns - ((mono_now_ns - frame_ts_ns) / 100) as i64;
+    // The tick sits ON its grid point: the nearest boundary (the floor of half a slot later).
+    let half_slot_100ns = UNITS_PER_SECOND_100NS / (2 * fps);
+    let stamp = crate::ndi::floor_boundary_100ns(tick_wall_100ns + half_slot_100ns, fps);
+    stamp.min(send_floor)
 }
+
+/// 100 ns units per second (the NDI timecode unit).
+const UNITS_PER_SECOND_100NS: i64 = 10_000_000;
 
 /// How many CONSECUTIVE captured frames elapse before the monotonic->realtime offset
 /// (`capture_realtime_100ns`'s `mono_to_real_offset_100ns` input) is due for a re-sample.

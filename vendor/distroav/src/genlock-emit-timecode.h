@@ -10,6 +10,9 @@
 
 #include <cstdint>
 
-/* The frame boundary at or before now on the per-second grid of `framerate` (rounded), 100 ns
- * since the Unix epoch. A framerate <= 0 stamps now. */
-int64_t genlock_emit_timecode_100ns(double framerate);
+/* The grid slot of the frame whose render tick is `frame_ts_ns` (libobs' media clock, the
+ * `video_data` timestamp) on the per-second grid of `framerate` (rounded), 100 ns since the Unix
+ * epoch, never after the floor of now (issue 1367: one frame, one stamp, however late the output
+ * callback runs). A frame_ts_ns of 0, ahead of now or over 1 s old stamps the floor of now; a
+ * framerate <= 0 stamps now. */
+int64_t genlock_emit_timecode_100ns(double framerate, uint64_t frame_ts_ns);
