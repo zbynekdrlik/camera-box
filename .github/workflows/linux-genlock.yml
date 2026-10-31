@@ -54,6 +54,9 @@ on:
       - 'src/jxs_send.rs'
       - 'src/jxs_send/**'
       - 'src/affinity.rs'
+      # the sender's pace + bpp decisions (live 31.10.2026: a congestion fix that never rebuilt)
+      - 'src/jxs_congestion.rs'
+      - 'src/jxs_auto_bpp.rs'
       # the static library links the whole camera-box crate: a dependency or module change can move
       # its native-library list or break the strih link.
       - 'Cargo.toml'
