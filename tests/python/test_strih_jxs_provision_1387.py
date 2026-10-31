@@ -64,7 +64,7 @@ def _fact(box, key):
 def test_the_four_fact_files_declare_the_live_path_and_pp_is_deferred():
     assert _fact("strih-snv", "STRIH_JXS_CAMERAS") == "2:7002 3:7003 5:7000"
     assert _fact("strih-snv", "STRIH_JXS_CAMERA_PIN_MS") == "36"
-    assert (_fact("stream-snv", "STRIH_JXS_PROGRAM_PORT"), _fact("stream-snv", "STRIH_JXS_PROGRAM_PIN_MS")) == ("7100", "1087")
+    assert (_fact("stream-snv", "STRIH_JXS_PROGRAM_PORT"), _fact("stream-snv", "STRIH_JXS_PROGRAM_PIN_MS")) == ("7100", "1054")
     for box in ("strih-pp", "stream-pp"):
         for key in ("STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS", "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS"):
             assert _fact(box, key) == "none", (box, key)
@@ -163,7 +163,7 @@ def test_stream_snv_declares_its_program_input_on_the_programs_stream_id():
     assert _bash('printf "%s\\n" "$STRIH_JXS_PROGRAM_STREAM_ID"').stdout.strip() == str(sid)
     (s,) = oji.parse_manifest(_manifest("stream-snv"))
     assert s.name == "JXS PGM src" and s.scene == "JXS PGM"
-    assert s.settings == {"jxs_port": 7100, "jxs_camera": sid, "jxs_max_bpp": 0, "genlock_latency_ms_src": 1087,
+    assert s.settings == {"jxs_port": 7100, "jxs_camera": sid, "jxs_max_bpp": 0, "genlock_latency_ms_src": 1054,
                           "genlock_fifo": True, "genlock_grid": False}
 
 
