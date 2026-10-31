@@ -6114,6 +6114,13 @@ static size_t genlock_source_drop_cap(const obs_source_t *source)
 				latency_frames = extra > UINT32_MAX - latency_frames ? UINT32_MAX
 										     : latency_frames + extra;
 			}
+			/* camera-box issue 1387: an N==1 source on the grid release (the opt-in) holds the
+			 * same grid age -- the same headroom */
+			if (source->genlock_last_known_n < 2 && source->genlock_grid_release) {
+				const uint32_t grid_extra = genlock_n2_drop_cap_extra_frames(fps_num, fps_den);
+				latency_frames = grid_extra > UINT32_MAX - latency_frames ? UINT32_MAX
+											  : latency_frames + grid_extra;
+			}
 		}
 		if (latency_frames > depth)
 			depth = latency_frames;
@@ -8092,6 +8099,11 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 	const uint32_t release_n = genlock_effective_source_multiple(source, interval);
 	if (release_n >= 2)
 		return genlock_release_tick_n2_grid(source, wall_now, present_ts, interval, reserve_ms, release_n, now_ns);
+	/* camera-box issue 1387: an N==1 source that opted in (a 30 fps JPEG XS camera) takes the same
+	 * grid release with N = 1 -- the stamp grid_floor(T - 50 ms - pin) on the canvas grid, the NDI
+	 * cameras' age -- never the shallow latch below, which re-measures its depth at run time. */
+	if (source->genlock_grid_release)
+		return genlock_release_tick_n2_grid(source, wall_now, present_ts, interval, reserve_ms, 1, now_ns);
 	/* ---- camera-box #401: PHASE-LOCKED release cadence (v2) ---------
 	 * WHY: this release used to re-derive the deadline from the wall
 	 * clock EVERY tick (present_ts above) and present the NEWEST due
@@ -10711,6 +10723,25 @@ void obs_source_set_genlock_burn(obs_source_t *source, bool enabled)
 bool obs_source_get_genlock_burn(const obs_source_t *source)
 {
 	return obs_source_valid(source, "obs_source_get_genlock_burn") ? source->genlock_burn : false;
+}
+
+/* camera-box issue 1387: per-source opt-in to the fixed grid release for an N==1 source (see
+ * obs.h). A plain bool write (same shape as obs_source_set_genlock_burn); the release tick reads it
+ * under the async mutex it already holds, a torn bool is not a concept on the target ABIs. */
+void obs_source_set_genlock_grid(obs_source_t *source, bool enabled)
+{
+	if (!obs_source_valid(source, "obs_source_set_genlock_grid"))
+		return;
+	const bool prev = source->genlock_grid_release;
+	source->genlock_grid_release = enabled;
+	if (prev != enabled)
+		blog(LOG_INFO, "genlock: fixed grid release %s for source '%s' (issue 1387)",
+		     enabled ? "ON" : "OFF", obs_source_get_name(source));
+}
+
+bool obs_source_get_genlock_grid(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_get_genlock_grid") ? source->genlock_grid_release : false;
 }
 
 /* camera-box #1299: per-source NDI RECEIVER-CONNECTION flag write. A plain bool (same shape as

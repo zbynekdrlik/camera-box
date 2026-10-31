@@ -49,6 +49,9 @@
 #define PROP_GENLOCK_FIFO "genlock_fifo"
 #define PROP_GENLOCK_LATENCY_MS_SRC "genlock_latency_ms_src"
 #define PROP_BURN "genlock_burn"
+/* issue 1387: the fixed grid release of the NDI cameras for this 30 fps (N == 1) input, default ON
+ * (a camera); OFF keeps the N==1 conveyor, e.g. the deep stream program input */
+#define PROP_GENLOCK_GRID "genlock_grid"
 
 /* How long one receiver poll waits (bounds the stop latency). */
 #define JXS_POLL_MS 100u
@@ -74,6 +77,7 @@ struct jxs_genlock_api {
 	jxs_set_u32_fn set_latency_ms;
 	jxs_set_bool_fn set_connected;
 	jxs_set_bool_fn set_burn;
+	jxs_set_bool_fn set_grid;
 };
 
 static const jxs_genlock_api &jxs_genlock()
@@ -83,6 +87,7 @@ static const jxs_genlock_api &jxs_genlock()
 		(jxs_set_u32_fn)jxs_resolve("obs_source_set_genlock_latency_ms"),
 		(jxs_set_bool_fn)jxs_resolve("obs_source_set_genlock_connected"),
 		(jxs_set_bool_fn)jxs_resolve("obs_source_set_genlock_burn"),
+		(jxs_set_bool_fn)jxs_resolve("obs_source_set_genlock_grid"),
 	};
 	return api;
 }
@@ -332,6 +337,7 @@ static void jxs_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true);
 	obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, CB_JXS_LATENCY_MS_MIN);
 	obs_data_set_default_bool(settings, PROP_BURN, false);
+	obs_data_set_default_bool(settings, PROP_GENLOCK_GRID, true);
 }
 
 static obs_properties_t *jxs_source_getproperties(void *)
@@ -345,6 +351,7 @@ static obs_properties_t *jxs_source_getproperties(void *)
 	obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC, "Genlock latency (ms)", CB_JXS_LATENCY_MS_MIN,
 			       CB_JXS_LATENCY_MS_MAX, 1);
 	obs_properties_add_bool(props, PROP_BURN, "Measurement burn (test only)");
+	obs_properties_add_bool(props, PROP_GENLOCK_GRID, "Genlock fixed grid (camera)");
 	return props;
 }
 
@@ -369,6 +376,8 @@ static void jxs_source_update(void *data, obs_data_t *settings)
 				 cb_jxs_clamp_latency_ms(obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC)));
 	if (g.set_burn)
 		g.set_burn(s->source, obs_data_get_bool(settings, PROP_BURN));
+	if (g.set_grid)
+		g.set_grid(s->source, obs_data_get_bool(settings, PROP_GENLOCK_GRID));
 }
 
 static void *jxs_source_create(obs_data_t *settings, obs_source_t *source)

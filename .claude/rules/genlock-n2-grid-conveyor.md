@@ -86,6 +86,14 @@ declaration.
 - **N==1 sources are byte-identical** (the stream `NDI 2ME PGM`, the shallow CG latch, imag's
   60-into-60): the only new statements on their path are the top `genlock_effective_source_multiple`
   call, whose latch write equals the one the STEADY branch made anyway.
+- **The N==1 opt-in (issue 1387, design 6544857648, live 31.10.2026):** a source with
+  `obs_source_set_genlock_grid(source, true)` (field `genlock_grid_release`) takes the SAME grid
+  release with N = 1, right after the N>=2 line and before the conveyor, and gets the same drop-cap
+  headroom in its own block (the N>=2 line and its two pwsh mirrors stay byte-identical). The JPEG XS
+  source sets it from its `genlock_grid` key, default ON: a 30 fps JPEG XS camera at pin 3 presents
+  66.7 ms like the 60 fps NDI cameras (its frame is decoded ~37-45 ms after its stamp). Without the
+  opt-in it fell to the shallow CG latch, which re-latched cam5 inside a soak window (A/V 20 -> 89 ms).
+  The deep stream program input `JXS PGM src` runs with it OFF (the pin-derived rule, unchanged).
 
 ## Pin arithmetic
 
