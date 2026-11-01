@@ -80,6 +80,15 @@ frozen_input_alert_detail() {
     "$source" "$received"
 }
 
+# frozen_input_watch_list <required ';'-list> [more ';'-list] -> stdout: ONE ';'-joined list of the
+#   sources to watch this pass: every REQUIRED name first, in order (issue 1387 slice 3: the inputs the
+#   box facts declare on air -- the resolver's `JXS camN src` / `JXS PGM src`), then each further name
+#   not already listed (the enumerated ones); blank names dropped, no trailing newline. Pure; rc 0.
+frozen_input_watch_list() {
+  { printf '%s\n' "${1:-}" | tr ';' '\n'; printf '%s\n' "${2:-}" | tr ';' '\n'; } \
+    | awk '{ sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "") } NF && !seen[$0]++ { printf "%s%s", (n++ ? ";" : ""), $0 }'
+}
+
 # frozen_input_cambox_sources [include_regex] [exclude_regex]
 #   stdin: raw OBS-log text (a `genlock-fifo audit '<src>': …` tail); stdout: newline-separated,
 #   UNIQUE (first-seen order) source names that name a CAMBOX camera input on the receiver.

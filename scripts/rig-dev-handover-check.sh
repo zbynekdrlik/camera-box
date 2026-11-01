@@ -66,6 +66,11 @@ STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
 IMAG_HOST="${IMAG_HOST:-10.77.9.182}"
 CAM2_HOST="${CAM2_HOST:-10.77.9.62}"
 CAM_PW="${CAM_PW:-newlevel}"
+# issue 1387: the strih / stream ssh logins of the JPEG XS link read (rig-mode.sh's names + defaults)
+STRIH_LX_USER="${STRIH_LX_USER:-newlevel}"
+STRIH_LX_PW="${STRIH_LX_PW:-newlevel}"
+STREAM_USER="${STREAM_USER:-newlevel}"
+STREAM_PW="${STREAM_PW:-newlevel}"
 # issue 1372: exported -- the dantesync version gate's --fleet reads it as the default ssh login.
 export WIN_SSH_USER="${WIN_SSH_USER:-newlevel}"
 CAMSET_LIB="${RDH_CAMSET_LIB:-$HERE/camera-set.sh}"
@@ -113,6 +118,11 @@ CAMBOX_PROBE="${RDH_CAMBOX_PROBE:-$HERE/camera-box-version-gate.sh}"
 AVLATENCY_PROBE="${RDH_AVLATENCY_PROBE:-$HERE/measurement-chain-latency.sh}"
 EXPOSURE_PROBE="${RDH_EXPOSURE_PROBE:-$HERE/camera_test_settings.py}"
 RIGMODE_LIB="${RDH_RIGMODE_LIB:-$HERE/lib/rig-mode-state.sh}"
+# issue 1387 slice 3: the JPEG XS item's two existing read-only probes + the resolver lib that renders
+# the box facts on dev1 (it has no /opt/camera-box)
+JXS_PROBE="${RDH_JXS_PROBE:-$HERE/obs_jxs_inputs.py}"
+JXS_LIVE_LIB="${RDH_JXS_LIVE_LIB:-$HERE/lib/event-jxs-facet.sh}"
+PROGRAM_INPUTS_LIB="${RDH_PROGRAM_INPUTS_LIB:-$HERE/lib/program-inputs.sh}"
 WATCHDOG_ROSTER="${RDH_WATCHDOG_ROSTER:-$HERE/lib/watchdog-roster.sh}"
 DECIDE="${RDH_DECIDE:-$HERE/rig_dev_handover_decision.py}"
 
@@ -368,6 +378,68 @@ echo 0 >"$WORKDIR/watchdogs.rc"
 # a PENDING snapshot means the last EVENT switch did NOT restore it (production ran on the TEST
 # exposure). Read-only; the path honours CAMERA_PROD_EXPOSURE_SNAPSHOT like the E2E + rig-mode do.
 run_probe exposure python3 "$EXPOSURE_PROBE" snapshot-state
+
+# --- item 18: jxs (issue 1387 slice 3: the JPEG XS inputs + links, read-only) --------------------
+# Per broadcast box: the box FACTS' declared JPEG XS inputs graded live by the SAME `obs_jxs_inputs.py
+# --verify` verify-strih item 49 and the E2E [4i/8jxs] run (program_inputs_jxs_box_rows renders the
+# manifest from the facts; on the strih it also grades the running program output) -> the raw PASS / FAIL
+# / NOTE rows, or ONE `NONE (jxs)` row for a box that declares no JPEG XS (never dialled). Bounded by the
+# verifier's own timeout. The decision engine grades the rows.
+probe_jxs_box() {
+  local role="$1" host="$2" out="$WORKDIR/jxs_$1.out"
+  printf '0\n' >"$WORKDIR/jxs_$1.rc"
+  if [ ! -e "$JXS_PROBE" ] || [ ! -e "$PROGRAM_INPUTS_LIB" ]; then
+    printf 'MISSING: %s %s\n' "$JXS_PROBE" "$PROGRAM_INPUTS_LIB" >"$out"
+    printf '%s\n' "$RC_MISSING" >"$WORKDIR/jxs_$1.rc"
+    return 0
+  fi
+  (
+    PROGRAM_INPUTS_VERIFY_TIMEOUT_S="$(_probe_timeout jxs)"
+    # shellcheck source=scripts/lib/program-inputs.sh
+    . "$PROGRAM_INPUTS_LIB" && program_inputs_jxs_box_rows "$(dirname "$JXS_PROBE")" "$host" "$role" "$WORKDIR"
+  ) >"$out" 2>&1 || true
+  return 0
+}
+# The links' liveness through the EVENT contract's facet (scripts/lib/event-jxs-facet.sh: the last 1 MiB
+# of the newest OBS log at nice 19, never a whole-log read on a broadcast box), on the boxes whose rows
+# above are not NONE only; event_assert.py grades it in the decision engine. A box rows capture that did
+# not run (MISSING) says nothing about which box declares JPEG XS -> no read, UNKNOWN.
+probe_jxs_live() {
+  local out="$WORKDIR/jxs_live.out" role first
+  local -a args=()
+  printf '0\n' >"$WORKDIR/jxs_live.rc"
+  for role in strih stream; do
+    first=""
+    IFS= read -r first <"$WORKDIR/jxs_${role}.out" || true
+    case "$first" in
+      NONE*) continue ;;
+      MISSING*) first="" ;;
+    esac
+    if [ -z "$first" ] || [ ! -e "$JXS_LIVE_LIB" ]; then
+      printf 'MISSING: %s (or the %s rows)\n' "$JXS_LIVE_LIB" "$role" >"$out"
+      printf '%s\n' "$RC_MISSING" >"$WORKDIR/jxs_live.rc"
+      return 0
+    fi
+    if [ "$role" = strih ]; then
+      args+=("$STRIH_LX_USER" "$STRIH_LX_PW" strih "$STRIH_HOST")
+    else
+      args+=("$STREAM_USER" "$STREAM_PW" stream "$STREAM_HOST")
+    fi
+  done
+  if [ "${#args[@]}" -eq 0 ]; then
+    printf 'NONE (jxs-live) no broadcast box declares a JPEG XS link\n' >"$out"
+    return 0
+  fi
+  (
+    EVENT_JXS_SSH_TIMEOUT="$(_probe_timeout jxs_live)"
+    # shellcheck source=scripts/lib/event-jxs-facet.sh
+    . "$JXS_LIVE_LIB" && event_jxs_windows_json "${args[@]}"
+  ) >"$out" 2>/dev/null || true
+  return 0
+}
+probe_jxs_box strih "$STRIH_HOST"
+probe_jxs_box stream "$STREAM_HOST"
+probe_jxs_live
 
 # --- decide + print ------------------------------------------------------------------------------
 json_flag=()

@@ -83,6 +83,23 @@ SENDER_NAME="${FROZEN_INPUT_SENDER:-strih}"
 # feed only -- the always-live input whose #767 receiver freeze this ticket targets. Listing a source
 # here IS the "expected live" scope (an idle input that may legitimately stop is simply not listed).
 SOURCES="${FROZEN_INPUT_SOURCES:-NDI 2ME PGM}"
+SOURCES_EXPLICIT="${FROZEN_INPUT_SOURCES+1}"
+
+# -- issue 1387 slice 3: the JPEG XS path. The box facts decide WHICH inputs carry the on-air picture,
+# through the ONE resolver the E2E uses (scripts/lib/program-inputs.sh + camera-set.sh camera_strih_input,
+# never a literal name): on a JPEG XS venue the stream receiver's default source is the resolved stream
+# program input (`JXS PGM src`) and the strih receiver always watches every declared JPEG XS camera input
+# (`JXS camN src`) beside what it enumerates. The JPEG XS source writes the same `genlock-fifo audit`
+# lines, so the tap is unchanged. An NDI venue resolves nothing (both behave as before); an explicit
+# FROZEN_INPUT_SOURCES still wins. The resolver needs the venue's two hosts: the receiver's own address
+# for its role, the fleet default for the other.
+case "$RECEIVER_NAME" in
+  strih) _fi_strih_default="$RECEIVER_IP" _fi_stream_default=10.77.9.204 ;;
+  stream) _fi_strih_default=10.77.9.202 _fi_stream_default="$RECEIVER_IP" ;;
+  *) _fi_strih_default=10.77.9.202 _fi_stream_default=10.77.9.204 ;;
+esac
+PATH_STRIH_HOST="${FROZEN_INPUT_STRIH_HOST:-$_fi_strih_default}"
+PATH_STREAM_HOST="${FROZEN_INPUT_STREAM_HOST:-$_fi_stream_default}"
 
 # -- #1069 dynamic-enumeration mode (default OFF -> the #1052 stream instance behaves identically) --
 # When ENUMERATE=1 the watched source LIST is derived from the receiver's live OBS log each pass
@@ -143,6 +160,35 @@ NETREACH_STATE_FILE="${FROZEN_INPUT_NETREACH_STATE_FILE:-$STATE_DIR/camera-box-n
 EXPECTED_LIVE=1
 
 log() { printf '%s [frozen-input-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
+
+# -- issue 1387 slice 3: the inputs the box facts put on air (local fact-file reads, no network) ---
+# resolved_required_sources -> stdout: the ';'-joined inputs this receiver must carry on the JPEG XS path
+# (the stream program input on the stream role, every declared JPEG XS camera input on the strih role);
+# EMPTY on the NDI path, on another role, or when the facts refuse the venue (the resolver's own line
+# says why, plus one WARNING: the NDI defaults stay, a watchdog never stops watching). Runs its
+# resolver in this command substitution's subshell, so nothing it sets reaches the watchdog's shell.
+resolved_required_sources() {
+  local cam names=""
+  # shellcheck source=scripts/camera-set.sh
+  . "$HERE/camera-set.sh" || return 0
+  # shellcheck source=scripts/lib/program-inputs.sh
+  . "$HERE/lib/program-inputs.sh" || return 0
+  if ! program_inputs_resolve "$PATH_STRIH_HOST" "$PATH_STREAM_HOST" ""; then
+    log "WARNING: issue 1387: the box facts of strih $PATH_STRIH_HOST / stream $PATH_STREAM_HOST do not resolve (above) -- keeping the NDI default sources"
+    return 0
+  fi
+  program_path_ndi && return 0
+  case "$RECEIVER_NAME" in
+    stream) printf '%s' "${STREAM_PROG_SOURCE:-}" ;;
+    strih)
+      for cam in ${CAMERA_STRIH_JXS_SET:-}; do
+        names="${names:+$names;}$(camera_strih_input "$cam")"
+      done
+      printf '%s' "$names"
+      ;;
+  esac
+  return 0
+}
 
 # -- I/O probe (dev1-local; NOT pure -- kept out of the lib) -------------------------------------
 # probe_received <receiver_ip> <source> -> stdout: the newest cumulative `received=` value for the
@@ -403,13 +449,25 @@ main() {
     sender_reachable=1
   fi
 
+  # issue 1387 slice 3: the inputs the box facts put on air on the JPEG XS path (empty on NDI).
+  local required
+  required="$(resolved_required_sources)"
+  if [ -n "$required" ]; then
+    log "issue 1387: the JPEG XS path -- the box facts put '$required' on air on $RECEIVER_NAME"
+    if [ "$ENUMERATE" != "1" ] && [ -z "$SOURCES_EXPLICIT" ]; then
+      SOURCES="$required"
+    fi
+  fi
+
   # #1069 enumeration mode: derive the watched cambox set from the receiver's live OBS log each pass
   # (never a static list). Only when the receiver is reachable -- a box-down pass has nothing to read
   # and must not count as an enumeration-blind streak. A box-down pass leaves SOURCES empty -> the
-  # loop below simply iterates nothing (every source would SKIP anyway).
+  # loop below simply iterates nothing (every source would SKIP anyway). issue 1387: every input the
+  # facts declare is watched FIRST, beside what the log enumerates -- a declared input whose audit line
+  # is missing then reaches the tap-broken WARN instead of never being watched.
   if [ "$ENUMERATE" = "1" ]; then
     if [ "$sender_reachable" = "1" ]; then
-      SOURCES="$(enumerate_and_guard "$RECEIVER_IP")"
+      SOURCES="$(frozen_input_watch_list "$required" "$(enumerate_and_guard "$RECEIVER_IP")")"
     else
       SOURCES=""
       log "enumerate mode: receiver not reachable per #1001 -> no enumeration this pass (SKIP)"

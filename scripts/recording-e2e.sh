@@ -5916,7 +5916,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     echo "    [8/8f-pre] #756: live latency-pins snapshot (strih+imag WS reads + recommended pins from this run's delivery table)"
     if ! python3 "$HERE/latency_pins_snapshot.py" \
         --strih-host "$STRIH" --imag-host "$IMAG_IP" --stream-host "$STREAM" \
-        --password "${OBS_PASSWORD:-}" \
+        --password "${OBS_PASSWORD:-}" --stream-input "${STREAM_PROG_SOURCE:-}" \
         --verdict-json "$REPORT_JSON" --out "$PINS_JSON" 2>&1 | sed 's/^/    [pins-snapshot] /'; then
       echo "WARNING: #756 latency_pins_snapshot.py failed — Discord report will omit the pins section (fail-open, gate unaffected)." >&2
       PINS_JSON=""
@@ -5946,7 +5946,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     if [ "$_msp_strih_os" != linux ]; then _msp_strih_rec="$STRIH_REC_WIN"; fi
     missing_slot_pixels_run "$REPORT_JSON" "$OUTDIR" "$RUN_ID" "$STRIH" "$_msp_strih_os" "$_msp_strih_rec" "$STREAM" "$STREAM_REC_WIN" "$OUT_DIR_WIN" || true
     echo "    [8/8f] #711: Discord full-report (fail-open — never affects \$GATE below)"
-    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON" "$GENLOCK_AUDIT_JSON"
+    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON" "$GENLOCK_AUDIT_JSON" "${E2E_PROGRAM_PATH:-ndi}" "${STRIH_PROG_SOURCE:-}" "${STREAM_PROG_SOURCE:-}" "${PROGRAM_INPUTS_STREAM_PIN_MS:-}"
     echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"
     if [ "${KEEP_RECORDINGS:-0}" = "1" ]; then
       echo "    KEEP_RECORDINGS=1 — skipping the recording-cleanup plan (debugging opt-out, #652)."

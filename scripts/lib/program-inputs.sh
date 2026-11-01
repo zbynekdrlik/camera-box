@@ -28,12 +28,26 @@
 #   program_inputs_jxs_preflight HERE STRIH STREAM OUTDIR RUN_ID     the BLOCKING [4i/8jxs] step
 #   program_inputs_rendered_verify HERE STRIH STREAM SWEEP           the BLOCKING rendered-input check
 #   program_inputs_av_pin_hold                        the #856 A/V apply on JPEG XS = a recommendation
+#   program_inputs_jxs_box_rows HERE HOST ROLE OUTDIR  one box's raw --verify rows for the read-only
+#       development handover check (slice 3): NONE when the box declares no JPEG XS, ERROR when unreadable
 #
 # Tests: tests/python/test_program_inputs_1387.py.
 
 # _program_inputs_libdir -> this lib's directory.
 _program_inputs_libdir() {
   (cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+}
+
+# _program_inputs_box_of HOST -> the obs-fleet row's box for HOST when it has a fact file, else nothing;
+# always rc 0. Needs obs-fleet.sh + strih-box-facts.sh loaded (its callers run it in their own subshell).
+# A file test, never `strih_box_known | grep -q`: grep -q's early exit SIGPIPEs the lister under the
+# caller's pipefail and reads as "no box".
+_program_inputs_box_of() {
+  local b
+  b="$(obs_fleet_name_for_host "${1-}" 2>/dev/null)" || return 0
+  [[ "$b" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 0
+  [ -f "$(strih_box_dir)/${b}.env" ] && printf '%s' "$b"
+  return 0
 }
 
 # _program_inputs_facts STRIH STREAM -> the two boxes' JPEG XS facts as KEY=VALUE lines on stdout:
@@ -48,17 +62,8 @@ _program_inputs_facts() {
     set +e
     declare -F obs_fleet_name_for_host >/dev/null || . "${dir}/obs-fleet.sh" || exit 3
     declare -F strih_box_load >/dev/null || . "${dir}/strih-box-facts.sh" || exit 3
-    # the fleet row's box, when it has a fact file. A file test, never `strih_box_known | grep -q`:
-    # grep -q's early exit SIGPIPEs the lister under the caller's pipefail and reads as "no box".
-    _pi_box() {
-      local b
-      b="$(obs_fleet_name_for_host "${1-}" 2>/dev/null)" || return 0
-      [[ "$b" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 0
-      [ -f "$(strih_box_dir)/${b}.env" ] && printf '%s' "$b"
-      return 0
-    }
-    sbox="$(_pi_box "$strih")"
-    pbox="$(_pi_box "$stream")"
+    sbox="$(_program_inputs_box_of "$strih")"
+    pbox="$(_program_inputs_box_of "$stream")"
     jcams="" ndicams="" pport=none ppin=""
     if [ -n "$sbox" ]; then
       strih_box_load "$sbox" >/dev/null || exit 3
@@ -205,13 +210,80 @@ _program_inputs_box_render() {
   )
 }
 
+# _program_inputs_verify_run TAG HERE HOST BOX ROLE OUTDIR MANIFEST -> the RAW `obs_jxs_inputs.py --verify`
+# rows (PASS / FAIL / NOTE) of one box against the facts' MANIFEST (written to OUTDIR) + the venue's
+# running program output on a strih, on stdout. rc 1 + one `ERROR: TAG ...` line on stderr when no program
+# target resolves on a strih, or the verifier fails or prints nothing. Read-only (the verifier only reads
+# over obs-websocket), bounded by PROGRAM_INPUTS_VERIFY_TIMEOUT_S. Shared by the E2E [4i/8jxs] grade and
+# the handover's raw rows.
+_program_inputs_verify_run() {
+  local tag="${1-}" here="${2-}" host="${3-}" box="${4-}" role="${5-}" outdir="${6-}" man="${7-}" target sid out
+  local -a args
+  printf '%s\n' "$man" >"${outdir}/jxs-seed-${box}.json" || return 1
+  args=(--verify --manifest "${outdir}/jxs-seed-${box}.json" --host "$host" --port "${PROGRAM_INPUTS_OBS_PORT:-4455}")
+  if [ "$role" = strih ]; then
+    target="$(_program_inputs_box_render "$box" target)" || target=""
+    sid="$(_program_inputs_box_render "$box" sid)" || sid=""
+    case "$target" in
+      "" | none)
+        echo "ERROR: ${tag} strih '${box}': no JPEG XS program target resolves from the venue facts (issue 1387)" >&2
+        return 1
+        ;;
+    esac
+    args+=(--output-target "$target" --output-stream-id "$sid")
+  fi
+  out="$(timeout "${PROGRAM_INPUTS_VERIFY_TIMEOUT_S:-60}" python3 "${here}/obs_jxs_inputs.py" "${args[@]}" 2>&1)" || {
+    echo "ERROR: ${tag} ${role} '${box}' (${host}): obs_jxs_inputs.py --verify failed (rc $?): ${out}" >&2
+    return 1
+  }
+  [ -n "$out" ] || { echo "ERROR: ${tag} ${role} '${box}': obs_jxs_inputs.py --verify printed nothing (issue 1387)" >&2; return 1; }
+  printf '%s\n' "$out"
+}
+
+# program_inputs_jxs_box_rows HERE HOST ROLE OUTDIR -> one broadcast box's JPEG XS inputs for a READ-ONLY
+# caller (the development handover check, issue 1387 slice 3): the raw `obs_jxs_inputs.py --verify` rows
+# against the box FACTS' render (the call verify-strih item 49 and the [4i/8jxs] grade make; HERE holds
+# obs_jxs_inputs.py), or ONE `NONE (jxs) ...` row when no fact file names the host or its facts declare
+# no JPEG XS input (the NDI path: nothing to grade, nothing dialled), or ONE `ERROR (jxs) ...` row when
+# the facts do not load / render or the verifier fails. Never grades, never writes a box. Always rc 0.
+program_inputs_jxs_box_rows() {
+  local here="${1-}" host="${2-}" role="${3-}" outdir="${4-}" dir box man out
+  dir="$(_program_inputs_libdir)" || { printf 'ERROR (jxs) %s %s: the lib dir does not resolve\n' "$role" "$host"; return 0; }
+  box="$(
+    set +e
+    declare -F obs_fleet_name_for_host >/dev/null || . "${dir}/obs-fleet.sh" || exit 3
+    declare -F strih_box_load >/dev/null || . "${dir}/strih-box-facts.sh" || exit 3
+    _program_inputs_box_of "$host"
+  )" || { printf 'ERROR (jxs) %s %s: the fleet / fact libs do not load (issue 1387)\n' "$role" "$host"; return 0; }
+  if [ -z "$box" ]; then
+    printf 'NONE (jxs) %s %s: no fact file names this box -- it declares no JPEG XS input (issue 1387)\n' "$role" "$host"
+    return 0
+  fi
+  man="$(_program_inputs_box_render "$box" manifest)" || {
+    printf "ERROR (jxs) %s '%s': the box facts do not render a JPEG XS manifest (issue 1387)\n" "$role" "$box"
+    return 0
+  }
+  if [ -z "$man" ]; then
+    printf "NONE (jxs) %s %s: the facts of '%s' declare no JPEG XS input (issue 1387)\n" "$role" "$host" "$box"
+    return 0
+  fi
+  if out="$(_program_inputs_verify_run "(jxs)" "$here" "$host" "$box" "$role" "$outdir" "$man" 2>&1)"; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  # ONE row, whatever the verifier printed (a traceback spans lines)
+  out="${out//$'\n'/ }"
+  out="${out#ERROR: (jxs) }"
+  printf "ERROR (jxs) %s\n" "${out:-${role} '${box}': the manifest could not be written to ${outdir}}"
+  return 0
+}
+
 # _program_inputs_verify_box HERE HOST BOX ROLE OUTDIR -> obs_jxs_inputs.py --verify against the
 # FACTS' render on one box (+ the running program output on the strih), graded for the E2E: every
 # FAIL row, an unreachable websocket and a camera the operator moved off its declared input (the
 # (jxs-pick) NOTE) are blocking; PASS and the (jxs-place) NOTE are fine. rc 1 on any blocking row.
 _program_inputs_verify_box() {
-  local here="${1-}" host="${2-}" box="${3-}" role="${4-}" outdir="${5-}" man target sid out line level bad=0
-  local -a args
+  local here="${1-}" host="${2-}" box="${3-}" role="${4-}" outdir="${5-}" man out line level bad=0
   man="$(_program_inputs_box_render "$box" manifest)" || {
     echo "ERROR: [4i/8jxs] ${role} '${box}': the box facts do not render a JPEG XS manifest (issue 1387)" >&2
     return 1
@@ -220,24 +292,7 @@ _program_inputs_verify_box() {
     echo "ERROR: [4i/8jxs] ${role} '${box}' declares no JPEG XS input, yet the venue resolved to the JPEG XS path (issue 1387)" >&2
     return 1
   fi
-  printf '%s\n' "$man" >"${outdir}/jxs-seed-${box}.json" || return 1
-  args=(--verify --manifest "${outdir}/jxs-seed-${box}.json" --host "$host" --port "${PROGRAM_INPUTS_OBS_PORT:-4455}")
-  if [ "$role" = strih ]; then
-    target="$(_program_inputs_box_render "$box" target)" || target=""
-    sid="$(_program_inputs_box_render "$box" sid)" || sid=""
-    case "$target" in
-      "" | none)
-        echo "ERROR: [4i/8jxs] strih '${box}': no JPEG XS program target resolves from the venue facts (issue 1387)" >&2
-        return 1
-        ;;
-    esac
-    args+=(--output-target "$target" --output-stream-id "$sid")
-  fi
-  out="$(timeout "${PROGRAM_INPUTS_VERIFY_TIMEOUT_S:-60}" python3 "${here}/obs_jxs_inputs.py" "${args[@]}" 2>&1)" || {
-    echo "ERROR: [4i/8jxs] ${role} '${box}' (${host}): obs_jxs_inputs.py --verify failed (rc $?): ${out}" >&2
-    return 1
-  }
-  [ -n "$out" ] || { echo "ERROR: [4i/8jxs] ${role} '${box}': obs_jxs_inputs.py --verify printed nothing (issue 1387)" >&2; return 1; }
+  out="$(_program_inputs_verify_run "[4i/8jxs]" "$here" "$host" "$box" "$role" "$outdir" "$man")" || return 1
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     level="${line%% *}"

@@ -252,6 +252,12 @@ def _jxs_box_links(box):
     return {n: (p["frames"], (now - p["t"]) % 86400) for n, p in newest.items()}
 
 
+def jxs_box_readable(box) -> bool:
+    """True when one box's facet names at least one link under a log head (the development handover
+    check, issue 1387 slice 3: an unreadable box is UNKNOWN there, a dead link FORGOT)."""
+    return _jxs_box_links(box) is not None
+
+
 def jxs_live_ok(jxs_windows) -> bool:
     """jxs_windows: {box: {"head": "HH:MM:SS.mmm", "lines": [window lines]} | None} from rig-mode.sh.
     PASS iff it names at least one box and on every box every JPEG XS link's newest window carries

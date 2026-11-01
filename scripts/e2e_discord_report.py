@@ -131,6 +131,20 @@ def _cameras_present(verdict):
     return [c for c in CAMERA_ORDER if c in seen]
 
 
+def _inputs(meta):
+    """issue 1387 slice 3: the inputs this run MEASURED, as recording-e2e.sh's ONE resolver
+    (scripts/lib/program-inputs.sh) set them -- {"path": "ndi"|"jxs", "strih": <strih program input>,
+    "stream": <stream program input>, "stream_pin_fact_ms": <STRIH_JXS_PROGRAM_PIN_MS>}, every key
+    optional. Empty for a caller that passes none: the report then renders exactly as before."""
+    inp = (meta or {}).get("inputs")
+    return inp if isinstance(inp, dict) else {}
+
+
+def _transport(meta):
+    """The transport the strih cameras arrived on: `JPEG XS` on the JPEG XS path, else `NDI`."""
+    return "JPEG XS" if _inputs(meta).get("path") == "jxs" else "NDI"
+
+
 def _section_header(verdict, meta):
     run_id = meta.get("run_id") or "?"
     event = meta.get("event") or "E2E beh"
@@ -142,6 +156,11 @@ def _section_header(verdict, meta):
         lines.append(f"Plánovaná dĺžka: {duration}s · Kamery v behu: {cam_list}")
     else:
         lines.append(f"Kamery v behu: {cam_list}")
+    inputs = _inputs(meta)
+    named = [f"{label} '{inputs[key]}'" for key, label in (("strih", "strih program"), ("stream", "stream"))
+             if inputs.get(key)]
+    if named:
+        lines.append(f"Merané vstupy (cesta {_transport(meta)}): {', '.join(named)}")
     return "\n".join(lines)
 
 
@@ -271,10 +290,10 @@ def _section_latency(verdict):
     return "\n".join(lines)
 
 
-def _section_video_sync(verdict):
+def _section_video_sync(verdict, meta=None):
     cams = _cameras_present(verdict)
     block = _g(verdict, "all_cambox_delivery_latency", default={})
-    lines = ["**3️⃣ Video sync NDI kamier v strih OBS (doručovacia latencia, per-kamera hold)**"]
+    lines = [f"**3️⃣ Video sync {_transport(meta)} kamier v strih OBS (doručovacia latencia, per-kamera hold)**"]
     body_lines, _floor_min = _latency_block_lines(block, cams)
     lines.extend(body_lines)
     return "\n".join(lines)
@@ -501,7 +520,8 @@ def _section_latency_pins(verdict, meta):
         {
           "strih": {"cam1": {"main_ms": 3}, ...},               # live GetInputSettings reads
           "imag":  {"cam1": {"main_ms": 3, "mv_ms": 3}, ...},   # (both optional per-box)
-          "stream_hold_active_ms": 952,                          # live 'NDI 2ME PGM' pin
+          "stream_hold_active_ms": 952,                          # live pin of the input below
+          "stream_hold_source": "NDI 2ME PGM",                   # issue 1387: the input it read
           "av_sync_last": {"applied_latency_ms": 952, "offset_ms": -7.24, "source": "NDI 2ME PGM",
                             "calibrated_at": "..."},              # ~/.camera-box/av-sync-last.json
           "recommended_pins_ms": {"cam1": 3, "cam2": 13, ...}     # phase-sync-gate output,
@@ -518,6 +538,13 @@ def _section_latency_pins(verdict, meta):
     latencia)" when every imag pin this run actually reads back as 3ms, or a LOUD per-camera
     drift warning otherwise (imag_latency_enforce.py should have already self-healed this before
     the report ran -- seeing drift HERE means that step itself failed or didn't run).
+
+    issue 1387 slice 3: the stream line names the input the snapshot READ (`stream_hold_source`; a
+    snapshot without it is the pre-1387 tool, which read 'NDI 2ME PGM'). On the JPEG XS path, when that
+    is the measured stream input, its truth is the box fact STRIH_JXS_PROGRAM_PIN_MS
+    (meta["inputs"]["stream_pin_fact_ms"]), never av-sync-last.json (the NDI pin's record). The
+    per-camera strih cell is labelled the NDI backup there: the snapshot reads the `NDI camN` inputs,
+    and the JPEG XS camera pin is the one box fact STRIH_JXS_CAMERA_PIN_MS.
     """
     pins = meta.get("pins")
     if not pins:
@@ -529,12 +556,15 @@ def _section_latency_pins(verdict, meta):
     imag_pins = pins.get("imag") or {}
     recommended = pins.get("recommended_pins_ms") or {}
 
+    inputs = _inputs(meta)
+    jxs = inputs.get("path") == "jxs"
+    strih_label = "strih NDI záloha" if jxs else "strih"
     lines = ["**Nastavené latencie per kamera (živé z WS, nie napevno) + odporúčanie**"]
     for cam in cams:
         s_main = (strih_pins.get(cam) or {}).get("main_ms")
         p50 = _g(delivery, cam, "p50_ms")
         rec = recommended.get(cam)
-        strih_str = f"strih={_pin_or_na(s_main)}" if s_main is not None else "strih=N/A"
+        strih_str = f"{strih_label}={_pin_or_na(s_main)}" if s_main is not None else f"{strih_label}=N/A"
         rec_str = f", odporúčané={_pin_or_na(rec)}" if rec is not None else ""
         lines.append(f"  • {cam}: {strih_str}, p50 tento beh={_pin_or_na(p50)}{rec_str}")
 
@@ -561,10 +591,20 @@ def _section_latency_pins(verdict, meta):
             )
 
     stream_active = pins.get("stream_hold_active_ms")
+    hold_name = pins.get("stream_hold_source") or "NDI 2ME PGM"
+    fact = inputs.get("stream_pin_fact_ms")
+    if jxs and hold_name == inputs.get("stream") and isinstance(fact, int):
+        mismatch = stream_active is not None and stream_active != fact
+        lines.append(
+            f"  Stream '{hold_name}' hold: živé z WS={_pin_or_na(stream_active)}, "
+            f"box fakt STRIH_JXS_PROGRAM_PIN_MS={_pin_or_na(fact)}"
+            + (" ⚠️ NEZHODA — box beží s iným holdom, než deklaruje fakt (štart OBS ho vráti)" if mismatch else "")
+        )
+        return "\n".join(lines)
     av_last = pins.get("av_sync_last") or {}
     applied = av_last.get("applied_latency_ms")
     lines.append(
-        f"  Stream 'NDI 2ME PGM' hold: živé z WS={_pin_or_na(stream_active)}, "
+        f"  Stream '{hold_name}' hold: živé z WS={_pin_or_na(stream_active)}, "
         f"posledný zdroj pravdy (av-sync-last.json)={_pin_or_na(applied)}"
         + (
             " ⚠️ NEZHODA — box beží s iným holdom, než je zapísaný ako naposledy kalibrovaný"
@@ -1370,7 +1410,7 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
         _section_header(verdict, meta),
         _section_zero_loss(verdict),
         _section_latency(verdict),
-        _section_video_sync(verdict),
+        _section_video_sync(verdict, meta),
         _section_av_sync(verdict),
         _section_overall(verdict, meta),
         _section_presentation_cadence(verdict),
@@ -1452,6 +1492,15 @@ def main(argv=None):
         "the genlock-conveyor section is skipped entirely (and appears in the FULL report only, "
         "never the Discord summary) when not supplied",
     )
+    # issue 1387 slice 3: the inputs recording-e2e.sh's resolver set (scripts/lib/program-inputs.sh),
+    # forwarded by scripts/lib/e2e-discord-report.sh; the full report names them (never a hard-coded
+    # NDI name). All optional: a caller that passes none renders exactly as before.
+    ap.add_argument("--program-path", default=None, choices=("ndi", "jxs"),
+                    help="issue 1387: the path the run measured (E2E_PROGRAM_PATH)")
+    ap.add_argument("--strih-input", default=None, help="issue 1387: the strih program input measured")
+    ap.add_argument("--stream-input", default=None, help="issue 1387: the stream program input measured")
+    ap.add_argument("--stream-pin-fact", default=None,
+                    help="issue 1387: STRIH_JXS_PROGRAM_PIN_MS of the stream box (a non-number is left out)")
     ap.add_argument(
         "--run-url",
         default=None,
@@ -1486,6 +1535,11 @@ def main(argv=None):
         with open(args.genlock_audit_json, encoding="utf-8") as f:
             genlock_audit = json.load(f)
 
+    inputs = {k: v for k, v in (("path", args.program_path), ("strih", args.strih_input),
+                                ("stream", args.stream_input)) if v}
+    if re.fullmatch(r"[0-9]{1,6}", args.stream_pin_fact or ""):
+        inputs["stream_pin_fact_ms"] = int(args.stream_pin_fact)
+
     meta = {
         "run_id": args.run_id,
         "event": args.event,
@@ -1495,6 +1549,7 @@ def main(argv=None):
         "mv_skew": mv_skew,
         "genlock_audit": genlock_audit,
         "run_url": args.run_url or _ci_run_url(),
+        "inputs": inputs,
     }
     if args.json_chunks:
         # #1127: Discord carries only the short, verdict-first summary.
