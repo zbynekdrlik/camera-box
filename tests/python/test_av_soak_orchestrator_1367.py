@@ -430,6 +430,18 @@ def test_plan_is_the_default_and_touches_nothing(rig):
         assert needle in out, needle
 
 
+
+def test_an_input_override_still_wins_over_the_jpeg_xs_facts(rig):
+    # issue 1387 slice 1b: the soak defaults its inputs from the box facts; the env override wins.
+    env, p = rig
+    env = dict(env, AV_SOAK_STRIH_INPUT_FMT="NDI %s", STREAM_PROG_SOURCE="NDI 2ME PGM")
+    r = _soak(env, "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    burns = _calls(p["log"], "burn")
+    added = {c[c.index("--input") + 1] for c in burns if c[0] == "add"}
+    removed = {c[c.index("--input") + 1] for c in burns if c[0] == "remove"}
+    assert added == {"NDI cam1", "NDI cam3", "NDI 2ME PGM"} and removed == added
+
 def test_the_default_slot_leaves_the_measured_strih_lx_decode_time(tmp_path):
     # ROZHODNUTÉ 5861667625: strih-snv decodes at ~8.5 frames/s on its idle E-cores, so the
     # defaults are a 20 min slot and 20 s camera segments, and the decode budget must cover a
@@ -535,7 +547,8 @@ def test_one_window_end_to_end(rig):
     burns = _calls(p["log"], "burn")
     added = {c[c.index("--input") + 1] for c in burns if c[0] == "add"}
     removed = {c[c.index("--input") + 1] for c in burns if c[0] == "remove"}
-    assert added == {"NDI cam1", "NDI cam3", "NDI 2ME PGM"} and removed == added
+    # issue 1387 slice 1b: the SNV facts put cam3 and the program on JPEG XS (cam1 is no SNV camera)
+    assert added == {"NDI cam1", "JXS cam3 src", "JXS PGM src"} and removed == added
 
     decodes = [line for line in p["log"].read_text().splitlines() if line.startswith("decode ")]
     assert any("--extract-partial strih" in d for d in decodes)
