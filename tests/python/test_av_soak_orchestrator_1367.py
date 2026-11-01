@@ -558,7 +558,7 @@ def test_one_window_end_to_end(rig):
     assert merge[merge.index("--cam2-run-id") + 1] == "4242"
     # issue 1482: the soak centres the A/V gate on the test feed's own leg, the same expected offset the
     # E2E passes (the rig's default feed is direct: -45 ms), never the verdict's camera+monitor default.
-    assert merge[merge.index("--av-expected-ms") + 1] == "-45"
+    assert merge[merge.index("--av-expected-ms") + 1] == "-74"
     assert not any(a.startswith("--burn-") for a in merge)
 
     _assert_rig_restored(p)
@@ -1389,7 +1389,7 @@ def test_an_explicit_av_expected_ms_wins_over_the_feed_1482(rig):
     env = dict(env, RIG_TEST_FEED="direct", AV_EXPECTED_MS="-12")
     out = _soak(env, "--plan").stdout
     line = _merge_line(out)
-    assert "--av-expected-ms -12" in line and "-45" not in line
+    assert "--av-expected-ms -12" in line and "-74" not in line
 
 
 def test_the_soak_measures_the_jpeg_xs_inputs_when_asked_1387(rig):

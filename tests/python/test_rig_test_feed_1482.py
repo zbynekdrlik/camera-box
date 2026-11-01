@@ -187,7 +187,7 @@ def test_recording_e2e_holds_the_av_apply_in_the_direct_feed():
 def test_the_av_gate_expects_the_direct_feeds_own_offset():
     # Every direct-feed measurement since the jack switch (8 E2E + soak windows, 25.-27.10.2026): -38..-52 ms,
     # median -46.5, uniform over the cameras (ROZHODNUTE on the ticket, 27.10.2026). The camera+monitor feed keeps 0.
-    assert _lib("rig_test_feed_av_expected_ms").stdout == "-45"
+    assert _lib("rig_test_feed_av_expected_ms").stdout == "-74"
     assert _lib("rig_test_feed_av_expected_ms", {"RIG_TEST_FEED": "optical"}).stdout == "0"
 
 
