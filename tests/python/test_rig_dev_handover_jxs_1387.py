@@ -229,10 +229,12 @@ def test_a_box_no_fact_file_names_is_one_none_row_and_never_dialled(tmp_path):
 
 
 def test_a_box_whose_facts_declare_no_jpeg_xs_is_one_none_row(tmp_path):
-    fleet = "strih-pp|192.0.2.30|linux-genlock|always\nstream-pp|192.0.2.31|linux-genlock|always"
+    # the fact loader checks the fleet row against the box's own STRIH_IP: dial it by that address
+    facts = (_SCRIPTS / "strih-boxes" / "strih-pp.env").read_text(encoding="utf-8").splitlines()
+    pp_ip = next(ln.split("=", 1)[1].strip() for ln in facts if ln.startswith("STRIH_IP="))
     here, log = _fake_seeder(tmp_path, {})
-    out = _rows(tmp_path, here, "192.0.2.30", "strih", env={"OBS_FLEET": fleet})
-    assert out.startswith("NONE (jxs) strih 192.0.2.30:") and "strih-pp" in out, out
+    out = _rows(tmp_path, here, pp_ip, "strih", env={"OBS_FLEET": f"strih-pp|{pp_ip}|linux-genlock|always"})
+    assert out.startswith(f"NONE (jxs) strih {pp_ip}:") and "strih-pp" in out, out
     assert not log.exists()
 
 
