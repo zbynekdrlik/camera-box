@@ -114,6 +114,38 @@ def test_an_output_busy_drop_fails():
         assert l["counters"][k] == 1
 
 
+def _closing_index():
+    log, start, stop, st, et = recording()
+    return links(run_box(log, start, stop, start_time=st, stop_time=et))[OUTPUT]["windows"] - 1
+
+
+def test_one_frame_in_the_closing_window_of_the_output_is_the_stoprecord_skip():
+    # owner 2.11.2026: recording stays NVENC, the one frame its teardown costs at StopRecord is accepted for now
+    log, start, stop, st, et = recording(out={_closing_index(): {"dropped_busy": 1, "not_taken": 1}})
+    l = links(run_box(log, start, stop, start_time=st, stop_time=et))[OUTPUT]
+    assert l["verdict"] == "PASS", l
+    assert l["counters"]["dropped_busy"] == 1, "the count stays visible"
+    assert l["stop_transient"] == {"dropped_busy": 1, "not_taken": 1}
+
+
+def test_two_frames_in_the_closing_window_fail():
+    log, start, stop, st, et = recording(out={_closing_index(): {"dropped_busy": 2, "not_taken": 2}})
+    assert links(run_box(log, start, stop, start_time=st, stop_time=et))[OUTPUT]["verdict"] == "FAIL"
+
+
+def test_a_frame_before_the_closing_window_still_fails():
+    log, start, stop, st, et = recording(out={_closing_index() - 1: {"dropped_busy": 1, "not_taken": 1}})
+    assert links(run_box(log, start, stop, start_time=st, stop_time=et))[OUTPUT]["verdict"] == "FAIL"
+
+
+def test_the_closing_window_excuses_nothing_else():
+    i = _closing_index()
+    log, start, stop, st, et = recording(out={i: {"dropped_busy": 1, "not_taken": 1, "send_errors": 1}})
+    assert links(run_box(log, start, stop, start_time=st, stop_time=et))[OUTPUT]["verdict"] == "FAIL"
+    log, start, stop, st, et = recording(src={i: {"JXS cam5 src": {"lost_slices": 1}}})
+    assert links(run_box(log, start, stop, start_time=st, stop_time=et))["JXS cam5 src"]["verdict"] == "FAIL"
+
+
 def test_fec_repaired_and_the_other_report_only_counters_never_fail():
     log, start, stop, st, et = recording(
         src={1: {n: {"fec_repaired": 7, "decoder_reopens": 1, "report_errors": 0} for n in CAMS}},
