@@ -1032,6 +1032,86 @@ mod tests {
         assert!(link.handoff().is_some());
     }
 
+    /// The cpus a thread of this process may run on (`/proc/self/task/<tid>/status`).
+    #[cfg(feature = "jxs")]
+    fn threads_named(name: &str) -> Vec<Vec<usize>> {
+        let mut out = Vec::new();
+        for t in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
+            let comm = std::fs::read_to_string(t.path().join("comm")).unwrap_or_default();
+            if comm.trim() != name {
+                continue;
+            }
+            let status = std::fs::read_to_string(t.path().join("status")).unwrap_or_default();
+            if let Some(l) = status.lines().find(|l| l.starts_with("Cpus_allowed_list:")) {
+                out.push(crate::affinity::parse_cpulist(
+                    l.trim_start_matches("Cpus_allowed_list:"),
+                ));
+            }
+        }
+        out
+    }
+
+    /// Review of the reconnect fix: while the link waits for its target, the start never holds
+    /// the capture loop back (`start_retrying` returns at once, `offer` skips the frame), and
+    /// the `jxs-connect` thread runs OFF the capture core. camera-box.service starts the whole
+    /// process on the capture core (CPUAffinity=3), and this thread outlives the start, so it
+    /// would otherwise wake every second next to the FIFO capture and spawn the encoder there.
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn a_waiting_link_never_holds_the_capture_back_and_retries_off_the_capture_core() {
+        let (expected, capture, _) = crate::affinity::off_capture_split();
+        assert!(
+            capture.is_some() && !expected.is_empty(),
+            "needs a box with more than one core: {expected:?} {capture:?}"
+        );
+        let open = std::sync::Arc::new(AtomicBool::new(false));
+        let gate = open.clone();
+        let started = std::time::Instant::now();
+        let link = JxsSender::start_retrying(
+            Some("127.0.0.1:9"),
+            "CAM5",
+            SenderOptions::new(BppMode::Fixed(DEFAULT_BPP), None),
+            move |t: &str| {
+                if gate.load(Ordering::SeqCst) {
+                    JxsSocket::connect(t)
+                } else {
+                    Err(std::io::Error::from_raw_os_error(libc::ENETUNREACH))
+                }
+            },
+            std::time::Duration::from_millis(10),
+        )
+        .expect("a waiting link");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "the start returned while the target still cannot connect"
+        );
+        assert!(
+            link.handoff().is_none(),
+            "no link before the target connects"
+        );
+        let frame = vec![1u8; 64 * 8 * 2];
+        link.offer(&jf(&frame, 64, 8, tc(0), true));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut seen = threads_named("jxs-connect");
+        while seen.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            seen = threads_named("jxs-connect");
+        }
+        assert!(!seen.is_empty(), "the retry thread runs");
+        for cpus in &seen {
+            assert_eq!(cpus, &expected, "jxs-connect runs off the capture core");
+        }
+        open.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while link.handoff().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            link.handoff().is_some(),
+            "the link comes up once the target connects"
+        );
+    }
+
     /// A target the link can never use (IPv6: `Unsupported`) is not retried: one try, off.
     #[cfg(feature = "jxs")]
     #[test]

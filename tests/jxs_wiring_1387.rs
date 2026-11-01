@@ -10,6 +10,25 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
+/// Issue 1387, 1.11.2026: the cambox entry retries a target that cannot connect yet, with the
+/// production socket and the 1 s interval (a unit test injects its own connector, so only this
+/// pins what camera-box itself runs).
+#[test]
+fn the_cambox_entry_retries_with_the_real_socket_every_second() {
+    let s = read("src/jxs_send.rs");
+    let start = s.find("pub fn start_from_env(").expect("the entry");
+    let body = &s[start..];
+    let body = &body[..body[1..]
+        .find("\n    pub fn ")
+        .map_or(body.len(), |i| i + 1)];
+    assert!(body.contains("Self::start_retrying("), "{body}");
+    assert!(body.contains("JxsSocket::connect,"), "{body}");
+    assert!(body.contains("CONNECT_RETRY,"), "{body}");
+    assert!(s.contains(
+        "pub const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_secs(1);"
+    ));
+}
+
 /// Slice 1b (deliberate change of the slice-1 order): the hand-off sits right after the genlock
 /// timecode is fixed and BEFORE the #1242 stagger sleep and the NDI send, so the JPEG XS path
 /// never waits for the NDI send call; it passes the very timecode variable the NDI frame carries.
