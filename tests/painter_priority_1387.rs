@@ -92,3 +92,18 @@ fn run_paint_only_raises_the_painter_before_it_spawns_a_thread() {
         "the raise must come before the first spawned thread"
     );
 }
+
+#[test]
+fn the_paint_thread_takes_its_fifo_before_it_opens_the_presenter() {
+    // The E2E run 41336635338: at nice -15 the painter still missed 10 % of its vsyncs beside the
+    // burn camera-box (54 fps), so the marker chain broke again.
+    let painter = repo("src/probe/painter.rs");
+    let body = &painter[painter
+        .find("crate::affinity::pin_off_capture_core(\"painter\")")
+        .unwrap()..];
+    let fifo = body
+        .find("painter_priority::raise_paint_thread_fifo()")
+        .expect("the paint thread raises itself to SCHED_FIFO");
+    let open = body.find("open_presenter(").expect("the presenter open");
+    assert!(fifo < open, "the raise comes before the first present");
+}
