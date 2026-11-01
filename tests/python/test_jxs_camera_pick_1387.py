@@ -202,6 +202,21 @@ def test_enforce_mapping_fails_when_the_read_back_disagrees():
     assert lines[0].startswith("FAIL jxs mapping: 'JXS cam2 src' reads CAM3 (UDP 7003) after the write"), lines
 
 
+def test_cli_enforce_mapping_exits_3_when_the_mapping_is_not_proven(tmp_path, monkeypatch, capsys):
+    # rig-mode folds the seeder's rc into the mode's exit: a refused or failed mapping must not read 0
+    m = tmp_path / "jxs-seed.json"
+    m.write_text(_manifest(CAM2, CAM3, CAM5))
+    obs = _obs(JXS_cam2_src={"jxs_port": 7003, "jxs_camera": 3})
+    obs.recording = True
+    client = type("Client", (), {"req": staticmethod(obs.rpc)})
+    monkeypatch.setattr(oji, "_client", lambda args: client())
+    assert oji.main(["--enforce-mapping", "--manifest", str(m)]) == 3
+    assert "REFUSED" in capsys.readouterr().out and obs.writes() == []
+    obs.recording = False
+    assert oji.main(["--enforce-mapping", "--manifest", str(m)]) == 0
+    assert _pair(obs, "JXS cam2 src") == (7002, 2)
+
+
 def test_cli_enforce_mapping_exit_codes(tmp_path, capsys):
     m = tmp_path / "jxs-seed.json"
     assert oji.main(["--enforce-mapping", "--manifest", str(m)]) == 0
