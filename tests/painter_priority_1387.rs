@@ -47,7 +47,8 @@ fn own_nice() -> i32 {
     parse_task_nice(&std::fs::read_to_string("/proc/thread-self/stat").unwrap()).unwrap()
 }
 
-/// A non-root test can only LOWER its priority, so this sets a positive nice: the mechanism
+/// A non-root test can only LOWER its priority, so this sets nice 19, the one value allowed from
+/// any starting nice (a runner already at nice 10 is refused nice 7): the mechanism
 /// (every existing thread, and a thread created afterwards inherits it) is the same one
 /// `raise_painter_priority` uses with PAINTER_NICE as root on cam2. Only the threads this test
 /// owns are read: the harness may be starting a parallel test's thread at that very moment
@@ -63,17 +64,17 @@ fn every_thread_of_the_process_gets_the_nice_and_a_later_thread_inherits_it() {
     });
     ready_rx.recv().unwrap();
 
-    let (set, refused) = set_all_threads_nice(7);
+    let (set, refused) = set_all_threads_nice(19);
     assert_eq!(refused, 0);
     assert!(
         set >= 2,
         "the main thread and the earlier thread at least, got {set}"
     );
-    assert_eq!(own_nice(), 7, "the calling thread");
+    assert_eq!(own_nice(), 19, "the calling thread");
     let later = std::thread::spawn(own_nice).join().unwrap();
-    assert_eq!(later, 7, "a thread created afterwards inherits the nice");
+    assert_eq!(later, 19, "a thread created afterwards inherits the nice");
     go_tx.send(()).unwrap();
-    assert_eq!(earlier.join().unwrap(), 7, "a thread that existed before");
+    assert_eq!(earlier.join().unwrap(), 19, "a thread that existed before");
 }
 
 #[test]
