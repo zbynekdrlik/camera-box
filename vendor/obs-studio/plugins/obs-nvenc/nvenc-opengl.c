@@ -1,6 +1,8 @@
 #include "nvenc-internal.h"
 #include "nvenc-helpers.h"
 
+#include <util/platform.h>
+
 /*
  * NVENC implementation using CUDA context and OpenGL textures
  */
@@ -10,7 +12,7 @@ void cuda_opengl_free(struct nvenc_data *enc)
 	if (!enc->cu_ctx || !enc->input_textures.num)
 		return;
 
-	/* issue 1462: the textures were registered inside obs_enter_graphics()
+	/* issue 1462: the textures were registered under the graphics lock
 	 * (cuda_opengl_encode). The encoder is destroyed from the output's stop
 	 * thread with no GL context current, and a GL-interop unregister there
 	 * fails, which pinned the GPU memory of every encoder start/stop. The
@@ -19,16 +21,25 @@ void cuda_opengl_free(struct nvenc_data *enc)
 	if (!cuda_error_check(enc, cu->cuCtxPushCurrent(enc->cu_ctx), __FUNCTION__,
 			      "cu->cuCtxPushCurrent(enc->cu_ctx)"))
 		return;
-	obs_enter_graphics();
+	/* issue 1387: one graphics hold per texture pair, the render tick takes the lock between
+	 * them. In one hold, every StopRecord made a tick late and lost a program frame. */
+	uint64_t start_ns = os_gettime_ns(), longest_ns = 0;
 	for (size_t i = 0; i < enc->input_textures.num; i++) {
 		CUgraphicsResource res_y = enc->input_textures.array[i].res_y;
 		CUgraphicsResource res_uv = enc->input_textures.array[i].res_uv;
+		obs_enter_graphics();
+		uint64_t hold_ns = os_gettime_ns();
 		cuda_error_check(enc, cu->cuGraphicsUnregisterResource(res_y), __FUNCTION__,
 				 "cu->cuGraphicsUnregisterResource(res_y)");
 		cuda_error_check(enc, cu->cuGraphicsUnregisterResource(res_uv), __FUNCTION__,
 				 "cu->cuGraphicsUnregisterResource(res_uv)");
+		hold_ns = os_gettime_ns() - hold_ns;
+		obs_leave_graphics();
+		if (hold_ns > longest_ns)
+			longest_ns = hold_ns;
 	}
-	obs_leave_graphics();
+	blog(LOG_INFO, "gpu-encode-stop: %zu interop pair(s) unregistered, longest hold %.2f ms, total %.2f ms (issue 1387)",
+	     enc->input_textures.num, (double)longest_ns / 1e6, (double)(os_gettime_ns() - start_ns) / 1e6);
 	cuda_error_check(enc, cu->cuCtxPopCurrent(NULL), __FUNCTION__, "cu->cuCtxPopCurrent(NULL)");
 }
 
