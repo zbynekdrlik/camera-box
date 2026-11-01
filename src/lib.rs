@@ -410,6 +410,12 @@ pub mod painted_tick_gaps;
 // `all_cambox_continuity.painter_pacing` by recording-verdict. Never gates.
 pub mod painter_pacing;
 
+// Issue 1387: every `frame-probe --paint-only` thread runs below camera-box's unit nice, so the
+// JPEG XS encoder on cam2's general cores never starves the measurement painter (it painted
+// ~47 fps and broke the QPSK marker chain). The /proc parse is pure; the setpriority glue is
+// cfg(target_os = "linux") on the existing libc dep.
+pub mod painter_priority;
+
 // #859 — the genlock FIFO's BACKLOG-STORM threshold, made latency-relative. `obs-source.c`'s bare
 // `GENLOCK_QDEPTH_RELOCK 6` was calibrated on "steady depth is ~1-2 at any skew" (its own comment),
 // which is false for a source configured DEEP: the stream box's `NDI 2ME PGM` sits at depth 29 on
