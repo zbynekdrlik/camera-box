@@ -1144,7 +1144,11 @@ fi
 # edit lives INSIDE this #295 initrd-guaranteed grub step (the update-grub + abort-if-no-initrd
 # guard below) so the cmdline change can never strand a box on an initrd-less kernel the way
 # an ad-hoc grub edit did.
-for flag_tag in "isolcpus=3:#289" "nohz_full=3:#303" "rcu_nocbs=3:#303" "irqaffinity=0-2:#303"; do
+# Issue 1387 (1.11.2026): video=1920x1080@60 caps the cameraman HDMI preview. A monitor whose EDID prefers
+# 4K60 (cam5's "Field Monitor", 594 MHz) read "no signal" because i915's fbdev took that mode; camera-box
+# renders min(source, framebuffer) and never upscales, so nothing above 1080p is useful. A global video=
+# applies to every connector. verify-device (az) grades the cmdline token and the fb0 size.
+for flag_tag in "isolcpus=3:#289" "nohz_full=3:#303" "rcu_nocbs=3:#303" "irqaffinity=0-2:#303" "video=1920x1080@60:#1387"; do
     flag="${flag_tag%%:*}"
     tag="${flag_tag##*:}"
     if ! grep -qE "^GRUB_CMDLINE_LINUX=.*${flag}([\" ]|\$)" /etc/default/grub; then

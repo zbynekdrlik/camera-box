@@ -251,6 +251,9 @@
 #        camera-box.service.d/jxs.conf, the LOADED unit environment and the RUNNING camera-box's
 #        environ; a target on a camera its venue does not declare, and a runtime (/run) drop-in that
 #        sets it, FAIL (scripts/lib/cambox-jxs-target.sh, whose --apply-program fixes a live box).
+#   (az) cameraman preview capped at 1080p (issue 1387) -- HARD FAIL: the running kernel's cmdline
+#        carries video=1920x1080@60 (setup-device STEP 10) and fb0 is no larger than 1920x1080. A
+#        monitor whose EDID prefers 4K60 otherwise reads "no signal"; no fb0 (no monitor at boot) is ok.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -679,6 +682,29 @@ cmdline_has_isolation() {
   return 0
 }
 
+# preview_cap_verdict CMDLINE FB_VIRTUAL_SIZE -> ok | no-flag | too-big:<W>x<H> | unreadable:<fb> (issue 1387).
+# CMDLINE must carry video=1920x1080@60 as a whole token; FB_VIRTUAL_SIZE is /sys/class/graphics/fb0/
+# virtual_size ("W,H"), empty when the box has no fbdev surface (no monitor at boot), which is ok.
+preview_cap_verdict() {
+  local cmdline="${1-}" fb="${2-}" w h
+  cmdline="${cmdline//[[:space:]]/ }"   # one line: /proc/cmdline ends in a newline
+  if ! grep -qE '[[:space:]]video=1920x1080@60[[:space:]]' <<<" $cmdline "; then
+    echo no-flag
+    return 0
+  fi
+  fb="${fb//[[:space:]]/}"
+  [ -n "$fb" ] || { echo ok; return 0; }
+  w="${fb%%,*}"
+  h="${fb#*,}"
+  case "$w" in ''|*[!0123456789]*) echo "unreadable:$fb"; return 0 ;; esac
+  case "$h" in ''|*[!0123456789]*) echo "unreadable:$fb"; return 0 ;; esac
+  if [ "$w" -gt 1920 ] || [ "$h" -gt 1080 ]; then
+    echo "too-big:${w}x${h}"
+  else
+    echo ok
+  fi
+}
+
 # cpulist_contains LIST CORE -> 0 iff CORE is a member of the Linux cpulist LIST (the kernel
 # "0-2" / "0,1,2" / "3" comma+range format that /proc/irq/<n>/smp_affinity_list renders). issue 899.
 cpulist_contains() {
@@ -1003,6 +1029,8 @@ Checks:
   (ay) the JPEG XS link target (issue 1387): the target the venue fact files declare (or none) is the
       persistent camera-box.service.d/jxs.conf, the loaded unit env and the running camera-box's
       environ; no runtime drop-in sets it
+  (az) cameraman preview capped at 1080p (issue 1387): the kernel cmdline carries
+      video=1920x1080@60 and fb0 is at most 1920x1080 (a 4K-preferring monitor read "no signal")
   (aw) fleet kernel line (issue 1446): linux-lowlatency-hwe-24.04 installed (held reads installed),
       the running kernel booted with preempt=full, and uname -r = the image the installed
       linux-image-generic-hwe-24.04 meta depends on; a box off the line is moved by
@@ -1895,6 +1923,24 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> ${REMOTELOG_SINK}:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> $(remote_log_journal_url "$REMOTELOG_SINK") (this box's venue strih; the next #1309 stick death ships its kernel+journal off-box, #1311, issue 1394)"
+fi
+
+# (az) cameraman preview capped at 1080p (issue 1387) -- HARD FAIL ---------------------------------
+# cam5's monitor prefers 4K60 in its EDID and read "no signal" through the SNV production (1.11.2026).
+# setup-device STEP 10 puts video=1920x1080@60 on the kernel cmdline; it takes effect at the next
+# power-on, never a remote reboot. One read-only ssh: the running cmdline and the fb0 size. Inserted
+# after the (ak) check and before the (ay) one, outside the slices other tests EXECUTE.
+azrc=0
+AZ_BLOCK="$(ssh_box "cat /proc/cmdline 2>/dev/null; echo --fb--; cat /sys/class/graphics/fb0/virtual_size 2>/dev/null || true")" || azrc=$?
+AZ_V="$(preview_cap_verdict "${AZ_BLOCK%%--fb--*}" "$(case "$AZ_BLOCK" in *--fb--*) printf '%s' "${AZ_BLOCK#*--fb--}" ;; esac)")"
+if [ "$azrc" -ne 0 ] || [ -z "$AZ_BLOCK" ]; then
+  fail "could not read the kernel cmdline / fb0 size (ssh rc=$azrc, issue 1387)"
+elif [ "$AZ_V" = ok ]; then
+  ok "cameraman preview capped: video=1920x1080@60 on the kernel cmdline, fb0 within 1920x1080 (issue 1387)"
+elif [ "$AZ_V" = no-flag ]; then
+  fail "kernel cmdline lacks video=1920x1080@60 -- a 4K-preferring monitor reads 'no signal'; re-run setup-device STEP 10, the cap applies at the next power-on (never a remote reboot) (issue 1387)"
+else
+  fail "fb0 is not capped ($AZ_V) although the cmdline carries the cap -- check the box after its next power-on (issue 1387)"
 fi
 
 # (ay) the JPEG XS link target (issue 1387) -- HARD FAIL ------------------------------------------
