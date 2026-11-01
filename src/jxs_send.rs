@@ -544,6 +544,60 @@ mod tests {
         assert_eq!(h.dropped_busy(), 0, "a skipped odd frame is no drop");
     }
 
+    /// Issue 1387, the 1.11.2026 night soak: cam2's source runs slower than the grid, so the
+    /// capture skips a 60 fps slot at every edge crossing and NDI gets ONE starvation repeat of
+    /// the current frame stamped on it. A skipped EVEN slot left the 30 fps link without a
+    /// frame and strih repeated the previous one (`stamp_gap` + `late_holds`). The odd-slot frame
+    /// right after the hole fills it, stamped on the hole, like the NDI repeat.
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn the_frame_after_a_skipped_even_slot_fills_it() {
+        let (h, ready) = JxsHandoff::unstarted();
+        let frame = vec![1u8; 64 * 8 * 2];
+        h.offer(&jf(&frame, 64, 8, tc(0), true));
+        h.offer(&jf(&frame, 64, 8, tc(1), true));
+        assert_eq!(ready.try_recv().unwrap().timecode_100ns, tc(0));
+        assert!(
+            ready.try_recv().is_err(),
+            "an odd slot after a taken even one never goes"
+        );
+        // slot 2 skipped by the capture; slot 3 arrives
+        h.offer(&jf(&frame, 64, 8, tc(3), true));
+        let filled = ready.try_recv().expect("the hole is filled");
+        assert_eq!(filled.timecode_100ns, tc(2), "stamped on the skipped slot");
+        // the next even slot goes as before, and its odd neighbour never does
+        h.free_tx.try_send(filled.pic).unwrap();
+        h.offer(&jf(&frame, 64, 8, tc(4), true));
+        h.offer(&jf(&frame, 64, 8, tc(5), true));
+        assert_eq!(ready.try_recv().unwrap().timecode_100ns, tc(4));
+        assert!(ready.try_recv().is_err());
+        assert_eq!(h.dropped_busy(), 0);
+    }
+
+    /// No fill without a taken frame exactly one 30 fps slot before the hole: a start, a longer
+    /// hole (a re-latch, a device hole) or a clock step keeps today's behaviour.
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn a_start_or_a_longer_hole_is_never_filled() {
+        let (h, ready) = JxsHandoff::unstarted();
+        let frame = vec![1u8; 64 * 8 * 2];
+        h.offer(&jf(&frame, 64, 8, tc(3), true));
+        assert!(
+            ready.try_recv().is_err(),
+            "nothing taken yet: no fill at a start"
+        );
+        h.offer(&jf(&frame, 64, 8, tc(4), true));
+        let first = ready.try_recv().unwrap();
+        assert_eq!(first.timecode_100ns, tc(4));
+        h.free_tx.try_send(first.pic).unwrap();
+        // slots 5..=8 skipped: slot 9's even slot 8 is two 30 fps slots after the last taken
+        h.offer(&jf(&frame, 64, 8, tc(9), true));
+        assert!(ready.try_recv().is_err(), "a longer hole is not filled");
+        // a clock step back
+        h.offer(&jf(&frame, 64, 8, tc(-57), true));
+        assert!(ready.try_recv().is_err());
+    }
+
     #[cfg(feature = "jxs")]
     #[test]
     fn two_frames_are_taken_and_the_third_is_dropped_without_waiting() {
