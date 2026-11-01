@@ -28,9 +28,9 @@ import json
 import re
 import sys
 
-# The 8 contract items, in a FIXED order -- both the Slovak summary and the aggregate()
-# failed-items list always follow this order, never dict/insertion order (a missing/absent item
-# must never silently vanish from the printed summary).
+# The contract items (8 since #722, + jxs_live since issue 1387), in a FIXED order -- both the
+# Slovak summary and the aggregate() failed-items list always follow this order, never
+# dict/insertion order (a missing/absent item must never silently vanish from the printed summary).
 ITEM_ORDER = [
     "paint_processes",
     "pixel_proof",
