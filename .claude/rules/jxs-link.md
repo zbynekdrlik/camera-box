@@ -38,6 +38,9 @@ paths:
   - "scripts/obs_jxs_inputs.py"
   - "tests/python/test_cambox_jxs_target_1387.py"
   - "tests/python/test_strih_jxs_provision_1387.py"
+  - "scripts/lib/event-jxs-facet.sh"
+  - "tests/python/test_event_assert_jxs_1387.py"
+  - "tests/python/test_cambox_preview_cap_1387.py"
   - "tests/python/test_obs_jxs_inputs_1387.py"
 ---
 
@@ -1097,6 +1100,41 @@ newest timestamped line is RUNNING: any `lost_slices` > 0 summed over its last 1
 FAILs naming it; a clean one PASSes; a source that stopped writing and no source at all are NOTEs.
 The OBS indicator reads DEGRADED from the same counters. Pytest:
 `tests/python/test_strih_jxs_verify_1387.py` (the lines rendered from the SHIPPED C format string).
+
+## The EVENT contract grades every JPEG XS link (1.11.2026, item `jxs_live`)
+
+- **Why:** on the SNV event morning the cameras were moved and rebooted after the rig was set up,
+  their JPEG XS senders stayed off, and the strih camera scenes were black on air for ~8 min while
+  every contract item read clean (the NDI items were fine, just not on program).
+- `scripts/lib/event-jxs-facet.sh` reads, per broadcast box (strih + stream), the last 1 MiB of the
+  newest OBS log at nice 19 (`tail -c`, a seek) and returns its last 40 `jxs-source` / `jxs-output`
+  5 s window lines plus the log's newest timestamp. Never a whole-log read: the owner's 1.11.2026
+  rule (an ssh read of the 100+ MB log on strih dropped frames on the program link).
+- `scripts/event_assert.py` `jxs_live_ok`: every link's newest window carries frames and is at most
+  `JXS_WINDOW_MAX_AGE_S` (20 s) older than the log's newest line (a midnight wrap is mod 86400). An
+  unread box, a box without a window line or head, or a malformed facet FAILS (#1225). The detail
+  names the link (`strih: 'JXS cam5 src' 0 snimok`).
+- Do not grade the `jxs-state:` indicator line here: it is logged only on a CHANGE, so a bounded tail
+  usually does not hold it.
+- Tests: `tests/python/test_event_assert_jxs_1387.py` (the decision, the gather with a fake
+  sshpass, the remote command run against a 1.2 MB fake log).
+
+## The sender retries a target it cannot reach yet (1.11.2026)
+
+- At boot camera-box starts before the network; the old sender failed `connect` once (ENETUNREACH)
+  and the link stayed off until a service restart. `start_retrying` / `JxsLink` retry every
+  `CONNECT_RETRY` (1 s) on a `jxs-connect` thread pinned off the capture core, log each error kind
+  once and `connected after N tries`; only `Unsupported` (an IPv6 target) stops it.
+- Live proof: a camera that boots with the new binary logs `connected after N tries` and then
+  `jxs send: fps=30`.
+
+## The cameraman HDMI preview is capped at 1080p (1.11.2026)
+
+- cam5's operator monitor prefers 3840x2160@60 in its EDID, which its link cannot carry ("no
+  signal"). setup-device STEP 10 puts `video=1920x1080@60` on the kernel cmdline (a global `video=`
+  applies to every connector); verify-device `(az)` grades the running cmdline and the fb0 size.
+  It takes effect at the next power-on, never a remote reboot. The runtime stopgap before that is an
+  `edid_override` (debugfs) with a 1080p EDID plus a connector re-detect, lost at reboot.
 
 ## The JPEG XS path is PROVISIONED from the box facts (issue 1387, owner: no hand state)
 
