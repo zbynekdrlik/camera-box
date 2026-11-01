@@ -29,6 +29,7 @@ const _: () = assert!(PAINTER_NICE >= -20 && PAINTER_NICE <= 19);
 /// 41336635338 painted 54 fps at nice -15 beside the burn camera-box, 10 % of the vsyncs missed.
 /// The paint thread blocks on every vsync, so it cannot take a core.
 pub const PAINTER_FIFO_PRIORITY: i32 = 40;
+#[cfg(target_os = "linux")]
 const _: () = assert!(PAINTER_FIFO_PRIORITY < crate::affinity::JXS_ENCODER_FIFO_PRIORITY);
 
 /// The nice value of one thread from its `/proc/<pid>/task/<tid>/stat` line (field 19, counted
@@ -110,6 +111,7 @@ pub fn raise_painter_priority() {
 
 /// Raise the CALLING thread, the paint thread, to [`PAINTER_FIFO_PRIORITY`] (reset-on-fork: nothing
 /// it spawns inherits it). Best effort like the nice raise: a refusal is one WARNING.
+#[cfg(target_os = "linux")]
 pub fn raise_paint_thread_fifo() {
     if crate::affinity::set_current_thread_fifo_reset_on_fork(PAINTER_FIFO_PRIORITY) {
         tracing::info!("#1387 paint thread at SCHED_FIFO {PAINTER_FIFO_PRIORITY}");
@@ -119,6 +121,10 @@ pub fn raise_paint_thread_fifo() {
         );
     }
 }
+
+/// The probe tree also builds on Windows (the verdict tools), which never paints.
+#[cfg(not(target_os = "linux"))]
+pub fn raise_paint_thread_fifo() {}
 
 #[cfg(test)]
 mod tests {
