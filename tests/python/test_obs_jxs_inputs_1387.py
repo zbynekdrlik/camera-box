@@ -328,3 +328,47 @@ def test_the_kind_and_every_declared_key_are_the_shipped_sources():
     # the defaults this test's fake OBS answers with are the shipped getdefaults
     assert "obs_data_set_default_bool(settings, PROP_GENLOCK_GRID, true);" in src
     assert "obs_data_set_default_int(settings, PROP_JXS_MAX_BPP, 0);" in src
+
+
+# --- one camera, one receive (owner 1.11.2026: "bud jedno alebo druhe a nie ze obdiva") ---------------
+
+
+def _two_receives(name="CAM2 (usb)", **over):
+    inputs = {"JXS cam2 src": (oji.INPUT_KIND, _live_cam2()), "NDI cam2": ("ndi_source", {"ndi_source_name": name}),
+              "NDI cam4": ("ndi_source", {"ndi_source_name": "CAM4 (usb)"})}
+    return FakeObs(inputs=inputs, scenes={"Cam 2": [("JXS cam2 src", True), ("NDI cam2", False)]}, **over)
+
+
+def _cam2_spec():
+    return oji.parse_manifest(_manifest({"name": "JXS cam2 src", "jxs_port": 7002, "jxs_camera": 2, "jxs_max_bpp": 0,
+                                         "genlock_latency_ms_src": 36, "genlock_fifo": True, "genlock_grid": True}))
+
+
+def test_the_bootstrap_stops_the_ndi_receive_of_a_jpeg_xs_camera_and_no_other():
+    obs = _two_receives()
+    _, ok = oji.bootstrap(obs.rpc, _cam2_spec())
+    assert ok
+    assert obs.inputs["NDI cam2"][1]["ndi_source_name"] == ""
+    assert obs.inputs["NDI cam4"][1]["ndi_source_name"] == "CAM4 (usb)"
+
+
+def test_a_stopped_receive_is_no_write_and_an_absent_twin_is_fine():
+    obs = _two_receives(name="")
+    oji.bootstrap(obs.rpc, _cam2_spec())
+    assert not [w for w in obs.writes() if w[1].get("inputName") == "NDI cam2"]
+    del obs.inputs["NDI cam2"]
+    assert oji.bootstrap(obs.rpc, _cam2_spec())[1]
+
+
+def test_the_receive_is_never_stopped_on_air():
+    obs = _two_receives()
+    lines, ok = oji.bootstrap(obs.rpc, _cam2_spec(), live=True)
+    assert not ok and obs.inputs["NDI cam2"][1]["ndi_source_name"] == "CAM2 (usb)"
+    assert any("NDI cam2" in ln and "REFUSED" in ln for ln in lines)
+
+
+def test_verify_fails_a_camera_received_both_ways():
+    rows = oji.verify_rows(_two_receives().rpc, _cam2_spec())
+    assert any(lv == "FAIL" and "NDI cam2" in t for lv, t in rows)
+    rows = oji.verify_rows(_two_receives(name="").rpc, _cam2_spec())
+    assert any(lv == "PASS" and "NDI cam2" in t for lv, t in rows)
