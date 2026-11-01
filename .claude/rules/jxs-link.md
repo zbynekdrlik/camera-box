@@ -1770,3 +1770,11 @@ line-rate ~8-12 ms. `first_arrival_ms` should stop wandering. The latency p50 sh
   thread (never the capture thread) until the NIC drains it.
 - The PNG dump is a stored-deflate writer in `src/jxs_link/png.rs` (no compression, no
   dependency): the probe needs only the `jxs` feature, not the probe feature's `image` crate.
+
+## One camera, one receive (owner 1.11.2026)
+
+"musi byt bud jedno alebo druhe a nie ze obdiva": a camera in `STRIH_JXS_CAMERAS` has no NDI receive, there is no backup
+receiver. `obs_jxs_inputs.py --bootstrap` (every OBS start) clears `NDI cam<N>`'s `ndi_source_name`, never on air;
+`--verify` FAILs a twin that still receives (`(jxs-one-input)`, verify item 49); `set-ndi-mapping.py` drops those
+cameras from its default map by the box facts, so no mapping, heal or rig-mode run re-arms them. Measured: the three
+idle receivers cost 4.3 ms of the 33 ms render budget (26.7 -> 22.4 ms, 1.11.2026).

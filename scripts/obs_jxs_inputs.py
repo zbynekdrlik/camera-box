@@ -40,6 +40,7 @@ import argparse
 import collections
 import json
 import os
+import re
 import sys
 
 INPUT_KIND = "camera_box_jxs_source"
@@ -198,6 +199,38 @@ def obs_live(rpc):
     return False
 
 
+def ndi_twin(spec):
+    """The NDI input of the camera `spec` carries, or None for an input that is no strih camera. A camera is
+    received once, JPEG XS or NDI, never both (owner 1.11.2026: "bud jedno alebo druhe a nie ze obdiva"): the
+    three idle NDI receivers cost 4.3 ms of the 33 ms strih render budget."""
+    m = re.fullmatch(r"JXS cam(\d+) src", spec.name)
+    return f"NDI cam{m.group(1)}" if m else None
+
+
+def _twin_receives(rpc, twin):
+    """The sender name the NDI input `twin` still receives, "" when it is stopped or absent."""
+    resp = rpc("GetInputSettings", {"inputName": twin}, ignore_err=True) or {}
+    return (resp.get("inputSettings") or {}).get("ndi_source_name") or ""
+
+
+def stop_ndi_twins(rpc, specs, live=False):
+    """Clear the sender of every JPEG XS camera's NDI input (an empty name stops its receiver, overlay keeps
+    the rest). Returns (lines, ok); with `live` nothing is written and a needed write is refused by name."""
+    lines, ok = [], True
+    for spec in specs:
+        twin = ndi_twin(spec)
+        if twin is None or not _twin_receives(rpc, twin):
+            continue
+        if live:
+            ok = False
+            lines.append(f"jxs inputs: REFUSED to stop '{twin}' while OBS streams or records -- the next OBS start "
+                         f"stops it")
+            continue
+        rpc("SetInputSettings", {"inputName": twin, "inputSettings": {"ndi_source_name": ""}, "overlay": True})
+        lines.append(f"jxs inputs: stopped the NDI receive of '{twin}', the camera arrives as '{spec.name}'")
+    return lines, ok
+
+
 def bootstrap(rpc, specs, live=False):
     """Apply the plan of every spec. Returns (lines, ok): one log line per input, ok False when an input
     was refused. Writes only CreateScene / CreateInput (an absent input, in its holding scene) and
@@ -235,7 +268,8 @@ def bootstrap(rpc, specs, live=False):
             lines.append(f"jxs inputs: healed '{spec.name}': {healed}{kept}")
         else:
             lines.append(f"jxs inputs: '{spec.name}' matches its declared settings{kept}")
-    return lines, ok
+    twin_lines, twin_ok = stop_ndi_twins(rpc, specs, live)
+    return lines + twin_lines, ok and twin_ok
 
 
 def _summary(spec, pair=None):
@@ -294,6 +328,16 @@ def verify_rows(rpc, specs):
         where = ", ".join(shown) if shown else "no scene (the operator places it)"
         rows.append(("NOTE", f"(jxs-place) '{spec.name}' is shown in: {where} (report-only, the scenes are "
                              f"the operator's)"))
+    for spec in specs:
+        twin = ndi_twin(spec)
+        if twin is None:
+            continue
+        sender = _twin_receives(rpc, twin)
+        if sender:
+            rows.append(("FAIL", f"(jxs-one-input) '{twin}' still receives '{sender}' beside '{spec.name}': a camera "
+                                 f"is received once (the next OBS start stops it, issue 1387)"))
+        else:
+            rows.append(("PASS", f"(jxs-one-input) '{twin}' receives nothing, the camera arrives as '{spec.name}'"))
     return rows
 
 
