@@ -766,6 +766,8 @@ case "$DS_ROLE_VERDICT" in
   *)               bad "(dantesync-role) unknown verdict '${DS_ROLE_VERDICT}'" ;;
 esac
 
+# 6d) dantesync PTP NIC (issue 1439): this boot's newest PTP join must be on the NIC carrying STRIH_IP.
+DS_JOIN_V="$(strih_dantesync_join_verdict "$(strih_lx_ip)")"; case "$DS_JOIN_V" in ok:*) ok "(dantesync-nic) PTP joined on the rig NIC ${DS_JOIN_V#ok:}" ;; *) bad "(dantesync-nic) ${DS_JOIN_V} (ok = the NIC carrying $(strih_lx_ip); wrong:<joined>:<rig> = restart dantesync once the rig NIC is up, dantesync#131)" ;; esac
 # 6c) dantesync UNIT content (issue 1372), read-only: the installed unit is byte-identical to the one
 #     setup-strih step 2 emits for the role, no drop-in overrides it, and the running process runs its
 #     ExecStart (strih_dantesync_unit_verdict). Step 2 restarts only on a change (a date-master restart
