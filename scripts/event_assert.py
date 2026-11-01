@@ -25,6 +25,7 @@ Discord confirmation composer) when --result-out is given.
 
 import argparse
 import json
+import re
 import sys
 
 # The 8 contract items, in a FIXED order -- both the Slovak summary and the aggregate()
@@ -39,6 +40,7 @@ ITEM_ORDER = [
     "latency_calibrated",
     "ndi_mapping",
     "artifacts_cleared",
+    "jxs_live",
 ]
 
 ITEM_LABELS_SK = {
@@ -50,6 +52,7 @@ ITEM_LABELS_SK = {
     "latency_calibrated": "latencia zodpoveda kalibrovanej hodnote",
     "ndi_mapping": "mapovanie kamier je spravne (#399)",
     "artifacts_cleared": "testovacie artefakty su vymazane",
+    "jxs_live": "vsetky JPEG XS vstupy a vystupy idu (ziadny DOWN)",
 }
 
 
@@ -200,6 +203,67 @@ def artifacts_cleared_ok(existing_paths: list) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Item 9 (issue 1387) -- every JPEG XS link is up on every broadcast OBS box.
+# ---------------------------------------------------------------------------
+
+# One `jxs-state:` line of the in-OBS JPEG XS indicator (GenlockJxsReport). The inputs' counts come
+# first, then the outputs', each `down=` / `degraded=` pair in that order.
+_JXS_STATE_RE = re.compile(
+    r"jxs-state: state=(?P<state>[A-Z]+) reason=(?P<reason>\S+) "
+    r"inputs=(?P<inputs>[0-9]+) down=(?P<inputs_down>[0-9]+) degraded=(?P<inputs_degraded>[0-9]+) "
+    r"outputs=(?P<outputs>[0-9]+) down=(?P<outputs_down>[0-9]+) degraded=(?P<outputs_degraded>[0-9]+) "
+    r"entry=(?:'(?P<entry>[^']*)'|-)"
+)
+
+
+def parse_jxs_state_line(line):
+    """The newest `jxs-state:` line of one box -> its counts, or None when it does not parse (an
+    empty line, None, anything else)."""
+    if not isinstance(line, str):
+        return None
+    m = _JXS_STATE_RE.search(line)
+    if not m:
+        return None
+    d = m.groupdict()
+    out = {k: (int(v) if k not in ("state", "reason", "entry") else v) for k, v in d.items()}
+    out["entry"] = d["entry"] or ""
+    return out
+
+
+def jxs_live_ok(jxs_lines) -> bool:
+    """jxs_lines: {box: newest jxs-state line | "" | None} from rig-mode.sh. PASS iff it names at
+    least one box and every box's line parses with no input and no output DOWN (state DOWN fails
+    too). "" (no line) and None (unread) fail CLOSED (#1225). DEGRADED with nothing down passes:
+    slices lost and concealed are not black; the detail names it."""
+    if not isinstance(jxs_lines, dict) or not jxs_lines:
+        return False
+    for line in jxs_lines.values():
+        p = parse_jxs_state_line(line)
+        if p is None or p["state"] == "DOWN" or p["inputs_down"] > 0 or p["outputs_down"] > 0:
+            return False
+    return True
+
+
+def jxs_live_detail(jxs_lines) -> str:
+    """The summary detail of item 9: each box that is unread, without a line, DOWN, or DEGRADED,
+    named with its reason and row. Empty when every box is OK/OFF."""
+    if not isinstance(jxs_lines, dict) or not jxs_lines:
+        return "JPEG XS stav sa nepodarilo precitat"
+    parts = []
+    for box in sorted(jxs_lines):
+        line = jxs_lines[box]
+        p = parse_jxs_state_line(line)
+        if line is None:
+            parts.append(f"{box}: necitatelne")
+        elif p is None:
+            parts.append(f"{box}: ziadny jxs-state riadok")
+        elif p["state"] not in ("OK", "OFF") or p["inputs_down"] or p["outputs_down"]:
+            row = f" '{p['entry']}'" if p["entry"] else ""
+            parts.append(f"{box}: {p['state']} {p['reason']}{row}")
+    return "; ".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Aggregation.
 # ---------------------------------------------------------------------------
 
@@ -264,6 +328,7 @@ def compute_item_results(facts: dict) -> dict:
         ),
         "ndi_mapping": ndi_mapping_ok(facts.get("ndi_mismatches", [])),
         "artifacts_cleared": artifacts_cleared_ok(facts.get("artifacts_existing", [])),
+        "jxs_live": jxs_live_ok(facts.get("jxs_state_lines")),
     }
 
 
@@ -291,6 +356,9 @@ def main(argv=None):
     qr_detail = pixel_proof_detail(facts.get("qr_findings") or {})
     if qr_detail:
         details.setdefault("pixel_proof", qr_detail)
+    jxs_detail = jxs_live_detail(facts.get("jxs_state_lines"))
+    if jxs_detail:
+        details.setdefault("jxs_live", jxs_detail)
     summary = format_summary_sk(overall_pass, item_results, details)
     print(summary)
 
