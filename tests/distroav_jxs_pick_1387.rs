@@ -124,9 +124,11 @@ int main(void)
 	EXPECT(refused("99999:2"));
 	EXPECT(refused("123456:2"));
 	EXPECT(refused("4294974298:2"));     /* 7002 + 2^32: never wraps */
+	EXPECT(refused("18446744073709558618:2")); /* 7002 + 2^64: a 64-bit accumulator wraps to 7002 */
 	EXPECT(refused("7002:256"));         /* a camera outside 0..255 */
 	EXPECT(refused("7002:1000"));
 	EXPECT(refused("7002:4294967298"));  /* 2 + 2^32 */
+	EXPECT(refused("7002:18446744073709551618")); /* 2 + 2^64 */
 	EXPECT(refused("7002:2x"));          /* trailing junk */
 	EXPECT(refused("7002:2 "));
 	EXPECT(refused("7002:2\n"));
