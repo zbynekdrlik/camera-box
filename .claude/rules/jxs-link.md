@@ -1150,7 +1150,7 @@ everything else is derived.
 | `STRIH_JXS_CAMERAS` | strih: `N:PORT` per camera on the link, N in STRIH_CAMERAS, each N and port once | `2:7002 3:7003 5:7000` (the live ports, kept) | `none` |
 | `STRIH_JXS_CAMERA_PIN_MS` | strih: their genlock pin, 3..2000 (the jxs-source clamp) | `36` (ROZHODNUTE 6546700019: the fixed 100 ms grid age) | `none` |
 | `STRIH_JXS_PROGRAM_PORT` | stream: the UDP port `JXS PGM src` listens on | `7100` | `none` |
-| `STRIH_JXS_PROGRAM_PIN_MS` | stream: its genlock pin = the stream A/V pin | `1087` (re-measured after the 100 ms step: a new value is this one line) | `none` |
+| `STRIH_JXS_PROGRAM_PIN_MS` | stream: its genlock pin = the stream A/V pin | `1054` on stream-snv (read live 1.11.2026; re-measured values are this one line) | `none` |
 
 A value is `none` exactly when its partner is; the camera facts are `none` on the stream role and the
 program facts `none` on the strih role. **PP is deferred by the owner**: every PP file declares `none`,
