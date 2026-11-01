@@ -223,6 +223,63 @@ impl JxsHandoff {
     }
 }
 
+/// The cambox link as the capture loop holds it ([`JxsSender::start_from_env`]): the hand-off
+/// once the link socket connected. A socket that cannot connect yet (no route while the network
+/// comes up after a power cycle or a move) is retried on its own thread, never given up (issue
+/// 1387, 1.11.2026: every SNV camera came back black on JPEG XS after a reboot while NDI
+/// recovered). Until then every frame is skipped; NDI and the capture never wait for it.
+pub struct JxsLink {
+    ready: std::cell::OnceCell<JxsHandoff>,
+    pending: Option<std::sync::mpsc::Receiver<JxsHandoff>>,
+}
+
+impl JxsLink {
+    #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
+    fn ready(h: JxsHandoff) -> Self {
+        let ready = std::cell::OnceCell::new();
+        let _ = ready.set(h);
+        Self {
+            ready,
+            pending: None,
+        }
+    }
+
+    #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
+    fn pending(rx: std::sync::mpsc::Receiver<JxsHandoff>) -> Self {
+        Self {
+            ready: std::cell::OnceCell::new(),
+            pending: Some(rx),
+        }
+    }
+
+    /// The hand-off once the link is up; `None` while its socket still retries (one channel
+    /// read, never a wait).
+    pub fn handoff(&self) -> Option<&JxsHandoff> {
+        if let Some(h) = self.ready.get() {
+            return Some(h);
+        }
+        let h = self.pending.as_ref()?.try_recv().ok()?;
+        Some(self.ready.get_or_init(|| h))
+    }
+
+    /// [`JxsHandoff::offer`] once the link is up; before that the frame is skipped.
+    pub fn offer(&self, frame: &JxsFrame<'_>) {
+        if let Some(h) = self.handoff() {
+            h.offer(frame);
+        }
+    }
+}
+
+/// How often a link socket that cannot connect yet is tried again.
+pub const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether a failed link-socket connect is worth another try: everything but a target the link
+/// can never use (an IPv6 address, `Unsupported`). No route, no address yet (the network or the
+/// resolver still coming up) and every other socket error retry.
+pub fn connect_error_retries(e: &std::io::Error) -> bool {
+    e.kind() != std::io::ErrorKind::Unsupported
+}
+
 /// One emitted frame as the capture loop hands it over.
 #[derive(Debug, Clone, Copy)]
 pub struct JxsFrame<'a> {
@@ -311,6 +368,36 @@ impl JxsSender {
         };
         start_worker(target, jxs_link::camera_id_from_hostname(hostname), opts)
     }
+
+    /// The cambox entry: like [`Self::start_with_options`], but a socket that cannot connect yet
+    /// is tried again every `retry` on its own thread ([`JxsLink`]); `connect` is
+    /// [`JxsSocket::connect`] in production (a test injects a failing one).
+    pub fn start_retrying<C>(
+        value: Option<&str>,
+        hostname: &str,
+        opts: SenderOptions,
+        connect: C,
+        retry: std::time::Duration,
+    ) -> Option<JxsLink>
+    where
+        C: FnMut(&str) -> std::io::Result<JxsSocket> + Send + 'static,
+    {
+        let target = match jxs_link::parse_target(value) {
+            Ok(None) => return None,
+            Ok(Some(t)) => t,
+            Err(e) => {
+                tracing::error!("{e} -- the JPEG XS link stays off (issue 1387)");
+                return None;
+            }
+        };
+        start_link_worker(
+            target,
+            jxs_link::camera_id_from_hostname(hostname),
+            opts,
+            connect,
+            retry,
+        )
+    }
 }
 
 #[cfg(not(feature = "jxs"))]
@@ -320,6 +407,17 @@ fn start_worker(target: String, _camera_id: u8, _opts: SenderOptions) -> Option<
          the JPEG XS link stays off (issue 1387)"
     );
     None
+}
+
+#[cfg(not(feature = "jxs"))]
+fn start_link_worker<C>(
+    target: String,
+    camera_id: u8,
+    opts: SenderOptions,
+    _connect: C,
+    _retry: std::time::Duration,
+) -> Option<JxsLink> {
+    start_worker(target, camera_id, opts).map(JxsLink::ready)
 }
 
 #[cfg(feature = "jxs")]
@@ -333,6 +431,39 @@ fn start_worker(target: String, camera_id: u8, opts: SenderOptions) -> Option<Jx
             return None;
         }
     };
+    start_with_socket(socket, &target, camera_id, opts)
+}
+
+#[cfg(feature = "jxs")]
+fn start_link_worker<C>(
+    target: String,
+    camera_id: u8,
+    opts: SenderOptions,
+    mut connect: C,
+    _retry: std::time::Duration,
+) -> Option<JxsLink>
+where
+    C: FnMut(&str) -> std::io::Result<JxsSocket> + Send + 'static,
+{
+    match connect(&target) {
+        Ok(socket) => start_with_socket(socket, &target, camera_id, opts).map(JxsLink::ready),
+        Err(e) => {
+            tracing::error!(
+                "{TARGET_ENV}={target}: {e} -- the JPEG XS link stays off (issue 1387)"
+            );
+            None
+        }
+    }
+}
+
+/// The threads of a link whose socket connected.
+#[cfg(feature = "jxs")]
+fn start_with_socket(
+    socket: JxsSocket,
+    target: &str,
+    camera_id: u8,
+    opts: SenderOptions,
+) -> Option<JxsHandoff> {
     let (allowed, capture, reserved) = crate::affinity::off_capture_split();
     let env_cores = std::env::var(CORES_ENV).ok();
     let cores = match select_encoder_cores(env_cores.as_deref(), &allowed) {
@@ -353,7 +484,7 @@ fn start_worker(target: String, camera_id: u8, opts: SenderOptions) -> Option<Jx
         socket
             .peer()
             .map(|a| a.to_string())
-            .unwrap_or_else(|_| target.clone()),
+            .unwrap_or_else(|_| target.to_string()),
         if socket.gso() { "on" } else { "OFF: one send per datagram" },
         socket.egress_text(),
         socket.send_buffer(),
@@ -789,6 +920,104 @@ mod tests {
             2,
             "the second frame was submitted while the first one's slices were still going out"
         );
+    }
+
+    /// Issue 1387, 1.11.2026 SNV event: the camboxes booted before their network, the link
+    /// socket's connect failed with "Network is unreachable" and the link stayed off for good
+    /// (every strih camera black on JPEG XS while NDI recovered). A target that cannot connect
+    /// yet must be tried again until it connects, and its frames must then reach the receiver.
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn a_target_that_cannot_connect_yet_is_retried_until_its_frames_arrive() {
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(std::time::Duration::from_millis(20)))
+            .unwrap();
+        set_int_opt(rx.as_raw_fd(), libc::SOL_SOCKET, libc::SO_RCVBUF, 4 << 20);
+        let target = format!("127.0.0.1:{}", rx.local_addr().unwrap().port());
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let tries = attempts.clone();
+        let link = JxsSender::start_retrying(
+            Some(&target),
+            "CAM5",
+            SenderOptions::new(BppMode::Fixed(DEFAULT_BPP), None),
+            move |t: &str| {
+                if tries.fetch_add(1, Ordering::SeqCst) < 3 {
+                    Err(std::io::Error::from_raw_os_error(libc::ENETUNREACH))
+                } else {
+                    JxsSocket::connect(t)
+                }
+            },
+            std::time::Duration::from_millis(10),
+        )
+        .expect("a target that cannot connect yet keeps the link waiting, never off");
+        let (w, ht) = (640u32, 128u32);
+        let frame: Vec<u8> = (0..w * ht * 2).map(|i| (i % 249) as u8).collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut b = [0u8; 2048];
+        let mut k = 0;
+        let mut got = None;
+        while got.is_none() && std::time::Instant::now() < deadline {
+            link.offer(&jf(&frame, w, ht, tc(k), true));
+            k += 2;
+            if let Ok(n) = rx.recv(&mut b) {
+                if b[0] != jxs_link::fec::FEC_MAGIC {
+                    got = Some(jxs_link::PacketHeader::decode(&b[..n]).unwrap());
+                }
+            }
+        }
+        let p = got.expect("frames reach the receiver once the target connects");
+        assert_eq!(p.camera_id, 5);
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 4,
+            "three failed tries, then the one that connected"
+        );
+        assert!(link.handoff().is_some());
+    }
+
+    /// A target the link can never use (IPv6: `Unsupported`) is not retried: one try, off.
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn a_target_the_link_can_never_use_is_tried_once_and_stays_off() {
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let tries = attempts.clone();
+        let link = JxsSender::start_retrying(
+            Some("127.0.0.1:9"),
+            "CAM5",
+            SenderOptions::new(BppMode::Fixed(DEFAULT_BPP), None),
+            move |_: &str| {
+                tries.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "IPv6 only",
+                ))
+            },
+            std::time::Duration::from_millis(10),
+        );
+        assert!(link.is_none());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn only_an_unusable_target_stops_the_retry() {
+        use std::io::{Error, ErrorKind};
+        assert!(connect_error_retries(&Error::from_raw_os_error(
+            libc::ENETUNREACH
+        )));
+        assert!(connect_error_retries(&Error::from_raw_os_error(
+            libc::EHOSTUNREACH
+        )));
+        assert!(connect_error_retries(&Error::from_raw_os_error(
+            libc::EADDRNOTAVAIL
+        )));
+        assert!(connect_error_retries(&Error::new(
+            ErrorKind::NotFound,
+            "no address"
+        )));
+        assert!(!connect_error_retries(&Error::new(
+            ErrorKind::Unsupported,
+            "IPv6"
+        )));
     }
 
     #[cfg(feature = "jxs")]
