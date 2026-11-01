@@ -90,9 +90,9 @@ set -euo pipefail
 # Other env: AV_SOAK_CAMS (default CAMERA_ACTIVE_SET; CAMBOX_OFFLINE_ACK/rig-fleet.txt acks are
 #   always removed), STRIH_HOST / STREAM_HOST (default from scripts/lib/obs-fleet.sh), PAINTER_IP
 #   (default cam2 from scripts/camera-set.sh), STRIH_CAPTURE_FPS / STREAM_CAPTURE_FPS (30, as
-#   recording-e2e.sh), STREAM_PROG_SOURCE ("NDI 2ME PGM", as recording-e2e.sh / rig-mode.sh),
-#   AV_SOAK_STRIH_INPUT_FMT (printf pattern of a strih camera input, default "NDI %s"; issue 1387:
-#   "JXS %s src" with STREAM_PROG_SOURCE="JXS PGM src" measures the JPEG XS path),
+#   recording-e2e.sh), STREAM_PROG_SOURCE + AV_SOAK_STRIH_INPUT_FMT (a printf pattern of a strih
+#   camera input): both default to the measured inputs of the box facts (issue 1387: `NDI camN` /
+#   "NDI 2ME PGM", on a JPEG XS venue `JXS camN src` / "JXS PGM src", program-inputs.sh),
 #   AV_SOAK_MERGE_TIMEOUT_S (90), AV_SOAK_OVERHEAD_S (90, the per-slot pre/stop/upload budget),
 #   AV_SOAK_DECODE_TIMEOUT_S (default: what the slot leaves = slot - window - merge - overhead),
 #   AV_SOAK_OBS_TIMEOUT_S (30), AV_SOAK_BROADCAST_READS (3) / AV_SOAK_BROADCAST_RETRY_S (20, the
@@ -144,6 +144,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/av-soak.sh"
 # shellcheck source=scripts/lib/av-soak-leftovers.sh
 . "$HERE/lib/av-soak-leftovers.sh"
+# shellcheck source=scripts/lib/program-inputs.sh
+. "$HERE/lib/program-inputs.sh"
 
 log() { printf '%s [av-soak] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { echo "av-soak: ERROR: $2" >&2; exit "$1"; }
@@ -224,8 +226,11 @@ done
 camera_resolve cam2
 PAINTER_IP="${PAINTER_IP:-$CAMERA_IP}"
 MARKER_LOG="${AV_SOAK_MARKER_LOG:-/run/rig-qpsk-markers.csv}"
+# issue 1387 slice 1b: the measured inputs from the box facts (a JPEG XS venue presets
+# STREAM_PROG_SOURCE + CAMERA_STRIH_JXS_SET); an env override still wins.
+program_inputs_resolve "$STRIH_HOST" "$STREAM_HOST" "" || die 3 "the measured inputs do not resolve from the box facts (above)"
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}"
-STRIH_INPUT_FMT="${AV_SOAK_STRIH_INPUT_FMT:-NDI %s}"
+STRIH_INPUT_FMT="${AV_SOAK_STRIH_INPUT_FMT:-}"   # empty = each camera's measured input (camera_strih_input)
 STREAM_DEV_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}"
 STRIH_CAPTURE_FPS="${STRIH_CAPTURE_FPS:-30}"
 STREAM_CAPTURE_FPS="${STREAM_CAPTURE_FPS:-30}"
@@ -655,8 +660,10 @@ burn_state() {  # IP INPUT -> True / False / "" (unreadable)
 }
 BURN_TARGETS=()
 for _c in $SOAK_CAMS; do
+  _si="$(camera_strih_input "$_c")"
   # shellcheck disable=SC2059  # the pattern is the operator's input-name format
-  BURN_TARGETS+=("$STRIH_HOST|$(printf "$STRIH_INPUT_FMT" "$_c")")
+  [ -z "$STRIH_INPUT_FMT" ] || _si="$(printf "$STRIH_INPUT_FMT" "$_c")"
+  BURN_TARGETS+=("$STRIH_HOST|$_si")
 done
 BURN_TARGETS+=("$STREAM_HOST|$STREAM_PROG_SOURCE")
 BURNS_OFF=()

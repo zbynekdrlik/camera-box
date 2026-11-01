@@ -437,6 +437,10 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # E2E_RUNDIR_KEEP (default 8) older ones, removes the rest, never aborts the run.
 # shellcheck source=scripts/lib/e2e-rundir-retention.sh
 . "$HERE/lib/e2e-rundir-retention.sh"
+# issue 1387 slice 1b: WHICH strih camera inputs + stream program input this run measures (NDI or
+# JPEG XS), resolved once from the box facts below; the JPEG XS checks before the recording.
+# shellcheck source=scripts/lib/program-inputs.sh
+. "$HERE/lib/program-inputs.sh"
 # #1134: the SOURCE-camera role (the "cam1 role") is no longer hard-pinned to cam1 -- it is the
 # first strih-routable member of CAMERA_ACTIVE_SET (camera_source_box, scripts/camera-set.sh), so
 # retiring cam1 from the active set (its USB grabber hw-faulted -- #1110 -EPROTO, owner order
@@ -551,6 +555,10 @@ STREAM_PW="${STREAM_PW:-newlevel}"
 # threaded via ${STRIH_LX_GATE_PREFIX:-} into the DanteSync NTP+PTP and dantesync version-parity gate
 # invocations below (the two heaviest strih-touching [0/8] gate calls).
 STRIH_LX_GATE_PREFIX="$(strih_lx_gate_prefix "${STRIH_LX_GATE_TIMEOUT:-300}" "$STRIH")"
+# issue 1387 slice 1b: the measured path from the box facts -- presets STRIH_PROG_SOURCE /
+# STREAM_PROG_SOURCE + CAMERA_STRIH_JXS_SET on a JPEG XS venue (the defaults below never fire there),
+# refuses a mixed venue and the NDI-only opt-ins on JPEG XS, before any rig mutation.
+program_inputs_resolve "$STRIH" "$STREAM" "$CAMERA_NAME" && program_inputs_refuse_ndi_only_optins || exit 2
 RUN_ID="${RUN_ID:-$(( (RANDOM << 16) | RANDOM ))}"
 # #703: surface RUN_ID to the CI workflow (when running under GH Actions) so a downstream
 # workflow step (the fail-closed structural guard) can locate THIS run's verdict JSON
@@ -1934,14 +1942,16 @@ preflight_mv_reverify() {
   local a
   for a in $(seq 1 "$attempts"); do
     if timeout "$call_timeout" python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-        --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle "${PREFLIGHT_MV_REVERIFY_WARM_SETTLE:-0}" \
+        --sources "$(mv_reverify_input "$cam_n")" --samples 2 --cadence 3.5 --threshold 1 --warm-settle "${PREFLIGHT_MV_REVERIFY_WARM_SETTLE:-0}" \
         --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
       if [ "$a" -gt 1 ]; then
         echo "    [sender-bounce] ${box} recovered on attempt ${a}/${attempts}" >&2
       fi
       return 0
     fi
-    if [ "$a" -eq 1 ]; then
+    if [ "$a" -eq 1 ] && ! mv_reverify_ndi_cures "$cam_n"; then
+      echo "    [sender-bounce] ${box} ($(mv_reverify_input "$cam_n")) shows no pixel change right after its deploy — a JPEG XS input has no NDI receiver to re-attach; re-sampling (issue 1387)" >&2
+    elif [ "$a" -eq 1 ]; then
       echo "    [sender-bounce] ${box} (NDI cam${cam_n}) shows no pixel change right after its deploy — attempting re-attach (#758 item 2)" >&2
       timeout "$call_timeout" python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
       # #1114: the re-attach above is a CLEAR-then-SET receiver reset (the merged WS-side fix) that
@@ -1969,7 +1979,7 @@ preflight_mv_reverify() {
   # as a spurious run-abort in the teardown log). The cleanup caller emits its own accurate WARNING;
   # the deploy-time callers (|| exit 1) keep the loud ERROR that correctly precedes their abort.
   if [ "${PREFLIGHT_MV_REVERIFY_CONTEXT:-preflight}" != "cleanup" ]; then
-    echo "ERROR: [preflight] FAIL: ${box} (NDI cam${cam_n}) still shows no pixel change after ${attempts} attempts (incl. one re-attach, ~$((attempts * 4 + (attempts - 1) * settle_s))s total) — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
+    echo "ERROR: [preflight] FAIL: ${box} ($(mv_reverify_input "$cam_n")) still shows no pixel change after ${attempts} attempts (incl. one re-attach, ~$((attempts * 4 + (attempts - 1) * settle_s))s total) — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
   fi
   return 1
 }
@@ -2267,6 +2277,8 @@ fi"
     AV_SYNC_HELD_REASON="$_avs_feed_hold"
     AV_SYNC_APPLY_OFFSET_MS=""
   fi
+  # issue 1387: on the JPEG XS path the stream pin is a box fact -> print the recommended fact, HOLD.
+  program_inputs_av_pin_hold
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
     _avs_hold="$(av_sync_apply_guard_decide "$REPORT_JSON" "$AV_SYNC_BAND_VERDICT" "$AV_SYNC_APPLY_OFFSET_MS" "$HERE/av_sync_apply_guard.py")"
     if [ -n "$_avs_hold" ]; then
@@ -2570,7 +2582,7 @@ CG_CHAIN_BURN_FLAG="$(cg_chain_extract_burn_flag)"
 # convention n_camera_strih_samples/spread_verdict already follow).
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   for _acn in $CAMERA_ACTIVE_SET; do
-    _acs="NDI $_acn"
+    _acs="$(camera_strih_input "$_acn")"
     if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then
       BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")
     fi
@@ -2907,11 +2919,13 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
    i=0; while fuser -s \$V4L2_NEUTRAL_NODE 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    $(v4l2_neutral_set_default_cmd) \
    $(cpu_affinity_burn_resolve_cmd) \
+   $(cambox_jxs_burn_setenv_resolve_cmd) \
    rm -f /tmp/cbox-burn.log; \
    systemd-run --unit=$CAM1_BURN_UNIT --collect \
      --property=Restart=on-failure --property=RestartSec=3 --property=StartLimitIntervalSec=0 \
      --property=StandardOutput=append:/tmp/cbox-burn.log --property=StandardError=append:/tmp/cbox-burn.log \
      \$CPU_AFFINITY_BURN_PROPERTY \
+     \$CAMBOX_JXS_BURN_SETENV \
      --setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
      --setenv=CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      $CAM1_BURN_BIN"
@@ -2998,11 +3012,13 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
        i=0; while fuser -s \$V4L2_NEUTRAL_NODE 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
        $(v4l2_neutral_set_default_cmd) \
        $(cpu_affinity_burn_resolve_cmd) \
+       $(cambox_jxs_burn_setenv_resolve_cmd) \
        rm -f /tmp/cbox-burn-${_cn}.log; \
        systemd-run --unit=$_cunit --collect \
          --property=Restart=on-failure --property=RestartSec=3 --property=StartLimitIntervalSec=0 \
          --property=StandardOutput=append:/tmp/cbox-burn-${_cn}.log --property=StandardError=append:/tmp/cbox-burn-${_cn}.log \
          \$CPU_AFFINITY_BURN_PROPERTY \
+         \$CAMBOX_JXS_BURN_SETENV \
          ${_cnodisplay_setenv}--setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$_cburn \
          --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
          $_cbin"
@@ -3600,15 +3616,24 @@ FROZEN_CAM_RETRY_SLEEP="${FROZEN_CAM_RETRY_SLEEP:-30}"
 # edit, picked up here automatically.
 FROZEN_CAM_EXCLUDE_SENDER="${FROZEN_CAM_EXCLUDE_SENDER:-CAM2 (usb)}"
 if [ -z "${FROZEN_CAM_SOURCES:-}" ]; then
-  FROZEN_CAM_SOURCES="$(python3 - "$STRIH" "$FROZEN_CAM_EXCLUDE_SENDER" "$HERE/obs_phase2.py" "$CAMERA_ACTIVE_SET" <<'PYEOF'
+  FROZEN_CAM_SOURCES="$(python3 - "$STRIH" "$FROZEN_CAM_EXCLUDE_SENDER" "$HERE/obs_phase2.py" "$CAMERA_ACTIVE_SET" "$(camera_active_ndi_sources_csv)" <<'PYEOF'
 import importlib.util, os, sys
 spec = importlib.util.spec_from_file_location("o", sys.argv[3])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 host, exclude = sys.argv[1], sys.argv[2]
 active_cams = sys.argv[4].split()
+# issue 1387: the measured strih input per active camera (camera_strih_input, NDI or JPEG XS)
+inputs = sys.argv[5].split(",") if len(sys.argv) > 5 and sys.argv[5] else [f"NDI {cam}" for cam in active_cams]
 ws = m._conn(host, os.environ.get("OBS_PASSWORD", ""))
 keep = []
-for inp in [f"NDI {cam}" for cam in active_cams]:
+for cam, inp in zip(active_cams, inputs):
+    if not inp.startswith("NDI "):
+        # a JPEG XS input carries no ndi_source_name: exclude the painter box by its camera number
+        if exclude and exclude.split(" ")[0].lower() == cam.lower():
+            print(f"    [frozen-camera-gate] excluding {inp!r} (camera {cam} = {exclude!r}, the painter box's self-feed, static by design pre-paint)", file=sys.stderr)
+        else:
+            keep.append(inp)
+        continue
     try:
         s = m._rpc(ws, "GetInputSettings", {"inputName": inp}).get("inputSettings", {})
         sender = s.get("ndi_source_name", "")
@@ -4459,7 +4484,7 @@ fi
 # unchanged (0 is set+non-empty, so `${PHASE_REANCHOR:-1}` keeps it 0).
 measurement_eq_enabled && PHASE_REANCHOR=0
 PHASE_REANCHOR="${PHASE_REANCHOR:-1}"
-if [ "$PHASE_REANCHOR" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
+if [ "$PHASE_REANCHOR" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ] && program_path_ndi; then
   echo "[4h/8pre] #900 phase-sync re-anchor — establish the ACTIVE floor pin set from persisted transits (no new measurement) before the [4h/8] floor gate"
   python3 "$HERE/phase_sync_reanchor.py" --host "$STRIH" --password "$STRIH_PW" \
     --active-set "$CAMERA_ACTIVE_SET" \
@@ -4508,7 +4533,7 @@ fi
 # incl. cam4, so this earlier read-only check is redundant AND would otherwise abort a run that
 # [4i/8align] would have rescued (or, cross-run, a prior align that legitimately floored cam4 leaves
 # no ACTIVE-set camera at 3). Same exclusion shape as the measurement_eq guard beside it.
-if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "${QR_ALIGN:-1}" != "1" ] && ! measurement_eq_enabled; then
+if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "${QR_ALIGN:-1}" != "1" ] && ! measurement_eq_enabled && program_path_ndi; then
   echo "[4h/8] #893 phase-sync active-floor gate — at least one ACTIVE strih camera must sit at the 3ms floor"
   python3 "$HERE/phase_sync_active_floor_check.py" --host "$STRIH" --password "$STRIH_PW" \
     --active-set "$CAMERA_ACTIVE_SET" \
@@ -4518,6 +4543,12 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "${QR_ALIGN:-1}" != "1" ] && ! measurement_
       exit 1
     }
 fi
+
+# issue 1387 slice 1b, the JPEG XS path (no-ops on NDI): the BLOCKING [4i/8jxs] check of the declared
+# JPEG XS inputs + the program output against the box facts (with a report-only one-frame measure)
+# replaces the NDI pin steps above and below, then every measured scene must render its input.
+program_inputs_jxs_preflight "$HERE" "$STRIH" "$STREAM" "$OUTDIR" "$RUN_ID" || exit 1
+program_inputs_rendered_verify "$HERE" "$STRIH" "$STREAM" "${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}" || exit 1
 
 # [4i/8align] #1003 floor-3 per-run camera alignment (owner rework 2026-08-20). The SIMULTANEOUS
 # painter-QR screenshot spread across every on-air strih camera (CAMERA_ALIGN_SET, issue 1413: cam3 + the active)
@@ -4531,7 +4562,7 @@ fi
 # gate (recording-verdict) stays a separate blocking proof, unchanged. Runs on the ALL_CAMBOX path;
 # SKIPPED under MEASUREMENT_EQ (that opt-in profile is the OTHER strih-pin writer) and via QR_ALIGN=0.
 QR_ALIGN="${QR_ALIGN:-1}"
-if [ "$QR_ALIGN" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ] && ! measurement_eq_enabled; then
+if [ "$QR_ALIGN" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ] && ! measurement_eq_enabled && program_path_ndi; then
   { [ "${QR_ALIGN_REINIT:-1}" = "1" ] && . "$HERE/lib/qr-align-reinit.sh" && qr_align_reinit_loop "$STRIH" "$(camera_align_ndi_sources_excluding_csv "${PREFLIGHT_EXCLUDED_CAMS:-}")"; } || echo "[qr-align-reinit] NOTE: issue 1349 re-init loop unavailable/off (missing lib or QR_ALIGN_REINIT=0) — proceeding to the floor-aware plan" >&2
   echo "[4i/8align] #1003 floor-3 camera alignment via simultaneous painter-QR spread (strih on-air set incl. cam4)"
   . "$HERE/lib/qr-align.sh"

@@ -307,6 +307,22 @@ mv_reverify_reopen_multiview_run() {
 }
 
 # ---- (issue 1197) bounded COLD-finder discovery-wait + re-enforce ------------------------------
+# mv_reverify_input <cam_n> -> the strih input this camera's leg is DETECTED on: camera-set.sh's
+# camera_strih_input (`JXS camN src` on a JPEG XS venue, issue 1387 slice 1b), or `NDI camN` when
+# the caller never sourced camera-set.sh. mv_reverify_ndi_cures <cam_n> -> 0 when that input is an NDI
+# input: the receiver cures (the CLEAR-then-SET reattach, the finder heal-wait, the proactive reset)
+# act on `ndi_source_name`, which a JPEG XS input does not have; the strih OBS restart applies to both.
+mv_reverify_input() {
+  if declare -F camera_strih_input >/dev/null; then
+    camera_strih_input "cam${1-}"
+  else
+    printf 'NDI cam%s' "${1-}"
+  fi
+}
+mv_reverify_ndi_cures() {
+  case "$(mv_reverify_input "${1-}")" in "NDI "*) return 0 ;; *) return 1 ;; esac
+}
+
 # mv_reverify_finder_heal_wait <host> <active_spec> <deadline_s> -- ride out a COLD DistroAV finder
 # (right after a strih OBS boot OR the #1093 escalation force-kill restart, where a genuinely-live
 # sender is not-yet-discovered) and re-enforce the #399 baseline of each active input the INSTANT its
@@ -318,6 +334,10 @@ mv_reverify_reopen_multiview_run() {
 # bound is logged LOUD (the python's own #1197 lines) but never aborts the run. Override the WHOLE
 # call with MV_REVERIFY_HEAL_WAIT_CMD (run with "<host> <active> <deadline>") for offline tests.
 mv_reverify_finder_heal_wait() {
+  if declare -F program_path_ndi >/dev/null && ! program_path_ndi; then
+    echo "    [#1197 finder-warm] skipped: the JPEG XS path (the measured inputs carry no ndi_source_name, issue 1387)" >&2
+    return 0
+  fi
   local host="$1" active_spec="$2" deadline_s="$3" out
   if [ -n "${MV_REVERIFY_HEAL_WAIT_CMD:-}" ]; then
     out="$($MV_REVERIFY_HEAL_WAIT_CMD "$host" "$active_spec" "$deadline_s" 2>&1 || true)"
@@ -354,7 +374,8 @@ mv_reverify_or_escalate() {
 
   # Read strih's received= RAW twice (default gap >= 2x the ~5s audit emit cadence, #1093 review
   # finding 6, so healthy emit jitter/flush can't read the same newest line twice = false WEDGE).
-  local src="NDI cam${cam_n}" raw0 raw1 r0 r1 verdict
+  local src raw0 raw1 r0 r1 verdict
+  src="$(mv_reverify_input "$cam_n")"
   raw0="$(mv_reverify_probe_raw "$STRIH" "$src" 2>/dev/null || true)"
   sleep "${MV_REVERIFY_WEDGE_SAMPLE_GAP_S:-12}"
   raw1="$(mv_reverify_probe_raw "$STRIH" "$src" 2>/dev/null || true)"
@@ -538,6 +559,7 @@ mv_reverify_proactive_reset() {
   [ "${PREFLIGHT_MV_REVERIFY_CONTEXT:-preflight}" != "cleanup" ] || return 0
   [ "${PREFLIGHT_MV_REVERIFY_PROACTIVE:-1}" = "1" ] || return 0
   case " ${PREFLIGHT_EXCLUDED_CAMS:-} " in *" $box "*) return 0 ;; esac
+  mv_reverify_ndi_cures "$cam_n" || return 0   # issue 1387: no NDI receiver to reset on a JPEG XS input
   # SILENT, UNCOUNTED pre-probe (issue 1114 review 🟡-1): the "known-stale" premise holds at the cam1
   # site (kick ~4s after its bounce) and for the FIRST ALL_CAMBOX-loop camera, but a LATER loop
   # camera's receiver may have re-resolved on its own during the preceding cameras' SERIAL reverifies

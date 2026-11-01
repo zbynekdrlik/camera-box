@@ -496,6 +496,17 @@ strih_box_jxs_facts_ok() {
   [ "$bad" = 0 ]
 }
 
+# strih_jxs_input_name N|PGM -> the OBS input name of a JPEG XS input (`JXS cam2 src`, `JXS PGM src`):
+# the ONE naming rule (issue 1387) the seed manifest (strih-jxs-provision.sh), camera-set.sh's
+# camera_strih_input and the E2E / rig-mode / soak resolver (program-inputs.sh) share. The holding
+# scene is the same name without ` src` (an input cannot share its scene's name). Pure.
+strih_jxs_input_name() {
+  case "${1-}" in
+    PGM) printf 'JXS PGM src\n' ;;
+    *) printf 'JXS cam%s src\n' "${1-}" ;;
+  esac
+}
+
 # strih_box_jxs_port_of JXS_CAMERAS N -> the UDP port STRIH_JXS_CAMERAS gives camera N, or `none` when
 # it lists no such camera (or is none). Pure; always rc 0 (a validated fact never holds a bad token).
 strih_box_jxs_port_of() {

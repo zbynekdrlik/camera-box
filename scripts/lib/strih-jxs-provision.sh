@@ -42,14 +42,7 @@ strih_jxs_checkout() {
   (cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 }
 
-# strih_jxs_input_name N|PGM -> the OBS input name (`JXS cam2 src`, `JXS PGM src`); the holding scene is
-# the same name without ` src` (an input cannot share its scene's name).
-strih_jxs_input_name() {
-  case "${1-}" in
-    PGM) printf 'JXS PGM src\n' ;;
-    *) printf 'JXS cam%s src\n' "${1-}" ;;
-  esac
-}
+# strih_jxs_input_name (the input naming rule) lives in strih-box-facts.sh (issue 1387 slice 1b).
 
 # _strih_jxs_entry NAME PORT CAMERA PIN GRID -> one manifest entry (JSON object, one line).
 _strih_jxs_entry() {

@@ -249,6 +249,10 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # rc recorded and folded into the exit. Source-only lib, no side effects at source time.
 # shellcheck source=scripts/lib/jxs-mapping-enforce.sh
 . "$RIG_MODE_DIR/lib/jxs-mapping-enforce.sh"
+# issue 1387 slice 1b: the measured strih/stream inputs (NDI or JPEG XS) resolved from the box facts.
+# Source-only lib; the one resolve call sits after the pinned constants below.
+# shellcheck source=scripts/lib/program-inputs.sh
+. "$RIG_MODE_DIR/lib/program-inputs.sh"
 
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
@@ -629,6 +633,11 @@ REMOTE
 # Overridable; defaults mirror the recording-e2e BURN_TARGETS (the prod program inputs).
 STRIH_IP="${STRIH_IP:-10.77.9.202}"
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
+# issue 1387 slice 1b: on a JPEG XS venue (the box facts) the TEST burns follow the measured JPEG XS
+# inputs: this presets STRIH_PROG_SOURCE / STREAM_PROG_SOURCE (the defaults below then never fire).
+# A venue it cannot resolve keeps the NDI defaults with a WARNING (an EVENT switch must still run).
+program_inputs_resolve "$STRIH_IP" "$STREAM_IP" "$RIG_SOURCE_BOX" \
+  || echo "WARNING: rig-mode: the measured inputs did not resolve from the box facts -- the NDI defaults stay (issue 1387)" >&2
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-$RIG_SOURCE_STRIH_SOURCE}" # strih program input for the
                                                           # SOURCE camera (#246 burn target). #1135:
                                                           # DERIVED off the resolved source box
@@ -1678,9 +1687,11 @@ event_mode_assert() {
   # --- item 6: stream PGM latency == calibrated (av-sync-last.json), restore-or-fail ---------
   local calibrated_ms="" current_ms="" latency_out latency_detail=""
   calibrated_ms="$(jq -r '.applied_latency_ms // empty' "$HOME/.camera-box/av-sync-last.json" 2>/dev/null || true)"
+  # issue 1387: on the JPEG XS path the stream program pin is the box fact STRIH_JXS_PROGRAM_PIN_MS
+  program_path_ndi || calibrated_ms="${PROGRAM_INPUTS_STREAM_PIN_MS:-}"
   if [ -n "$calibrated_ms" ]; then
     latency_out="$(python3 "$here/obs_phase2.py" latency-check --host "$STREAM_IP" --password "$OBS_WS_PASSWORD" \
-      --source "NDI 2ME PGM" --calibrated-ms "$calibrated_ms" 2>/dev/null || true)"
+      --source "$STREAM_PROG_SOURCE" --calibrated-ms "$calibrated_ms" 2>/dev/null || true)"
     current_ms="$(printf '%s' "$latency_out" | grep -oP 'final=\K-?[0-9]+' || true)"
     latency_detail="aktualna=${current_ms:-neznama}ms, kalibrovana=${calibrated_ms}ms"
   else
