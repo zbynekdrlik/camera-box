@@ -441,6 +441,9 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # JPEG XS), resolved once from the box facts below; the JPEG XS checks before the recording.
 # shellcheck source=scripts/lib/program-inputs.sh
 . "$HERE/lib/program-inputs.sh"
+# issue 1387 slice 2: the BLOCKING JPEG XS link continuity gate (a lost or concealed slice in the window = RED).
+# shellcheck source=scripts/lib/jxs-link-continuity.sh
+. "$HERE/lib/jxs-link-continuity.sh"
 # #1134: the SOURCE-camera role (the "cam1 role") is no longer hard-pinned to cam1 -- it is the
 # first strih-routable member of CAMERA_ACTIVE_SET (camera_source_box, scripts/camera-set.sh), so
 # retiring cam1 from the active set (its USB grabber hw-faulted -- #1110 -EPROTO, owner order
@@ -4652,6 +4655,7 @@ youtube_leg_start "$HERE" "$STRIH" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDI
 # transients are already over (design Prístup 3 rejection).
 genlock_audit_snapshot_capture before "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" || true
 program_audio_continuity_mark start "$OUTDIR" "$STREAM" || true   # issue 1439: program-audio window START (stream OBS log line count)
+jxs_link_continuity_mark start "$OUTDIR" "$STRIH" "$STREAM" || true   # issue 1387: JPEG XS link window START (byte marks)
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
 # #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
 # raises (nonzero exit) if the output isn't genuinely active + writing growing bytes — a
@@ -4932,6 +4936,7 @@ youtube_leg_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "${STRE
 # the recording. Report-only + fail-open (in this [7/8] `set +e` region + a trailing `|| true`).
 genlock_audit_snapshot_capture after "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" || true
 program_audio_continuity_mark stop "$OUTDIR" "$STREAM" || true   # issue 1439: program-audio window END (graded after the merge)
+jxs_link_continuity_mark stop "$OUTDIR" "$STRIH" "$STREAM" || true   # issue 1387: JPEG XS link window END (graded after the merge)
 
 # #1124 item 3 — POST-record stomp re-check (profile mode only, report-only). Runs HERE, right
 # after StopRecord while the measurement pins/hold are STILL in force (cleanup()'s teardown
@@ -5827,6 +5832,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
     # issue 1404: the YouTube end point (the VOD against the stream recording) is BLOCKING too.
     if ! youtube_leg_gate "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "$REPORT_JSON" "${STREAM_HOST_PATH:-}" "$MARKER_CSV" "$SWITCH_SCHEDULE_JSON" "$PROBE_BIN_DIR"; then [ "$GATE" -ne 0 ] || GATE=1; fi
+    # issue 1387: a JPEG XS link loss (a concealed slice included) or an unprovable window is a blocking FAIL.
+    if ! jxs_link_continuity_gate "$HERE" "$STRIH" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
     # #827: merge the fleet-preflight exclusion list into the verdict JSON so a run that excluded
     # boxes (ALL_CAMBOX only — PREFLIGHT_EXCLUDED_CAMS is otherwise unset/empty, and the merge
     # below is then a harmless no-op `excluded_cams: []`) can NEVER be read back as "full-fleet
@@ -6106,6 +6113,8 @@ fi
 if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
 # issue 1404: the YouTube end point, the legacy path's twin of the execute branch's.
 if ! youtube_leg_gate "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "$REPORT_JSON" "${STREAM_HOST_PATH:-}" "$MARKER_CSV" "$SWITCH_SCHEDULE_JSON" "$PROBE_BIN_DIR"; then [ "$GATE" -ne 0 ] || GATE=1; fi
+# issue 1387: the JPEG XS link continuity gate, the legacy path's twin of the execute branch's.
+if ! jxs_link_continuity_gate "$HERE" "$STRIH" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
 
 # #758 item 3 — the in-run freeze watch's own verdict (same check as the E2E_EXECUTE_VERDICT=1
 # branch's own early exit above; this is the LEGACY/plan-print path's equivalent tail).

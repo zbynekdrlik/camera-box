@@ -65,6 +65,7 @@ if _SCRIPTS not in sys.path:
 import cambox_segments  # noqa: E402
 import e2e_report_program_audio as _program_audio  # noqa: E402  (issue 1439)
 import e2e_report_youtube as _youtube  # noqa: E402  (issue 1404)
+import e2e_report_jxs_link as _jxs_link  # noqa: E402  (issue 1387)
 
 CAMERA_ORDER = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
 
@@ -377,9 +378,10 @@ def _section_av_sync(verdict):
 def _run_passed(verdict):
     """issue 1439: the run's own verdict -- the merge's overall_pass AND the BLOCKING program-audio
     continuity gate, which the E2E folds into its exit after the merge (a FAIL or UNKNOWN block);
-    issue 1404: and the BLOCKING YouTube end point (the `youtube_leg` block), folded the same way."""
+    issue 1404: and the BLOCKING YouTube end point (the `youtube_leg` block), folded the same way;
+    issue 1387: and the BLOCKING JPEG XS link continuity gate (the `jxs_link_continuity` block)."""
     return (bool(verdict.get("overall_pass")) and not _program_audio.blocks(verdict)
-            and not _youtube.blocks(verdict))
+            and not _youtube.blocks(verdict) and not _jxs_link.blocks(verdict))
 
 
 def _section_overall(verdict, meta):
@@ -415,6 +417,9 @@ def _section_overall(verdict, meta):
     yt_label = _youtube.summary_label(verdict)  # issue 1404
     if yt_label:
         blockers.append(yt_label)
+    jxs_label = _jxs_link.summary_label(verdict)  # issue 1387
+    if jxs_label:
+        blockers.append(jxs_label)
 
     if blockers:
         lines.append("Blokujúce brány:")
@@ -1318,6 +1323,9 @@ def compose_summary(verdict: dict, meta: dict | None = None) -> str:
     yt_label = _youtube.summary_label(verdict)  # issue 1404: the YouTube end point
     if yt_label:
         failures.append((yt_label, _OWN_CLAUDE))
+    jxs_label = _jxs_link.summary_label(verdict)  # issue 1387: the JPEG XS link gate
+    if jxs_label:
+        failures.append((jxs_label, _OWN_CLAUDE))
     if not failures:
         # Safety net: overall_pass is false but no enumerated blocking gate matched (e.g. a
         # burn_hold-only fold, or a shape this summary doesn't itemize). Never look PASS-ish.
@@ -1388,6 +1396,9 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
     yt_section = _youtube.section(verdict)  # issue 1404
     if yt_section is not None:
         sections.append(yt_section)
+    jxs_section = _jxs_link.section(verdict)  # issue 1387
+    if jxs_section is not None:
+        sections.append(jxs_section)
     return "\n\n".join(sections)
 
 
