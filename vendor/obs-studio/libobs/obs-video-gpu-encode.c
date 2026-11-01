@@ -284,27 +284,6 @@ void stop_gpu_encoding_thread(struct obs_core_video_mix *video)
 	}
 }
 
-/* issue 1387: one step of the stop's texture drain, called inside one graphics hold with
- * gpu_encoder_mutex held. The render loop holds the graphics lock ~24 ms of every 33 ms tick, so
- * destroying all the textures in one hold made the next tick late at every StopRecord. Returns
- * true while there is more to free. A start during the drain ends it: what is left stays in the
- * queues for that session. */
-bool free_gpu_encoding_step(struct obs_core_video_mix *video)
-{
-	struct deque *queue;
-	struct obs_tex_frame frame;
-
-	if (video->gpu_encoders.num)
-		return false;
-	queue = video->gpu_encoder_queue.size ? &video->gpu_encoder_queue : &video->gpu_encoder_avail_queue;
-	if (!queue->size)
-		return false;
-	deque_pop_front(queue, &frame, sizeof(frame));
-	gs_texture_destroy(frame.tex);
-	gs_texture_destroy(frame.tex_uv);
-	return true;
-}
-
 void free_gpu_encoding(struct obs_core_video_mix *video)
 {
 	if (video->gpu_encode_semaphore) {

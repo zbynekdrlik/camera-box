@@ -3318,7 +3318,6 @@ obs_data_t *obs_get_private_data(void)
 extern bool init_gpu_encoding(struct obs_core_video_mix *video);
 extern void stop_gpu_encoding_thread(struct obs_core_video_mix *video);
 extern void free_gpu_encoding(struct obs_core_video_mix *video);
-extern bool free_gpu_encoding_step(struct obs_core_video_mix *video);
 
 bool start_gpu_encode(obs_encoder_t *encoder)
 {
@@ -3363,31 +3362,13 @@ void stop_gpu_encode(obs_encoder_t *encoder)
 	os_event_wait(video->gpu_encode_inactive);
 
 	if (call_free) {
-		uint64_t start_ns, hold_ns, longest_ns = 0;
-		size_t holds = 0;
-		bool more = true;
-
 		stop_gpu_encoding_thread(video);
 
-		/* issue 1387: one short graphics hold per frame, the render tick takes the lock between
-		 * them. In one hold, every StopRecord made a tick late and lost a program frame. */
-		start_ns = os_gettime_ns();
-		while (more) {
-			obs_enter_graphics();
-			pthread_mutex_lock(&video->gpu_encoder_mutex);
-			hold_ns = os_gettime_ns();
-			more = free_gpu_encoding_step(video);
-			if (!more && !video->gpu_encoders.num)
-				free_gpu_encoding(video);
-			hold_ns = os_gettime_ns() - hold_ns;
-			pthread_mutex_unlock(&video->gpu_encoder_mutex);
-			obs_leave_graphics();
-			if (hold_ns > longest_ns)
-				longest_ns = hold_ns;
-			holds++;
-		}
-		blog(LOG_INFO, "gpu-encode-stop: textures freed in %zu hold(s), longest %.2f ms, total %.2f ms (issue 1387)",
-		     holds, (double)longest_ns / 1e6, (double)(os_gettime_ns() - start_ns) / 1e6);
+		obs_enter_graphics();
+		pthread_mutex_lock(&video->gpu_encoder_mutex);
+		free_gpu_encoding(video);
+		pthread_mutex_unlock(&video->gpu_encoder_mutex);
+		obs_leave_graphics();
 	}
 }
 
