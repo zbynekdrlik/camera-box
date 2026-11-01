@@ -1778,3 +1778,11 @@ receiver. `obs_jxs_inputs.py --bootstrap` (every OBS start) clears `NDI cam<N>`'
 `--verify` FAILs a twin that still receives (`(jxs-one-input)`, verify item 49); `set-ndi-mapping.py` drops those
 cameras from its default map by the box facts, so no mapping, heal or rig-mode run re-arms them. Measured: the three
 idle receivers cost 4.3 ms of the 33 ms render budget (26.7 -> 22.4 ms, 1.11.2026).
+
+## The StopRecord frame (owner 2.11.2026)
+
+Recording on strih stays NVENC. Tearing it down at StopRecord costs the program one frame (`lagged=1`, `dropped_busy=1`):
+3 of 3 stops with NVENC, 0 of 3 with x264, not the graphics lock (holds of 0.01-3.9 ms did not cure it, that fix was
+reverted). It does not happen during production, so `jxs_link_continuity.py` accepts at most 1 `dropped_busy` / `not_taken`
+in the output's closing window and reports it as `stop_transient`. The counter stays in the block; everything else
+stays RED. The root stays open on the ticket.

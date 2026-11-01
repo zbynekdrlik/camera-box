@@ -152,6 +152,13 @@ def _place(sod, ref):
     return sod + 86400.0 * round((ref - sod) / 86400.0)
 
 
+# Owner 2.11.2026: the strih records with NVENC, and tearing that encoder down at StopRecord costs the program
+# one frame (measured 3 of 3, x264 0 of 3). It never happens during production, so it is accepted for now: at
+# most this many frames in the output's CLOSING window, reported as `stop_transient`, never anywhere else.
+STOP_TRANSIENT_KEYS = ("dropped_busy", "not_taken")
+STOP_TRANSIENT_MAX = 1
+
+
 def _link_result(role, kind, name):
     return {"box": role, "link": name, "kind": "input" if kind == "source" else "output",
             "verdict": "UNKNOWN", "pass": False, "windows": 0, "frames": 0, "counters": {},
@@ -244,8 +251,14 @@ def grade_link(role, kind, name, entries, times, start_off, stop_off, t_start, t
     res["min_fps"] = min(fps) if fps else None
     if res["zero_frame_windows"]:
         failures.append(f"{res['zero_frame_windows']} window(s) with frames=0")
+    excused = {}
+    if kind != "source" and closing is not None:
+        vals = {k: _int(closing[2]["fields"].get(k)) or 0 for k in STOP_TRANSIENT_KEYS}
+        if any(vals.values()) and max(vals.values()) <= STOP_TRANSIENT_MAX:
+            excused = vals
+            res["stop_transient"] = vals
     for k in gated:
-        if res["counters"].get(k):
+        if res["counters"].get(k, 0) - excused.get(k, 0) > 0:
             failures.append(f"{k} +{res['counters'][k]}" + (" (a concealed slice is a LOST slice)"
                                                               if k == "concealed" else ""))
     if res["counters"].get("reopens"):
