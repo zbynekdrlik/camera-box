@@ -47,6 +47,8 @@ def _clean_facts():
         "latency_calibrated_ms": 925,
         "ndi_mismatches": [],
         "artifacts_existing": [],
+        # issue 1387: the JPEG XS item (every link up)
+        "jxs_state_lines": {"strih": "13:06:13.794: jxs-state: state=OK reason=none inputs=3 down=0 degraded=0 outputs=1 down=0 degraded=0 entry=- (issue 1387)"},
     }
 
 
