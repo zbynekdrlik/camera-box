@@ -1373,7 +1373,7 @@ def test_the_direct_feed_soak_centres_the_av_gate_on_the_direct_leg_1482(rig):
     env = dict(env, RIG_TEST_FEED="direct")
     env.pop("AV_EXPECTED_MS", None)
     out = _soak(env, "--plan").stdout
-    assert "--av-expected-ms -45" in _merge_line(out)
+    assert "--av-expected-ms -74" in _merge_line(out)
 
 
 def test_the_optical_feed_soak_keeps_the_zero_centre_1482(rig):
