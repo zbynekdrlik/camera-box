@@ -1659,8 +1659,9 @@ line-rate ~8-12 ms. `first_arrival_ms` should stop wandering. The latency p50 sh
 - A frame whose slice count (a geometry change) or picture header packet (a bpp change) differs
   from the decoder's restarts it; that frame decodes after its last packet, not slice by slice.
 - In burn mode (the E2E's temporary probe unit) NDI and JPEG XS both carry the burned frame
-  (slice 1a, "Burn mode" above); the temporary unit still needs the camera's own
-  `CAMERA_BOX_JXS_TARGET` to send JPEG XS at all (slice 1b).
+  (slice 1a, "Burn mode" above); the temporary unit gets the camera's own
+  `CAMERA_BOX_JXS_TARGET` from its loaded camera-box unit (slice 1b,
+  `cambox_jxs_burn_setenv_resolve_cmd`).
 - `SO_SNDBUF` asks for 4 MB; the kernel caps it at `net.core.wmem_max` (the "link ON" line logs
   what was granted). A frame is ~1.04 MB, so a small grant makes `send` block the `jxs-send`
   thread (never the capture thread) until the NIC drains it.
