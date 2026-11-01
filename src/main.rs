@@ -36,6 +36,9 @@ struct BurnJob {
     /// burn); `false` for a non-YUYV frame the v4l2 driver substituted — sent UNBURNED so a format
     /// substitution can never kill the cam1 feed (the QR burner assumes the YUYV byte layout).
     render_qr: bool,
+    /// Issue 1387 slice 1a — the CURRENT frame's JPEG XS stamp (`None` on a starvation repeat,
+    /// which stays NDI-only): the burn thread offers the BURNED `buf` to the JPEG XS link with it.
+    jxs: Option<camera_box::probe::burn_jxs::BurnJxsOffer>,
 }
 
 /// Wall-clock time in ns (CLOCK_REALTIME — the DanteSync-disciplined clock the
@@ -945,6 +948,11 @@ async fn run_capture_loop(
         let mut burn_ids = camera_box::probe::genlock::BurnFrameIdSource::default();
         #[cfg(feature = "probe")]
         let mut capture_sender: Option<NdiSender> = Some(sender);
+        // Issue 1387 slice 1a — in burn mode the JPEG XS link moves to the burn thread with the
+        // NDI sender (below), so it is offered the BURNED frame; otherwise it stays here and the
+        // capture loop offers the raw frame, as in every production build.
+        #[cfg(feature = "probe")]
+        let mut jxs_sender = jxs_sender;
         #[cfg(feature = "probe")]
         let mut burn_ring: Option<camera_box::probe::genlock::BurnRing<BurnJob>> = None;
         #[cfg(feature = "probe")]
@@ -969,6 +977,17 @@ async fn run_capture_loop(
             let mut burn_sender = capture_sender
                 .take()
                 .expect("NDI sender is present before the burn thread takes it");
+            // Issue 1387 slice 1a — the JPEG XS link moves to the burn thread too: the capture
+            // loop's raw offer then finds `None`, and the burn thread offers each CURRENT frame
+            // after its QR is drawn and before its NDI send (the strih programs the JPEG XS
+            // inputs, so the E2E reads the camera burn there). The starvation repeats stay
+            // NDI-only, like the production offer. The link's `offer` never blocks.
+            let burn_jxs_link = jxs_sender.take();
+            if burn_jxs_link.is_some() {
+                tracing::info!(
+                    "jxs send: burn mode -- the JPEG XS link is offered the BURNED frame on the cam1-burn thread, after the QR and before the NDI send; the starvation repeats stay NDI-only (issue 1387)"
+                );
+            }
             // #279 FIX 4 — whether genlock paces the pipeline. ON: the capture thread already
             // gated each emit to a wall-clock boundary and stamped its timecode, so the burn
             // thread sends verbatim (no re-derivation/sleep → no queue jitter in the pacing).
@@ -996,21 +1015,22 @@ async fn run_capture_loop(
                     camera_box::probe::genlock::run_burn_ring(rx, |mut job: BurnJob| {
                         // #279 FIX 3 — render the QR ONLY for a YUYV frame; a substituted non-YUYV
                         // frame is sent UNBURNED (never dropped, so the feed can't go dead).
-                        if job.render_qr {
-                            let payload = camera_box::probe::payload::Payload {
-                                run_id: job.run_id,
-                                frame_id: job.frame_id,
-                                gen_ts_ns: job.gen_ts_ns,
-                            };
-                            camera_box::probe::qr::burn_qr_yuyv(
-                                &mut job.buf,
-                                job.info.width,
-                                job.info.height,
-                                job.info.stride,
-                                &payload,
-                                camera_box::probe::qr::CAM1_BURN_QR_PX,
-                            );
-                        }
+                        let payload =
+                            job.render_qr
+                                .then_some(camera_box::probe::payload::Payload {
+                                    run_id: job.run_id,
+                                    frame_id: job.frame_id,
+                                    gen_ts_ns: job.gen_ts_ns,
+                                });
+                        // Issue 1387 slice 1a — the QR into `buf`, THEN the burned `buf` to the
+                        // JPEG XS link (the current frame only, a link that is on), then the NDI
+                        // send below of the same bytes.
+                        camera_box::probe::burn_jxs::burn_then_offer_jxs(
+                            &mut job.buf,
+                            &job.info,
+                            payload.as_ref(),
+                            burn_jxs_link.as_ref().zip(job.jxs.as_ref()),
+                        );
                         let send_result = if burn_external_pacing {
                             // Genlock on: send with the gate-stamped emitted-frame timecode.
                             burn_sender.send_frame_data_with_timecode(
@@ -1340,6 +1360,13 @@ async fn run_capture_loop(
                 // empty-queue starvation repeats below, parameterized by the genlock emit timecode.
                 // Factored so a repeat and the current frame can never drift in how they send. Every
                 // capture of `emit_one` is disjoint from the per-poll `decimation_gate` borrow above.
+                // Issue 1387 slice 1a — the CURRENT frame's JPEG XS stamp for its burn job: set
+                // right before the current frame's `emit_one` below, taken by the job it builds, so
+                // a starvation repeat (emitted first) carries none.
+                #[cfg(feature = "probe")]
+                let burn_jxs_current: std::cell::Cell<
+                    Option<camera_box::probe::burn_jxs::BurnJxsOffer>,
+                > = std::cell::Cell::new(None);
                 let mut emit_one = |emit_timecode_100ns: i64| {
                     // #275b ASYNC BURN PATH (test mode: probe + CAMERA_BOX_BURN_RUN_ID).
                     #[cfg(feature = "probe")]
@@ -1380,6 +1407,7 @@ async fn run_capture_loop(
                             gen_ts_ns: emit_wall_ns,
                             emit_timecode_100ns,
                             render_qr,
+                            jxs: burn_jxs_current.take(),
                         };
                         // BLOCKING submit (back-pressures, never drops → 1:1 preserved). Count the
                         // emit ONLY on success: any Err means the frame was NOT sent, so it must not
@@ -1513,6 +1541,20 @@ async fn run_capture_loop(
                         j,
                         send_fps as i64,
                     ));
+                }
+                // Issue 1387 slice 1a — burn mode: the JPEG XS link lives on the burn thread, so
+                // the CURRENT frame's job carries the stamp the production offer above passes (the
+                // repeats went out without one, NDI-only).
+                #[cfg(feature = "probe")]
+                if burn_ring.is_some() {
+                    burn_jxs_current.set(Some(camera_box::probe::burn_jxs::BurnJxsOffer {
+                        timecode_100ns: capture_timecode_100ns,
+                        emit_fps: send_fps,
+                        capture_realtime_100ns: camera_box::genlock_stamp::capture_realtime_100ns(
+                            info.capture_monotonic_100ns,
+                            mono_to_real_offset_100ns,
+                        ),
+                    }));
                 }
                 emit_one(capture_timecode_100ns);
                 // #1242 — this emitted iteration's work (everything in the callback except the

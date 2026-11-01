@@ -57,9 +57,6 @@ pub fn burn_then_offer_jxs(
     qr: Option<&Payload>,
     jxs: Option<(&JxsLink, &BurnJxsOffer)>,
 ) {
-    if let Some((link, offer)) = jxs {
-        link.offer(&offer.frame(buf, info));
-    }
     if let Some(payload) = qr {
         burn_qr_yuyv(
             buf,
@@ -69,6 +66,11 @@ pub fn burn_then_offer_jxs(
             payload,
             CAM1_BURN_QR_PX,
         );
+    }
+    // after the QR: the link converts the burned buffer (a copy into its own picture), so the
+    // NDI send that follows reads the same bytes
+    if let Some((link, offer)) = jxs {
+        link.offer(&offer.frame(buf, info));
     }
 }
 
