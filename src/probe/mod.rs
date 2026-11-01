@@ -46,6 +46,10 @@ pub mod av_sync_recording;
 // recording_latency/burn_contiguity/payload/qr/luma/analyzer — all pure +
 // cross-platform). Gating them on cfg(target_os="linux") lets the verdict cross-build for
 // Windows (so the #193 decode runs ON stream.lan), while the Linux probe build is unchanged.
+// Issue 1387 slice 1a: in burn mode the JPEG XS link carries the burned frame (the capture and
+// JPEG XS sender modules it uses are Linux-only).
+#[cfg(target_os = "linux")]
+pub mod burn_jxs;
 #[cfg(target_os = "linux")]
 pub mod fb;
 #[cfg(target_os = "linux")]

@@ -94,6 +94,86 @@ fn the_capture_loop_starts_the_link_only_from_the_env_and_offers_before_the_ndi_
     );
 }
 
+/// Slice 1a: in burn mode (the E2E's probe build with `CAMERA_BOX_BURN_RUN_ID`) the link moves to
+/// the `cam1-burn` thread and is offered the BURNED frame there: the current frame only, after the
+/// QR, before the NDI send. Production (no burn) keeps the link on the capture thread and offers
+/// the raw frame there, exactly as before (the test above pins that offer and its order).
+#[test]
+fn in_burn_mode_the_link_moves_to_the_burn_thread_and_production_keeps_the_raw_offer() {
+    let m = read("src/main.rs");
+    let one = |needle: &str| {
+        assert_eq!(m.matches(needle).count(), 1, "exactly one {needle:?}");
+        m.find(needle).unwrap()
+    };
+    // the link moves only behind the probe feature (a production build cannot take it), only in
+    // the burn setup, before the burn thread starts
+    let rebind = one("#[cfg(feature = \"probe\")]\n        let mut jxs_sender = jxs_sender;");
+    let burn_setup = m.find("if burn_run_id.is_some() {").unwrap();
+    let take = one("let burn_jxs_link = jxs_sender.take();");
+    let spawn = one(".name(\"cam1-burn\".into())");
+    assert!(
+        rebind < burn_setup && burn_setup < take && take < spawn,
+        "taken in the burn setup, before the burn thread starts"
+    );
+    // the burn thread: one helper draws the QR and then offers the burned buffer, before the NDI
+    // send of that same buffer
+    assert_eq!(
+        m.matches("burn_qr_yuyv(").count(),
+        0,
+        "the helper is the one burn site (QR first, then the JPEG XS offer)"
+    );
+    let ring = one("run_burn_ring(rx,");
+    let helper = one("camera_box::probe::burn_jxs::burn_then_offer_jxs(");
+    let ndi = one("burn_sender.send_frame_data_with_timecode(");
+    assert!(
+        spawn < ring && ring < helper && helper < ndi,
+        "the burned frame goes to JPEG XS before the NDI send"
+    );
+    let call = &m[helper..ndi];
+    assert!(call.contains("&mut job.buf,"), "{call}");
+    assert!(
+        call.contains("burn_jxs_link.as_ref().zip(job.jxs.as_ref()),"),
+        "{call}"
+    );
+    // only the CURRENT frame's job carries the JPEG XS stamp: it is set after every starvation
+    // repeat went out and right before the current frame, and each job takes it (a repeat finds
+    // nothing), so the repeats stay NDI-only like the production offer
+    let job = one("let job = BurnJob {");
+    let taken = one("jxs: burn_jxs_current.take(),");
+    let submit = one("match ring.submit(job) {");
+    assert!(
+        job < taken && taken < submit,
+        "the job literal takes the stamp"
+    );
+    let repeats = one("for j in (1..=starvation_repeats).rev() {");
+    let set = one("burn_jxs_current.set(");
+    let current = one("emit_one(capture_timecode_100ns);");
+    assert!(
+        repeats < set && set < current,
+        "set after the repeats, right before the current frame"
+    );
+    let stamp = &m[set..current];
+    // the same stamp the production offer passes: the NDI frame's timecode, the emit rate and
+    // the RAW capture instant (never the phase tracker's slot middle)
+    assert!(
+        stamp.contains("timecode_100ns: capture_timecode_100ns,"),
+        "{stamp}"
+    );
+    assert!(stamp.contains("emit_fps: send_fps,"), "{stamp}");
+    assert!(
+        stamp.contains(
+            "capture_realtime_100ns: camera_box::genlock_stamp::capture_realtime_100ns(\n"
+        ),
+        "{stamp}"
+    );
+    assert!(stamp.contains("info.capture_monotonic_100ns,"), "{stamp}");
+    // production: the capture loop's raw offer is behind no feature gate, so it runs whenever
+    // the link was not moved (every production build, a probe build without the burn)
+    let guard = one("if let Some(jxs) = jxs_sender.as_ref() {");
+    let prev = m[..guard].trim_end().lines().last().unwrap().trim_start();
+    assert!(!prev.starts_with("#[cfg("), "{prev}");
+}
+
 #[test]
 fn the_deployed_appliance_and_the_probe_tools_are_built_with_the_codec() {
     let ci = read(".github/workflows/ci.yml");
