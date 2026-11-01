@@ -6745,7 +6745,10 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	 * head age; latency_ms before any measurement) via the pure mirror (0 = paired, -video delay =
 	 * audio not held). Parsed by src/jitter_audit.rs; consumed by the LOCK indicator's audio health
 	 * via src/genlock_audio_pairing.rs::decide_audio_health. */
-	stats->audio_enabled = obs_source_audio_active(source);
+	/* issue 1387: libobs creates every source with audio_active = true, so a source type without
+	 * audio (the JPEG XS receiver) read as audio-enabled and its never-held "audio" degraded the
+	 * LOCK indicator. A source that cannot carry audio is never an audio-enabled genlock source. */
+	stats->audio_enabled = (source->info.output_flags & OBS_SOURCE_AUDIO) != 0 && obs_source_audio_active(source);
 	stats->audio_delay_ms = source->genlock_audio_delay_ms;
 	/* issue 1367: a WITHHELD source (no video delay known yet, nothing placed) is not unpaired -- 0,
 	 * so the LOCK widget does not read DEGRADED for the first seconds after every OBS start. Mid-slew
