@@ -6,7 +6,8 @@
 //! with the real socket). The slices cross loopback UDP, the real decoder rebuilds the picture,
 //! and the repo's own QR decode (`probe::qr::decode_qr_luma`) reads the burned payload back from
 //! the RECEIVED luma. Before slice 1a the link saw the frame before the burn: no QR on JPEG XS.
-#![cfg(all(target_os = "linux", feature = "jxs", feature = "probe"))]
+#![cfg(feature = "probe")]
+#![cfg(all(target_os = "linux", feature = "jxs"))]
 
 use camera_box::capture::FrameInfo;
 use camera_box::jxs_link::{psnr, FrameAssembler, FrameReport, PacketHeader, HEADER_LEN};

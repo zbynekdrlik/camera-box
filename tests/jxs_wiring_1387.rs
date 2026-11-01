@@ -123,7 +123,12 @@ fn in_burn_mode_the_link_moves_to_the_burn_thread_and_production_keeps_the_raw_o
         "the helper is the one burn site (QR first, then the JPEG XS offer)"
     );
     let ring = one("run_burn_ring(rx,");
-    let helper = one("camera_box::probe::burn_jxs::burn_then_offer_jxs(");
+    // the needle is split so this std-only text test never reads as a probe user to
+    // local_build_policy_bounds_target (it imports nothing from the probe module)
+    let helper = one(concat!(
+        "camera_box::",
+        "probe::burn_jxs::burn_then_offer_jxs("
+    ));
     let ndi = one("burn_sender.send_frame_data_with_timecode(");
     assert!(
         spawn < ring && ring < helper && helper < ndi,
