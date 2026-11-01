@@ -22,7 +22,8 @@
 # env override, else the strih-snv address -> linux, else windows).
 #   linux   -> plain ssh running tail / wc / tail -n +N on the NEWEST ~/.config/obs-studio/logs/*.txt
 #              (newest by mtime via `ls -t`; the filename carries SPACES, e.g.
-#              `2026-09-23 09-23-36.txt`, so it is always used as the quoted "$F").
+#              `2026-09-23 09-23-36.txt`, so it is always used as the quoted "$F"). Every file read
+#              runs at nice 19 (issue 1387, owner 1.11.2026: no read may take CPU from a broadcast).
 #   windows -> the EXISTING PowerShell command strings, moved here verbatim, sent cmd.exe-proof as
 #              `powershell -NoProfile -NonInteractive -EncodedCommand <base64 UTF-16LE>`
 #              (ps-encoded.sh; the issue-1258/1259 root cause is a naive -Command whose pipes leak
@@ -79,10 +80,10 @@ strih_log_remote_cmd() {
     linux)
       local newest='F=$(ls -t ~/.config/obs-studio/logs/*.txt 2>/dev/null | head -1); [ -n "$F" ] && '
       case "$op" in
-        tail) printf '%s' "${newest}tail -n ${n} \"\$F\"" ;;
-        headtail) printf '%s' "${newest}{ head -n 600 \"\$F\"; tail -n ${n} \"\$F\"; }" ;;
-        since) printf '%s' "${newest}tail -n +$((10#$n + 1)) \"\$F\"" ;; # 10#: a zero-padded mark is decimal
-        count) printf '%s' "${newest}wc -l < \"\$F\"" ;;
+        tail) printf '%s' "${newest}nice -n 19 tail -n ${n} \"\$F\"" ;;
+        headtail) printf '%s' "${newest}{ nice -n 19 head -n 600 \"\$F\"; nice -n 19 tail -n ${n} \"\$F\"; }" ;;
+        since) printf '%s' "${newest}nice -n 19 tail -n +$((10#$n + 1)) \"\$F\"" ;; # 10#: a zero-padded mark is decimal
+        count) printf '%s' "${newest}nice -n 19 wc -l < \"\$F\"" ;;
       esac
       ;;
     windows)
