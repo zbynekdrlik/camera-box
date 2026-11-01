@@ -7,9 +7,7 @@
 //! camera-box's unit nice before it spawns anything.
 #![cfg(target_os = "linux")]
 
-use camera_box::painter_priority::{
-    parse_task_nice, set_all_threads_nice, CAMERA_BOX_UNIT_NICE, PAINTER_NICE,
-};
+use camera_box::painter_priority::{parse_task_nice, set_all_threads_nice, CAMERA_BOX_UNIT_NICE};
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -41,30 +39,19 @@ fn the_painter_runs_below_both_copies_of_the_camera_box_unit_nice() {
             "{file} must set camera-box's Nice= once, at CAMERA_BOX_UNIT_NICE"
         );
     }
-    assert!(
-        PAINTER_NICE < CAMERA_BOX_UNIT_NICE,
-        "the painter ({PAINTER_NICE}) must run below camera-box's unit nice ({CAMERA_BOX_UNIT_NICE})"
-    );
-    assert!((-20..=19).contains(&PAINTER_NICE));
+    // PAINTER_NICE < CAMERA_BOX_UNIT_NICE is a compile-time assert in src/painter_priority.rs
 }
 
-fn thread_nices() -> Vec<(String, i32)> {
-    let mut out = Vec::new();
-    for e in std::fs::read_dir("/proc/self/task").unwrap() {
-        let p = e.unwrap().path();
-        // a parallel test's thread may end between the listing and the read
-        let Ok(stat) = std::fs::read_to_string(p.join("stat")) else {
-            continue;
-        };
-        let nice = parse_task_nice(&stat).expect("a nice field");
-        out.push((p.file_name().unwrap().to_string_lossy().into_owned(), nice));
-    }
-    out
+/// The nice of the CALLING thread.
+fn own_nice() -> i32 {
+    parse_task_nice(&std::fs::read_to_string("/proc/thread-self/stat").unwrap()).unwrap()
 }
 
 /// A non-root test can only LOWER its priority, so this sets a positive nice: the mechanism
 /// (every existing thread, and a thread created afterwards inherits it) is the same one
-/// `raise_painter_priority` uses with PAINTER_NICE as root on cam2.
+/// `raise_painter_priority` uses with PAINTER_NICE as root on cam2. Only the threads this test
+/// owns are read: the harness may be starting a parallel test's thread at that very moment
+/// (`frame-probe --paint-only` starts no thread before its raise).
 #[test]
 fn every_thread_of_the_process_gets_the_nice_and_a_later_thread_inherits_it() {
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -72,6 +59,7 @@ fn every_thread_of_the_process_gets_the_nice_and_a_later_thread_inherits_it() {
     let earlier = std::thread::spawn(move || {
         ready_tx.send(()).unwrap();
         go_rx.recv().unwrap();
+        own_nice()
     });
     ready_rx.recv().unwrap();
 
@@ -81,21 +69,11 @@ fn every_thread_of_the_process_gets_the_nice_and_a_later_thread_inherits_it() {
         set >= 2,
         "the main thread and the earlier thread at least, got {set}"
     );
-    for (tid, nice) in thread_nices() {
-        assert!(nice >= 7, "thread {tid} kept nice {nice}");
-    }
-    let later = std::thread::spawn(|| {
-        let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
-        parse_task_nice(&stat).unwrap()
-    })
-    .join()
-    .unwrap();
-    assert!(
-        later >= 7,
-        "a thread created afterwards runs at nice {later}"
-    );
+    assert_eq!(own_nice(), 7, "the calling thread");
+    let later = std::thread::spawn(own_nice).join().unwrap();
+    assert_eq!(later, 7, "a thread created afterwards inherits the nice");
     go_tx.send(()).unwrap();
-    earlier.join().unwrap();
+    assert_eq!(earlier.join().unwrap(), 7, "a thread that existed before");
 }
 
 #[test]
