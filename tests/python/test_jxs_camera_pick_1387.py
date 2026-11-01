@@ -293,7 +293,9 @@ def test_a_failed_enforce_returns_its_rc_and_warns_by_name_and_the_caller_contin
 
 
 def test_a_strih_that_declares_no_jpeg_xs_camera_or_no_fact_file_is_a_note(tmp_path):
-    for ip in ("10.77.8.202", "192.0.2.9"):  # strih-pp declares none; no box at the TEST-NET address
+    # strih-pp declares none; stream-snv is no strih (its JXS PGM src is never enforced from here); no box at
+    # the TEST-NET address
+    for ip in ("10.77.8.202", "10.77.9.204", "192.0.2.9"):
         proc, log = _lib(tmp_path, ip)
         assert proc.returncode == 0 and "AFTER rc=0" in proc.stdout, proc.stdout + proc.stderr
         assert log == ""
