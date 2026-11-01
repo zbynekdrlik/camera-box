@@ -180,10 +180,17 @@ SKIP gate and the `frozen-input-$RECEIVER_NAME-$source` dedup key are unchanged 
   line and the NDI defaults stay.
 - Tests: `tests/python/test_frozen_input_jxs_1387.py` (the real watchdog, stubbed probe / enumeration /
   notify, the committed fact files; an NDI venue = TEST-NET hosts).
-- **Read size:** every read is a bounded tail (`strih_log_tail` = `tail -n 800` of the newest log on a
-  Linux box), never a whole-log read, but it runs at normal priority and costs one ssh per watched input
-  each pass (the enumeration read is a separate one): on the JPEG XS strih that is up to 1 + 6 reads
-  per 5 min. One shared bounded read per pass at nice 19 would be lighter (open point, not built).
+- **ONE read per pass, at nice 19** (issue 1387, owner 1.11.2026: no watchdog may risk a frame).
+  `main` calls `pass_log_fill` once, outside any command substitution, when a real read is needed
+  (no `FROZEN_INPUT_PROBE_CMD`, or enumerate mode without `FROZEN_INPUT_ENUMERATE_CMD`); the
+  enumeration and every `probe_received` extract from `PASS_LOG`. It is a bounded tail
+  (`read_receiver_log` = `strih_log_tail`, `nice -n 19 tail -n 800` of the newest log on a Linux box;
+  the Windows PowerShell read unchanged). One login per pass, was 1 + one per watched input (6 on the
+  JPEG XS strih). A failed read is EMPTY: every input UNKNOWN, the blind counters count it, no retry
+  per input. A box-down pass reads nothing. A direct `probe_received` call outside a pass (the issue
+  1258 / 1259 / 1360 harnesses) still reads by itself. Tests:
+  `tests/python/test_frozen_input_one_read_1387.py` (a PATH-stubbed sshpass/ssh that counts logins and
+  RUNS the Linux command against a fixture HOME).
 
 ### bash quoting traps hit while building this (both cost a live debug loop)
 

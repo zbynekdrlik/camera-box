@@ -1504,9 +1504,10 @@ program-audio continuity gate's shape (`obs-vban-receive.md`). A concealed slice
 - **The frozen-input watchdog** (`.claude/rules/frozen-input-watchdog.md`): its stream instance watches
   the resolved `JXS PGM src`, its strih instance always watches every declared `JXS camN src` beside the
   enumeration (`frozen_input_watch_list`). Tests: `tests/python/test_frozen_input_jxs_1387.py`.
-- **Open:** the strih instance's alert cure text (the systemd unit) still names the NDI heal
-  (`set-ndi-mapping.py --heal`), which does nothing for a JPEG XS input; the per-camera strih pins in
-  the report are the NDI backups' (a JPEG XS per-camera pin read would need the naming rule in python).
+- **Since:** the strih instance's cure text names the JPEG XS cure first (77304b7bb1), and each pass
+  reads the receiver log ONCE at nice 19 (`frozen-input-watchdog.md`, issue 1387).
+- **Open:** the per-camera strih pins in the report are the NDI backups' (a JPEG XS per-camera pin read
+  would need the naming rule in python).
 
 ## Supervisor runbook: the saturation test (owner scenario, strih-snv -> stream-snv)
 
