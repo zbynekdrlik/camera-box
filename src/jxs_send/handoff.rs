@@ -76,6 +76,9 @@ impl JxsHandoff {
             capture_realtime_100ns,
             emit_fps,
         } = *frame;
+        // the frame's own stamp: the hand-off age below is about the frame's own slot, also for
+        // a fill that goes out stamped on the slot before it
+        let own_timecode_100ns = timecode_100ns;
         // a frame off the 30 fps grid goes only to fill a slot the capture skipped right after a
         // taken one, stamped on that slot, like the NDI starvation repeat (issue 1387)
         let fill = if jxs_link::on_jxs_grid(timecode_100ns, emit_fps) {
@@ -93,7 +96,7 @@ impl JxsHandoff {
         // the stamp's age at the hand-off, read on the clock the timecode is stamped on (every
         // grid frame, a busy-dropped one too: the diagnostic is about the time BEFORE this point)
         self.stats.note_handoff(
-            timecode_100ns,
+            own_timecode_100ns,
             capture_realtime_100ns,
             crate::jxs_recv::realtime_100ns(),
         );

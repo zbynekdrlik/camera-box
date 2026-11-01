@@ -749,6 +749,13 @@ mod tests {
         // at or below 30 fps every frame goes: there is never a hole to fill
         assert_eq!(jxs_fill_slot(s(5), 30, s(2)), None);
         assert_eq!(jxs_fill_slot(-s(5), 60, s(2)), None);
+        // genlock off (emit 0) floors on the assumed 60 fps grid
+        assert_eq!(jxs_fill_slot(s(5), 0, s(2)), Some(s(4)));
+        // at 120 fps only the slot RIGHT after the hole fills it (slots 4j+1), never 4j+2/4j+3
+        let s120 = |k: i64| sec * 10_000_000 + k * 10_000_000 / 120;
+        assert_eq!(jxs_fill_slot(s120(9), 120, s120(4)), Some(s120(8)));
+        assert_eq!(jxs_fill_slot(s120(10), 120, s120(4)), None);
+        assert_eq!(jxs_fill_slot(s120(11), 120, s120(4)), None);
     }
 
     #[test]

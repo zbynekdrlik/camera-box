@@ -98,16 +98,27 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     frame and a second boundary never shifts the parity. Genlock off (emit 0) floors on an assumed
     60 fps grid; an emit rate at or below 30 sends every frame.
   - **A skipped 30 fps slot is filled (`jxs_link::jxs_fill_slot`, the 1.11.2026 night soak).** A
-    camera slower than the grid skips one 60 fps slot per edge crossing (cam2: `src_ppm` -420, one
-    per 1-2 min; also a hidden drop or a busy-dropped even frame), and NDI gets one starvation
+    camera slower than the grid skips one 60 fps slot per edge crossing (cam2: `src_ppm` -420, a
+    crossing about every 40 s, an EVEN skip about every 80 s; also a hidden drop or a busy-dropped
+    even frame), and NDI gets one starvation
     repeat of the CURRENT frame on it. The hand-off sees only the current frame, so a skipped EVEN
     slot left the link without a frame and strih repeated the previous one (`stamp_gap` +
     `late_holds` on `JXS camN src`, one repeated frame on the program; 6 copies in 22 soak windows).
     Now the odd-slot frame right after such a hole is sent stamped on it, like the NDI repeat, but
     only when the last frame the hand-off TOOK (`Stats::last_taken_100ns`) is the 30 fps point
-    right before the hole: a start, a longer hole, a re-latch or a clock step never fills. The
-    filled frame reaches strih ~16.7 ms later against its stamp than a normal one (inside the
-    100 ms grid age). `slot_fills=` on the 5 s line counts the fills that were taken.
+    right before the hole: a start, a longer hole, a re-latch or a clock step back never fills (a
+    forward step of about two emit slots that lands on an odd slot right after a taken even frame
+    does fill, exactly as the NDI gap fill does). The filled frame reaches strih ~16.7 ms later
+    against its stamp than a normal one (inside the 100 ms grid age). `slot_fills=` on the 5 s
+    line counts the fills that were taken. `handoff_age` is sampled against the frame's OWN stamp,
+    so a fill keeps the documented `handoff_age - capture_age` split. A busy-dropped even frame
+    whose fill also finds no picture adds 2 to `dropped_busy` for one missing 30 fps point (the auto
+    bpp reacts to any drop in a second, so only the line's count changes).
+    Known limits: a two-slot hole that ends on an EVEN frame (slots 4 and 5 skipped, frame 6: a
+    hidden drop plus a crossing) leaves slot 4 unfilled (filling it would need a second conversion
+    and a second picture from one capture); a clock step back of about one slot right after a fill
+    can offer the hole's slot again, which goes out as a duplicate stamp the receiver drops
+    (benign, very rare).
   - **Hand-off BEFORE the NDI send:** main.rs calls `jxs.offer(&JxsFrame { .., timecode_100ns:
     capture_timecode_100ns, emit_fps: send_fps })` right after the timecode is fixed
     (`note_emitted_stamp_100ns`) and BEFORE the #1242 stagger sleep and every `emit_one`
