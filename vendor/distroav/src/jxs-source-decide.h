@@ -1,12 +1,15 @@
 /* camera-box issue 1387 slice 2: the pure decisions of the JPEG XS source (jxs-source.cpp).
  *
- * C, header-only, no OBS or library calls: tests/distroav_jxs_source_1387.rs includes this very
- * file into a truth-table program and runs it under `cargo test` (CI is otherwise the first
- * compiler of the plugin). */
+ * C, header-only, no OBS calls (libc only): tests/distroav_jxs_source_1387.rs and
+ * tests/distroav_jxs_pick_1387.rs include this very file into truth-table programs and run them under
+ * `cargo test` (CI is otherwise the first compiler of the plugin). */
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #define CB_JXS_PORT_DEFAULT 7000
 #define CB_JXS_LATENCY_MS_MIN 3     /* mirrors ndi-source.cpp PROP_GENLOCK_LATENCY_MS_MIN */
@@ -91,6 +94,111 @@ static inline uint32_t cb_jxs_bpp_x100(uint64_t bytes, uint64_t frames, uint32_t
 		return UINT32_MAX;
 	const uint64_t v = (bytes * 800u + den / 2) / den;
 	return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
+}
+
+/* issue 1387 (owner 1.11.2026): the "Kamera" list of a JPEG XS input, like the NDI source's list.
+ * Its items are the cameras the box declares (/opt/camera-box/jxs-seed.json): label
+ * "CAM<N> (UDP <port>)", value "<port>:<camera>"; one custom entry leaves the two numbers to the
+ * operator. A UDP port binds one input, so a second input on the same camera stays black. */
+#define CB_JXS_PICK_CUSTOM "custom"
+#define CB_JXS_PICK_VALUE_MAX 12 /* "65535:255" + NUL */
+#define CB_JXS_PICK_LABEL_MAX 24 /* "CAM255 (UDP 65535)" + NUL */
+
+static inline bool cb_jxs_pick_pair_ok(long long port, long long camera)
+{
+	return port >= 1 && port <= 65535 && camera >= 0 && camera <= 255;
+}
+
+/* The list value of a camera, "<port>:<camera>". false (and "" when the buffer has room) for a pair
+ * out of range or a buffer too small. */
+static inline bool cb_jxs_pick_value(char *buf, size_t len, long long port, long long camera)
+{
+	if (!buf || len == 0)
+		return false;
+	buf[0] = '\0';
+	if (!cb_jxs_pick_pair_ok(port, camera))
+		return false;
+	const int n = snprintf(buf, len, "%u:%u", (unsigned)port, (unsigned)camera);
+	if (n < 0 || (size_t)n >= len) {
+		buf[0] = '\0';
+		return false;
+	}
+	return true;
+}
+
+/* The list label of a camera, "CAM<camera> (UDP <port>)"; false like cb_jxs_pick_value. */
+static inline bool cb_jxs_pick_label(char *buf, size_t len, long long port, long long camera)
+{
+	if (!buf || len == 0)
+		return false;
+	buf[0] = '\0';
+	if (!cb_jxs_pick_pair_ok(port, camera))
+		return false;
+	const int n = snprintf(buf, len, "CAM%u (UDP %u)", (unsigned)camera, (unsigned)port);
+	if (n < 0 || (size_t)n >= len) {
+		buf[0] = '\0';
+		return false;
+	}
+	return true;
+}
+
+/* One decimal field of a list value: 1..max_digits ASCII digits, no sign, no leading zero (one
+ * spelling per value), at most max. Moves *p past it. */
+static inline bool cb_jxs_pick_field(const char **p, unsigned max_digits, unsigned long max, unsigned long *out)
+{
+	const char *s = *p;
+	unsigned long v = 0;
+	unsigned n = 0;
+	while (s[n] >= '0' && s[n] <= '9') {
+		if (n == max_digits)
+			return false;
+		v = v * 10u + (unsigned long)(s[n] - '0');
+		n++;
+	}
+	if (n == 0 || (n > 1 && s[0] == '0') || v > max)
+		return false;
+	*p = s + n;
+	*out = v;
+	return true;
+}
+
+/* A list value back to its pair: exactly "<port>:<camera>", port 1..65535, camera 0..255. Anything
+ * else (the custom entry, empty, a sign, trailing junk) is false and leaves the outputs alone. */
+static inline bool cb_jxs_pick_parse(const char *value, uint16_t *port, uint8_t *camera)
+{
+	unsigned long p = 0, c = 0;
+	const char *s = value;
+	if (!s || !cb_jxs_pick_field(&s, 5u, 65535ul, &p) || p < 1 || *s != ':')
+		return false;
+	s++;
+	if (!cb_jxs_pick_field(&s, 3u, 255ul, &c) || *s != '\0')
+		return false;
+	if (port)
+		*port = (uint16_t)p;
+	if (camera)
+		*camera = (uint8_t)c;
+	return true;
+}
+
+/* The value the list shows for an input on (port, camera): that pair's value when it is one of the n
+ * listed camera values, else the custom entry. The shown value is always an item of the list (the
+ * properties view applies the first item on its own to a value it cannot find). buf needs
+ * CB_JXS_PICK_VALUE_MAX bytes. */
+static inline void cb_jxs_pick_shown(char *buf, size_t len, long long port, long long camera,
+				     const char *const *listed, size_t n)
+{
+	if (!buf || len == 0)
+		return;
+	char v[CB_JXS_PICK_VALUE_MAX];
+	if (listed && cb_jxs_pick_value(v, sizeof v, port, camera)) {
+		for (size_t i = 0; i < n; i++) {
+			if (listed[i] && strcmp(listed[i], v) == 0) {
+				snprintf(buf, len, "%s", v);
+				return;
+			}
+		}
+	}
+	snprintf(buf, len, "%s", CB_JXS_PICK_CUSTOM);
 }
 
 /* Whether the source counts as connected (frames arriving) for the genlock LOCK indicator. */

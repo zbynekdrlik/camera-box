@@ -244,6 +244,11 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source-only lib, no side effects at source time.
 # shellcheck source=scripts/lib/event-jxs-facet.sh
 . "$RIG_MODE_DIR/lib/event-jxs-facet.sh"
+# issue 1387 (owner 1.11.2026): the operator picks the camera of a strih JPEG XS input in its Kamera list;
+# TEST and EVENT put the declared camera back next to the strih NDI mapping (the issue-399 parity), the
+# rc recorded and folded into the exit. Source-only lib, no side effects at source time.
+# shellcheck source=scripts/lib/jxs-mapping-enforce.sh
+. "$RIG_MODE_DIR/lib/jxs-mapping-enforce.sh"
 
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
@@ -1434,6 +1439,10 @@ do_test() {
   echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct):"
   enforce_strih_ndi_mapping
   echo
+  echo "[obs] issue 1387: put the declared camera back on every strih JPEG XS input (the operator's Kamera picks; the NDI mapping's parity):"
+  local _jxsmap_rc=0
+  jxs_mapping_enforce test "$STRIH_IP" "$OBS_WS_PASSWORD" || _jxsmap_rc=$?
+  echo
   echo "[obs] #462 ensure imag-nb's PROGRAM shows the source camera ${RIG_SOURCE_BOX} (EPIC #466 Topology v2 — cam→imag proof):"
   set_imag_test_program
   echo
@@ -1467,10 +1476,14 @@ do_test() {
   echo "ACHIEVED (chain, #901): strih's live program scene confirmed NON-BLACK — the camera genuinely sees content, not just a live process."
   echo "                        mbc Dante transport confirmed bound + unmuted on stream."
   echo "                        measurement-audio arrival checked end to end (verdict printed above — PASS / non-blocking WARN / hard FAIL)."
+  if [ "${_jxsmap_rc:-0}" -ne 0 ]; then
+    echo "RESULT: TEST mode — the strih JPEG XS camera mapping enforce FAILED (issue 1387, rc=${_jxsmap_rc}). Every other step ran — see the [strih jxs-map] lines above." >&2
+  fi
   if [ "${_relay_rc:-0}" -ne 0 ]; then
     bkshading_relay_mode_result test "$_relay_rc"
     exit 1
   fi
+  [ "${_jxsmap_rc:-0}" -eq 0 ] || exit 1
   echo "RESULT: TEST mode — WHOLE CHAIN verified (cam emission + OBS program/burn/mapping + optical proof + Dante transport + measurement-audio arrival)."
 }
 
@@ -1826,6 +1839,10 @@ do_event() {
     echo "WARNING issue 1410: strih NDI mapping enforce FAILED (rc=$_ndimap_rc, see the [strih ndi-map] lines above) — continuing, EVENT mode will still exit non-zero." >&2
   fi
   echo
+  echo "[obs] issue 1387: put the declared camera back on every strih JPEG XS input (the NDI mapping's parity):"
+  local _jxsmap_rc=0
+  jxs_mapping_enforce event "$STRIH_IP" "$OBS_WS_PASSWORD" || _jxsmap_rc=$?
+  echo
   print_genlock_relaunch_note event
   echo
   echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + unconditional HDMI preview restored."
@@ -1841,6 +1858,7 @@ do_event() {
   [ "$_stray_rc" -eq 0 ] || _obs_failed="kontrola zabudnutých nahrávok"
   [ "$_burn_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }vypnutie meracích QR (burn)"
   [ "$_ndimap_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }nastavenie NDI kamier na strihu"
+  [ "$_jxsmap_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }nastavenie JPEG XS kamier na strihu"
   [ -z "$_obs_failed" ] || event_mode_discord_note_add "${EVENT_ASSERT_DISCORD_MSG_PATH:-}" "⚠️ Prepnutie do EVENT: na OBS boxoch sa nepodarilo: ${_obs_failed}. Niektorý OBS box (strih, stream alebo imag) asi nebol dosiahnuteľný. Ostatné kroky prepnutia prebehli, výsledok kontroly je nižšie. Napíš Claudovi, nech to skontroluje." top
   echo "=================================================================================="
   echo
@@ -1853,7 +1871,7 @@ do_event() {
   # #868: fold the recorded cam-side restore failure (and, issue 1407, the relay step's; issue 1410,
   # the stray-recording guard's, the burn clear's and the mapping enforce's) into the final verdict —
   # deferring them past the burn-clear must never SWALLOW them. Every failure gets its own RESULT line.
-  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ] && [ "${_stray_rc:-0}" -eq 0 ] && [ "${_burn_rc:-0}" -eq 0 ] && [ "${_ndimap_rc:-0}" -eq 0 ]; then
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ] && [ "${_stray_rc:-0}" -eq 0 ] && [ "${_burn_rc:-0}" -eq 0 ] && [ "${_ndimap_rc:-0}" -eq 0 ] && [ "${_jxsmap_rc:-0}" -eq 0 ]; then
     echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
     exit 0
   fi
@@ -1865,6 +1883,9 @@ do_event() {
   fi
   if [ "${_ndimap_rc:-0}" -ne 0 ]; then
     echo "RESULT: EVENT mode — strih NDI mapping enforce FAILED (issue 1410, rc=${_ndimap_rc}). The strih camera inputs were not verified distinct — see the [strih ndi-map] lines above." >&2
+  fi
+  if [ "${_jxsmap_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — strih JPEG XS camera mapping enforce FAILED (issue 1387, rc=${_jxsmap_rc}). The strih JPEG XS inputs were not verified on their declared cameras — see the [strih jxs-map] lines above." >&2
   fi
   bkshading_relay_mode_result event "${_relay_rc:-0}"
   if [ "${_cam_restore_rc:-0}" -ne 0 ]; then

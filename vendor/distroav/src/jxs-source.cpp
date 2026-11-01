@@ -27,9 +27,11 @@
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <dlfcn.h>
 
@@ -43,6 +45,12 @@
 #define PROP_JXS_PORT "jxs_port"
 #define PROP_JXS_CAMERA "jxs_camera"
 #define PROP_JXS_MAX_BPP "jxs_max_bpp"
+/* issue 1387 (owner 1.11.2026): the "Kamera" list, which camera this input shows (a view of the
+ * jxs_port + jxs_camera pair, which is all the receiver reads) */
+#define PROP_JXS_PICK "jxs_pick"
+/* the box's declared JPEG XS inputs, rendered by setup-strih step 6 from the box facts
+ * (scripts/lib/strih-jxs-provision.sh); scripts/obs_jxs_inputs.py reads the same file */
+#define JXS_SEED_MANIFEST "/opt/camera-box/jxs-seed.json"
 /* the genlock whitelist keys of ndi-source.cpp that apply to this source, the measurement burn
  * included (live 31.10.2026: the burn sweeps -- obs_burn_filter.py BURN_INPUT_KINDS, the EVENT
  * contract, the leak guards -- enumerate this input kind too, so a burn here is never invisible) */
@@ -156,11 +164,16 @@ static void jxs_output_frame(jxs_source *s, const cbjxs_frame &f)
 }
 
 /* This source's row in the JPEG XS state table (the frontend indicator, issue 1387): its name
- * (refreshed: a rename) and what it listens on. */
-static void jxs_state_entry(jxs_source *s, const cb_jxs_config &cfg)
+ * (refreshed: a rename) and what it listens on; `why` names why it cannot listen (a UDP port binds
+ * one input, so a second input picked onto the same camera stays black and says so here). */
+static void jxs_state_entry(jxs_source *s, const cb_jxs_config &cfg, const char *why = nullptr)
 {
-	char detail[96];
-	snprintf(detail, sizeof detail, "UDP %u, camera %u", (unsigned)cfg.port, (unsigned)cfg.camera);
+	char detail[192];
+	if (why)
+		snprintf(detail, sizeof detail, "UDP %u, camera %u: cannot listen (%s)", (unsigned)cfg.port,
+			 (unsigned)cfg.camera, why);
+	else
+		snprintf(detail, sizeof detail, "UDP %u, camera %u", (unsigned)cfg.port, (unsigned)cfg.camera);
 	cb_jxs_state().set_entry(s, CB_JXS_STATE_INPUT, obs_source_get_name(s->source), detail);
 }
 
@@ -260,6 +273,7 @@ static void jxs_thread(jxs_source *s)
 			err[0] = '\0';
 			rx = cbjxs_open(cfg.port, cfg.camera, cfg.max_bpp, err, sizeof err);
 			if (!rx) {
+				jxs_state_entry(s, cfg, err[0] ? err : "no reason given");
 				if (!open_failure_logged)
 					obs_log(LOG_WARNING,
 						"jxs-source '%s': cannot listen on UDP %u: %s -- retrying every second (issue 1387)",
@@ -329,8 +343,87 @@ static const char *jxs_source_getname(void *)
 	return "Camera-box JPEG XS (issue 1387)";
 }
 
+/* issue 1387 (owner 1.11.2026): the "Kamera" list. tests/distroav_jxs_pick_1387.rs lifts this block,
+ * from the item struct to the end of the modified callback, and runs it against a fake obs_data. */
+struct jxs_pick_item {
+	std::string value;
+	std::string label;
+};
+
+/* The cameras the box declares, in manifest order, one item per valid (port, camera) pair of the
+ * manifest's `inputs`, each pair once. A missing file is no item; an unparseable one reads as an
+ * empty object (libobs), also no item. */
+static std::vector<jxs_pick_item> jxs_declared_cameras(const char *path)
+{
+	std::vector<jxs_pick_item> items;
+	obs_data_t *manifest = obs_data_create_from_json_file(path);
+	obs_data_array_t *inputs = obs_data_get_array(manifest, "inputs");
+	const size_t n = obs_data_array_count(inputs);
+	for (size_t i = 0; i < n; i++) {
+		obs_data_t *input = obs_data_array_item(inputs, i);
+		obs_data_t *st = obs_data_get_obj(input, "settings");
+		const long long port = obs_data_get_int(st, "jxs_port");
+		const long long camera = obs_data_get_int(st, "jxs_camera");
+		char value[CB_JXS_PICK_VALUE_MAX];
+		char label[CB_JXS_PICK_LABEL_MAX];
+		if (st && cb_jxs_pick_value(value, sizeof value, port, camera) &&
+		    cb_jxs_pick_label(label, sizeof label, port, camera)) {
+			bool seen = false;
+			for (const jxs_pick_item &it : items)
+				seen = seen || it.value == value;
+			if (!seen)
+				items.push_back({value, label});
+		}
+		obs_data_release(st);
+		obs_data_release(input);
+	}
+	obs_data_array_release(inputs);
+	obs_data_release(manifest);
+	return items;
+}
+
+/* Fill the list: the declared cameras, then the custom entry. For an input (s set), the shown pick
+ * follows its pair (the seeder, rig-mode and an obs-websocket write set only the pair), so opening
+ * the properties never applies a stale pick: libobs runs every modified callback once with the
+ * settings right after this (obs_source_properties). */
+static void jxs_pick_list(obs_property_t *list, jxs_source *s)
+{
+	const std::vector<jxs_pick_item> items = jxs_declared_cameras(JXS_SEED_MANIFEST);
+	std::vector<const char *> values;
+	for (const jxs_pick_item &it : items) {
+		obs_property_list_add_string(list, it.label.c_str(), it.value.c_str());
+		values.push_back(it.value.c_str());
+	}
+	obs_property_list_add_string(list, "Vlastné (UDP port a Camera id nižšie)", CB_JXS_PICK_CUSTOM);
+	if (!s)
+		return;
+	obs_data_t *settings = obs_source_get_settings(s->source);
+	char shown[CB_JXS_PICK_VALUE_MAX];
+	cb_jxs_pick_shown(shown, sizeof shown, obs_data_get_int(settings, PROP_JXS_PORT),
+			  obs_data_get_int(settings, PROP_JXS_CAMERA), values.data(), values.size());
+	if (strcmp(obs_data_get_string(settings, PROP_JXS_PICK), shown) != 0)
+		obs_data_set_string(settings, PROP_JXS_PICK, shown);
+	obs_data_release(settings);
+}
+
+/* A picked camera writes the pair (and refreshes, so the two number fields show it); the custom
+ * entry leaves the numbers to the operator. */
+static bool jxs_pick_modified(obs_properties_t *, obs_property_t *, obs_data_t *settings)
+{
+	uint16_t port = 0;
+	uint8_t camera = 0;
+	if (!cb_jxs_pick_parse(obs_data_get_string(settings, PROP_JXS_PICK), &port, &camera))
+		return false;
+	if (obs_data_get_int(settings, PROP_JXS_PORT) == port && obs_data_get_int(settings, PROP_JXS_CAMERA) == camera)
+		return false;
+	obs_data_set_int(settings, PROP_JXS_PORT, port);
+	obs_data_set_int(settings, PROP_JXS_CAMERA, camera);
+	return true;
+}
+
 static void jxs_source_getdefaults(obs_data_t *settings)
 {
+	obs_data_set_default_string(settings, PROP_JXS_PICK, CB_JXS_PICK_CUSTOM);
 	obs_data_set_default_int(settings, PROP_JXS_PORT, CB_JXS_PORT_DEFAULT);
 	obs_data_set_default_int(settings, PROP_JXS_CAMERA, 0);
 	obs_data_set_default_int(settings, PROP_JXS_MAX_BPP, 0);
@@ -340,9 +433,13 @@ static void jxs_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, PROP_GENLOCK_GRID, true);
 }
 
-static obs_properties_t *jxs_source_getproperties(void *)
+static obs_properties_t *jxs_source_getproperties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
+	obs_property_t *pick =
+		obs_properties_add_list(props, PROP_JXS_PICK, "Kamera", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	jxs_pick_list(pick, static_cast<jxs_source *>(data));
+	obs_property_set_modified_callback(pick, jxs_pick_modified);
 	obs_properties_add_int(props, PROP_JXS_PORT, "UDP port", 1, 65535, 1);
 	obs_properties_add_int(props, PROP_JXS_CAMERA, "Camera id (CAM<N>, 0 = the first heard)", 0, 255, 1);
 	obs_properties_add_int(props, PROP_JXS_MAX_BPP, "Highest bpp taken (0 = no limit)", 0, CB_JXS_MAX_BPP_LIMIT,
