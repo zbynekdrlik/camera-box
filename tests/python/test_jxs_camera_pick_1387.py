@@ -309,10 +309,11 @@ def test_rig_mode_sources_the_lib_once_and_calls_it_next_to_the_ndi_mapping_in_b
         ndi = body.index("enforce_strih_ndi_mapping")
         assert ndi < body.index(call), mode
         assert "local _jxsmap_rc=0" in body
+    # the call LINES (a comment near the top of do_test names the imag step too)
     test_body = _body(s, "do_test")
-    assert test_body.index("jxs_mapping_enforce test") < test_body.index("set_imag_test_program")
+    assert test_body.index("jxs_mapping_enforce test") < test_body.index("\n  set_imag_test_program\n")
     event_body = _body(s, "do_event")
-    assert event_body.index("jxs_mapping_enforce event") < event_body.index("print_genlock_relaunch_note event")
+    assert event_body.index("jxs_mapping_enforce event") < event_body.index("\n  print_genlock_relaunch_note event\n")
 
 
 def test_event_with_a_failed_jxs_mapping_runs_every_step_then_exits_nonzero_naming_it(tmp_path):
