@@ -2633,7 +2633,8 @@ else
   # #174: build camera-box WITH --features probe so the cam1-capture render-time QR burn is
   # present (the production artifact stays probe-free / clean; only this TEST binary carries
   # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
-  cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
+  # Issue 1387: `jxs` too, or the burn unit ignores its CAMERA_BOX_JXS_TARGET and the JPEG XS inputs freeze.
+  cargo build --release --features probe,jxs --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
   # #365/#405/#137/#109/#438/#272/#757: build the default-feature gate binaries (no probe deps,
   # no disk balloon). phase-sync-gate + genlock-jitter-report were MISSING here before #757
   # (confirmed: the #756 Member 3 pins-snapshot script's "recommended_pins" feature has been
