@@ -28,7 +28,7 @@ Environment="FROZEN_INPUT_ALERT_STATE_FILE=%t/camera-box-frozen-strih-input-aler
 # ALERT-ONLY (the ticket asks for an alarm, not auto-restart): the cure is EMBEDDED in the alert text
 # (obs-liveness #391 convention). A wedged strih receiver only recovers via an OBS restart -- reattach
 # + recv-rebuild are ineffective (#1096); NL_STARTUP.ahk respawns one clean genlock OBS after a kill.
-Environment="FROZEN_INPUT_CURE_HINT=Try a WS settings touch FIRST -- scripts/set-ndi-mapping.py --host 10.77.9.202 --heal recreates the receiver in place and usually clears the connected-but-frameless wedge in ~30 s (issue 1096, 16.9). If that does NOT recover it, restart strih OBS: force-kill obs64 on strih (Stop-Process -Name obs64 -Force) and NL_STARTUP.ahk respawns one clean genlock OBS, or run the issue-1096 harness escalation. If instead the cambox SENDER is down, check that camera-box on the affected cam."
+Environment="FROZEN_INPUT_CURE_HINT=A JXS camN src input: check camera-box on that cam (journalctl -u camera-box | grep jxs) -- the JPEG XS link retries every 1 s, a cam that logs `stays off` needs systemctl restart camera-box. An NDI input: scripts/set-ndi-mapping.py --host 10.77.9.202 --heal recreates the receiver in place (issue 1096). If the strih OBS itself is wedged: on strih-snv systemctl --user restart strih-obs.service. A cambox SENDER that is down: check the cam (ping, camera-box)."
 # %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
 ExecStart=%h/devel/camera-box/scripts/frozen-input-alert-watchdog.sh
 # One enumeration OBS-log tail + one per watched cambox source (~4-7) to the reachable strih box, each
