@@ -280,6 +280,41 @@ pub fn connect_error_retries(e: &std::io::Error) -> bool {
     e.kind() != std::io::ErrorKind::Unsupported
 }
 
+/// Every how many tries the `jxs-connect` thread repeats that it is still retrying (10 min at
+/// [`CONNECT_RETRY`]), so a long outage stays visible after the first WARN.
+pub const RETRY_REMINDER_TRIES: u64 = 600;
+
+/// How many different connect errors the `jxs-connect` thread names; past them only the
+/// reminder speaks, so errors that alternate never log every second.
+const RETRY_LOG_KINDS: usize = 8;
+
+/// What the `jxs-connect` thread logs while its target cannot connect: each error text once
+/// (at most [`RETRY_LOG_KINDS`] of them) and a reminder every [`RETRY_REMINDER_TRIES`] tries.
+#[derive(Debug, Default)]
+pub struct RetryLog {
+    seen: Vec<String>,
+}
+
+impl RetryLog {
+    /// The log with the start's error already named (its WARN went out with the start).
+    pub fn seeded(first: &str) -> Self {
+        Self {
+            seen: vec![first.to_string()],
+        }
+    }
+
+    /// The line to log for try `tries` that failed with `error`, or `None`.
+    pub fn note(&mut self, tries: u64, error: &str) -> Option<String> {
+        if !self.seen.iter().any(|e| e == error) && self.seen.len() < RETRY_LOG_KINDS {
+            self.seen.push(error.to_string());
+            return Some(format!("{error} -- still retrying ({tries} tries)"));
+        }
+        tries
+            .is_multiple_of(RETRY_REMINDER_TRIES)
+            .then(|| format!("{error} -- still retrying ({tries} tries, no connect yet)"))
+    }
+}
+
 /// One emitted frame as the capture loop hands it over.
 #[derive(Debug, Clone, Copy)]
 pub struct JxsFrame<'a> {
@@ -469,7 +504,10 @@ where
     let spawned = std::thread::Builder::new()
         .name("jxs-connect".to_string())
         .spawn(move || {
-            let mut last = first.to_string();
+            // camera-box.service starts the process on the capture core: never wake there, and
+            // let the encoder threads this thread spawns start off it too
+            crate::affinity::pin_off_capture_core("jxs-connect");
+            let mut log = RetryLog::seeded(&first.to_string());
             let mut tries: u64 = 1;
             loop {
                 std::thread::sleep(retry);
@@ -492,12 +530,8 @@ where
                         return;
                     }
                     Err(e) => {
-                        let now = e.to_string();
-                        if now != last {
-                            tracing::warn!(
-                                "{TARGET_ENV}={target}: {now} -- still retrying ({tries} tries) (issue 1387)"
-                            );
-                            last = now;
+                        if let Some(line) = log.note(tries, &e.to_string()) {
+                            tracing::warn!("{TARGET_ENV}={target}: {line} (issue 1387)");
                         }
                     }
                 }
@@ -1134,6 +1168,31 @@ mod tests {
         assert!(link.is_none());
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_retry_log_names_each_error_once_and_reminds_every_ten_minutes() {
+        let mut log = RetryLog::seeded("Network is unreachable");
+        for t in 2..RETRY_REMINDER_TRIES {
+            assert_eq!(log.note(t, "Network is unreachable"), None, "try {t}");
+        }
+        assert!(log
+            .note(RETRY_REMINDER_TRIES, "Network is unreachable")
+            .unwrap()
+            .contains("600 tries"));
+        // two errors that alternate log once each, then only the reminder
+        let mut log = RetryLog::seeded("A");
+        assert!(log.note(2, "B").is_some());
+        for t in 3..RETRY_REMINDER_TRIES {
+            let e = if t % 2 == 0 { "A" } else { "B" };
+            assert_eq!(log.note(t, e), None, "try {t}");
+        }
+        // at most RETRY_LOG_KINDS kinds are named
+        let mut log = RetryLog::seeded("e0");
+        let named = (1..20)
+            .filter(|i| log.note(*i + 1, &format!("e{i}")).is_some())
+            .count();
+        assert_eq!(named, RETRY_LOG_KINDS - 1);
     }
 
     #[test]

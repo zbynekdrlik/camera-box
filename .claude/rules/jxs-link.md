@@ -91,8 +91,11 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     unreachable` and the link stayed off for good, every strih camera black on JPEG XS while NDI
     recovered. Now the cambox entry (`start_retrying` -> `JxsLink`) tries once at start as before;
     on a failure other than `Unsupported` (IPv6, `connect_error_retries`) a `jxs-connect` thread
-    tries again every `CONNECT_RETRY` (1 s), logs a WARN on the first failure and on each change of
-    the error, and an INFO `connected after N tries` before the usual "link ON" line. Until then
+    tries again every `CONNECT_RETRY` (1 s). That thread pins itself OFF the capture core first
+    (`pin_off_capture_core`: camera-box.service starts the process on core 3, and the encoder
+    threads it spawns on connect start from its mask), logs a WARN on the first failure, each other
+    error text once (at most 8, `RetryLog`) and `still retrying (N tries, no connect yet)` every 600
+    tries (10 min), and an INFO `connected after N tries` before the usual "link ON" line. Until then
     `JxsLink::offer` skips the frame (one channel read, never a wait); NDI and the capture never
     wait for it. The C ABI and the tests keep the one-try `start*` calls.
     The bpp mode comes from `parse_bpp_mode` (`CAMERA_BOX_JXS_BPP` = fixed, a whole number
