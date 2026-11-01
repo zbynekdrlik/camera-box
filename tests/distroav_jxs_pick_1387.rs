@@ -534,10 +534,8 @@ fn the_list_reads_the_manifest_setup_strih_renders_and_the_seeder_reads() {
     let block = pick_block(&s);
     assert!(block.contains("obs_data_create_from_json_file(path)"));
     assert!(block.contains("jxs_declared_cameras(JXS_SEED_MANIFEST)"));
-    assert!(
-        read("scripts/obs_jxs_inputs.py")
-            .contains("MANIFEST_PATH = \"/opt/camera-box/jxs-seed.json\"")
-    );
+    assert!(read("scripts/obs_jxs_inputs.py")
+        .contains("MANIFEST_PATH = \"/opt/camera-box/jxs-seed.json\""));
     assert!(read("scripts/lib/strih-jxs-provision.sh").contains(
         "STRIH_JXS_SEED_MANIFEST=\"${STRIH_JXS_SEED_MANIFEST:-/opt/camera-box/jxs-seed.json}\""
     ));
