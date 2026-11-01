@@ -240,7 +240,7 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Report-only (a WARNING, never the exit status). Source-only lib, no side effects at source time.
 # shellcheck source=scripts/lib/program-audio-mode.sh
 . "$RIG_MODE_DIR/lib/program-audio-mode.sh"
-# issue 1387: the JPEG XS facet of the EVENT contract (each broadcast box's newest jxs-state line).
+# issue 1387: the JPEG XS facet of the EVENT contract (each link's newest window, a bounded log read).
 # Source-only lib, no side effects at source time.
 # shellcheck source=scripts/lib/event-jxs-facet.sh
 . "$RIG_MODE_DIR/lib/event-jxs-facet.sh"
@@ -1695,11 +1695,12 @@ event_mode_assert() {
   stream_program_scene="$(stream_program_scene_read "$here" "$STREAM_IP" "$OBS_WS_PASSWORD")"
   echo "    [stream program] '${stream_program_scene:-unreadable}' (report-only, issue 1380: EVENT never switches the stream program; the owner cuts to '${STREAM_PRODUCTION_SCENE_DEFAULT}' himself)"
 
-  # --- issue 1387: every JPEG XS link up (the newest jxs-state line of strih + stream) ----------
+  # --- issue 1387: every JPEG XS link delivers (its newest 5 s window on strih + stream) ---------
   # The SNV event morning (1.11.2026): moved cameras came back without JPEG XS and the camera scenes
-  # were black on air while every other item read clean. An unread box or a missing line fails closed.
+  # were black on air while every other item read clean. Bounded read (last 1 MiB of the OBS log);
+  # an unread box or a box without a window line fails closed.
   local jxs_json
-  jxs_json="$(event_jxs_state_lines_json "${STRIH_LX_USER:-newlevel}" "${STRIH_LX_PW:-newlevel}" strih "$STRIH_IP" \
+  jxs_json="$(event_jxs_windows_json "${STRIH_LX_USER:-newlevel}" "${STRIH_LX_PW:-newlevel}" strih "$STRIH_IP" \
     "$STREAM_USER" "$STREAM_PW" stream "$STREAM_IP" 2>/dev/null)" || jxs_json=""
   [ -n "$jxs_json" ] || jxs_json="null"
   echo "    [jpeg-xs] $jxs_json"
@@ -1716,7 +1717,7 @@ event_mode_assert() {
     --arg latency_calibrated_ms "$calibrated_ms" \
     --argjson ndi_mismatches "$ndi_mismatches" \
     --argjson artifacts_existing "$artifacts_json" \
-    --argjson jxs_state_lines "$jxs_json" \
+    --argjson jxs_windows "$jxs_json" \
     --arg latency_detail "$latency_detail" \
     '{
       fleet_paint_process_counts: $fleet_paint_process_counts,
@@ -1729,7 +1730,7 @@ event_mode_assert() {
       latency_calibrated_ms: (if ($latency_calibrated_ms | length) > 0 then ($latency_calibrated_ms | tonumber) else null end),
       ndi_mismatches: $ndi_mismatches,
       artifacts_existing: $artifacts_existing,
-      jxs_state_lines: $jxs_state_lines,
+      jxs_windows: $jxs_windows,
       details: {latency_calibrated: $latency_detail}
     }' > "$facts_json"
 
