@@ -113,7 +113,7 @@ def test_verify_reads_a_pick_as_a_note_never_a_fail():
     assert "'JXS cam2 src' shows CAM5 (UDP 7000)" in picks[0] and "CAM2 (UDP 7002)" in picks[0], picks[0]
     # a second input on the same camera stays black: the note names it
     assert "'JXS cam5 src' listens on UDP 7000 too" in picks[0], picks[0]
-    passes = [t for lvl, t in rows if lvl == "PASS"]
+    passes = [t for lvl, t in rows if lvl == "PASS" and t.startswith("(jxs-inputs)")]
     assert len(passes) == 3 and "port 7000 camera 5" in passes[0], passes
     assert obs.writes() == []
 
