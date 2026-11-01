@@ -24,6 +24,13 @@ pub const CAMERA_BOX_UNIT_NICE: i32 = -10;
 const _: () = assert!(PAINTER_NICE < CAMERA_BOX_UNIT_NICE);
 const _: () = assert!(PAINTER_NICE >= -20 && PAINTER_NICE <= 19);
 
+/// The SCHED_FIFO priority of the paint thread: under the opt-in JPEG XS encoder FIFO and the
+/// capture thread, over everything SCHED_OTHER. Nice alone was not enough: the E2E run
+/// 41336635338 painted 54 fps at nice -15 beside the burn camera-box, 10 % of the vsyncs missed.
+/// The paint thread blocks on every vsync, so it cannot take a core.
+pub const PAINTER_FIFO_PRIORITY: i32 = 40;
+const _: () = assert!(PAINTER_FIFO_PRIORITY < crate::affinity::JXS_ENCODER_FIFO_PRIORITY);
+
 /// The nice value of one thread from its `/proc/<pid>/task/<tid>/stat` line (field 19, counted
 /// after the `(comm)` field, which may itself hold spaces and parentheses).
 pub fn parse_task_nice(stat: &str) -> Option<i32> {
@@ -97,6 +104,18 @@ pub fn raise_painter_priority() {
             "#1387 painter priority: nice {PAINTER_NICE} refused on {refused} of {} thread(s) (needs \
              CAP_SYS_NICE / root) -- the painter may miss vsync beside camera-box's JPEG XS encoder",
             set + refused
+        );
+    }
+}
+
+/// Raise the CALLING thread, the paint thread, to [`PAINTER_FIFO_PRIORITY`] (reset-on-fork: nothing
+/// it spawns inherits it). Best effort like the nice raise: a refusal is one WARNING.
+pub fn raise_paint_thread_fifo() {
+    if crate::affinity::set_current_thread_fifo_reset_on_fork(PAINTER_FIFO_PRIORITY) {
+        tracing::info!("#1387 paint thread at SCHED_FIFO {PAINTER_FIFO_PRIORITY}");
+    } else {
+        tracing::warn!(
+            "#1387 paint thread SCHED_FIFO {PAINTER_FIFO_PRIORITY} refused (needs CAP_SYS_NICE / root) -- it stays at its nice"
         );
     }
 }
