@@ -33,7 +33,7 @@ def test_the_stream_program_scene_never_fails_the_contract():
         "latency_calibrated_ms": 925,
         "ndi_mismatches": [],
         "artifacts_existing": [],
-        "jxs_state_lines": {"strih": "13:06:13.794: jxs-state: state=OK reason=none inputs=3 down=0 degraded=0 outputs=1 down=0 degraded=0 entry=- (issue 1387)"},
+        "jxs_windows": {"strih": {"head": "13:30:10.559", "lines": ["13:30:06.594: [distroav] jxs-source 'JXS cam5 src': fps=30.00 frames=150 lost_slices=0"]}},
     }
     for scene in ("Development", "PRO", "PRE", None):
         facts = dict(clean, stream_program_scene=scene)
