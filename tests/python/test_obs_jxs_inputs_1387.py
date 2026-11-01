@@ -340,8 +340,9 @@ def _two_receives(name="CAM2 (usb)", **over):
 
 
 def _cam2_spec():
-    return oji.parse_manifest(_manifest({"name": "JXS cam2 src", "jxs_port": 7002, "jxs_camera": 2, "jxs_max_bpp": 0,
-                                         "genlock_latency_ms_src": 36, "genlock_fifo": True, "genlock_grid": True}))
+    return oji.parse_manifest(_manifest({"name": "JXS cam2 src", "scene": "JXS cam2", "settings": {
+        "jxs_port": 7002, "jxs_camera": 2, "jxs_max_bpp": 0, "genlock_latency_ms_src": 36,
+        "genlock_fifo": True, "genlock_grid": True}}))
 
 
 def test_the_bootstrap_stops_the_ndi_receive_of_a_jpeg_xs_camera_and_no_other():
