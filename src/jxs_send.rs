@@ -630,6 +630,31 @@ mod tests {
         assert_eq!(again.slot_fills, 0, "the window resets it");
     }
 
+    /// A fill keeps `handoff_age` about the frame's OWN slot (review of the slot fill): sampled
+    /// against the hole's stamp, a fill read one emit slot (16.7 ms) older, so `handoff_age -
+    /// capture_age` (the capture's phase in its slot) left its 0..16.7 ms band for that sample.
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn a_fill_samples_the_handoff_age_against_the_frames_own_slot() {
+        let (h, ready) = JxsHandoff::unstarted();
+        let frame = vec![1u8; 64 * 8 * 2];
+        h.offer(&jf(&frame, 64, 8, tc(0), true));
+        // slot 2 skipped; slot 3 fills it
+        h.offer(&jf(&frame, 64, 8, tc(3), true));
+        assert_eq!(ready.try_recv().unwrap().timecode_100ns, tc(0));
+        assert_eq!(ready.try_recv().unwrap().timecode_100ns, tc(2));
+        let mut w = jxs_link::SendWindow::default();
+        h.stats.drain_into(&mut w);
+        assert_eq!(w.handoff_age.count, 2);
+        // the two offers run microseconds apart: their ages differ by the two frames' own
+        // stamps (slots 0 and 3, 50 ms), never by slot 0 and the hole (33.3 ms)
+        let spread = w.handoff_age.max_100ns - w.handoff_age.min_100ns;
+        assert!(
+            (spread - 500_000).abs() < 50_000,
+            "age spread {spread} x100 ns, want ~500000 (the frame's own slot 3)"
+        );
+    }
+
     /// No fill without a taken frame exactly one 30 fps slot before the hole: a start, a longer
     /// hole (a re-latch, a device hole) or a clock step keeps today's behaviour.
     #[cfg(feature = "jxs")]
