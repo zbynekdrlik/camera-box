@@ -737,3 +737,15 @@ def test_the_soak_defaults_from_the_resolver_and_an_env_override_still_wins():
     loop = loop[:loop.index("\ndone\n")]
     assert '_si="$(camera_strih_input "$_c")"' in loop
     assert loop.index("camera_strih_input") < loop.index('[ -z "$STRIH_INPUT_FMT" ] ||') < loop.index('BURN_TARGETS+=')
+
+
+def test_the_e2e_builds_its_burn_binary_with_the_jpeg_xs_link():
+    """The live run 41335442079: the burn unit got its CAMERA_BOX_JXS_TARGET, but the binary the E2E
+    built itself had no `jxs` feature, logged `the JPEG XS link stays off`, and the measured input
+    never moved. ci.yml's probe artifact already carried the feature; every other build must too."""
+    text = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "recording-e2e.sh").read_text()
+    builds = [ln for ln in text.splitlines()
+              if ln.lstrip().startswith("cargo build") and "--bin camera-box" in ln]
+    assert builds, "the E2E build line"
+    for ln in builds:
+        assert "--features probe,jxs" in ln, ln
