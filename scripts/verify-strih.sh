@@ -773,7 +773,7 @@ esac
 DS_UNIT_PATH_V="/etc/systemd/system/dantesync.service"
 DS_ARGS_V="$(strih_lx_dantesync_args 2>/dev/null)" || DS_ARGS_V=""
 DS_UNIT_ARGV_V="$(strih_dantesync_running_argv 2>/dev/null || true)"
-if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" 2>/dev/null)"; then
+if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" "$(strih_lx_ip)" 2>/dev/null)"; then
   DS_UNIT_V="$(strih_dantesync_unit_verdict "$DS_UNIT_WANT" "$DS_UNIT_PATH_V" "${DS_UNIT_PATH_V}.d" "$DS_UNIT_ARGV_V" || true)"
 else
   DS_UNIT_V=no-unit

@@ -48,7 +48,7 @@ if has strih_lx_dantesync_role; then
 else
   DS_R=server; DS_A=""
 fi
-strih_dantesync_unit_text "$DS_R" "$DS_A"
+strih_dantesync_unit_text "$DS_R" "$DS_A" "$(strih_lx_ip)"
 section janus-audiobridge
 strih_janus_audiobridge_jcfg_text 1000 /etc/intercom-hub/janus-room.secret "$(strih_lx_ip)"
 section janus-ws
