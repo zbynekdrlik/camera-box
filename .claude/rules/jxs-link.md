@@ -49,6 +49,13 @@ paths:
   - "tests/python/test_jxs_camera_pick_1387.py"
   - "scripts/lib/program-inputs.sh"
   - "tests/python/test_program_inputs_1387.py"
+  - "scripts/jxs_link_continuity.py"
+  - "scripts/lib/jxs-link-continuity.sh"
+  - "scripts/e2e_report_jxs_link.py"
+  - "tests/python/test_jxs_link_continuity_1387.py"
+  - "tests/python/test_jxs_link_continuity_e2e_1387.py"
+  - "tests/python/test_e2e_report_jxs_link_1387.py"
+  - "tests/python/jxs_link_fakes_1387.py"
 ---
 
 # The cambox JPEG XS link (issue 1387, slices 1, 1b, 2 + 3, and the in-OBS indicator)
@@ -1404,7 +1411,76 @@ The full-path E2E had never run on the JPEG XS rig: its burns, pins and checks n
   path`, one `[jxs-burn] camN: the burn unit sends JPEG XS to <strih>:<port>` per camera, the
   `[4i/8jxs]` PASS rows, the `(b) REPORT-ONLY` verdict (record it: flipping (b) to blocking needs it),
   four `[rendered-inputs]` lines, and the strih + stream recordings decode the camera burns +
-  911002 / 911004. Open: (b) blocking; the slice-2 JPEG XS link continuity gate.
+  911002 / 911004. Open: (b) blocking.
+
+## The E2E's BLOCKING JPEG XS link continuity gate (design 6558387590, its slice 2)
+
+Every JPEG XS link the run measures must lose nothing over the recording window, the
+program-audio continuity gate's shape (`obs-vban-receive.md`). A concealed slice is a LOST slice
+(the owner's 23.10.2026 audio ruling): concealment hides it on screen, never in the verdict.
+
+- **The decision** is the pure `scripts/jxs_link_continuity.py` (pytest
+  `tests/python/test_jxs_link_continuity_1387.py`, every line rendered from the SHIPPED C format
+  strings by `tests/python/jxs_link_fakes_1387.py`). Per link, from the 5 s window lines (every count
+  a per-window DELTA):
+  - which windows count: the first written after the START byte mark through the first written at
+    or after the STOP mark (the window straddling each edge is counted: one window of slack);
+  - inputs (`jxs-source '<name>'`): `lost_slices + concealed + undecodable + dropped_unread + foreign`
+    must be 0, and `reopens` 0 (a reopen restarts the receiver's counters: what came before it was
+    never counted);
+  - the strih program output (`jxs-output 'camera-box JPEG XS program'`, the name imported from
+    `obs_jxs_inputs.OUTPUT_NAME`): `dropped_busy + not_taken + refused + send_errors + encode_errors`
+    must be 0;
+  - coverage: no counted window with `frames=0`; no gap over `GAP_MAX_S` (one period + 1 s) between
+    two window lines from the last one before the start to the closing one; a link with no window
+    before the start may begin up to one window late, one with no closing window (once the log went
+    on) may end up to one window early; a hole event of the link inside the window FAILS (`not
+    connected`, `receiver failed`, `listening on UDP`, `cannot listen`, `settings changed --
+    reopening`; the output's `started --`, `stopped`, `cannot start the sender`, `did not start`);
+  - report-only: `fec_repaired` (rebuilt, nothing lost), `decoder_reopens` (a bpp step), `reports`,
+    `report_errors`, the output's `stamp_dup` / `offered` / `taken` / `fec_sent`, the lowest fps;
+  - UNKNOWN (fails the run): no window line of the link in the window (the link is missing), a gated
+    token absent, an unreadable box, a missing mark, a new log after the start (OBS restarted), a log
+    shorter than the stop mark. `retryable` = the closing window is not in the log yet.
+  The block `jxs_link_continuity` = every link's result; FAIL wins over UNKNOWN, PASS only when all
+  passed. Midnight is the program-audio module's `file_order_times`.
+- **The E2E side** is `scripts/lib/jxs-link-continuity.sh` (pytest
+  `tests/python/test_jxs_link_continuity_e2e_1387.py`: a fake READ_CMD RUNS the real remote text in a
+  fake home per host). Both functions do nothing on the NDI path (`program_path_ndi`).
+  - `jxs_link_continuity_mark start|stop DIR STRIH STREAM` sits right after each program-audio mark;
+    per box `<newest log name>\t<size in bytes>\t<newest HH:MM:SS.mmm>`, fail-open (a missing mark is
+    UNKNOWN at the gate).
+  - `jxs_link_continuity_gate HERE STRIH STREAM DIR VERDICT` in BOTH tails right after the YouTube gate
+    line, folded `if ! ...; then [ "$GATE" -ne 0 ] || GATE=1; fi`. It reads per box the bytes
+    `[start - LOOKBACK, stop + CLOSE)` (256 KiB each by default), merges the block into the verdict
+    JSON and retries (bounded, 60 s) while a closing window is not in the log yet.
+  - **BOUNDED, never a whole-log read** (owner 1.11.2026): a mark is `stat -c %s` + a 64 KiB `tail -c`
+    seek, never `wc -l` (the line-count readers `strih_log_line_count` / the program-audio mark scan the
+    whole file on the box); the read is `nice -n 19 tail -c +N | head -c LEN | grep -a -b` of the JPEG XS
+    lines, so only those lines and their byte offsets leave the box. A read cut mid-line (the first
+    line at a nonzero FROM, the last one at the cap or at the file's end) is dropped.
+  - Transport: `stream_box_exec` for BOTH boxes (plain ssh by the obs-fleet class), `timeout`-bounded;
+    a Windows-class box is UNKNOWN before any contact (no JPEG XS there). Credentials
+    STRIH_USER/STRIH_PW, STREAM_USER/STREAM_PW.
+  - Measured inputs: ALL_CAMBOX = every active camera on `CAMERA_STRIH_JXS_SET`
+    (`camera_active_excluding "$PREFLIGHT_EXCLUDED_CAMS"` + `camera_strih_input`, cam2 included: its
+    burn unit sends JPEG XS too); single camera = `STRIH_PROG_SOURCE`; stream = `STREAM_PROG_SOURCE`.
+    No input resolved on a box = UNKNOWN.
+- **The report** (`scripts/e2e_report_jxs_link.py`, pytest `tests/python/test_e2e_report_jxs_link_1387.py`):
+  `_run_passed` reads the block; the summary names each failing link (`strih vstup 'JXS cam3 src':
+  concealed +1 (zamaskované = STRATENÉ)`) or `NEOVERENÉ = ZLYHANIE`; the full report has a
+  `📡 Kontinuita JPEG XS liniek` section with one line per link. A PASS block keeps the 3-line PASS.
+- The 703 byte window (merge -> `exit "$GATE"`): 12608 of 14000 bytes after this gate.
+- **Known limits:** the camera senders' own `jxs send` counters are not read (one more ssh per camera);
+  a whole frame whose every datagram was lost never reaches the assembler, so no input counter sees it
+  (the genlock FIFO's `stamp_gap` does); `not_taken` also counts an OFF-GRID frame, so a strih canvas
+  above 30 fps would read every second frame as a loss (strih-snv runs 30 fps); `stamp_dup` (two
+  frames in one slot after a render lag: the slot before had none) is report-only; a reopen just
+  before the start reads as a gap into the first counted window (conservative).
+- **Live acceptance (supervisor, SNV, TEST mode):** the E2E log reads two `[jxs-link] ... window start
+  mark = byte N` lines (strih + stream) before `[5/8]`, two `stop` lines after StopRecord, and after the
+  merge `JPEG XS link continuity: PASS` with one line per camera link, the output and `JXS PGM src`;
+  the verdict JSON carries `jxs_link_continuity`.
 
 ## Supervisor runbook: the saturation test (owner scenario, strih-snv -> stream-snv)
 

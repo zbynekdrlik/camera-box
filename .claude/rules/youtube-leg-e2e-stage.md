@@ -114,8 +114,8 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   still hits the job timeout leaves no block: the per-point page reads the stage dir (`--stage-dir`)
   and shows that as RED ("no verdict was folded"), never as "not measured".
 - **Where the measurement runs: dev2** (design 6387919956 part c, next section); dev1 orchestrates + folds.
-- The 703 byte window (merge -> `exit "$GATE"`): 12373 of 13000 bytes after this stage. The next step
-  added there must widen it.
+- The 703 byte window (merge -> `exit "$GATE"`): 12373 of 13000 bytes after this stage; 12608 of
+  14000 after the issue-1387 JPEG XS link gate. The next step added there must re-measure it.
 
 ## The measurement on dev2 (main design 6387919956, parts b + c, 24.10.2026)
 
