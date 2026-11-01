@@ -41,6 +41,7 @@ pub fn parse_task_nice(stat: &str) -> Option<i32> {
 }
 
 /// What one per-thread `setpriority` did.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum NiceResult {
     Set,
     Refused,

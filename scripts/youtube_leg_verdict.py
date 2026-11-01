@@ -125,7 +125,7 @@ STOP_MARGIN_S = 1.0  # a window must end this long before a StopStream (the VOD 
 CLIP_TIMEOUT_S, PROBE_TIMEOUT_S, YTDLP_TIMEOUT_S, URL_TIMEOUT_S = 600, 1800, 3600, 60
 # restreamer reports the VOD done at YouTube `uploaded` (0.29.57), which can come before the
 # 1080p + audio formats are listed: the fetch retries every YTDLP_RETRY_S until YTDLP_READY_S.
-YTDLP_RETRY_S, YTDLP_READY_S = 30, 600  # inside the 1500 s tool timeout
+YTDLP_RETRY_S, YTDLP_READY_S = 30, 600  # inside the 2400 s tool timeout
 
 
 def join_parts(parts):

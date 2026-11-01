@@ -321,6 +321,9 @@ cam2 has only cores 0-1 for general work, and since its JPEG XS sender came on (
 words still decode but the program-audio chain breaks, which reads FOREIGN at an unchanged level and
 stops every E2E at the `[0/8]` issue-1421 preflight. It looks like foreign audio on mbc and is not.
 
+- The paint thread itself runs SCHED_FIFO 40 (`raise_paint_thread_fifo`, reset-on-fork, under the capture and encoder
+  FIFOs): nice -15 alone still missed 10 % of the vsyncs beside the burn camera-box; E2E 41338338452 with it: 60.001 fps,
+  0 missed over 34979 frames.
 - `run_paint_only` calls `painter_priority::raise_painter_priority()` before its first spawn: every
   thread at `PAINTER_NICE` -15 (`src/painter_priority.rs`), which covers all three launch paths (the
   unit, rig-mode's transient painter, the E2E painter). camera-box's FIFO capture threads still

@@ -26,6 +26,9 @@ RestartSec=5
 # marker reads this server needs, and is inert under the --user manager anyway
 # (.claude/rules/dev1-systemd-user-unit-hardening.md) -- declared-intent only, no isolation claimed.
 NoNewPrivileges=true
+# issue 1387: one gather holds a core for seconds. It never competes with OBS, which runs on cores 2-15.
+Nice=19
+CPUAffinity=0 1
 
 # Logging
 StandardOutput=journal

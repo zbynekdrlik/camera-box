@@ -748,7 +748,9 @@ def main(argv=None):
     ap.add_argument("--stream-platform", choices=("linux", "windows"),
                     default=os.environ.get("YOUTUBE_LEG_STREAM_PLATFORM", "linux"),
                     help="the stream box's class (scripts/lib/stream-box.sh): the host pulls from a Linux box only")
-    tool_timeout = float(os.environ.get("YOUTUBE_LEG_TOOL_TIMEOUT_S", 1500))
+    # 2400 s: dev2 is shared. At load 21-25 the A/V pool sizes 2, not 3, and E2E 41338338452 reached window 8 of 10 at
+    # 1500 s. The job timeout (105 min) holds it: that run took 54 min.
+    tool_timeout = float(os.environ.get("YOUTUBE_LEG_TOOL_TIMEOUT_S", 2400))
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("start")
     p.add_argument("--requester", default="camera-box full-path E2E")
