@@ -52,7 +52,10 @@ fn thread_nices() -> Vec<(String, i32)> {
     let mut out = Vec::new();
     for e in std::fs::read_dir("/proc/self/task").unwrap() {
         let p = e.unwrap().path();
-        let stat = std::fs::read_to_string(p.join("stat")).unwrap();
+        // a parallel test's thread may end between the listing and the read
+        let Ok(stat) = std::fs::read_to_string(p.join("stat")) else {
+            continue;
+        };
         let nice = parse_task_nice(&stat).expect("a nice field");
         out.push((p.file_name().unwrap().to_string_lossy().into_owned(), nice));
     }
