@@ -139,7 +139,7 @@ def run_box(log, start, stop, names=CAMS, program_output=True, back=4096, close=
 
 
 def recording(windows=8, src=None, out=None, names=CAMS, output=True, pre=3, post=3, gap_at=None,
-              t0=T0, extra=None):
+              t0=T0, extra=None, closing_out=None, closing_src=None):
     """A log with `pre` windows before the start, `windows` inside, `post` after the stop. `src` /
     `out` override one window's counters: {index: {name: {...}}} / {index: {...}} (index 0 = the
     first window inside). Returns (log, start, stop, start_time, stop_time)."""
@@ -161,7 +161,7 @@ def recording(windows=8, src=None, out=None, names=CAMS, output=True, pre=3, pos
     stop_time = ts(t - 4.0)
     log.add([noise(stop_time)])
     stop = log.mark()
-    for _ in range(post):
-        log.add(window_set(t, names, output))
+    for k in range(post):
+        log.add(window_set(t, names, output, src=closing_src if k == 0 else None, out=closing_out if k == 0 else None))
         t += 5.0
     return log, start, stop, start_time, stop_time
