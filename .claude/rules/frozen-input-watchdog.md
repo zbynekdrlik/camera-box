@@ -159,6 +159,32 @@ NOT a duplicate script — set via env:
 cadence, offset from the #1052 stream instance). Dev1-side only; nothing deployed to strih. Smoke-test:
 `FROZEN_INPUT_ENUMERATE=1 FROZEN_INPUT_RECEIVER='strih|10.77.9.202' FROZEN_INPUT_SENDER=strih FROZEN_INPUT_ALERT_TAG='#1069' FROZEN_INPUT_ENUMERATE_CMD=<stub-prints-raw-log> FROZEN_INPUT_PROBE_CMD=<stub> scripts/frozen-input-alert-watchdog.sh --dry-run`.
 
+## The JPEG XS path follows the resolver (issue 1387 slice 3)
+
+On a JPEG XS venue the on-air inputs are `JXS PGM src` (stream) and `JXS camN src` (strih); the JPEG XS
+source writes the same `genlock-fifo audit '<input>'` lines, so the tap, the classify, the confirm, the
+SKIP gate and the `frozen-input-$RECEIVER_NAME-$source` dedup key are unchanged -- only WHICH inputs.
+
+- `resolved_required_sources` (the watchdog) runs the E2E's ONE resolver,
+  `scripts/lib/program-inputs.sh` `program_inputs_resolve` + `camera-set.sh` `camera_strih_input`, in its
+  command substitution's subshell (sourced at CALL time, so sourcing the watchdog in a test stays
+  side-effect-free). Local fact-file reads only. The venue's two hosts: the receiver's own address for its
+  role, the fleet default for the other (`FROZEN_INPUT_STRIH_HOST` / `FROZEN_INPUT_STREAM_HOST` override).
+- stream instance (static mode): the default source becomes the resolved stream program input; an
+  explicit `FROZEN_INPUT_SOURCES` still wins.
+- strih instance (enumerate mode): `frozen_input_watch_list` (frozen-input-health.sh, pure) puts every
+  declared `JXS camN src` FIRST, then the enumerated names. A declared input whose audit line is absent
+  is still watched, so it reaches the tap-broken WARN instead of silently never being watched. A box-down
+  pass (issue 1001) still watches nothing.
+- An NDI venue resolves nothing (both instances as before); a resolve the facts refuse is ONE WARNING
+  line and the NDI defaults stay.
+- Tests: `tests/python/test_frozen_input_jxs_1387.py` (the real watchdog, stubbed probe / enumeration /
+  notify, the committed fact files; an NDI venue = TEST-NET hosts).
+- **Read size:** every read is a bounded tail (`strih_log_tail` = `tail -n 800` of the newest log on a
+  Linux box), never a whole-log read, but it runs at normal priority and costs one ssh per watched input
+  each pass (the enumeration read is a separate one): on the JPEG XS strih that is up to 1 + 6 reads
+  per 5 min. One shared bounded read per pass at nice 19 would be lighter (open point, not built).
+
 ### bash quoting traps hit while building this (both cost a live debug loop)
 
 - An apostrophe inside a `"${VAR:-default}"` default OPENS a single-quote context even within double

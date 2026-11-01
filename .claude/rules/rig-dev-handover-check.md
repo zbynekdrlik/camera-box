@@ -6,6 +6,7 @@ paths:
   - "tests/python/test_rig_dev_handover_1312.py"
   - "tests/python/test_rig_dev_handover_watchdogs_1319.py"
   - "tests/python/test_rig_dev_handover_exposure_1371.py"
+  - "tests/python/test_rig_dev_handover_jxs_1387.py"
 ---
 
 # "development" handover check (#1312)
@@ -51,6 +52,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 | cambox | `camera-box-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
 | avlatency | `measurement-chain-latency.sh` (marker emit vs `mbc` relative onset) | `verdict=ALIGNED` | `verdict=DRIFTED` (>90 ms vs baseline) | monotonic-emit / no-baseline / **ambiguous-cadence** (#1332) / chain-silent (all <−60 dB) / <3 onsets / cam2 down / stream OBS down |
 | watchdogs | `systemctl --user` per timer in `lib/watchdog-roster.sh` (dev1-local, no ssh) | all enabled+active+fired <15 min → OK | disabled/inactive/never-run/stale → **SUPERVISOR** (`nezapnutý watchdog: …`, never `zabudol si`) | no unit file → UNKNOWN with names |
+| jxs (issue 1387) | per box `obs_jxs_inputs.py --verify` against the box FACTS' render (`program_inputs_jxs_box_rows`, the [4i/8jxs] + verify-strih item 49 call; strih also its program output) + the EVENT facet `event_jxs_windows_json` (bounded 1 MiB tail) graded by `event_assert.jxs_live_ok`/`jxs_live_detail`/`jxs_box_readable` | every declared input PASS and every link delivering; a venue that declares no JPEG XS = OK (N/A) | a FAIL row (missing input, a setting off its fact, a stopped/re-targeted program output), a `(jxs-pick)` camera off its declared input, a link with 0 frames or a stale window -- each named | unreachable websocket, an ERROR row, an unread box, a malformed facet, a missing probe |
 | exposure | `camera_test_settings.py snapshot-state` (dev1-local file, issue 1371) + the `mode` capture | `state=none` / `state=restored` → OK; `state=pending` with mode TEST (waiting for its EVENT switch) → OK | `state=pending` with mode EVENT, `… restore_failed=<utc>`, `state=invalid` → **SUPERVISOR** (the owner's ISO/shutter were not put back; summary `supervisor musí vyriešiť: …`, next to the watchdog clause) | no line, or pending with an unreadable mode → UNKNOWN |
 
 ## `avlatency` (#1312) — the mbc measurement-chain LATENCY, not just presence
@@ -176,6 +178,26 @@ enabled=.. active=.. age_s=..`), and the pure `classify_watchdogs` decides it.
   `classify_watchdogs(imag_retired=True)` (env `RDH_IMAG_RETIRED`) drops them once imag is retired
   (issue 1316). imag-nb currently returns next year, so they are LIVE (counted) today.
 - **NEVER mutates** — no `systemctl enable/disable/start`. The probe only reads.
+
+## `jxs` (issue 1387 slice 3) -- the JPEG XS inputs and links
+
+- **Two existing probes, one item, three captures** (`jxs_strih`, `jxs_stream`, `jxs_live`). The box
+  rows come from `scripts/lib/program-inputs.sh` `program_inputs_jxs_box_rows HERE HOST ROLE OUTDIR`: it
+  renders the box FACTS' manifest on dev1 (no `/opt/camera-box` there) and runs the SAME
+  `obs_jxs_inputs.py --verify` verify-strih item 49 and the E2E [4i/8jxs] run (`_program_inputs_verify_run`
+  is shared with the E2E grade), the strih with `--output-target` (its running program output). A host no
+  fact file names, or facts that declare no JPEG XS, print ONE `NONE (jxs)` row and nothing is dialled.
+- **Liveness** reads only the boxes whose rows are not `NONE`, through the EVENT contract's bounded
+  facet (`scripts/lib/event-jxs-facet.sh`, the last 1 MiB of the newest OBS log at nice 19, the owner's
+  1.11.2026 never-a-whole-log rule), graded by `event_assert.py` (`jxs_box_readable` tells an unread box
+  = UNKNOWN from a dead link = FORGOT). A rows capture that did not run (MISSING) reads no link at all.
+- **Seams:** `RDH_JXS_PROBE` (the path of `obs_jxs_inputs.py`; its dir is the HERE the lib runs it
+  from), `RDH_JXS_LIVE_LIB`, `RDH_PROGRAM_INPUTS_LIB`; the ssh logins `STRIH_LX_USER/PW`,
+  `STREAM_USER/PW`. Every orchestrator test that points the other probes at a missing path must add
+  `JXS` and `JXS_LIVE_LIB` too, or it dials 10.77.9.202 / .204 over WS and ssh.
+- `(jxs-pick)` is FORGOT here (the NDI `mapping` item's parity: `rig-mode.sh test` puts the declared
+  camera back), `(jxs-place)` is report-only, the English remedy tail of a row (` -- ...`) stays in the
+  capture, the Slovak line names the input.
 
 ## Gotchas / invariants
 

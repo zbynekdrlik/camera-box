@@ -1482,6 +1482,32 @@ program-audio continuity gate's shape (`obs-vban-receive.md`). A concealed slice
   merge `JPEG XS link continuity: PASS` with one line per camera link, the output and `JXS PGM src`;
   the verdict JSON carries `jxs_link_continuity`.
 
+## Design 6558387590 slice 3: the report, the handover check and the frozen-input watchdog follow the resolver
+
+- **The report** (`e2e_discord_report.py`): recording-e2e.sh hands what the resolver set through the
+  existing `e2e_discord_report_send` call (args 8-11: `${E2E_PROGRAM_PATH:-ndi}`, the strih + stream
+  program inputs, `PROGRAM_INPUTS_STREAM_PIN_MS`; the sender drops an unknown path, a composer usage
+  error would cost the whole report). The full report gets a `Merané vstupy (cesta JPEG XS|NDI)` header
+  line, `Video sync JPEG XS kamier`, and the stream hold line names the input the pins snapshot READ
+  (`latency_pins_snapshot.py --stream-input`, recorded as `stream_hold_source`): on the JPEG XS path it
+  is graded against the fact `STRIH_JXS_PROGRAM_PIN_MS`, never av-sync-last.json (the NDI pin's record).
+  The per-camera strih cell reads `strih NDI záloha=` there (the snapshot still reads the `NDI camN`
+  backups; the JPEG XS camera pin is the one fact). A caller that passes nothing renders as before; the
+  phone summary never changes. Tests: `tests/python/test_e2e_report_inputs_1387.py`.
+- **The handover check** (`rig-dev-handover-check.sh` item `jxs`, `.claude/rules/rig-dev-handover-check.md`):
+  `program_inputs_jxs_box_rows` (program-inputs.sh, sharing `_program_inputs_verify_run` with the
+  [4i/8jxs] grade) runs `obs_jxs_inputs.py --verify` against each box's facts render (strih + its program
+  output, stream) -> raw rows, or ONE `NONE` row for a box that declares no JPEG XS (never dialled); then
+  the EVENT facet (`event_jxs_windows_json`, bounded) on the declaring boxes only. FAIL / `(jxs-pick)` /
+  a dead or stale link = FORGOT naming it; unreachable / unread / malformed = UNKNOWN. Tests:
+  `tests/python/test_rig_dev_handover_jxs_1387.py`.
+- **The frozen-input watchdog** (`.claude/rules/frozen-input-watchdog.md`): its stream instance watches
+  the resolved `JXS PGM src`, its strih instance always watches every declared `JXS camN src` beside the
+  enumeration (`frozen_input_watch_list`). Tests: `tests/python/test_frozen_input_jxs_1387.py`.
+- **Open:** the strih instance's alert cure text (the systemd unit) still names the NDI heal
+  (`set-ndi-mapping.py --heal`), which does nothing for a JPEG XS input; the per-camera strih pins in
+  the report are the NDI backups' (a JPEG XS per-camera pin read would need the naming rule in python).
+
 ## Supervisor runbook: the saturation test (owner scenario, strih-snv -> stream-snv)
 
 Prerequisite: the FULL strih bundle on strih-snv AND stream-snv from the same CI run (send + receive
