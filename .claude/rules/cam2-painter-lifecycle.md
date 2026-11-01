@@ -312,3 +312,21 @@ dev1, not on the box — deliberately out of scope.)
   (`fs::read_to_string(lib).contains("presenter: using DRM/KMS page-flip")`) must instead assert the
   EMITTED builder output (run the builder, assert its stdout) — the literal now lives only in the
   shared lib, so a source-read of the individual site is 1→0 (the #1148 recheck-anchor migration).
+
+## The painter outranks camera-box's JPEG XS encoder (issue 1387, 1.11.2026)
+
+cam2 has only cores 0-1 for general work, and since its JPEG XS sender came on (31.10.2026 09:20) the
+`jxs-feed` threads (the unit's `Nice=-10`) share them with the painter. At nice 0 the painter painted
+~47 fps. The marker index is the paint frame id, so markers 0.5 s apart differ by ~24, not 30: the
+words still decode but the program-audio chain breaks, which reads FOREIGN at an unchanged level and
+stops every E2E at the `[0/8]` issue-1421 preflight. It looks like foreign audio on mbc and is not.
+
+- `run_paint_only` calls `painter_priority::raise_painter_priority()` before its first spawn: every
+  thread at `PAINTER_NICE` -15 (`src/painter_priority.rs`), which covers all three launch paths (the
+  unit, rig-mode's transient painter, the E2E painter). camera-box's FIFO capture threads still
+  outrank it. The relation to the unit nice is a const assert; both unit copies are pinned by
+  `tests/painter_priority_1387.rs`.
+- **Diagnose:** rate = frame_id delta / emit_ts delta in `/run/rig-qpsk-markers.csv` (60, not ~47);
+  the journal line `#1387 painter priority: N thread(s) at nice -15`.
+- **Open gap:** rig-mode TEST's measurement-audio check reads only the level, so it reported WHOLE
+  CHAIN verified while the painter ran at 47 fps.
