@@ -47,6 +47,8 @@ paths:
   - "scripts/lib/jxs-mapping-enforce.sh"
   - "tests/distroav_jxs_pick_1387.rs"
   - "tests/python/test_jxs_camera_pick_1387.py"
+  - "scripts/lib/program-inputs.sh"
+  - "tests/python/test_program_inputs_1387.py"
 ---
 
 # The cambox JPEG XS link (issue 1387, slices 1, 1b, 2 + 3, and the in-OBS indicator)
@@ -534,8 +536,9 @@ runtime-resolved `obs_source_set_genlock_burn`; the QR burn filter reads the par
 safe only because the ONE burn enumeration `obs_burn_filter.BURN_INPUT_KINDS` lists
 `camera_box_jxs_source` next to `ndi_source`: sweep-check / sweep-off, the EVENT contract and the
 E2E restore see a JPEG XS burn. Never add a burn-carrying input kind without adding it to that set.
-The soak measures the JPEG XS path with `AV_SOAK_STRIH_INPUT_FMT="JXS %s src"` +
-`STREAM_PROG_SOURCE="JXS PGM src"` (the restart matrix inherits both from its environment).
+The soak measures the JPEG XS path by itself on a JPEG XS venue (the box facts, section "The E2E,
+rig-mode TEST and the soak measure the JPEG XS path" below); `AV_SOAK_STRIH_INPUT_FMT` +
+`STREAM_PROG_SOURCE` still override it (the restart matrix inherits both from its environment).
 
 ### Slice 2 known limits
 
@@ -1322,6 +1325,86 @@ Owner: "to co sa dalo povodne v obs vybrat ze ktory ndi stream do ktorej sceny t
 - **Deploy:** a vendored DistroAV change, so the FULL strih bundle on strih-snv. Then check by hand:
   open a `JXS camN src` properties dialog, read the list, pick another camera, and read the
   `listening on UDP` line in the OBS log.
+
+## The E2E, rig-mode TEST and the soak measure the JPEG XS path (design 6558387590, its slice 1b)
+
+The full-path E2E had never run on the JPEG XS rig: its burns, pins and checks named `NDI camN` /
+`NDI 2ME PGM`, which are not on air there (the scenes show `JXS camN src` / `JXS PGM src`).
+
+- **ONE resolver, the facts decide** (`scripts/lib/program-inputs.sh`, `program_inputs_resolve STRIH
+  STREAM [SOURCE_CAM]`). The host -> box is `obs_fleet_name_for_host` + a fact file named after it.
+  - The strih's `STRIH_JXS_CAMERAS` covers EVERY `STRIH_CAMERAS` camera and the stream declares a
+    `STRIH_JXS_PROGRAM_PORT` -> `E2E_PROGRAM_PATH=jxs`, `CAMERA_STRIH_JXS_SET` (cam names),
+    `STRIH_PROG_SOURCE` (`JXS camN src` of the source camera), `STREAM_PROG_SOURCE` (`JXS PGM src`),
+    plus `PROGRAM_INPUTS_STRIH_BOX` / `_STREAM_BOX` / `_STREAM_PIN_MS`.
+  - Neither box declares JPEG XS (PP, a Windows box with no fact file) -> `ndi`: nothing preset, the
+    callers' own NDI defaults fire, every list byte-identical.
+  - Anything between (an NDI camera beside JPEG XS ones, a JPEG XS strih with a stream that receives
+    no JPEG XS program, the reverse) is a MIXED venue: refused, naming the cameras / the box.
+  - Each variable is set only when UNSET (an env override wins); an `E2E_PROGRAM_PATH` the facts
+    contradict refuses. `program_path_ndi` is true when nothing resolved (the pre-1387 shape).
+- **The one naming rule** `strih_jxs_input_name` lives in `strih-box-facts.sh` (moved from
+  strih-jxs-provision.sh; the seed manifest still uses it). camera-set.sh's `camera_strih_input camN`
+  returns the JPEG XS name for a camera in `CAMERA_STRIH_JXS_SET`, else `NDI camN`; the four CSV
+  helpers (`camera_active_ndi_sources_csv`, `camera_align_ndi_sources_csv`, both `_excluding_csv`)
+  follow it under their old names, so the frozen gate, the settle-wait, the freeze watch and the
+  sweeps read the measured inputs.
+- **recording-e2e.sh:** the resolve right after `STRIH_LX_GATE_PREFIX` (exit 2 on a refusal, before
+  any rig mutation), together with `program_inputs_refuse_ndi_only_optins` (`COLD_CUT_BYPASS_CAM`,
+  `MEASUREMENT_EQ=1`, `PRERECORD_PHASE_CALIBRATE=1` refuse on JPEG XS: their pins are facts);
+  - both temporary burn units get the camera's own target: `cambox_jxs_burn_setenv_resolve_cmd` reads
+    the LOADED camera-box unit's `CAMERA_BOX_JXS_TARGET` (the facts' jxs.conf) into
+    `\$CAMBOX_JXS_BURN_SETENV` next to `\$CPU_AFFINITY_BURN_PROPERTY` (IPv4:port only, else a
+    WARNING and NDI only), so the burned frame reaches strih over JPEG XS (the burn thread's offer is
+    slice 1a);
+  - the all-camera burn targets use `camera_strih_input`;
+  - the NDI pin steps (the #900 re-anchor, the #893 floor gate, the floor-3 align) carry
+    `&& program_path_ndi`;
+  - **`[4i/8jxs]`** (`program_inputs_jxs_preflight`, BLOCKING on JPEG XS): `obs_jxs_inputs.py
+    --verify` against the facts' manifest (rendered on dev1 with `strih_jxs_seed_manifest_json`) on
+    strih + stream, `--output-target` (the venue's program target, stream id 100) on the strih. A
+    FAIL row, an unreachable websocket NOTE and a `(jxs-pick)` NOTE (a camera off its declared input:
+    the run would measure the wrong camera; `rig-mode.sh test` puts it back) abort; `(jxs-place)` is
+    fine. Then (b) `qr_align_pins.py --measure-only` over the active cameras' JPEG XS inputs, saved to
+    `jxs-measure-<RUN_ID>.json` and graded COMMON / SPREAD / UNKNOWN -- **REPORT-ONLY**: the measure
+    counts 60 fps painter frames while a JPEG XS camera input runs on the 30 fps grid, and no rig run
+    has shown how it reads there yet;
+  - `program_inputs_rendered_verify` (BLOCKING, before StartRecord, the issue-1204 pattern): the strih
+    program scene, every ALL_CAMBOX sweep scene and the stream program scene must render the measured
+    input (`obs_phase2.py program-rendered-input --scene`, which descends `Development` -> `PRO`);
+    every scene is read before it fails;
+  - the #856 A/V apply on JPEG XS is a RECOMMENDATION (`program_inputs_av_pin_hold`, right after the
+    issue-1482 feed hold in cleanup): `av_sync_calibrate.required_delay_ms(<the fact pin>, <offset>)`
+    printed as `STRIH_JXS_PROGRAM_PIN_MS=<new>` (stderr + `av-sync-jxs-pin-recommendation-<RUN>.txt`),
+    `AV_SYNC_APPLY_OFFSET_MS` cleared with a HOLD reason; never a runtime pin write. Applying it =
+    the fact change + setup-strih on the stream box + an OBS restart off air (runbook step 4 above);
+  - the frozen-gate heredoc gets the measured CSV as a 5th argument; a JPEG XS input has no
+    `ndi_source_name`, so the painter box is excluded by its CAMERA number (`CAM2 (usb)` -> cam2);
+    `frozen-camera-gate.py` maps `JXS camN src` to `Cam N` for its warm-up.
+  - mv-reverify: `mv_reverify_input` / `mv_reverify_ndi_cures` (mv-reverify-escalate.sh); detection
+    and the received= escalation probe read the measured input; the reattach, the proactive reset and
+    the finder heal-wait (NDI `ndi_source_name` cures) are skipped on a JPEG XS input; the strih OBS
+    restart stays.
+- **rig-mode.sh:** the resolve sits between `STREAM_IP=` and `STRIH_PROG_SOURCE=` (above the source
+  guard), so TEST burns follow the JPEG XS inputs; a refusal is a WARNING and the NDI defaults stay
+  (an EVENT switch must still run). EVENT item 6 reads `$STREAM_PROG_SOURCE` against the box fact
+  `STRIH_JXS_PROGRAM_PIN_MS` on JPEG XS (av-sync-last.json on NDI). `jxs_live` and
+  `jxs_mapping_enforce` are unchanged.
+- **av-soak.sh:** resolves once (`die 3` on a refusal); each camera's input is `camera_strih_input`
+  unless `AV_SOAK_STRIH_INPUT_FMT` is set; `STREAM_PROG_SOURCE` still overrides.
+- **Stays NDI on purpose:** the issue-399 NDI mapping, the NDI cadence heal, the #924 per-input burn
+  clears (the `sweep-off` covers JPEG XS) and imag -- the backup path's health.
+- **Testing gotcha:** never `strih_box_known | grep -qxF` under a caller's pipefail: grep's early
+  exit SIGPIPEs the lister and a found box reads as missing (a parallel-run flake; the test pads the
+  fact dir with 8000 names to make it certain). The lib tests a file instead.
+- Tests: `tests/python/test_program_inputs_1387.py` (every function under `set -euo pipefail`, the
+  resolver over real + edited fact files, fakes for obs_jxs_inputs / qr_align_pins / obs_phase2 /
+  systemctl / systemd-run, the frozen heredoc run, rig-mode sourced, the e2e wiring).
+- **Live acceptance (supervisor, SNV, TEST mode):** the E2E log reads `[program-inputs] ... the jxs
+  path`, one `[jxs-burn] camN: the burn unit sends JPEG XS to <strih>:<port>` per camera, the
+  `[4i/8jxs]` PASS rows, the `(b) REPORT-ONLY` verdict (record it: flipping (b) to blocking needs it),
+  four `[rendered-inputs]` lines, and the strih + stream recordings decode the camera burns +
+  911002 / 911004. Open: (b) blocking; the slice-2 JPEG XS link continuity gate.
 
 ## Supervisor runbook: the saturation test (owner scenario, strih-snv -> stream-snv)
 
