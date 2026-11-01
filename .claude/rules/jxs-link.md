@@ -42,6 +42,9 @@ paths:
   - "tests/python/test_event_assert_jxs_1387.py"
   - "tests/python/test_cambox_preview_cap_1387.py"
   - "tests/python/test_obs_jxs_inputs_1387.py"
+  - "scripts/lib/jxs-mapping-enforce.sh"
+  - "tests/distroav_jxs_pick_1387.rs"
+  - "tests/python/test_jxs_camera_pick_1387.py"
 ---
 
 # The cambox JPEG XS link (issue 1387, slices 1, 1b, 2 + 3, and the in-OBS indicator)
@@ -1200,7 +1203,8 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
 - `strih-obs-start.sh` runs `obs_jxs_inputs.py --bootstrap` after the strih_scenes seed when the
   manifest exists, best effort (a WARN never stops OBS):
   - an existing JPEG XS input gets ONE `SetInputSettings` overlay of the declared keys that differ
-    (update-only; a matching input is a pure read);
+    (update-only; a matching input is a pure read). A `jxs_port` + `jxs_camera` pair that names ANOTHER
+    declared camera is the operator's pick and is kept (section "The Kamera list" below);
   - an ABSENT input is created in its own holding scene `JXS camN` / `JXS PGM` (the slice-2/3 runbook
     shape), never in an operator scene: `Cam N`, `Moderatori`, `MULTIVIEW` and `PRO` are the operator's
     arrangement, and no tool writes the production scene;
@@ -1253,6 +1257,56 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
 4. After the stream A/V re-measure: change `STRIH_JXS_PROGRAM_PIN_MS` in `stream-snv.env`, merge, re-run
    setup-strih on stream-snv, restart its OBS while it is off air (the pin is written at the launch,
    never on air); never a WS-only pin change (the seeder heals it back at the next OBS start).
+
+## The Kamera list: the operator picks the camera (owner 1.11.2026, design 6558038959)
+
+Owner: "to co sa dalo povodne v obs vybrat ze ktory ndi stream do ktorej sceny tak teraz to uz nejde".
+
+- **The list.** `camera_box_jxs_source` has a first property `jxs_pick` "Kamera" (string list). Items:
+  - one per camera `/opt/camera-box/jxs-seed.json` declares, label `CAM<N> (UDP <port>)`, value
+    `<port>:<camera>`;
+  - then `Vlastné (UDP port a Camera id nižšie)` (value `custom`), which leaves the two raw numbers to
+    the operator.
+  Picking a camera writes `jxs_port` + `jxs_camera` (its modified callback, then a refresh). The
+  receiver reads only the pair, so `jxs_pick` is a view of it.
+- **Why the pick is re-derived when the properties open.** `obs_source_properties` runs every modified
+  callback once with the input's settings right after `get_properties`. A stale pick (the pair was
+  changed by the seeder, rig-mode or a WS write) would write its old pair back on a mere open.
+  - The properties view also applies the FIRST item on its own when the stored value is not in the
+    list (`AddList`, `idx == -1`).
+  - So `jxs_pick_list` sets the pick from the pair first: the pair's value when it is listed, else
+    `custom` (`cb_jxs_pick_shown`). The shown value is always an item of the list.
+- **The pure helpers** (`jxs-source-decide.h`): `cb_jxs_pick_value` / `_label` / `_parse` / `_shown`.
+  The parse takes exactly `<port>:<camera>`: ASCII digits, no sign, no leading zero, a digit cap,
+  port 1..65535, camera 0..255.
+- **The manifest** is read with `obs_data_create_from_json_file`. A missing or unparseable file gives
+  only the custom entry, never a crash. A pair is listed once.
+- **Limit (by design).** A UDP port binds one input, so two inputs on one camera leave the second one
+  black. Its state-table row then reads `UDP <p>, camera <c>: cannot listen (<error>)` in the status
+  bar tooltip. One camera in two scenes = the same input added to both scenes.
+- **The seeder.** `--bootstrap` keeps a pair that is ANOTHER declared camera's (`picked_camera`). It
+  heals an undeclared or mixed pair and every other key. `--verify` adds a `(jxs-pick)` NOTE (never a
+  FAIL) naming the camera shown, its declared one, and any other input on the same port.
+- **rig-mode puts the 1:1 mapping back** (the NDI issue-399 parity). TEST and EVENT call
+  `jxs_mapping_enforce <mode> "$STRIH_IP" "$OBS_WS_PASSWORD"` (`scripts/lib/jxs-mapping-enforce.sh`)
+  right after the strih NDI mapping.
+  - The lib finds the strih-ROLE fact file whose `STRIH_IP` is that address and renders its manifest
+    with `strih_jxs_seed_manifest_json` (dev1 has no `/opt/camera-box`).
+  - It then runs `obs_jxs_inputs.py --enforce-mapping`: ONE overlay of the pair keys that differ, a
+    read-back, nothing while OBS streams or records, no create and no other key.
+  - Exit codes: 3 = a mapping not proven, 1 = OBS unreachable, 2 = a bad manifest.
+  - No strih at the address, or a strih that declares none, is a NOTE and rc 0.
+  - The rc is recorded (`_jxsmap_rc`), warned by name and folded into the exit: an EVENT RESULT line,
+    the Discord ⚠️ line `nastavenie JPEG XS kamier na strihu`, and a TEST RESULT line before the
+    "WHOLE CHAIN" verdict.
+- **Tests.**
+  - `tests/distroav_jxs_pick_1387.rs`: the helpers' truth table, and the dropdown block LIFTED out of
+    the source and run against a fake libobs `obs_data` (every reference released), plus the anchors.
+  - `tests/python/test_jxs_camera_pick_1387.py`: the seeder, verify, enforce + CLI, the lib with a
+    fake seeder, and the mode bodies through the issue-1407 harness.
+- **Deploy:** a vendored DistroAV change, so the FULL strih bundle on strih-snv. Then check by hand:
+  open a `JXS camN src` properties dialog, read the list, pick another camera, and read the
+  `listening on UDP` line in the OBS log.
 
 ## Supervisor runbook: the saturation test (owner scenario, strih-snv -> stream-snv)
 
