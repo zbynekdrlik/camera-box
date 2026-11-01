@@ -304,8 +304,9 @@ pub struct JxsSender;
 
 impl JxsSender {
     /// Read [`TARGET_ENV`]: unset/blank = `None` (nothing created). Set = start the sender
-    /// threads; any failure is logged and the link stays off (`None`), never the capture loop.
-    pub fn start_from_env(hostname: &str) -> Option<JxsHandoff> {
+    /// threads; a socket that cannot connect yet retries every [`CONNECT_RETRY`] ([`JxsLink`]),
+    /// any other failure is logged and the link stays off (`None`), never the capture loop.
+    pub fn start_from_env(hostname: &str) -> Option<JxsLink> {
         let env = |k: &str| std::env::var(k).ok();
         let value = env(TARGET_ENV);
         if jxs_link::parse_target(value.as_deref()) == Ok(None) {
@@ -327,10 +328,12 @@ impl JxsSender {
             tracing::warn!("jxs send: {e} -- sending at line rate (issue 1387)");
             0
         });
-        Self::start_with_options(
+        Self::start_retrying(
             value.as_deref(),
             hostname,
             SenderOptions::new(bpp, fifo).with_pace(pace),
+            JxsSocket::connect,
+            CONNECT_RETRY,
         )
     }
 
@@ -440,16 +443,71 @@ fn start_link_worker<C>(
     camera_id: u8,
     opts: SenderOptions,
     mut connect: C,
-    _retry: std::time::Duration,
+    retry: std::time::Duration,
 ) -> Option<JxsLink>
 where
     C: FnMut(&str) -> std::io::Result<JxsSocket> + Send + 'static,
 {
-    match connect(&target) {
-        Ok(socket) => start_with_socket(socket, &target, camera_id, opts).map(JxsLink::ready),
-        Err(e) => {
+    let first = match connect(&target) {
+        Ok(socket) => {
+            return start_with_socket(socket, &target, camera_id, opts).map(JxsLink::ready)
+        }
+        Err(e) if !connect_error_retries(&e) => {
             tracing::error!(
                 "{TARGET_ENV}={target}: {e} -- the JPEG XS link stays off (issue 1387)"
+            );
+            return None;
+        }
+        Err(e) => e,
+    };
+    tracing::warn!(
+        "{TARGET_ENV}={target}: {first} -- the JPEG XS link retries every {} ms until it connects, NDI is not affected (issue 1387)",
+        retry.as_millis()
+    );
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let shown = target.clone();
+    let spawned = std::thread::Builder::new()
+        .name("jxs-connect".to_string())
+        .spawn(move || {
+            let mut last = first.to_string();
+            let mut tries: u64 = 1;
+            loop {
+                std::thread::sleep(retry);
+                tries += 1;
+                match connect(&target) {
+                    Ok(socket) => {
+                        tracing::info!(
+                            "jxs send: {target} connected after {tries} tries (issue 1387)"
+                        );
+                        if let Some(h) = start_with_socket(socket, &target, camera_id, opts) {
+                            // a dropped link (camera-box stopping) drops the hand-off here
+                            let _ = tx.send(h);
+                        }
+                        return;
+                    }
+                    Err(e) if !connect_error_retries(&e) => {
+                        tracing::error!(
+                            "{TARGET_ENV}={target}: {e} -- the JPEG XS link stays off (issue 1387)"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        let now = e.to_string();
+                        if now != last {
+                            tracing::warn!(
+                                "{TARGET_ENV}={target}: {now} -- still retrying ({tries} tries) (issue 1387)"
+                            );
+                            last = now;
+                        }
+                    }
+                }
+            }
+        });
+    match spawned {
+        Ok(_) => Some(JxsLink::pending(rx)),
+        Err(e) => {
+            tracing::error!(
+                "{TARGET_ENV}={shown}: cannot start the retry thread: {e} -- the JPEG XS link stays off (issue 1387)"
             );
             None
         }
