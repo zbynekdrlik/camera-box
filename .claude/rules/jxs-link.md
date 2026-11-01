@@ -19,6 +19,8 @@ paths:
   - "vendor/svt-jpeg-xs/**"
   - "tests/jxs_loopback_1387.rs"
   - "tests/jxs_wiring_1387.rs"
+  - "src/probe/burn_jxs.rs"
+  - "tests/jxs_burn_1387.rs"
   - "vendor/distroav/src/jxs-output.cpp"
   - "vendor/distroav/src/jxs-output-decide.h"
   - "vendor/distroav/src/genlock-emit-timecode.h"
@@ -146,6 +148,19 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     frame is `dropped_busy`. Never blocks. Its cost lands inside the stagger offset (the sleep
     shrinks by it), so the NDI send time of every camera but CAM1 (offset 0) is unchanged; CAM1's
     NDI send moves by the conversion (~0.25 ms on dev1, more on the N150).
+  - **Burn mode: JPEG XS carries the BURNED frame (issue 1387 slice 1a).** In the E2E's probe
+    build with `CAMERA_BOX_BURN_RUN_ID` the NDI sender lives on the `cam1-burn` thread; the link
+    moves there with it (`let burn_jxs_link = jxs_sender.take();`, probe-only), so the capture
+    loop's raw offer finds `None`. The capture thread stamps the CURRENT frame's job with a
+    `probe::burn_jxs::BurnJxsOffer` (the production offer's timecode, `send_fps` and raw capture
+    instant) right before `emit_one(capture_timecode_100ns)`; a starvation repeat's job carries
+    none (NDI-only, as in production). The burn thread runs `burn_then_offer_jxs`: the QR into the
+    job's buffer, then `offer` of that same buffer, then the NDI send. Production (no burn) is
+    byte-identical. Pinned by `tests/jxs_burn_1387.rs` (the burned QR decodes from the picture
+    the real decoder rebuilds over loopback) and the main.rs anchors in
+    `tests/jxs_wiring_1387.rs`. In burn mode the hand-off runs after the #1242 stagger sleep, the
+    ring and the QR draw, so `handoff_age_ms` / `capture_age_ms` read that much later than in
+    production; the timecode and the 30 fps choice are the same.
   - **AVX2 conversion** (`jxs_link::planar`): four 32-byte loads per 64 pixels, `packus` of the
     low bytes (Y) and the high bytes (chroma), split once more into U and V, `permute4x64(0,2,1,3)`
     restoring the lane order; the scalar loop does the tail; runtime-detected
@@ -1560,8 +1575,9 @@ line-rate ~8-12 ms. `first_arrival_ms` should stop wandering. The latency p50 sh
 - One receiver per cambox; only YUYV captures are sent (another format logs one WARN).
 - A frame whose slice count (a geometry change) or picture header packet (a bpp change) differs
   from the decoder's restarts it; that frame decodes after its last packet, not slice by slice.
-- In TEST mode with the cam1 QR burn active, NDI carries the burned frame and JPEG XS the
-  unburned capture: a pixel comparison of the two during an E2E differs by the burn.
+- In burn mode (the E2E's temporary probe unit) NDI and JPEG XS both carry the burned frame
+  (slice 1a, "Burn mode" above); the temporary unit still needs the camera's own
+  `CAMERA_BOX_JXS_TARGET` to send JPEG XS at all (slice 1b).
 - `SO_SNDBUF` asks for 4 MB; the kernel caps it at `net.core.wmem_max` (the "link ON" line logs
   what was granted). A frame is ~1.04 MB, so a small grant makes `send` block the `jxs-send`
   thread (never the capture thread) until the NIC drains it.
