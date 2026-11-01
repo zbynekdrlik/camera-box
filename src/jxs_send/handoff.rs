@@ -72,13 +72,24 @@ impl JxsHandoff {
             height,
             stride,
             yuyv,
-            timecode_100ns,
+            mut timecode_100ns,
             capture_realtime_100ns,
             emit_fps,
         } = *frame;
-        if !jxs_link::on_jxs_grid(timecode_100ns, emit_fps) {
-            return;
-        }
+        // a frame off the 30 fps grid goes only to fill a slot the capture skipped right after a
+        // taken one, stamped on that slot, like the NDI starvation repeat (issue 1387)
+        let fill = if jxs_link::on_jxs_grid(timecode_100ns, emit_fps) {
+            false
+        } else {
+            let last = self.stats.last_taken_100ns.load(Ordering::Relaxed);
+            match jxs_link::jxs_fill_slot(timecode_100ns, emit_fps, last) {
+                Some(hole) => {
+                    timecode_100ns = hole;
+                    true
+                }
+                None => return,
+            }
+        };
         // the stamp's age at the hand-off, read on the clock the timecode is stamped on (every
         // grid frame, a busy-dropped one too: the diagnostic is about the time BEFORE this point)
         self.stats.note_handoff(
@@ -118,11 +129,19 @@ impl JxsHandoff {
             let _ = self.free_tx.try_send(pic);
             return;
         }
-        self.queue(Ready {
+        if self.queue(Ready {
             pic,
             timecode_100ns,
             handed_off,
-        });
+        }) == Offered::Taken
+        {
+            self.stats
+                .last_taken_100ns
+                .store(timecode_100ns, Ordering::Relaxed);
+            if fill {
+                self.stats.slot_fills.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Queue a converted picture for the feeder (never blocks).

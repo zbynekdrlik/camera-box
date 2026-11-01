@@ -152,6 +152,37 @@ pub fn on_jxs_grid(timecode_100ns: i64, emit_fps: u32) -> bool {
     per_second_floor(stamp, JXS_FPS, U) == stamp
 }
 
+/// The [`JXS_FPS`] slot a frame OFF that grid fills, or `None` (issue 1387, the 1.11.2026 night
+/// soak). A free-running camera slower than the grid skips one emit slot at every edge crossing,
+/// and the capture loop fills it on NDI with one starvation repeat of the CURRENT frame stamped
+/// on the skipped slot; the JPEG XS hand-off sees only the current frame. When the skipped slot
+/// is a 30 fps point, the link had no frame for it and strih repeated the previous one. The frame
+/// on the emit slot right after the hole fills it, like the NDI repeat. Only when
+/// `last_taken_100ns` (the stamp of the last frame the link took, 0 = none) is the 30 fps point
+/// right before the hole: one missed point after a taken one. A start, a longer hole (a re-latch,
+/// a device hole) or a clock step never fills.
+pub fn jxs_fill_slot(timecode_100ns: i64, emit_fps: u32, last_taken_100ns: i64) -> Option<i64> {
+    use crate::genlock_grid::{per_second_floor, UNITS_100NS_PER_SECOND as U};
+    if timecode_100ns <= 0 || last_taken_100ns <= 0 || on_jxs_grid(timecode_100ns, emit_fps) {
+        return None;
+    }
+    let emit = match emit_fps as u64 {
+        0 => JXS_ASSUMED_EMIT_FPS,
+        f => f,
+    };
+    if emit <= JXS_FPS {
+        return None;
+    }
+    let stamp = per_second_floor(timecode_100ns as u64, emit, U);
+    let hole = per_second_floor(stamp, JXS_FPS, U);
+    // the hole is the emit slot right before this frame's own (always so at 60 fps)
+    if hole == 0 || per_second_floor(stamp - 1, emit, U) != hole {
+        return None;
+    }
+    let before = per_second_floor(hole - 1, JXS_FPS, U);
+    (per_second_floor(last_taken_100ns as u64, JXS_FPS, U) == before).then_some(hole as i64)
+}
+
 /// One datagram's header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketHeader {
@@ -377,6 +408,8 @@ pub struct SendWindow {
     pub wire_frames: u64,
     pub wire_ms_sum: f64,
     pub wire_ms_max: f64,
+    /// Frames sent on a 30 fps slot the capture skipped ([`jxs_fill_slot`]).
+    pub slot_fills: u64,
 }
 
 /// The age of an instant (a frame's genlock timecode, or its capture instant) at the hand-off to
@@ -465,12 +498,12 @@ impl SendWindow {
     /// capture_age_ms_avg/min/max= first_slice_ms_avg/max=
     /// encode_ms_avg/max= send_errors= encode_errors= report_age_s= reports= pace_mbps=
     /// wire_ms_avg/max= pace_src= rx_link_mbps= tx_link_mbps= path= cong_pct= queue_ms=
-    /// fec_sent= fec_repaired= (issue 1387)`. `bytes`
+    /// fec_sent= fec_repaired= slot_fills= (issue 1387)`. `bytes`
     /// counts the codestream, not the headers; `bpp_reason` / `report_age_s` / the two ages read `-` when
     /// there is none.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} pace_mbps={} wire_ms_avg/max={:.2}/{:.2} pace_src={} rx_link_mbps={} tx_link_mbps={} path={} cong_pct={} queue_ms={} fec_sent={} fec_repaired={} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} pace_mbps={} wire_ms_avg/max={:.2}/{:.2} pace_src={} rx_link_mbps={} tx_link_mbps={} path={} cong_pct={} queue_ms={} fec_sent={} fec_repaired={} slot_fills={} (issue 1387)",
             if self.window_s > 0.0 {
                 self.frames as f64 / self.window_s
             } else {
@@ -510,6 +543,7 @@ impl SendWindow {
                 .map_or("-".to_string(), |q| format!("{:.1}", q as f64 / 1000.0)),
             self.fec_sent,
             self.fec_repaired,
+            self.slot_fills,
         )
     }
 }
@@ -693,6 +727,30 @@ mod tests {
         }
     }
 
+    /// Issue 1387, the 1.11.2026 night soak: the odd-slot frame after a skipped even slot fills
+    /// it, only right after a taken frame, across a second boundary too.
+    #[test]
+    fn an_odd_frame_fills_the_even_slot_skipped_right_after_a_taken_one() {
+        let sec = 1_761_730_000;
+        let s = |k| stamp60(sec, k);
+        assert_eq!(jxs_fill_slot(s(5), 60, s(2)), Some(s(4)), "slot 4 skipped");
+        assert_eq!(jxs_fill_slot(s(5), 60, s(4)), None, "slot 4 went");
+        assert_eq!(jxs_fill_slot(s(5), 60, 0), None, "nothing taken yet");
+        assert_eq!(jxs_fill_slot(s(7), 60, s(2)), None, "two points missed");
+        assert_eq!(jxs_fill_slot(s(4), 60, s(2)), None, "on the grid: no fill");
+        assert_eq!(jxs_fill_slot(s(5), 60, s(6)), None, "a clock step back");
+        // across the second boundary: 58 taken, 0 skipped, 1 fills it
+        assert_eq!(
+            jxs_fill_slot(stamp60(sec + 1, 1), 60, s(58)),
+            Some(stamp60(sec + 1, 0))
+        );
+        // a stamp a little past its slot boundary floors to it first
+        assert_eq!(jxs_fill_slot(s(5) + 1234, 60, s(2)), Some(s(4)));
+        // at or below 30 fps every frame goes: there is never a hole to fill
+        assert_eq!(jxs_fill_slot(s(5), 30, s(2)), None);
+        assert_eq!(jxs_fill_slot(-s(5), 60, s(2)), None);
+    }
+
     #[test]
     fn the_parity_holds_across_a_second_boundary_and_a_dropped_capture() {
         let sec = 1_761_730_000;
@@ -777,11 +835,12 @@ mod tests {
         w.queue_delay_us = Some(460);
         w.fec_sent = 300;
         w.fec_repaired = 2;
+        w.slot_fills = 1;
         w.note_wire(19.5);
         w.note_wire(20.1);
         assert_eq!(
             w.status_line(),
-            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 reports=5 pace_mbps=900 wire_ms_avg/max=19.80/20.10 pace_src=receiver-link rx_link_mbps=1000 tx_link_mbps=10000 path=clean cong_pct=100 queue_ms=0.5 fec_sent=300 fec_repaired=2 (issue 1387)"
+            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 reports=5 pace_mbps=900 wire_ms_avg/max=19.80/20.10 pace_src=receiver-link rx_link_mbps=1000 tx_link_mbps=10000 path=clean cong_pct=100 queue_ms=0.5 fec_sent=300 fec_repaired=2 slot_fills=1 (issue 1387)"
         );
         let empty = SendWindow::default().status_line();
         assert!(empty.contains("convert_ms_avg/max=0.00/0.00"), "{empty}");
@@ -820,10 +879,11 @@ mod tests {
             "queue_ms=",
             "fec_sent=",
             "fec_repaired=",
+            "slot_fills=",
         ];
         assert!(
             empty.contains(
-                " pace_mbps=0 wire_ms_avg/max=0.00/0.00 pace_src=line-rate rx_link_mbps=0 tx_link_mbps=0 path=unknown cong_pct=0 queue_ms=- fec_sent=0 fec_repaired=0 "
+                " pace_mbps=0 wire_ms_avg/max=0.00/0.00 pace_src=line-rate rx_link_mbps=0 tx_link_mbps=0 path=unknown cong_pct=0 queue_ms=- fec_sent=0 fec_repaired=0 slot_fills=0 "
             ),
             "line rate reads 0: {empty}"
         );

@@ -30,7 +30,7 @@
 //! The codec needs the `jxs` cargo feature (CI's deployed `camera-box-linux-amd64` carries it).
 //! A build without it logs one ERROR when the target is set and stays off.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 use crate::jxs_link;
 
@@ -144,6 +144,11 @@ struct Stats {
     /// hand-off]`. The capture thread only `try_lock`s it (a sample is skipped rather than ever
     /// waiting); the status line holds it for a copy.
     handoff_age: std::sync::Mutex<[jxs_link::HandoffAge; 2]>,
+    /// The stamp of the last frame the hand-off TOOK (0 = none yet): the capture thread's only
+    /// state for [`jxs_link::jxs_fill_slot`] (issue 1387).
+    last_taken_100ns: AtomicI64,
+    /// Frames sent on a 30 fps slot the capture skipped, since the last status line.
+    slot_fills: AtomicU64,
 }
 
 #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
@@ -174,6 +179,7 @@ impl Stats {
     /// Move the shared counters into `w` and reset them (the in-flight max restarts from now).
     fn drain_into(&self, w: &mut jxs_link::SendWindow) {
         w.dropped_busy = self.dropped_busy.swap(0, Ordering::Relaxed);
+        w.slot_fills = self.slot_fills.swap(0, Ordering::Relaxed);
         w.encode_errors += self.convert_errors.swap(0, Ordering::Relaxed);
         w.convert_count = self.convert_count.swap(0, Ordering::Relaxed);
         w.convert_ms_sum = self.convert_ns_sum.swap(0, Ordering::Relaxed) as f64 / 1e6;
@@ -572,6 +578,56 @@ mod tests {
         assert_eq!(ready.try_recv().unwrap().timecode_100ns, tc(4));
         assert!(ready.try_recv().is_err());
         assert_eq!(h.dropped_busy(), 0);
+    }
+
+    /// Every fill is counted on the 5 s status line (`slot_fills=`), a busy-dropped even frame's
+    /// slot is filled like a skipped one, and a fill that finds every picture busy is no fill.
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn a_fill_is_counted_and_a_busy_dropped_even_frame_is_filled_too() {
+        let (h, ready) = JxsHandoff::unstarted();
+        let frame = vec![1u8; 64 * 8 * 2];
+        h.offer(&jf(&frame, 64, 8, tc(0), true));
+        h.offer(&jf(&frame, 64, 8, tc(2), true));
+        // both pictures in flight: slot 4 is dropped busy; one comes back, slot 5 fills slot 4
+        h.offer(&jf(&frame, 64, 8, tc(4), true));
+        assert_eq!(h.dropped_busy(), 1);
+        let a = ready.try_recv().unwrap();
+        assert_eq!(a.timecode_100ns, tc(0));
+        h.free_tx.try_send(a.pic).unwrap();
+        h.offer(&jf(&frame, 64, 8, tc(5), true));
+        let b = ready.try_recv().unwrap();
+        let c = ready.try_recv().unwrap();
+        assert_eq!(b.timecode_100ns, tc(2));
+        assert_eq!(
+            c.timecode_100ns,
+            tc(4),
+            "the busy-dropped even slot is filled"
+        );
+        // both out again: slot 6 dropped busy, and slot 7's fill finds no picture either
+        h.offer(&jf(&frame, 64, 8, tc(6), true));
+        h.offer(&jf(&frame, 64, 8, tc(7), true));
+        assert_eq!(h.dropped_busy(), 3);
+        assert!(ready.try_recv().is_err(), "a busy fill is no fill");
+        // pictures back; a capture-skipped slot 10 is filled from slot 11
+        h.free_tx.try_send(b.pic).unwrap();
+        h.free_tx.try_send(c.pic).unwrap();
+        h.offer(&jf(&frame, 64, 8, tc(8), true));
+        h.offer(&jf(&frame, 64, 8, tc(11), true));
+        let d = ready.try_recv().unwrap();
+        let e = ready.try_recv().unwrap();
+        assert_eq!((d.timecode_100ns, e.timecode_100ns), (tc(8), tc(10)));
+        let mut w = jxs_link::SendWindow::default();
+        h.stats.drain_into(&mut w);
+        assert_eq!(w.slot_fills, 2, "the two fills that were taken");
+        assert!(
+            w.status_line().contains(" slot_fills=2 "),
+            "{}",
+            w.status_line()
+        );
+        let mut again = jxs_link::SendWindow::default();
+        h.stats.drain_into(&mut again);
+        assert_eq!(again.slot_fills, 0, "the window resets it");
     }
 
     /// No fill without a taken frame exactly one 30 fps slot before the hole: a start, a longer

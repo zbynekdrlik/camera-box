@@ -97,6 +97,17 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     `floor(j/30 s)`, the same integer). Never a frame counter: a dropped capture costs only its own
     frame and a second boundary never shifts the parity. Genlock off (emit 0) floors on an assumed
     60 fps grid; an emit rate at or below 30 sends every frame.
+  - **A skipped 30 fps slot is filled (`jxs_link::jxs_fill_slot`, the 1.11.2026 night soak).** A
+    camera slower than the grid skips one 60 fps slot per edge crossing (cam2: `src_ppm` -420, one
+    per 1-2 min; also a hidden drop or a busy-dropped even frame), and NDI gets one starvation
+    repeat of the CURRENT frame on it. The hand-off sees only the current frame, so a skipped EVEN
+    slot left the link without a frame and strih repeated the previous one (`stamp_gap` +
+    `late_holds` on `JXS camN src`, one repeated frame on the program; 6 copies in 22 soak windows).
+    Now the odd-slot frame right after such a hole is sent stamped on it, like the NDI repeat, but
+    only when the last frame the hand-off TOOK (`Stats::last_taken_100ns`) is the 30 fps point
+    right before the hole: a start, a longer hole, a re-latch or a clock step never fills. The
+    filled frame reaches strih ~16.7 ms later against its stamp than a normal one (inside the
+    100 ms grid age). `slot_fills=` on the 5 s line counts the fills that were taken.
   - **Hand-off BEFORE the NDI send:** main.rs calls `jxs.offer(&JxsFrame { .., timecode_100ns:
     capture_timecode_100ns, emit_fps: send_fps })` right after the timecode is fixed
     (`note_emitted_stamp_100ns`) and BEFORE the #1242 stagger sleep and every `emit_one`
@@ -133,7 +144,7 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
     capture_age_ms_avg/min/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors=
     encode_errors= report_age_s= reports= pace_mbps= wire_ms_avg/max= pace_src= rx_link_mbps=
-    tx_link_mbps= path= cong_pct= queue_ms= fec_sent= fec_repaired= (issue 1387)`
+    tx_link_mbps= path= cong_pct= queue_ms= fec_sent= fec_repaired= slot_fills= (issue 1387)`
     (`pace_mbps` 0 = line rate; `wire_ms` = a whole frame's first send -> its last send returned,
     see "Send pacing"; the rest: "The automatic pace", "Early congestion control", "FEC").
   - **`handoff_age_ms` / `capture_age_ms`** (coordinator request 29.10, the cam5 sawtooth: the
