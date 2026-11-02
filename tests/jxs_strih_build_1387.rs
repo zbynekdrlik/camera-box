@@ -1,8 +1,8 @@
 //! Issue 1387 slice 2 -- the CI wiring of the JPEG XS source (std-only, every build):
 //! the strih Linux variant builds the jxs-recv-ffi static library (Rust + nasm), hands it and
 //! rustc's native-library list to DistroAV's CMake, and refuses a distroav.so without the source
-//! or with an executable stack; no other DistroAV build turns the source on; ci.yml lints and tests
-//! the FFI crate; a receiver change re-runs the strih build.
+//! or with an executable stack; no other DistroAV build turns the source on; a new vstack pin
+//! re-runs the strih build.
 
 #[path = "support/vstack.rs"]
 mod vstack;

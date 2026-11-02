@@ -199,7 +199,7 @@ def render_frame(frame: int) -> np.ndarray:
 # -- sound ---------------------------------------------------------------------------------------
 
 def crc4(data: int, size: int) -> int:
-    """src/qpsk_marker.rs `crc4` (vendor/av-sync-dock/tool/videogen.py)."""
+    """vstack:av/marker/src/qpsk_marker.rs `crc4` (vendor/av-sync-dock/tool/videogen.py)."""
     data <<= 4
     p = CRC4_POLY << (size - 1)
     s = size

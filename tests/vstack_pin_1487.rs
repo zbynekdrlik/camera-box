@@ -64,9 +64,10 @@ fn a_default_build_needs_no_codec() {
         assert!(!cargo.contains(&format!("{c} =")), "{c}");
     }
     assert!(cargo.contains("jxs = [\"dep:svt-jpegxs-sys\", \"camera-box-jxs/jxs\"]"));
-    assert!(cargo
-        .contains("svt-jpegxs-sys = { git = \"https://github.com/zbynekdrlik/vstack\", tag = \"v"));
-    assert!(cargo.contains("\", optional = true }"));
+    let tag = vstack::pin("VSTACK_RELEASE_TAG");
+    assert!(cargo.contains(&format!(
+        "svt-jpegxs-sys = {{ git = \"https://github.com/zbynekdrlik/vstack\", tag = \"{tag}\", optional = true }}"
+    )));
 }
 
 #[test]
@@ -107,10 +108,20 @@ fn the_old_paths_stay_as_reexports() {
 #[test]
 fn the_strih_build_links_the_pinned_tag_with_this_repos_release_profile() {
     let wf = read(".github/workflows/linux-genlock.yml");
-    assert!(wf.contains("scripts/vstack-release.pin"));
-    assert!(wf.contains("VSTACK_RELEASE_TAG="));
-    assert!(wf.contains("VSTACK_RELEASE_COMMIT="));
-    assert!(wf.contains("https://github.com/zbynekdrlik/vstack"));
+    let at = wf
+        .find("- name: Fetch the pinned vstack source")
+        .expect("the fetch step");
+    let fetch = &wf[at..at + wf[at..].find("- name: Build the jxs-recv-ffi").unwrap()];
+    for needle in [
+        "VSTACK_RELEASE_TAG=//p' scripts/vstack-release.pin",
+        "VSTACK_RELEASE_COMMIT=//p' scripts/vstack-release.pin",
+        "--branch \"$tag\" https://github.com/zbynekdrlik/vstack",
+        "if [ \"$have\" != \"$commit\" ]; then",
+        "; exit 1; fi",
+    ] {
+        assert!(fetch.contains(needle), "the fetch step lacks `{needle}`");
+    }
+    assert!(wf.contains("working-directory: ${{ env.VSTACK_SRC }}"));
     let cargo = read("Cargo.toml");
     for line in ["lto = true", "codegen-units = 1", "strip = true"] {
         assert!(cargo.contains(line), "{line}");

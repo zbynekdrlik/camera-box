@@ -206,7 +206,7 @@ EOF
 cambox_hk_irq_dropin_content() {
   cat <<'EOF'
 # camera-box issue 1367: run the IRQ split before every start (the capture IRQ onto its reserved
-# core, every other device IRQ and default_smp_affinity off it; vstack:rig/core/src/affinity.rs setup_irq_affinity).
+# core, every other device IRQ and default_smp_affinity off it; rig/core/src/affinity.rs setup_irq_affinity).
 # '-' never blocks the start; '+' runs it outside the unit sandbox (ProtectSystem=strict and
 # ReadOnlyPaths=/ would make /proc/irq read-only).
 [Service]
