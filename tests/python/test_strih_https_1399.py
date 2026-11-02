@@ -447,7 +447,7 @@ def test_the_upstream_ports_are_the_services_own_binds(box):
     """One source of truth: the hub port is the box's intercom matrix [http] bind, bkshading's is its
     default_bind (bkshading/service/src/config.rs)."""
     r = _bash('strih_box_load "$1" || exit 9\nstrih_lx_intercom_config', box, sources=(FACTS,))
-    matrix = (REPO / r.stdout.strip()).read_text()
+    matrix = (REPO / "tests" / "fixtures" / "intercom_pinned" / r.stdout.strip()).read_text()
     hub = re.search(r'(?m)^bind = "0\.0\.0\.0:(\d+)"', matrix).group(1)
     cfg = (REPO / "bkshading" / "service" / "src" / "config.rs").read_text()
     bks = re.search(r'"0\.0\.0\.0:(\d+)"', cfg).group(1)

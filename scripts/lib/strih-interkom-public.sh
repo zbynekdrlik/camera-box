@@ -121,7 +121,7 @@ strih_public_dropin_text() {
   cat <<DROPIN
 # intercom-hub TURN key (camera-box issue 1453) -- installed by setup-strih step 16i. Do NOT edit by hand.
 # The hub runs as the operator and cannot read the root 0600 key file, so systemd hands it over as the
-# credential ${STRIH_PUBLIC_TURN_CRED}; the hub prefers that copy (intercom/hub/src/turn.rs). Present only
+# credential ${STRIH_PUBLIC_TURN_CRED}; the hub prefers that copy (hub/src/turn.rs in the intercom repo). Present only
 # while the key file exists: a LoadCredential= of a missing file fails the hub start.
 [Service]
 LoadCredential=${STRIH_PUBLIC_TURN_CRED}:$(strih_public_turn_file)

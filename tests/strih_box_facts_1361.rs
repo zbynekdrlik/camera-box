@@ -181,7 +181,7 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_NDI_PREFIX=STRIH-SNV",
         "STRIH_DANTESYNC_ROLE=server",
         "STRIH_DANTESYNC_UPSTREAM=",
-        "STRIH_INTERCOM_CONFIG=intercom/intercom.strih-snv.toml",
+        "STRIH_INTERCOM_CONFIG=intercom.strih-snv.toml",
         // issue 1411: the new notebook's rig NIC is the 10 GbE Thunderbolt Aquantia (in-tree atlantic,
         // PCIe, no USB device), replacing the returned notebook's USB RTL8157 (r8152).
         "STRIH_NIC_DRIVER=atlantic",
@@ -362,9 +362,9 @@ fn malformed_fact_files_are_refused() {
             "STRIH_HOSTNAME",
         ),
         (
-            "intercom config not a repo-relative intercom/*.toml",
+            "intercom config not a release file name intercom.*.toml",
             vec![(
-                "STRIH_INTERCOM_CONFIG=intercom/intercom.strih-snv.toml",
+                "STRIH_INTERCOM_CONFIG=intercom.strih-snv.toml",
                 "STRIH_INTERCOM_CONFIG=/etc/intercom-hub/intercom.toml",
             )],
             "STRIH_INTERCOM_CONFIG",
@@ -676,10 +676,9 @@ fn setup_strih_takes_every_identity_value_from_the_facts() {
         "DS_ROLE=\"$(strih_lx_dantesync_role)\"",
         "DS_ARGS=\"$(strih_lx_dantesync_args)\"",
         "NDI_PEER=\"${STRIH_NDI_PEER:-$(strih_lx_ndi_runtime_peer)}\"",
-        // the file's existence is checked where it is installed, not at fact load (the deploy
-        // plan stages scripts/ + systemd/ only, so loading must not depend on intercom/).
-        "[ -f \"${HERE}/../$(strih_lx_intercom_config)\" ]",
-        "\"${HERE}/../$(strih_lx_intercom_config)\" /etc/intercom-hub/intercom.toml",
+        // the file's existence is checked in the release bundle, not at fact load
+        "[ -f \"${IH_BUNDLE}/$(strih_lx_intercom_config)\" ]",
+        "\"${IH_BUNDLE}/$(strih_lx_intercom_config)\" /etc/intercom-hub/intercom.toml",
         "strih_obs_box_facts_dropin_text > \"${USER_HOME}/.config/systemd/user/strih-obs.service.d/10-box-facts.conf\"",
         "\"${HERE}/verify-strih.sh\" --box \"$STRIH_FACT_BOX\"",
     ] {

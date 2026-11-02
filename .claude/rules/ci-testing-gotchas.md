@@ -2,7 +2,6 @@
 paths:
   - ".github/workflows/*.yml"
   - "tests/*.rs"
-  - "intercom/hub/tests/*.rs"
   - "tests/python/*.py"
   - "scripts/version-integrity-gate.sh"
   - "scripts/drift-guard.sh"
@@ -1145,14 +1144,14 @@ successful ci.yml run found for commit … after the poll budget`). So ANY red c
 one-line clippy lint in a brand-new TEST file — costs: the 20-min poll (holding the rig LEASE the
 whole time), a wasted E2E slot, and a full re-push cycle. Release PR 1348 lost three E2E attempts to
 exactly this: `trim_split_whitespace` (`tests/harness_qr_align_reinit_1349.rs`), then `useless_vec`
-(`intercom/hub/tests/mulaw_g711.rs`) — both in test files.
+(the hub's `tests/mulaw_g711.rs`) — both in test files.
 
 **Before pushing a head that will trigger the E2E, hand-audit every NEW/edited `.rs` test file for
 the clippy TEST lints CI denies** (`-D warnings` under `--all-targets`): `useless_vec` (`vec![…]`
 only borrowed/compared → array literal), `trim_split_whitespace` (`.trim().split_whitespace()`),
 `bool_assert_comparison` (`assert_eq!(x, true)` on a real `bool`), `needless_range_loop`,
 `manual_range_contains`, `len_zero`, `approx_constant`, `redundant_clone` — plus the first-compile
-list in `.claude/rules/strih-intercom.md`. A grep sweep takes 10 s; a missed lint takes an hour of
+list in the intercom repo's `.claude/rules/strih-intercom.md`. A grep sweep takes 10 s; a missed lint takes an hour of
 rig time. And do NOT push a docs-only follow-up while the E2E is running on the previous head — the
 push cancels it (the concurrency-group section above) and re-queues another 20-min poll if Lint is
 not yet green on the new head.

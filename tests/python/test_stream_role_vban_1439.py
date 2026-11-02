@@ -109,7 +109,7 @@ def test_the_three_vban_facts_and_the_input_name_sit_before_the_program_sender()
     # (tests/python/test_vban_leg_1439.py pins them).
     assert keys[i + 1:i + 5] == ["STRIH_PROGRAM_VBAN_STREAMS", "STRIH_PROGRAM_VBAN_PORT",
                                  "STRIH_PROGRAM_VBAN_RESERVE_MS", "STRIH_PROGRAM_AUDIO_INPUT"]
-    assert keys[i + 8] == "STRIH_PROGRAM_SENDER"
+    assert keys[i + 9] == "STRIH_PROGRAM_SENDER"
 
 
 @pytest.mark.parametrize("box", sorted(p.stem for p in BOXES.glob("*.env")))
@@ -675,8 +675,9 @@ def test_every_hub_dropin_is_written_in_step_13s_hub_branch_only():
         assert s.count(write) == 1, write
         assert gate < step13.index(write) < other, write
     assert "if obs_box_step_applies 13 >/dev/null; then" not in s
-    assert gate < step13.index('install -Dm644 "${HERE}/../systemd/intercom-hub.service"') \
-        < step13.index("strih_intercom_hub_binary_install") < other < step13.index("strih_intercom_hub_remove ||")
+    assert gate < step13.index("strih_intercom_hub_binary_install") \
+        < step13.index('install -Dm644 "${IH_BUNDLE}/intercom-hub.service"') < other \
+        < step13.index("strih_intercom_hub_remove ||")
 
 
 def test_setup_installs_the_vban_module_next_to_the_seeder():

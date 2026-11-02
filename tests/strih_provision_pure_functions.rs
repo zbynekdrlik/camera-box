@@ -2887,12 +2887,16 @@ fn bkshading_config_text_seeds_the_venue_cameras_and_is_valid_toml() {
         "must carry the cam2 camera: {cfg}"
     );
     assert!(
-        cfg.contains("address = \"register:cam2\""),
-        "issue 1431: cam2 is reached first through its relay's registration: {cfg}"
+        cfg.contains("address = \"register:cam5\""),
+        "issue 1431: cam5 is reached first through its relay's registration: {cfg}"
     );
     assert!(
-        cfg.contains("fallback_address = \"cam2.lan:8771\""),
-        "cam2 literal relay address as the fallback (host-independent of the service): {cfg}"
+        cfg.contains("fallback_address = \"cam5.lan:8771\""),
+        "cam5 literal relay address as the fallback (host-independent of the service): {cfg}"
+    );
+    assert!(
+        cfg.contains("address = \"register:cam2-shading\""),
+        "cam2's handheld SBC relay registers under its board name: {cfg}"
     );
     assert!(
         cfg.contains("ndi_preview = \"CAM2 (usb)\""),

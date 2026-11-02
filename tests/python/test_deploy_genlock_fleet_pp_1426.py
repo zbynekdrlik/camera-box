@@ -180,6 +180,10 @@ printf '{"genlock_build_sha":"%s"}\n' "$STUB_SHA"
 
 OBS_PHASE2 = r'''#!/usr/bin/env python3
 import json, os, sys
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from intercom_release_fake_1487 import fake_release_env  # noqa: E402
 with open(os.path.join(os.environ["STUB_DIR"], "calls.log"), "a") as f:
     f.write("obs_phase2 " + " ".join(sys.argv[1:]) + "\n")
 if sys.argv[1:2] == ["rig-busy-check"]:
@@ -208,6 +212,7 @@ def _execute(tmp_path, boxes, extra=None):
         "STRIH_LX_VERIFY_POLLS": "3", "STRIH_LX_VERIFY_POLL_SECS": "0", "STRIH_LX_VERIFY_SETTLE_SECS": "0",
         "STRIH_LX_OBS_PHASE2_DIR": str(obs_dir),
     }, home=str(home))
+    env.update(fake_release_env(tmp_path))
     env.update(extra or {})
     r = subprocess.run(["bash", str(FLEET), "--run-id", "R1", "--boxes", boxes], capture_output=True,
                        text=True, cwd=REPO, env=env, timeout=300)
@@ -334,7 +339,7 @@ def test_a_fact_file_that_does_not_parse_is_named_as_such_by_the_tree_check(tmp_
         (tmp_path / f).write_text("x")
     (tmp_path / "scripts/strih-boxes").mkdir(parents=True)
     (tmp_path / "scripts/strih-boxes/strih-pp.env").write_text(
-        "STRIH_HOSTNAME=strih-pp\nSTRIH_INTERCOM_CONFIG=intercom/x.toml\nBOGUS_KEY=1\n")
+        "STRIH_HOSTNAME=strih-pp\nSTRIH_INTERCOM_CONFIG=intercom.x.toml\nBOGUS_KEY=1\n")
     r = _sourced('rc=0; strih_lx_tree_check %s strih-pp || rc=$?; echo "rc=$rc"' % tmp_path)
     assert "rc=1" in r.stdout, r.stdout + r.stderr
     assert "strih-pp.env does not parse" in r.stderr, r.stderr

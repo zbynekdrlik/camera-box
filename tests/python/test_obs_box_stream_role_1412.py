@@ -8,7 +8,7 @@ Covers:
   * scripts/strih_scenes.py: the "program" class (genlock, the latency pin never written) and the
     manifest's program_audio_input;
   * the session-apps grader's row count for a keeper-only box;
-  * intercom/intercom.stream-pp.toml vs the hub load rules (the real loader: intercom/hub/tests/
+  * intercom.stream-pp.toml (the pinned copy) vs the hub load rules (the real loader: intercom repo hub/tests/
     deployed_matrix_pp_1412.rs at CI);
   * the setup-strih / verify-strih wiring.
 
@@ -381,7 +381,7 @@ def test_the_stream_encoder_grade_reads_the_written_profile(tmp_path, boxes):
 # --- the stream-pp hub matrix ------------------------------------------------------------------------------
 
 def test_the_stream_pp_matrix_satisfies_the_hub_load_rules():
-    m = tomllib.loads((REPO / "intercom" / "intercom.stream-pp.toml").read_text())
+    m = tomllib.loads((REPO / "tests" / "fixtures" / "intercom_pinned" / "intercom.stream-pp.toml").read_text())
     assert "janus" not in m and "video" not in m
     # The program mix is summed through the matrix points (source_streams only names the streams):
     # lv1 ch1/ch2 -> program_out ch1/ch2 at unity, nothing else (11.10.2026: no points = silence).

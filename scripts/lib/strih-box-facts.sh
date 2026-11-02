@@ -244,12 +244,11 @@ strih_box_validate() {
       || { echo "strih-box ${name}: STRIH_DANTESYNC_UPSTREAM '${f[STRIH_DANTESYNC_UPSTREAM]}' must be the NTP master host name / address (required for the client role)" >&2; bad=1; } ;;
     *) echo "strih-box ${name}: STRIH_DANTESYNC_ROLE '${f[STRIH_DANTESYNC_ROLE]}' must be server or client" >&2; bad=1 ;;
   esac
-  # Shape only (a repo-relative .toml under intercom/): the deploy plan stages scripts/ + systemd/ on
-  # the box WITHOUT intercom/, so its existence is checked where it is installed (setup-strih step 13),
-  # never here -- loading the facts must not refuse a box whose run never reaches that step.
+  # Shape only (a routing file's name in the pinned intercom release, issue 1487): its existence is
+  # checked where the bundle is, never here -- loading the facts must not need the bundle.
   v="${f[STRIH_INTERCOM_CONFIG]}"
-  if [[ ! "$v" =~ ^intercom/[A-Za-z0-9._-]+\.toml$ ]]; then
-    echo "strih-box ${name}: STRIH_INTERCOM_CONFIG '${v}' must be a repo-relative intercom/<file>.toml" >&2; bad=1
+  if [[ ! "$v" =~ ^intercom\.[A-Za-z0-9._-]+\.toml$ ]]; then
+    echo "strih-box ${name}: STRIH_INTERCOM_CONFIG '${v}' must be the file name intercom.<box>.toml in the pinned intercom release" >&2; bad=1
   fi
   [[ "${f[STRIH_NIC_DRIVER]}" =~ ^[a-z0-9_]+$ ]] \
     || { echo "strih-box ${name}: STRIH_NIC_DRIVER '${f[STRIH_NIC_DRIVER]}' is not a kernel driver name" >&2; bad=1; }
@@ -899,8 +898,8 @@ strih_lx_hdmi_output_backend() { strih_box_fact STRIH_HDMI_OUTPUT_BACKEND; }
 # STRIH_HDMI_OUTPUTS: auto | none | CONNECTOR:VIEW ..., issue 1424 part 2).
 strih_lx_hdmi_outputs() { strih_box_fact STRIH_HDMI_OUTPUTS; }
 
-# strih_lx_intercom_config -> the repo-relative intercom hub routing file (fact STRIH_INTERCOM_CONFIG),
-# installed as /etc/intercom-hub/intercom.toml.
+# strih_lx_intercom_config -> the intercom hub routing file's name in the pinned release bundle (fact
+# STRIH_INTERCOM_CONFIG), installed as /etc/intercom-hub/intercom.toml.
 strih_lx_intercom_config() { strih_box_fact STRIH_INTERCOM_CONFIG; }
 
 # strih_lx_nic_driver -> the kernel driver of the ONE rig NDI NIC (fact STRIH_NIC_DRIVER, the NIC

@@ -34,7 +34,7 @@ constants named here. Never present a computed number as measured.
 | HDMI | The HDMI audio clock of the strih-pp vestibule output (the GPU's HDA codec). |
 | BROWSER | A phone's WebRTC / Opus clock (Janus mixes on the box's own timer). |
 
-## The hub's crossings (`intercom/hub`, the mix runs on FLEET at 256 frames / 5.33 ms)
+## The hub's crossings (`hub/` in the intercom repo, the mix runs on FLEET at 256 frames / 5.33 ms)
 
 | Crossing | What does it | Status |
 |---|---|---|
