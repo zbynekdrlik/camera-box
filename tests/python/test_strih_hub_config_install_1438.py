@@ -101,6 +101,6 @@ def test_setup_strih_step_13_installs_the_routing_through_the_guard():
     assert len(s.splitlines()) <= 1000
     step13 = s[s.index('step 13 "'):s.index('step 14 "')]
     assert step13.count("strih_intercom_hub_config_install ") == 1
-    assert ('strih_intercom_hub_config_install "${HERE}/../$(strih_lx_intercom_config)" '
+    assert ('strih_intercom_hub_config_install "${IH_BUNDLE}/$(strih_lx_intercom_config)" '
             "/etc/intercom-hub/intercom.toml /usr/local/bin/intercom-hub") in step13
-    assert "install -Dm644 \"${HERE}/../$(strih_lx_intercom_config)\"" not in step13
+    assert "install -Dm644 \"${IH_BUNDLE}/$(strih_lx_intercom_config)\"" not in step13

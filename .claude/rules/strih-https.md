@@ -10,12 +10,11 @@ paths:
   - "scripts/lib/strih-interkom-public.sh"
   - "scripts/janus_turn_rest_cfg.py"
   - "tests/python/test_strih_interkom_public_1453.py"
-  - "intercom/hub/src/turn.rs"
-  - "intercom/hub/tests/turn_ice_1453.rs"
-  - "intercom/tests/e2e/ice.spec.js"
 ---
 
 # The strih box serves its OWN intercom + shading HTTPS front (issue 1399)
+
+The `hub/`, `web/` and `tests/e2e` paths below are in the intercom repo (issue 1487); camera-box keeps the provisioning side.
 
 Owner, 1.10.2026, during an outdoor production, when `interkom.newlevel.media` did not load at the
 venue: "MA TO BYT SAMOBEZIACE NA STRIH NB NEMA TO BYT ZAVISLE NA INOM PC AKO DEV1". The names were A
@@ -150,7 +149,7 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
     first intercom name) live on the Cloudflare side, so the box needs only the token. nginx is unchanged:
     the tunnel arrives at the same :443 site with the same SNI.
 - **The media: Cloudflare Realtime TURN.**
-  - The hub (`intercom/hub/src/turn.rs`) mints credentials from `/etc/intercom-hub/turn.toml`
+  - The hub (`hub/src/turn.rs`) mints credentials from `/etc/intercom-hub/turn.toml`
     (`key_id` + `key_api_token`, 0600 root): `GET /api/ice` for the PWA (ALWAYS 200: `turn` = on / off /
     error, an empty list without TURN, because Chromium logs every 4xx/5xx as a console error), `GET
     /api/turn-rest` for Janus (draft-uberti, turn/turns uris only; 404 with the reason without a key, 502
@@ -170,7 +169,7 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
     gives the package file back, and a hand-set `turn_rest_api` outside the block is a conflict (exit 2,
     the file untouched; libconfig would refuse a duplicate). A changed jcfg restarts a running Janus
     (step 14 restarts it on every run anyway).
-  - The PWA (`intercom/web/app.js` `fetchIceServers`) fetches `/api/ice` before `new Janus(...)`, bounded
+  - The PWA (`web/app.js` `fetchIceServers`) fetches `/api/ice` before `new Janus(...)`, bounded
     by 6 s (longer than the hub's 5 s mint bound, so a cold cache still yields the relay), and passes
     `iceServers` only for a non-empty `turn: "on"` list: janus.js reads `iceServers || default`, so an
     empty list would drop even its default STUN server. A hung `/api/ice` with the service worker in
@@ -232,12 +231,12 @@ the room to a host it names. The same plugin, with no `admin_key` configured, al
 `create` a room of its own with `allow_rtp_participants`, `rtp_forward` (behind the room secret),
 `play_file` and record to a path, and the box's Janus loads other plugins too.
 
-- **The relay (`intercom/hub/src/janus_relay.rs`, `GET /janus` on the hub).** nginx's `location =
+- **The relay (`hub/src/janus_relay.rs`, `GET /janus` on the hub).** nginx's `location =
   /janus` points at the hub (127.0.0.1:8790). The hub opens its own WebSocket to Janus first
   (`[janus].ws_url`, default `ws://127.0.0.1:8188/janus`, subprotocol `janus-protocol`, 5 s bound) and
   answers the phone's upgrade only then: a 101 means Janus is reachable, 502 = it is not, 503 = the hub
   has no Janus room. Janus's frames go to the phone unchanged.
-- **The allowlist (`intercom/hub/src/janus_ws_guard.rs`, pure).** A client text frame is forwarded as
+- **The allowlist (`hub/src/janus_ws_guard.rs`, pure).** A client text frame is forwarded as
   the SAME string only when it is what janus.js 1.1.2 + the page send: a janus request in `create
   attach message trickle keepalive detach destroy hangup info`; `attach` only to
   `janus.plugin.audiobridge`; a `message` whose body is `join` (keys `request room display muted`, the
@@ -248,7 +247,7 @@ the room to a host it names. The same plugin, with no `admin_key` configured, al
 - **Janus's WebSocket listens on loopback only** (`strih_janus_ws_jcfg_text`, `ws_ip = "127.0.0.1"`
   whatever it is passed), so a LAN client cannot go around the relay. The dev1 renderer's `/janus`
   points at `strih.lan:8790` too (the dev1 front is retired for these names).
-- **The contract between the page and the allowlist:** `intercom/tests/fixtures/janus-ws-pwa-frames.json`
+- **The contract between the page and the allowlist:** `tests/fixtures/janus-ws-pwa-frames.json`
   holds the raw text of one frame of every shape the page sends (captured from the phone suite; the
   keepalive / hangup / detach / info samples are built from janus.js's own request literals). The
   hub's `janus_relay_1453.rs` forwards each of them byte-identically through the real relay, and
@@ -268,14 +267,14 @@ the room to a host it names. The same plugin, with no `admin_key` configured, al
 - **The relay is capped:** at most `MAX_CONCURRENT_RELAYS` (64) at once; a phone over the cap gets 503
   before the hub opens anything towards Janus (the path is public, and each relay holds two sockets in
   the audio daemon). Frames are capped at 256 KiB (message and frame size).
-- **Tests:** `intercom/hub/tests/janus_ws_guard_1453.rs` (the pure policy), `janus_relay_1453.rs` (the
+- **Tests:** `hub/tests/janus_ws_guard_1453.rs` (the pure policy), `janus_relay_1453.rs` (the
   real router against a fake Janus WebSocket), the jcfg / site / item-45 rows in
   `tests/strih_provision_pure_functions.rs`, `tests/strih_box_facts_1361.rs` (golden),
   `tests/python/test_strih_https_1399.py`, `tests/python/test_shading_https_install_808.py`.
 
 Tests: `tests/python/test_strih_interkom_public_1453.py` (the fakes on PATH, the real python3 + sha256sum;
-a 12-mutant pass over the lib + the jcfg tool kills all), `intercom/hub/tests/turn_ice_1453.rs` (a fake
-Cloudflare that answers 403 without a User-Agent), `intercom/tests/e2e/ice.spec.js` (the page's
+a 12-mutant pass over the lib + the jcfg tool kills all), `hub/tests/turn_ice_1453.rs` (a fake
+Cloudflare that answers 403 without a User-Agent), `tests/e2e/ice.spec.js` (the page's
 RTCPeerConnection really gets the servers; off / garbage / a hung `/api/ice` join with the default).
 
 ## Tests

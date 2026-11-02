@@ -63,7 +63,7 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
 - **The facts** (all required): `STRIH_HOSTNAME` (= the file name = the fleet name),
   `STRIH_IP`, `STRIH_NDI_PREFIX` (MUST be the hostname upper-cased — DistroAV prepends the hostname
   to every output), `STRIH_DANTESYNC_ROLE` (`server` = NTP master, no upstream / `client` + a
-  non-empty `STRIH_DANTESYNC_UPSTREAM`), `STRIH_INTERCOM_CONFIG` (`intercom/<file>.toml`),
+  non-empty `STRIH_DANTESYNC_UPSTREAM`), `STRIH_INTERCOM_CONFIG` (`intercom.<box>.toml`, a file of the pinned release),
   `STRIH_NIC_DRIVER` (the rig-NIC selection rule; the IP match is the fallback, `STRIH_NIC_IFACE`
   stays the run-time override), `STRIH_NIC_OOT_DRIVER` / `STRIH_NIC_MIN_USB_MBPS` /
   `STRIH_NIC_MIN_LINK_MBPS` (issue 1391, the section below), `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION`,
@@ -129,7 +129,7 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION` from its environment). The NIC driver + target IP are
   substituted into the boot IRQ oneshot's `@STRIH_NIC_DRIVER@` / `@STRIH_TARGET_IP@` placeholders.
   The intercom file is only SHAPE-checked at load and checked for existence where step 13 installs it
-  — the dev1 deploy plan rsyncs `scripts/` + `systemd/` only (no `intercom/`), and a load that
+  — the dev1 deploy plan rsyncs `scripts/` + `systemd/` (the release bundle is staged separately), and a load that
   required the file would refuse the whole deploy before step 4.
 - **On-box artifact names are ROLE paths, not identity** (`/opt/camera-box/strih-seed.json`,
   the retired `strih-lx-projector.json` that setup step 6 now only removes (issue 1346),
@@ -185,7 +185,7 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
 - **strih-pp.env is decided** from the read-only recon (issue 1412 comment 6106146258) + the owner
   rulings: 10.77.8.202, NTP master, RTL8125 PCIe (`r8169`, `none`, `none`, 2500), vk-direct (RTX 3060
   only), cameras `1 4 6 7`, companion-pp 10.77.8.205, `RESOLUME-PP (SP-program)`, grandmaster
-  10.77.8.110, sampler `off`, the program-only `intercom/intercom.strih-pp.toml`. Only
+  10.77.8.110, sampler `off`, the program-only `intercom.strih-pp.toml`. Only
   `STRIH_NDI_RUNTIME_PEER` stays TODO_OWNER (the PP camboxes have no PP address yet); on site set it,
   or run with `STRIH_NDI_PEER=<ip>` after filling the fact. Disable the onboard RTL8168 in the BIOS
   (both NICs bind `r8169`), or pass `STRIH_NIC_IFACE`.
@@ -194,24 +194,18 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   `dantesync-version-gate.sh`, `--version` checked before install) and the role config
   (`server` = the canonical `ntp-master` shape with `ntp_server` 162.159.200.1, `client` = `video`),
   each ONLY when absent. strih-snv keeps its binary and config, so its date master is untouched.
-- **G6 the hub binary** (`scripts/lib/strih-ci-artifact.sh`, step 13): `strih_ci_artifact_fetch`
-  is the ONE CI-artifact fetch (step 16c uses it too; `STRIH_LX_HUB_SRC` / `STRIH_LX_BKSHADING_SRC`
-  pre-staged dirs win); `strih_intercom_hub_binary_install` installs `intercom-hub-linux-amd64` only
-  when `/usr/local/bin/intercom-hub` is absent (the running hub is upgraded by its own deploy).
-  The hub comes from a `main` run, and dev CI fills whole pages of the artifacts API, so a
-  branch-filtered fetch walks the pages (`per_page=100`, at most `STRIH_CI_ARTIFACT_MAX_PAGES` = 10,
-  stop on an empty page) in `_strih_ci_artifact_url`. A one-page read found no main hub on the new
-  strih notebook (11.10.2026, 254 artifacts, main on page 2+). An unfiltered fetch (bkshading) still
-  reads page 1 only. **Since issue 1467 the hub comes from the provisioning checkout's OWN commit**
-  (a SHA-filtered fetch, paged the same way; `main` only as a named fallback), see
-  `.claude/rules/strih-intercom.md` "The hub binary of the checkout's own commit".
+- **G6 the hub** is a pinned release since issue 1487 (`.claude/rules/intercom-pinned-release.md`).
+  `strih_ci_artifact_fetch` stays the ONE CI-artifact fetch, for bkshading (step 16c;
+  `STRIH_LX_BKSHADING_SRC` = a pre-staged dir). A branch- or SHA-filtered fetch walks the pages
+  (`per_page=100`, at most `STRIH_CI_ARTIFACT_MAX_PAGES` = 10, stop on an empty page) in
+  `_strih_ci_artifact_url`; an unfiltered fetch reads page 1 only.
 - **G7 + G11, the per-box step gate** (`scripts/lib/obs-box-role.sh` `obs_box_step_applies`): step
   11b (the xhci IRQ unit) runs only for a USB rig NIC (`STRIH_NIC_MIN_USB_MBPS != none`; a PCIe NIC
   has no xhci walk and the unit would fail every boot), step 16e only with
   `STRIH_PROGRAM_AUDIO_SAMPLER=on`. verify items 16 and 41 use the same gate. The gate is at install
   time on purpose: the rendered IRQ script is in the strih-snv golden. The stream role's rows follow below.
 - The three libs are sourced by `strih-provision.sh`, so setup-strih.sh stays under 1000 lines.
-- Tests: `tests/python/test_strih_pp_box_1412.py`, `intercom/hub/tests/deployed_matrix_pp_1412.rs`.
+- Tests: `tests/python/test_strih_pp_box_1412.py`, `hub/tests/deployed_matrix_pp_1412.rs`.
 
 ## The stream role: stream-pp is a Linux stream OBS box (issue 1412 slice B)
 
@@ -858,7 +852,7 @@ with an old inline block that ran its tail unconditionally.
   `echo "$PW" | sudo -S -p "" bash -c "nohup … &"`.
 - **verify-strih from a staged tree also needs `vendor/av-sync-dock/src`.** Item 41's
   `(program-audio-files)` row compares the installed sampler headers with the checkout's
-  `vendor/av-sync-dock/src/camera-box-{audio,marker-scan}.hpp`; a `scripts/ systemd/ intercom/`-only
+  `vendor/av-sync-dock/src/camera-box-{audio,marker-scan}.hpp`; a `scripts/ systemd/`-only
   stage reads them as `differs` (a false FAIL, 21.10.2026: the installed files matched the repo's
   sha256). Stage that dir too, or check the two hashes before believing the row.
 - **A few steps on a live box, without the whole run:** a small driver does `set -- --box <box>;
@@ -898,7 +892,7 @@ operator TALKBACK mic.** On Linux **PipeWire replaces VB-Matrix**: the intercom 
 writes the summed program mix to a `strih-program` null sink OBS captures via
 `strih-program.monitor` (the OBS input `ASIO zvuk`, now `pulse_input_capture`), and reads the
 MiniFuse capture as the operator talkback into the N-1 mix. Full design + the DynamicUser decision:
-`.claude/rules/strih-intercom.md` "M2 — the local PipeWire audio bridge".
+`.claude/rules/intercom-pinned-release.md` "M2 — the local PipeWire audio bridge".
 
 `setup-strih.sh` step 12 now **INSTALLS** the graph (no more fail-loud TODO / `STRIH_LX_AUDIO_WIRED`):
 the operator-session `strih-program` null sink + a WirePlumber rule pinning the MiniFuse to its
@@ -1291,8 +1285,8 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
   byte-identical to the release, no dev1 build artifact, plus camera-box's own `dkms.conf`
   (`realtek-r8152` / `2.21.4` / module `r8152` / `/updates/dkms` / `AUTOINSTALL=yes`, DKMS's default
   make command, so the Realtek Makefile's own rmmod+modprobe install target never runs) and a
-  `SHA256SUMS` over all seven. The genlock deploy archives this directory with `scripts/ systemd/
-  intercom/` (`scripts/lib/strih-snv-deploy.sh`), so setup-strih finds it on the box.
+  `SHA256SUMS` over all seven. The genlock deploy archives this directory with `scripts/ systemd/`
+  (`scripts/lib/strih-snv-deploy.sh`), so setup-strih finds it on the box.
 - **Box facts** (loader-validated): `STRIH_NIC_OOT_DRIVER` = `<package>-<version>` of a driver vendored
   under `vendor/`, or `none`; `STRIH_NIC_MIN_USB_MBPS` = the lowest USB device speed (Mb/s, `none` for a
   non-USB NIC); `STRIH_NIC_MIN_LINK_MBPS` = the lowest Ethernet link speed. The returned strih-snv

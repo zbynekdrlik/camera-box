@@ -106,12 +106,16 @@ strih_pipewire_purge_decision() {
   return 0
 }
 
-# _strih_pw_purge_toml -> the loaded box's hub routing file (the fact STRIH_INTERCOM_CONFIG, repo-relative).
+# _strih_pw_purge_toml -> the loaded box's hub routing file: the pinned release's (the fact
+# STRIH_INTERCOM_CONFIG, issue 1487) when the bundle is here, else the installed one (a verify run from a
+# checkout that never fetched the bundle).
 _strih_pw_purge_toml() {
-  local rel
+  local rel dir installed="${STRIH_PW_PURGE_INSTALLED_TOML:-/etc/intercom-hub/intercom.toml}"
   if [ -n "${STRIH_PW_PURGE_TOML:-}" ]; then printf '%s' "$STRIH_PW_PURGE_TOML"; return 0; fi
   rel="$(strih_lx_intercom_config 2>/dev/null)" || return 1
-  printf '%s/../../%s' "$(dirname "${BASH_SOURCE[0]}")" "$rel"
+  dir="$(strih_intercom_release_dir "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null)" || dir=""
+  if [ -n "$dir" ] && [ -f "${dir}/${rel}" ]; then printf '%s/%s' "$dir" "$rel"
+  else printf '%s' "$installed"; fi
 }
 
 # strih_pipewire_purge_why -> the decision line of the LOADED box (see strih_pipewire_purge_decision).

@@ -3,8 +3,7 @@
 //! The hub's systemd unit + routing TOML are installed by `setup-strih.sh`, which also STARTS a
 //! stopped hub on the strih role (issue 1418: the interkom runs on it since the M4 cut-over) and never
 //! restarts a running one. `verify-strih.sh` FAILs an inactive hub on the strih role and only reports
-//! it on the stream role, and the `intercom-hub` CI job builds/tests/uploads it. These
-//! tests pin that wiring textually (same `read + .contains` convention as
+//! it on the stream role. These tests pin that wiring textually (same `read + .contains` convention as
 //! `tests/strih_provision_pure_functions.rs`), so a silent removal, a restart or an ungated start
 //! surfaces on CI. Std-only — runs in the appliance `test` job (Tier-0 #557: CI is the first run).
 
@@ -113,7 +112,7 @@ fn setup_strih_installs_janus_enable_only() {
 
 #[test]
 fn systemd_unit_loads_the_room_secret_credential_and_keeps_dynamicuser() {
-    let unit = read("systemd/intercom-hub.service");
+    let unit = read("tests/fixtures/intercom_pinned/intercom-hub.service");
     // The production unit runs DynamicUser=yes (unchanged) and reads the root-owned 0600 room secret
     // through systemd's credential store — LoadCredential drops it 0400 owned by the dynamic user, so
     // the hub can read it without dropping the sandbox (issue 1345 M3 follow-up b).
@@ -133,7 +132,7 @@ fn systemd_unit_loads_the_room_secret_credential_and_keeps_dynamicuser() {
 /// forbids it.
 #[test]
 fn the_real_hub_unit_lets_the_hub_mix_thread_run_sched_fifo_10() {
-    let unit = read("systemd/intercom-hub.service");
+    let unit = read("tests/fixtures/intercom_pinned/intercom-hub.service");
     let service = unit
         .split("[Service]")
         .nth(1)
@@ -162,7 +161,7 @@ fn the_real_hub_unit_lets_the_hub_mix_thread_run_sched_fifo_10() {
 /// public tunnel) may lower or reset either.
 #[test]
 fn the_real_hub_unit_grants_the_memory_lock_and_no_dropin_takes_it_back() {
-    let unit = read("systemd/intercom-hub.service");
+    let unit = read("tests/fixtures/intercom_pinned/intercom-hub.service");
     let service = unit
         .split("[Service]")
         .nth(1)
@@ -250,35 +249,31 @@ fn verify_strih_grades_the_unit_by_role() {
     assert!(!item.contains("M4"), "no stale M4 wording: {item}");
 }
 
+/// Issue 1487: the hub is built, tested and released by the intercom repo.
 #[test]
-fn ci_has_the_intercom_hub_job_uploading_the_artifact() {
+fn ci_no_longer_builds_the_hub() {
     let ci = read(".github/workflows/ci.yml");
+    assert!(!ci.contains("intercom-hub"), "the hub leaves camera-box CI");
+    assert!(!ci.contains("intercom-web-e2e"), "the PWA E2E leaves too");
+}
+
+/// Issue 1487: `StateDirectory=` in the released unit keeps the hub's Dante state; systemd creates it
+/// owned by the unit's user, so the operator drop-in (DynamicUser=no + User=) must keep both keys.
+#[test]
+fn the_released_unit_keeps_its_state_directory_under_the_operator_dropin() {
+    let unit = read("tests/fixtures/intercom_pinned/intercom-hub.service");
+    assert!(unit.contains("StateDirectory=intercom-hub"));
+    assert!(read("scripts/lib/strih-provision.sh").contains("DynamicUser=no\nUser=${user}"));
+    let purge = read("scripts/lib/strih-pipewire-purge.sh");
     assert!(
-        ci.contains("intercom-hub:"),
-        "ci.yml must define the intercom-hub job"
-    );
-    assert!(
-        ci.contains("cargo test -p intercom-vban -p intercom-hub"),
-        "the intercom-hub job must test both members"
-    );
-    assert!(
-        ci.contains("cargo clippy -p intercom-vban -p intercom-hub --all-targets -- -D warnings"),
-        "the intercom-hub job must clippy -D warnings both members"
-    );
-    assert!(
-        ci.contains("intercom-hub-linux-amd64"),
-        "the intercom-hub job must upload the deployable binary artifact"
-    );
-    // The job must be in the notify-on-failure needs list so a red hub build pings.
-    assert!(
-        ci.contains("intercom-hub, build"),
-        "intercom-hub must be in the notify-on-failure needs list"
+        purge.contains("DynamicUser=no"),
+        "the no-PipeWire render too"
     );
 }
 
 #[test]
 fn systemd_unit_runs_the_binary_against_the_installed_toml() {
-    let unit = read("systemd/intercom-hub.service");
+    let unit = read("tests/fixtures/intercom_pinned/intercom-hub.service");
     assert!(
         unit.contains(
             "ExecStart=/usr/local/bin/intercom-hub --config /etc/intercom-hub/intercom.toml"

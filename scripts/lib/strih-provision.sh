@@ -69,7 +69,7 @@ if ! declare -F strih_cambox_log_sink_install >/dev/null; then
   . "$(dirname "${BASH_SOURCE[0]}")/strih-cambox-log-sink.sh"
 fi
 # issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2) and the ONE CI-artifact
-# fetch (step 13's intercom-hub binary, step 16c's bkshading service).
+# fetch (step 16c's bkshading service).
 if ! declare -F dantesync_install >/dev/null; then
   # shellcheck source=scripts/lib/dantesync-install.sh
   . "$(dirname "${BASH_SOURCE[0]}")/dantesync-install.sh"
@@ -98,6 +98,11 @@ if ! declare -F strih_user_home_dir >/dev/null; then
   # shellcheck source=scripts/lib/strih-user-home.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-user-home.sh"
 fi
+# issue 1487: the pinned intercom release (the bundle step 13 installs from).
+if ! declare -F strih_intercom_release_ensure >/dev/null; then
+  # shellcheck source=scripts/lib/strih-intercom-release.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-release.sh"
+fi
 # issue 1412: the intercom-hub unit per role (step 13) + verify item 16's crash-loop grade.
 if ! declare -F strih_intercom_hub_cred_dropin_apply >/dev/null; then
   # shellcheck source=scripts/lib/strih-intercom-hub-unit.sh
@@ -107,6 +112,11 @@ fi
 if ! declare -F strih_program_vban_grade >/dev/null; then
   # shellcheck source=scripts/lib/strih-program-vban.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-program-vban.sh"
+fi
+# issue 1485: the Dante variant of that leg (the fact STRIH_DANTE_DEVICES, sourced before it).
+if ! declare -F strih_dante_leg_declared >/dev/null; then
+  # shellcheck source=scripts/lib/strih-dante-leg.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-leg.sh"
 fi
 # issue 1439 (ROZHODNUTE 6360417876): the VBAN-only leg on a stream box's second NIC (setup step 13, item 9).
 if ! declare -F strih_vban_leg_install >/dev/null; then
@@ -1302,7 +1312,7 @@ EOF
 # strih_janus_ws_jcfg_text -> print the Janus WebSocket transport jcfg: ws BOUND to LOOPBACK
 # 127.0.0.1 :8188 (ws_ip), NO wss (TLS terminates on the box's nginx front), admin API off. Issue
 # 1453: the phones reach Janus ONLY through the intercom hub's /janus relay (nginx `location = /janus`
-# -> 127.0.0.1:8790, the frame allowlist in intercom/hub/src/janus_ws_guard.rs that refuses a
+# -> 127.0.0.1:8790, the frame allowlist in the intercom repo's hub/src/janus_ws_guard.rs that refuses a
 # plain-RTP join), so no client on the venue LAN or through the tunnel can talk to Janus directly.
 # The hub's own plain-RTP session uses the HTTP transport (127.0.0.1:8088). Any argument (the old
 # LAN IP) is ignored: the bind is never a box fact.

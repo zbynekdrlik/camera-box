@@ -2,7 +2,6 @@
 paths:
   - ".github/workflows/*.yml"
   - "tests/*.rs"
-  - "intercom/hub/tests/*.rs"
   - "tests/python/*.py"
   - "scripts/version-integrity-gate.sh"
   - "scripts/drift-guard.sh"
@@ -1145,14 +1144,14 @@ successful ci.yml run found for commit … after the poll budget`). So ANY red c
 one-line clippy lint in a brand-new TEST file — costs: the 20-min poll (holding the rig LEASE the
 whole time), a wasted E2E slot, and a full re-push cycle. Release PR 1348 lost three E2E attempts to
 exactly this: `trim_split_whitespace` (`tests/harness_qr_align_reinit_1349.rs`), then `useless_vec`
-(`intercom/hub/tests/mulaw_g711.rs`) — both in test files.
+(the hub's `tests/mulaw_g711.rs`) — both in test files.
 
 **Before pushing a head that will trigger the E2E, hand-audit every NEW/edited `.rs` test file for
 the clippy TEST lints CI denies** (`-D warnings` under `--all-targets`): `useless_vec` (`vec![…]`
 only borrowed/compared → array literal), `trim_split_whitespace` (`.trim().split_whitespace()`),
 `bool_assert_comparison` (`assert_eq!(x, true)` on a real `bool`), `needless_range_loop`,
 `manual_range_contains`, `len_zero`, `approx_constant`, `redundant_clone` — plus the first-compile
-list in `.claude/rules/strih-intercom.md`. A grep sweep takes 10 s; a missed lint takes an hour of
+list in the intercom repo's `.claude/rules/strih-intercom.md`. A grep sweep takes 10 s; a missed lint takes an hour of
 rig time. And do NOT push a docs-only follow-up while the E2E is running on the previous head — the
 push cancels it (the concurrency-group section above) and re-queues another 20-min poll if Lint is
 not yet green on the new head.
@@ -1887,3 +1886,17 @@ The CI lint `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` froze dev1 twi
 - **A comment line that starts with the word `shellcheck`** (`# shellcheck 0.10.0+ knows`,
   `#   shellcheck_pin_install DIR`) is parsed as a directive and fails SC1073 (an error). Reflow the
   comment so the word never starts it.
+
+## A new local in a lib can raise shellcheck warnings in ANOTHER file of the multi-file run (issue 1485)
+
+The CI lint lints every lib together, so variable names are shared across files. A new `local vban=...`
+made `STRIH_VBAN_LEG_PROFILE=vban-dante70` read as arithmetic (SC2100: `vban` minus `dante70`), and a new
+array `rx=()` clashed with a string `rx` in another lib (SC2178/SC2128). A single-file `shellcheck` run
+stays clean. Run the full pinned command (the issue-1395 section) after adding a variable to a lib, and
+rename the variable instead of disabling the warning.
+
+## Reading a pinned git dependency's other crates from a test: never `cargo metadata --offline` (issue 1487)
+
+`cargo metadata` resolves every target's packages, so it fails offline on one not in the local cache
+(`failed to download cc`). `tests/intercom_pin_1487.rs` takes the commit from Cargo.lock and reads
+`<cargo home>/git/checkouts/intercom-*/<first 7 of the commit>/`, which building the crate has created.

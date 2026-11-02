@@ -63,10 +63,10 @@ section intercom-toml
 if has strih_lx_intercom_config; then
   IC="$(strih_lx_intercom_config)"
 else
-  IC="intercom/intercom.strih-snv.toml"
+  IC="intercom.strih-snv.toml"
 fi
 # the installed /etc/intercom-hub/intercom.toml is a verbatim copy -- pin its content by sha256.
-sha256sum < "${ROOT}/${IC}" | cut -d' ' -f1
+sha256sum < "${ROOT}/tests/fixtures/intercom_pinned/${IC}" | cut -d' ' -f1
 section ndi-runtime-peer
 if has strih_lx_ndi_runtime_peer; then strih_lx_ndi_runtime_peer; else printf '10.77.9.61'; fi; echo
 section companion-host-conf

@@ -35,7 +35,6 @@ PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
 BOXES = SCRIPTS / "strih-boxes"
 HEADER = REPO / "vendor" / "obs-vban" / "src" / "vban-receive-timeline.h"
-XML = REPO / "intercom" / "tests" / "fixtures" / "vbmatrix-coconut-today.xml"
 VBAN_KIND = "net.nagater.obs-vban.source"
 
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
@@ -133,7 +132,7 @@ def test_strih_pp_receives_lv1s_strih_obs_on_6981_with_no_leg():
     assert (f["STRIH_PROGRAM_VBAN_STREAMS"], f["STRIH_PROGRAM_VBAN_PORT"]) == ("strih-obs", "6981")
     assert (f["STRIH_PROGRAM_VBAN_LEG"], f["STRIH_PROGRAM_VBAN_LEG_ADDR"], f["STRIH_PROGRAM_VBAN_SENDER"]) == (
         "none", "none", "none")
-    hub = tomllib.loads((REPO / f["STRIH_INTERCOM_CONFIG"]).read_text())
+    hub = tomllib.loads((REPO / "tests" / "fixtures" / "intercom_pinned" / f["STRIH_INTERCOM_CONFIG"]).read_text())
     assert hub["hub"]["vban_bind"].endswith(":6980")
 
 
@@ -300,20 +299,6 @@ def test_verify_item_9_follows_the_facts_not_the_role():
 
 # --- the hub forwards nothing into OBS ---------------------------------------------------------------------
 
-sys.path.insert(0, str(SCRIPTS))
-import vbmatrix_to_intercom_toml as conv  # noqa: E402
-
-
-def test_the_converter_emits_no_program_out():
-    data = tomllib.loads(conv.convert(XML.read_text()))
-    assert not any(p["role"] == "program_out" or p["name"] == "program_out" for p in data["participant"])
-    assert not any(pt["dst"] == "program_out" for pt in data["point"])
-    # the console still feeds the cutters' cans and the speakers (the intercom's own program references)
-    assert any(pt["src"] == "fohabl" and pt["dst"] == "cutters" for pt in data["point"])
-    assert any(pt["src"] == "fohabl" and pt["dst"] == "speakers" for pt in data["point"])
-    assert any(pt["src"] == "lv1" and pt["dst"] == "cutters" for pt in data["point"])
-
-
 # the strih-role boxes only: the stream role runs no intercom hub (setup step 13 moves one aside)
 STRIH_ROLE_BOXES = sorted(p.stem for p in BOXES.glob("*.env") if _facts(p.stem)["STRIH_ROLE"] == "strih")
 
@@ -325,7 +310,7 @@ def test_both_strih_boxes_are_checked():
 @pytest.mark.parametrize("box", STRIH_ROLE_BOXES)
 def test_a_box_that_takes_the_program_as_vban_has_no_hub_program_out(box):
     f = _facts(box)
-    toml = tomllib.loads((REPO / f["STRIH_INTERCOM_CONFIG"]).read_text())
+    toml = tomllib.loads((REPO / "tests" / "fixtures" / "intercom_pinned" / f["STRIH_INTERCOM_CONFIG"]).read_text())
     has_out = any(p["role"] == "program_out" for p in toml["participant"])
     if f["STRIH_PROGRAM_VBAN_STREAMS"] == "none":
         assert has_out, "%s: a hub-fed strih keeps its program_out until its console sends a stream" % box

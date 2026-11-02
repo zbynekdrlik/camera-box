@@ -223,7 +223,7 @@ CRED_DROPIN = "20-no-janus-credential.conf"
 
 def test_the_base_hub_unit_still_loads_the_janus_credential():
     """The strih role keeps the DynamicUser credential path (issue 1345); only the role drop-in resets it."""
-    unit = (REPO / "systemd" / "intercom-hub.service").read_text()
+    unit = (REPO / "tests" / "fixtures" / "intercom_pinned" / "intercom-hub.service").read_text()
     assert "LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret" in unit
 
 
