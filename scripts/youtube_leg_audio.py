@@ -36,6 +36,7 @@ LEVEL_DROP_DB = 10.0
 FOREIGN_DB = 20.0  # a quiet recording block whose VOD block is this much louder (and has signal): foreign sound
 AUDIO_LOAD_TIMEOUT_S = 900
 DETAIL_LIMIT = 20
+NCC_FLAT_FRACTION = 1e-10  # a window this little varied around its offset carries no signal
 
 
 def load_audio(path, start_s=None, dur_s=None):
@@ -75,8 +76,12 @@ def ncc_best(ref, seg):
     size = 1 << (n + m - 1).bit_length()
     c = np.fft.irfft(np.fft.rfft(seg, size) * np.conj(np.fft.rfft(ref, size)), size)[: n - m + 1]
     e = np.concatenate([[0.0], np.cumsum(seg * seg)])
-    den = nr * np.sqrt(np.maximum(e[m:] - e[:-m], 1e-20))
-    r = c / den
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    energy = e[m:] - e[:-m]
+    # each window's own variance: its offset is no signal (the ref has none, so c holds none either)
+    var = energy - (s[m:] - s[:-m]) ** 2 / m
+    flat = var <= NCC_FLAT_FRACTION * energy  # only an offset left, up to the rounding of the sums
+    r = np.where(flat, 0.0, c / (nr * np.sqrt(np.maximum(var, 1e-20))))
     k = int(np.argmax(r))
     return k, float(r[k])
 
