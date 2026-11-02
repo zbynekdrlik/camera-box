@@ -66,10 +66,10 @@ strih_dante_service_ports() {
 
 # strih_dante_in_ports DEVICES -> the nft set of the ports the devices receive on (pure).
 strih_dante_in_ports() {
-  local d rx=()
-  for d in $1; do rx+=("${d##*:}"); done
+  local d ranges=()
+  for d in $1; do ranges+=("${d##*:}"); done
   # shellcheck disable=SC2046,SC2086  # the lists split on purpose
-  _strih_dante_merged_set $(strih_dante_service_ports "$1") "${rx[@]}" \
+  _strih_dante_merged_set $(strih_dante_service_ports "$1") "${ranges[@]}" \
     "$STRIH_DANTE_MDNS_PORT" "$STRIH_DANTE_INFO_PORT" $STRIH_DANTE_GROUP_PORTS
 }
 

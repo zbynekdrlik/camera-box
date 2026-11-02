@@ -97,12 +97,12 @@ _strih_vban_leg_devices() { strih_lx_dante_devices 2>/dev/null || echo none; }
 
 # _strih_vban_leg_filter_words SENDER PORT -> what the leg's filter admits, for the setup + verify lines.
 _strih_vban_leg_filter_words() {
-  local vban="only ping (no sender declared yet)"
-  if [ "$1" != none ]; then vban="only ${1}'s VBAN to UDP ${2} + ping"; fi
+  local admits="only ping (no sender declared yet)"
+  if [ "$1" != none ]; then admits="only ${1}'s VBAN to UDP ${2} + ping"; fi
   if strih_dante_leg_declared; then
-    printf '%s + the Dante devices (%s), out echo replies + Dante from the leg address\n' "${vban#only }" "$(_strih_vban_leg_devices)"
+    printf '%s + the Dante devices (%s), out echo replies + Dante from the leg address\n' "${admits#only }" "$(_strih_vban_leg_devices)"
   else
-    printf '%s, out only echo replies\n' "$vban"
+    printf '%s, out only echo replies\n' "$admits"
   fi
 }
 
