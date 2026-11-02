@@ -128,8 +128,20 @@ def test_two_frames_in_the_closing_window_fail():
     assert links(run_box(log, start, stop, start_time=st, stop_time=et))[OUTPUT]["verdict"] == "FAIL"
 
 
-def test_a_frame_before_the_closing_window_still_fails():
+def test_the_stoprecord_frame_may_land_in_the_window_before_the_closing_one():
+    # E2E 41362630489: StopRecord 00:48:52.4, the frame's window line 00:48:53.7, the stop mark 00:48:54.3
     log, start, stop, st, et = recording(out={7: {"dropped_busy": 1, "not_taken": 1}})
+    assert links(run_box(log, start, stop, start_time=st, stop_time=et))[OUTPUT]["verdict"] == "PASS"
+
+
+def test_one_frame_in_each_of_the_last_two_windows_fails():
+    log, start, stop, st, et = recording(out={7: {"dropped_busy": 1, "not_taken": 1}},
+                                         closing_out={"dropped_busy": 1, "not_taken": 1})
+    assert links(run_box(log, start, stop, start_time=st, stop_time=et))[OUTPUT]["verdict"] == "FAIL"
+
+
+def test_a_frame_earlier_in_the_recording_still_fails():
+    log, start, stop, st, et = recording(out={6: {"dropped_busy": 1, "not_taken": 1}})
     assert links(run_box(log, start, stop, start_time=st, stop_time=et))[OUTPUT]["verdict"] == "FAIL"
 
 
