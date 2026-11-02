@@ -2,7 +2,7 @@
 
 Live 8.10.2026 05:53Z: `deploy-genlock-fleet.sh --boxes strih-snv` failed at setup-strih step 16e,
 `vendor/av-sync-dock/src/camera-box-audio.hpp not found under /tmp/genlock-stage-<sha>/repo`. The
-deploy archived only scripts/ systemd/ intercom/ vendor/realtek-r8152, while step 16e installs the
+deploy archived only scripts/ systemd/ vendor/realtek-r8152, while step 16e installs the
 program-audio sampler from `STRIH_PROGRAM_AUDIO_FILES`, which names two vendored dock headers (the
 decoder shim's sources). These tests pin that the staged tree carries every file of that list, and
 that the tree check refuses a tree without them before any box is touched.
@@ -48,7 +48,7 @@ def test_tree_paths_cover_every_program_audio_file_1404():
 
 def test_tree_paths_keep_the_existing_dirs_1404():
     roots = _tree_paths()
-    for d in ("scripts", "systemd", "intercom", "vendor/realtek-r8152"):
+    for d in ("scripts", "systemd", "vendor/realtek-r8152"):
         assert d in roots, roots
 
 
@@ -66,7 +66,7 @@ def test_archiving_the_tree_paths_yields_the_dock_headers_1404():
 def test_tree_check_refuses_a_tree_without_the_sampler_files_1404(tmp_path):
     tree = tmp_path / "repo"
     tar_bytes = subprocess.run(
-        ["git", "-C", str(ROOT), "archive", "--format=tar", "HEAD", "scripts", "systemd", "intercom"],
+        ["git", "-C", str(ROOT), "archive", "--format=tar", "HEAD", "scripts", "systemd"],
         capture_output=True, check=True,
     ).stdout
     tarfile.open(fileobj=io.BytesIO(tar_bytes)).extractall(tree)

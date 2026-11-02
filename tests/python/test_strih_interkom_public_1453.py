@@ -4,7 +4,7 @@ DATA, served from the strih box itself.
 Owner 18.10.2026: the cameramen on mobile data could not reach `interkom-pp.newlevel.media` (a private
 venue address), and the answer was "2" = reachable from mobile data, straight from the strih notebook,
 no dev1. Pinned here (slices 1 + 2, the box side; the hub's TURN endpoints are pinned in
-intercom/hub/tests/turn_ice_1453.rs, the PWA in intercom/tests/e2e/ice.spec.js):
+hub/tests/turn_ice_1453.rs and the PWA's tests/e2e/ice.spec.js in the intercom repo):
 
   * the box fact STRIH_HTTPS_PUBLIC (yes on strih-snv + strih-pp, no on the stream role; `yes` needs an
     intercom site);
@@ -42,8 +42,6 @@ SETUP = SCRIPTS / "setup-strih.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
 BOXES = SCRIPTS / "strih-boxes"
 TOOL = SCRIPTS / "janus_turn_rest_cfg.py"
-HUB_TURN = REPO / "intercom" / "hub" / "src" / "turn.rs"
-HUB_HTTP = REPO / "intercom" / "hub" / "src" / "http.rs"
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_BOXES_DIR", "OBS_FLEET",
          "CLOUDFLARE_TUNNEL_TOKEN")
 FAKE_TOKEN = "fake-tunnel-token-of-the-1453-test"
@@ -643,11 +641,8 @@ def test_the_provision_lib_sources_the_public_lib():
     assert re.search(r'(?m)^  \. "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)/strih-interkom-public\.sh"$', text)
 
 
-def test_the_hub_reads_the_same_credential_name_path_and_route():
-    turn = HUB_TURN.read_text()
-    assert 'pub const TURN_CONFIG_CRED: &str = "turn.toml";' in turn
-    assert 'pub const TURN_CONFIG_DEFAULT: &str = "/etc/intercom-hub/turn.toml";' in turn
-    assert '.route("/api/turn-rest", get(api_turn_rest))' in HUB_HTTP.read_text()
+def test_our_side_of_the_turn_credential_contract():
+    """The hub's side (its constants + route) is read at the pinned tag by tests/intercom_pin_1487.rs."""
     r = _bash('printf "%s|%s|%s" "$STRIH_PUBLIC_TURN_CRED" "$(strih_public_turn_file)" "$(strih_public_turn_rest_url)"')
     assert r.stdout == "turn.toml|/etc/intercom-hub/turn.toml|%s" % TURN_REST, r.stdout + r.stderr
 

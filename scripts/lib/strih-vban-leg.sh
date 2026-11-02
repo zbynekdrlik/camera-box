@@ -51,6 +51,10 @@
 # strih_vban_leg_grade, read-only (never the link), through the caller's ok / bad / note (each rc 0).
 # Run verify as root (nft).
 #
+# Issue 1485: a box with STRIH_DANTE_DEVICES gets the Dante variant of parts 1-3 (strih-dante-leg.sh): the
+# real /24 with ipv4.route-table, the devices' ports through the filter, a loose rp_filter. It applies by
+# `connection modify` + `device reapply` like every other property: no VLAN create, no link change.
+#
 # Seams (tests/python/test_vban_leg_1439.py): STRIH_VBAN_LEG_SYSFS (/sys), STRIH_VBAN_LEG_PROC_SYS
 # (/proc/sys), STRIH_VBAN_LEG_NFT_FILE, STRIH_VBAN_LEG_UNIT_FILE, STRIH_VBAN_LEG_SYSCTL_FILE,
 # STRIH_VBAN_LEG_WAIT_S (the counter window, 3 s), STRIH_VBAN_LEG_LINK_WAIT_S (30 s) +
@@ -84,6 +88,23 @@ _strih_vban_leg_sender() {
 # _strih_vban_leg_dport PORTS -> the nft dport match: one port as is, several as an anonymous set
 # (`{ 6980, 6981 }`, the form `nft list` prints back).
 _strih_vban_leg_dport() { case "$1" in *,*) printf '{ %s }' "${1//,/, }" ;; *) printf '%s' "$1" ;; esac; }
+
+# _strih_vban_leg_plen -> the leg address's prefix length: 24 with Dante devices declared, else 32.
+_strih_vban_leg_plen() { if strih_dante_leg_declared; then echo 24; else echo 32; fi; }
+
+# _strih_vban_leg_devices -> the box fact STRIH_DANTE_DEVICES (`none` when unreadable).
+_strih_vban_leg_devices() { strih_lx_dante_devices 2>/dev/null || echo none; }
+
+# _strih_vban_leg_filter_words SENDER PORT -> what the leg's filter admits, for the setup + verify lines.
+_strih_vban_leg_filter_words() {
+  local admits="only ping (no sender declared yet)"
+  if [ "$1" != none ]; then admits="only ${1}'s VBAN to UDP ${2} + ping"; fi
+  if strih_dante_leg_declared; then
+    printf '%s + the Dante devices (%s), out echo replies + Dante from the leg address\n' "${admits#only }" "$(_strih_vban_leg_devices)"
+  else
+    printf '%s, out only echo replies\n' "$admits"
+  fi
+}
 
 # strih_vban_leg_kind -> mac | vlan | none (the loaded box's STRIH_PROGRAM_VBAN_LEG).
 strih_vban_leg_kind() {
@@ -140,12 +161,19 @@ strih_vban_leg_resolve() {
   esac
 }
 
-# strih_vban_leg_nft_text IF SENDER PORT -> the ruleset file (nft -f), see the header; SENDER `none` = only
-# ping. Its rule text is exactly what nft 1.0.9 lists back (pinned against a netns render and the live
-# strih-snv table by the pytest).
+# strih_vban_leg_nft_text IF SENDER PORT [ADDR DEVICES] -> the ruleset file (nft -f), see the header; SENDER
+# `none` = only ping; ADDR + DEVICES (STRIH_DANTE_DEVICES) add the Dante rules (strih-dante-leg.sh). Its rule
+# text is exactly what nft 1.0.9 lists back (pinned against a netns render and the live strih-snv table by
+# the pytest).
 strih_vban_leg_nft_text() {
   local ifc="${1:?interface required}" sender="${2:?sender required}" port="${3:?port required}"
+  local addr="${4:-}" dev="${5:-none}" dante_in="" dante_out="" net
   local vin="" voff="" what="only echo requests (no VBAN sender declared yet)"
+  if [ "$dev" != none ]; then
+    net="$(strih_vban_leg_net "$addr")"
+    dante_in="$(strih_dante_nft_input "$ifc" "$net" "$dev")"$'\n'
+    dante_out="$(strih_dante_nft_output "$ifc" "$addr" "$net")"$'\n'
+  fi
   if [ "$sender" != none ]; then
     vin="        iifname \"${ifc}\" ip saddr ${sender} udp dport $(_strih_vban_leg_dport "$port") counter accept"$'\n'
     voff="        iifname != \"${ifc}\" iifname != \"lo\" ip saddr ${sender} udp dport $(_strih_vban_leg_dport "$port") counter"$'\n'
@@ -162,14 +190,16 @@ strih_vban_leg_nft_text() {
     "    chain input {" \
     "        type filter hook input priority filter; policy accept;"
   printf '%s' "$vin"
-  printf '%s\n' "        iifname \"${ifc}\" icmp type echo-request counter accept" \
-    "        iifname \"${ifc}\" counter drop"
+  printf '%s\n' "        iifname \"${ifc}\" icmp type echo-request counter accept"
+  printf '%s' "$dante_in"
+  printf '%s\n' "        iifname \"${ifc}\" counter drop"
   printf '%s' "$voff"
   printf '%s\n' "    }" \
     "    chain output {" \
     "        type filter hook output priority filter; policy accept;" \
-    "        oifname \"${ifc}\" icmp type echo-reply counter accept" \
-    "        oifname \"${ifc}\" counter drop" \
+    "        oifname \"${ifc}\" icmp type echo-reply counter accept"
+  printf '%s' "$dante_out"
+  printf '%s\n' "        oifname \"${ifc}\" counter drop" \
     "    }" \
     "}"
 }
@@ -181,7 +211,7 @@ strih_vban_leg_nft_normalize() {
     -e 's/counter packets [0123456789]+ bytes [0123456789]+/counter/'
 }
 
-# strih_vban_leg_nft_expected IF SENDER PORT -> what `nft list table inet vban_dante70` must read,
+# strih_vban_leg_nft_expected IF SENDER PORT [ADDR DEVICES] -> what `nft list table inet vban_dante70` must read,
 # normalized: the ruleset file's table block (one source for both).
 strih_vban_leg_nft_expected() {
   strih_vban_leg_nft_text "$@" | sed -n '/^table .* {$/,$p' | strih_vban_leg_nft_normalize
@@ -205,29 +235,38 @@ WantedBy=multi-user.target
 EOF
 }
 
-# strih_vban_leg_sysctl_text IF -> the sysctl.d drop-in (slash form: a VLAN name carries a dot).
+# strih_vban_leg_sysctl_text IF [DANTE] -> the sysctl.d drop-in (slash form: a VLAN name carries a dot).
+# DANTE (yes) adds a loose rp_filter: an inbound multicast's reverse lookup has no `from <addr>` match, so
+# it resolves through the rig NIC and a strict filter would drop mDNS and the Dante groups (issue 1485).
 strih_vban_leg_sysctl_text() {
   local ifc="${1:?interface required}"
   printf '# issue 1439: the VBAN-only leg %s answers ARP only for its own address, from it\n' "$ifc"
   printf 'net/ipv4/conf/%s/arp_ignore = 1\nnet/ipv4/conf/%s/arp_announce = 2\n' "$ifc" "$ifc"
+  if [ "${2:-}" = yes ]; then printf 'net/ipv4/conf/%s/rp_filter = 2\n' "$ifc"; fi
 }
 
 # strih_vban_leg_nm_props IF ADDR [PARENT VLAN_ID] -> `property<TAB>value` lines: the profile, as
-# `nmcli -g` reads it back (the vlan kind adds vlan.parent + vlan.id after the interface name).
+# `nmcli -g` reads it back (the vlan kind adds vlan.parent + vlan.id after the interface name). With Dante
+# devices the address is the real /24 and ipv4.route-table holds its connected route out of main, so the
+# explicit route goes (strih-dante-leg.sh).
 strih_vban_leg_nm_props() {
   local ifc="${1:?interface required}" addr="${2:?address required}" parent="${3:--}" id="${4:--}"
+  local plen routes
+  plen="$(_strih_vban_leg_plen)"
+  routes="$(strih_vban_leg_net "$addr") table=${STRIH_VBAN_LEG_ROUTE_TABLE}"
   printf '%s\t%s\n' connection.id "$STRIH_VBAN_LEG_PROFILE" connection.interface-name "$ifc"
   if [ "$parent" != - ]; then printf '%s\t%s\n' vlan.parent "$parent" vlan.id "$id"; fi
+  if [ "$plen" = 24 ]; then routes=""; printf '%s\t%s\n' ipv4.route-table "$STRIH_VBAN_LEG_ROUTE_TABLE"; fi
   printf '%s\t%s\n' \
     connection.autoconnect yes \
     ipv4.method manual \
-    ipv4.addresses "${addr}/32" \
+    ipv4.addresses "${addr}/${plen}" \
     ipv4.gateway "" \
     ipv4.never-default yes \
     ipv4.ignore-auto-routes yes \
     ipv4.ignore-auto-dns yes \
     ipv4.dns "" \
-    ipv4.routes "$(strih_vban_leg_net "$addr") table=${STRIH_VBAN_LEG_ROUTE_TABLE}" \
+    ipv4.routes "$routes" \
     ipv4.routing-rules "priority ${STRIH_VBAN_LEG_RULE_PRIORITY} from ${addr} table ${STRIH_VBAN_LEG_ROUTE_TABLE}" \
     ipv6.method disabled
 }
@@ -296,15 +335,16 @@ _strih_vban_leg_put() {
   echo written
 }
 
-# _strih_vban_leg_filter_apply IF SENDER PORT -> the ruleset file, the oneshot (enabled), the live table.
+# _strih_vban_leg_filter_apply IF SENDER PORT ADDR -> the ruleset file, the oneshot (enabled), the live table.
 _strih_vban_leg_filter_apply() {
-  local ifc="$1" sender="$2" port="$3" nf uf w1 w2 live want
+  local ifc="$1" sender="$2" port="$3" addr="$4" nf uf w1 w2 live want dev
+  dev="$(_strih_vban_leg_devices)"
   nf="$(_strih_vban_leg_nft_file)"; uf="$(_strih_vban_leg_unit_file)"
   if ! command -v nft >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nftables \
       || { echo "strih-vban-leg: nft is missing and nftables could not be installed" >&2; return 1; }
   fi
-  w1="$(_strih_vban_leg_put "$nf" 0644 "$(strih_vban_leg_nft_text "$ifc" "$sender" "$port")")" \
+  w1="$(_strih_vban_leg_put "$nf" 0644 "$(strih_vban_leg_nft_text "$ifc" "$sender" "$port" "$addr" "$dev")")" \
     || { echo "strih-vban-leg: could not write ${nf}" >&2; return 1; }
   w2="$(_strih_vban_leg_put "$uf" 0644 "$(strih_vban_leg_unit_text "$nf")")" \
     || { echo "strih-vban-leg: could not write ${uf}" >&2; return 1; }
@@ -315,7 +355,7 @@ _strih_vban_leg_filter_apply() {
   if ! systemctl is-enabled -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
     systemctl enable "$STRIH_VBAN_LEG_UNIT" || { echo "strih-vban-leg: could not enable ${STRIH_VBAN_LEG_UNIT}" >&2; return 1; }
   fi
-  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port")"
+  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$dev")"
   live="$(nft list table inet "$STRIH_VBAN_LEG_NFT_TABLE" 2>/dev/null | strih_vban_leg_nft_normalize || true)"
   if [ "$w1" = written ] || [ "$w2" = written ] || [ "$live" != "$want" ] \
      || ! systemctl is-active -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
@@ -332,9 +372,10 @@ _strih_vban_leg_filter_apply() {
 
 # _strih_vban_leg_sysctl_apply IF -> the drop-in, applied (when the interface exists), read back.
 _strih_vban_leg_sysctl_apply() {
-  local ifc="$1" sf w d
+  local ifc="$1" sf w d dante=no
   sf="$(_strih_vban_leg_sysctl_file)"
-  w="$(_strih_vban_leg_put "$sf" 0644 "$(strih_vban_leg_sysctl_text "$ifc")")" \
+  if strih_dante_leg_declared; then dante=yes; fi
+  w="$(_strih_vban_leg_put "$sf" 0644 "$(strih_vban_leg_sysctl_text "$ifc" "$dante")")" \
     || { echo "strih-vban-leg: could not write ${sf}" >&2; return 1; }
   d="${STRIH_VBAN_LEG_PROC_SYS:-/proc/sys}/net/ipv4/conf/${ifc}"
   if [ ! -e "$(_strih_vban_leg_sysfs)/class/net/${ifc}" ]; then
@@ -345,6 +386,9 @@ _strih_vban_leg_sysctl_apply() {
   if [ "$(cat "${d}/arp_ignore" 2>/dev/null)" != 1 ] || [ "$(cat "${d}/arp_announce" 2>/dev/null)" != 2 ]; then
     echo "strih-vban-leg: ${ifc} arp_ignore / arp_announce do not read back 1 / 2 after sysctl -p ${sf}" >&2; return 1
   fi
+  if [ "$dante" = yes ] && [ "$(cat "${d}/rp_filter" 2>/dev/null)" != 2 ]; then
+    echo "strih-vban-leg: ${ifc} rp_filter does not read back 2 after sysctl -p ${sf}" >&2; return 1
+  fi
   echo "  ${sf}: ${w}; ${ifc} arp_ignore=1 arp_announce=2"
 }
 
@@ -352,14 +396,14 @@ _strih_vban_leg_sysctl_apply() {
 # there is one, rc 1 when the leg is right): the addresses, a default route or a main-table route through
 # it, the policy rule, the table-70 route.
 _strih_vban_leg_live_problems() {
-  local ifc="$1" addr="$2" got net t n=0 line
-  net="$(strih_vban_leg_net "$addr")"
+  local ifc="$1" addr="$2" got net t n=0 line plen
+  net="$(strih_vban_leg_net "$addr")"; plen="$(_strih_vban_leg_plen)"
   got=""
   while read -r line; do
     t="${line#*inet }"; [ "$t" != "$line" ] || continue
     got="${got}${got:+ }${t%% *}"
   done < <(ip -4 -o addr show dev "$ifc" 2>/dev/null || true)
-  if [ "$got" != "${addr}/32" ]; then echo "the leg ${ifc} carries '${got:-no address}', not exactly ${addr}/32"; n=1; fi
+  if [ "$got" != "${addr}/${plen}" ]; then echo "the leg ${ifc} carries '${got:-no address}', not exactly ${addr}/${plen}"; n=1; fi
   # every read is captured first and grepped from a here-string: a grep -q on a pipe can SIGPIPE its
   # producer under the caller's pipefail and read as "no match"
   t="$(ip -4 route show default 2>/dev/null || true)"
@@ -545,7 +589,7 @@ _strih_vban_leg_nm_apply() {
     echo "strih-vban-leg: ${ifc} after applying ${STRIH_VBAN_LEG_PROFILE}: $(tr '\n' ';' <<<"$diff")" >&2
     return 1
   fi
-  echo "  ${ifc}: ${addr}/32, no route through it but the ping-reply rule ${STRIH_VBAN_LEG_RULE_PRIORITY} -> table ${STRIH_VBAN_LEG_ROUTE_TABLE}"
+  echo "  ${ifc}: ${addr}/$(_strih_vban_leg_plen), no route through it but the rule ${STRIH_VBAN_LEG_RULE_PRIORITY} -> table ${STRIH_VBAN_LEG_ROUTE_TABLE}"
 }
 
 # strih_vban_leg_install -> setup-strih step 13 (every role). rc 0 (also a SKIP without a leg), rc 1 + stderr
@@ -575,8 +619,8 @@ strih_vban_leg_install() {
     return 1
   fi
   read -r ifc parent id <<<"${res##*$'\n'}"
-  echo "  the VBAN-only leg ${leg}: ${ifc} -> ${addr}/32, $([ "$sender" = none ] && echo 'only ping (no sender declared yet)' || echo "only ${sender}'s VBAN to UDP ${port} + ping")"
-  _strih_vban_leg_filter_apply "$ifc" "$sender" "$port" || return 1
+  echo "  the leg ${leg}: ${ifc} -> ${addr}/$(_strih_vban_leg_plen), $(_strih_vban_leg_filter_words "$sender" "$port")"
+  _strih_vban_leg_filter_apply "$ifc" "$sender" "$port" "$addr" || return 1
   _strih_vban_leg_sysctl_apply "$ifc" || return 1
   _strih_vban_leg_nm_apply "$ifc" "$addr" "$mac" "$parent" "$id" || return 1
   # a VLAN created just now did not exist at the sysctl step above (udev applies the drop-in too)
@@ -638,15 +682,15 @@ strih_vban_leg_grade() {
       if [ -n "$diff" ] || [ -n "$others" ]; then
         bad "(vban-leg) profile ${STRIH_VBAN_LEG_PROFILE}: $(tr '\n' ';' <<<"$diff")${others:+ other profiles on ${ifc}: ${others}} -- re-run setup-strih.sh step 13"
       else
-        ok "(vban-leg) profile ${STRIH_VBAN_LEG_PROFILE} for ${ifc}: ${addr}/32, no gateway, never-default, the ping-reply route in table ${STRIH_VBAN_LEG_ROUTE_TABLE}"
+        ok "(vban-leg) profile ${STRIH_VBAN_LEG_PROFILE} for ${ifc}: ${addr}/$(_strih_vban_leg_plen), no gateway, never-default, its route in table ${STRIH_VBAN_LEG_ROUTE_TABLE}"
       fi
     fi
   fi
-  # the kernel's view: the /32, no route through the leg but the policy one
+  # the kernel's view: the address, no route through the leg but the policy one
   if p="$(_strih_vban_leg_live_problems "$ifc" "$addr")"; then
     bad "(vban-leg) routes: $(tr '\n' ';' <<<"$p") -- only the leg's own traffic may use it (re-run setup-strih.sh step 13)"
   else
-    ok "(vban-leg) routes: ${ifc} = ${addr}/32 only, no default or main-table route through it, rule ${STRIH_VBAN_LEG_RULE_PRIORITY} -> table ${STRIH_VBAN_LEG_ROUTE_TABLE}"
+    ok "(vban-leg) routes: ${ifc} = ${addr}/$(_strih_vban_leg_plen) only, no default or main-table route through it, rule ${STRIH_VBAN_LEG_RULE_PRIORITY} -> table ${STRIH_VBAN_LEG_ROUTE_TABLE}"
   fi
   # the ARP sysctls
   d="${STRIH_VBAN_LEG_PROC_SYS:-/proc/sys}/net/ipv4/conf/${ifc}"
@@ -656,18 +700,24 @@ strih_vban_leg_grade() {
   else
     bad "(vban-leg) arp: ${ifc} arp_ignore=${ai} arp_announce=${aa}, wants 1 / 2 ($(_strih_vban_leg_sysctl_file), re-run setup-strih.sh step 13)"
   fi
+  if strih_dante_leg_declared; then
+    ai="$(cat "${d}/rp_filter" 2>/dev/null || echo '?')"
+    if [ -z "$(_strih_dante_avahi_uid)" ]; then note "(vban-leg) dante: no avahi user, so no avahi drop in the filter"; fi
+    if [ "$ai" = 2 ]; then ok "(vban-leg) dante: ${ifc} rp_filter=2, the devices' ports through the filter below"
+    else bad "(vban-leg) dante: ${ifc} rp_filter=${ai}, wants 2: a strict filter drops mDNS and the Dante groups (re-run setup-strih.sh step 13)"; fi
+  fi
   # the filter: the unit, the live table, then the two counters over the window
   if ! l1="$(nft list table inet "$STRIH_VBAN_LEG_NFT_TABLE" 2>/dev/null)"; then
     bad "(vban-leg) filter: cannot read table inet ${STRIH_VBAN_LEG_NFT_TABLE} (missing, or verify-strih not run as root) -- ${STRIH_VBAN_LEG_UNIT} loads it"
     return 0
   fi
-  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port")"
+  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$(_strih_vban_leg_devices)")"
   if [ "$(printf '%s\n' "$l1" | strih_vban_leg_nft_normalize)" != "$want" ] \
      || [ "$(systemctl is-enabled "$STRIH_VBAN_LEG_UNIT" 2>/dev/null || true)" != enabled ] \
      || ! systemctl is-active -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
     bad "(vban-leg) filter: table inet ${STRIH_VBAN_LEG_NFT_TABLE} is not $(_strih_vban_leg_nft_file) live, or ${STRIH_VBAN_LEG_UNIT} is not enabled + active (a reboot would leave the leg open) -- re-run setup-strih.sh step 13"
   else
-    ok "(vban-leg) filter: ${STRIH_VBAN_LEG_UNIT} enabled + active, table inet ${STRIH_VBAN_LEG_NFT_TABLE} = $([ "$sender" = none ] && echo 'in only ping' || echo "in only ${sender}'s VBAN to UDP ${port} + ping"), out only echo replies"
+    ok "(vban-leg) filter: ${STRIH_VBAN_LEG_UNIT} enabled + active, table inet ${STRIH_VBAN_LEG_NFT_TABLE} = $(_strih_vban_leg_filter_words "$sender" "$port")"
   fi
   if [ "$sender" = none ]; then
     note "(vban-leg) vban: no VBAN sender declared yet (STRIH_PROGRAM_VBAN_SENDER=none): the leg passes only ping"

@@ -190,6 +190,11 @@ elif a == ["-4", "rule", "show"]:
     out("32766:\tfrom all lookup main\n32767:\tfrom all lookup default\n")
 elif a[:5] == ["-4", "route", "show", "table", "70"]:
     for d, pr in s["applied"].items():
+        # ipv4.route-table: NetworkManager puts the connected route of an address in that table
+        if pr.get("ipv4.route-table") == "70":
+            for x in addrs(d):
+                ip, plen = x.split("/")
+                out("%s.0/%s dev %s proto kernel scope link src %s metric 400 \n" % (ip.rsplit(".", 1)[0], plen, d, ip))
         for r in [r.strip() for r in pr.get("ipv4.routes", "").split(",") if r.strip()]:
             net, tbl = r.split()
             if tbl == "table=70":

@@ -591,97 +591,6 @@ jobs:
           if-no-files-found: error
           path: target/release/bkshading.exe
 
-  intercom-hub:
-    name: intercom-hub (issue 1345)
-    # The strih-snv intercom hub + shared VBAN codec are SEPARATE workspace members
-    # (intercom/vban, intercom/hub). The appliance jobs above run cargo at the ROOT WITHOUT
-    # --workspace, so they never build/test the hub (they DO compile intercom-vban as a path
-    # dep, but its tests only run here); THIS job is the members' first clippy + test + build.
-    # tokio/axum/toml + the bundled libopus (built with cmake) — no libv4l/libasound needed.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: intercom-hub
-
-      # The phones leg's Opus codec (issue 1345): the `opus` crate's `opusic-sys` builds the bundled
-      # libopus source with cmake and links it statically, so no libopus-dev is needed — but cmake
-      # is. Install it if the runner image ever drops it (a failed apt install fails this step).
-      - name: Ensure cmake (bundled libopus build)
-        run: command -v cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
-
-      # Clippy -D warnings on the codec crate + the hub (all targets incl. the unit tests). Default
-      # features = the Interkom picture `ndi` path (issue 1345 M3c): libloading is a RUNTIME dynamic
-      # load, so this compiles the real NDI FFI (src/ndi_video/ndi_source.rs) with no libndi installed.
-      - name: Clippy (intercom members)
-        run: cargo clippy -p intercom-vban -p intercom-hub --all-targets -- -D warnings
-
-      # Keep the `--no-default-features` (libndi-free, stub picture source) hub path proven so it can't
-      # bit-rot now that `ndi` is the default build (mirrors the bkshading service's stub step).
-      - name: Clippy (intercom-hub, --no-default-features — stub picture path)
-        run: cargo clippy -p intercom-hub --no-default-features --all-targets -- -D warnings
-
-      # The moved VBAN codec tests + the hub's matrix/engine/vban_io/state/http unit tests
-      # (incl. the random-port VBAN loopback). This is where the codec tests run now that
-      # src/vban.rs is a re-export (the root `cargo test` compiles intercom-vban but never runs
-      # its tests without -p).
-      - name: Test (intercom members)
-        run: cargo test -p intercom-vban -p intercom-hub
-
-      # Prove the `--no-default-features` stub picture path still compiles + passes its tests (the
-      # libndi-free build can't silently break now that `ndi` is off the default).
-      - name: Test (intercom-hub, --no-default-features — stub picture path)
-        run: cargo test -p intercom-hub --no-default-features
-
-      # Build the deployable hub binary in RELEASE (the enable-only systemd unit + setup-strih
-      # step expect /usr/local/bin/intercom-hub), mirroring the bkshading artifact pattern.
-      - name: Build deployable binary (intercom-hub)
-        run: cargo build --release --bins -p intercom-hub
-
-      - name: Upload intercom-hub binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: intercom-hub-linux-amd64
-          # Fail loud on a missing binary (renamed bin / wrong path) — never a green empty artifact.
-          if-no-files-found: error
-          path: target/release/intercom-hub
-
-  intercom-web-e2e:
-    name: intercom phone PWA E2E (issue 1345)
-    # Real-browser E2E of the phone interkom page (the 25.9.2026 phone UX rework): the REAL
-    # intercom/web client served by a stdlib stub hub (intercom/tests/e2e/stub_hub.py) with a Janus
-    # test double and Chromium fake media, at a 390x844 phone viewport. Auto-join receive-only with
-    # the mic off, the mic toggle + both live meters, tap-to-fullscreen, the reconnect state, the
-    # remembered name, the tap-for-sound layer — and an empty browser console in every test. No Rust
-    # build needed: the page is plain static files.
-    # Issue 1379: a second project, `iphone-webkit`, runs picture-sw.spec.js and
-    # picture-sw-upgrade.spec.js on WebKit (the iPhone engine) with the PWA service worker registered
-    # and in control, against a real endless multipart MJPEG stream. The worker used to swallow that
-    # stream in WebKit only, which no Chromium run can catch, so WebKit is installed here too.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Node (intercom phone E2E)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Install Playwright chromium + webkit (intercom phone E2E)
-        working-directory: intercom/tests/e2e
-        run: |
-          npm ci
-          npx playwright install --with-deps chromium webkit
-      - name: intercom phone PWA E2E
-        working-directory: intercom/tests/e2e
-        run: npx playwright test
-
   build:
     name: Build
     runs-on: ubuntu-22.04
@@ -1120,7 +1029,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, intercom-web-e2e, version-check, release-tag, release]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, version-check, release-tag, release]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

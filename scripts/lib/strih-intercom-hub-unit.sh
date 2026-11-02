@@ -8,7 +8,7 @@
 # checkout + the decode_rejects note; issue 1438: verify item 9's grade of the hub's card leg (the
 # cutters' USB card opened through ALSA).
 #
-# The base systemd/intercom-hub.service loads the Janus room secret with an unconditional
+# The released intercom-hub.service loads the Janus room secret with an unconditional
 #   LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
 # (issue 1345: DynamicUser cannot read the root 0600 file directly). setup-strih step 14 (Janus) creates
 # that file, but the stream role skips step 14 (obs_box_step_applies), so on stream-pp (11.10.2026) the
@@ -197,19 +197,17 @@ strih_intercom_hub_refusal_line() {
 }
 
 # strih_intercom_hub_config_install SRC DST BIN -> setup-strih step 13's install of the routing TOML
-# (issue 1438). Step 13 installs the checkout's routing file but keeps an already-installed hub binary
-# (the hub is upgraded by its own deploy). A routing file that needs a newer hub (the issue-1438 `alsa`
-# adapter) would make the installed hub refuse it at its next restart and crash-loop, so the file is
-# installed only when the installed hub loads it (`BIN --check-config --config SRC`, bounded): a hub
-# that refuses it, or a binary from before the flag, keeps the installed DST and gets one WARNING that
-# names the reinstall. With no hub binary yet (a fresh box: the same step installs the checkout's own
-# build right after) the file is installed. Prints what it did; rc 0, or 1 when the copy itself fails.
+# (issue 1438). Step 13 installs the pinned release's binary first (issue 1487), so BIN normally loads SRC.
+# A routing file the installed hub refuses would crash-loop it at its next restart, so the file is
+# installed only when the hub loads it (`BIN --check-config --config SRC`, bounded): a refusal keeps the
+# installed DST and gets one WARNING that names the reinstall. With no hub binary the file is installed.
+# Prints what it did; rc 0, or 1 when the copy itself fails.
 strih_intercom_hub_config_install() {
   local src="${1:?routing file required}" dst="${2:?install path required}" bin="${3:?hub binary required}" why said
   if [ -x "$bin" ] && ! why="$(timeout 15 "$bin" --check-config --config "$src" 2>&1)"; then
     said="$(strih_intercom_hub_refusal_line "$why")"
     if [ -f "$dst" ]; then
-      echo "  WARNING: the installed hub ${bin} cannot load ${src} -- KEPT the installed ${dst}. Reinstall the hub (sudo mv ${bin} ${bin}.pre-old; re-run setup-strih), then re-run step 13. Hub said: ${said}" >&2
+      echo "  WARNING: the installed hub ${bin} cannot load ${src} -- KEPT the installed ${dst}. The pinned release is not a pair: fix scripts/intercom-release.pin, then re-run step 13. Hub said: ${said}" >&2
       return 0
     fi
     echo "  WARNING: the installed hub ${bin} cannot load ${src} and no routing file is installed yet -- installing it; reinstall the hub before starting it. Hub said: ${said}" >&2
@@ -337,22 +335,22 @@ else:
 }
 
 # strih_intercom_hub_version_grade BASE_URL BOX [ROOT] [BIN] -> verify item 16's version + decode rows
-# (issue 1467) through the caller's ok / note; never a FAIL, always rc 0. 23.10.2026 the FOH console's
-# 24-bit VBAN stream was dropped silently by a hub binary built before the 24-bit decode, and a fresh
-# strih installed main's hub, older than its checkout. So:
-#   * the RUNNING hub's version (BASE_URL/api/version), else the version setup-strih recorded next to
-#     the binary (BIN.version, default /usr/local/bin/intercom-hub), against the checkout's workspace
-#     version (strih_checkout_version ROOT, default the checkout this lib lives in): OLDER = a NOTE with the reinstall line (the old binary is
-#     moved aside, never deleted: setup never replaces an installed hub); the same or newer = a PASS;
-#     nothing readable = a NOTE;
+# (issue 1467, issue 1487: graded against the pinned intercom release) through the caller's ok / note;
+# never a FAIL there (the capability row at its end can be), always rc 0. 23.10.2026 the FOH console's 24-bit VBAN stream was dropped silently by a
+# hub binary built before the 24-bit decode. So:
+#   * the RUNNING hub's version (BASE_URL/api/version), else the version setup-strih recorded next to the
+#     binary (BIN.version), against the pin (scripts/intercom-release.pin at ROOT, default the tree this
+#     lib lives in): the same = a PASS, anything else = a NOTE with the reinstall line (setup keeps the
+#     old binary as BIN.pre-<version>); nothing readable = a NOTE;
 #   * a VBAN participant with decode_rejects > 0 on /api/state (a known stream the hub cannot decode)
 #     = a NOTE naming the legs; an unreadable state adds nothing (the memory-lock row reports it).
 # STRIH_HUB_VERSION_JSON_FILE / STRIH_HUB_DECODE_STATE_FILE read the JSON from files (the test seams).
 strih_intercom_hub_version_grade() {
   local base="${1:?hub base url required}" box="${2:-<box>}"
   local root="${3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-  local bin="${4:-/usr/local/bin/intercom-hub}" want vjson recorded="" sjson rows row tmp
-  want="$(strih_checkout_version "$root" || true)"
+  local bin="${4:-/usr/local/bin/intercom-hub}" want="" tag vjson recorded="" sjson rows row tmp
+  tag="$(strih_intercom_pin_tag "$root" 2>/dev/null || true)"
+  want="${tag#v}"
   if [ -n "${STRIH_HUB_VERSION_JSON_FILE:-}" ]; then
     vjson="$(cat -- "$STRIH_HUB_VERSION_JSON_FILE" 2>/dev/null || true)"
   else
@@ -373,7 +371,7 @@ strih_intercom_hub_version_grade() {
   printf '%s' "$vjson" > "$tmp/version.json" 2>/dev/null || true
   printf '%s' "$sjson" > "$tmp/state.json" 2>/dev/null || true
   rows="$(python3 - "$want" "$recorded" "$bin" "$root" "$box" "$tmp/version.json" "$tmp/state.json" <<'PYHUBV' 2>&1 || true
-import json, re, sys
+import json, sys
 want, recorded, binp, root, box, vfile, sfile = sys.argv[1:8]
 
 def load(path):
@@ -383,17 +381,6 @@ def load(path):
     except Exception:
         return None
 
-def key(v):
-    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", v or "")
-    if not m:
-        return None
-    pre = m.group(4)
-    ids = []
-    for part in (pre.split(".") if pre else []):
-        ids.append((0, int(part), "") if part.isdigit() else (1, 0, part))
-    # a release sorts after every pre-release of the same triple (semver)
-    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if pre else 1, ids)
-
 running = ""
 try:
     running = str(load(vfile)["version"])
@@ -401,15 +388,15 @@ except Exception:
     running = ""
 have, source = (running, "runs") if running else (recorded if recorded not in ("", "unknown") else "", "recorded")
 if not have:
-    print("NOTE\tthe hub version is not readable (no /api/version answer, no recorded %s.version) -- not graded against this checkout's %s" % (binp, want or "unknown version"))
-elif key(want) is None or key(have) is None:
-    print("NOTE\tthe hub %s %s, this checkout is %s -- the versions cannot be compared" % (source, have, want or "unknown"))
-elif key(have) < key(want):
+    print("NOTE\tthe hub version is not readable (no /api/version answer, no recorded %s.version) -- not graded against the pinned release %s" % (binp, want or "unknown"))
+elif not want:
+    print("NOTE\tthe hub %s %s, the pin scripts/intercom-release.pin is not readable" % (source, have))
+elif have != want:
     verb = "runs" if source == "runs" else "is installed (recorded version, the hub does not answer)"
-    print("NOTE\tthe hub %s %s, OLDER than this checkout's %s -- a VBAN format it cannot decode reads as a silent leg (issue 1467); reinstall: sudo mv %s %s.pre-%s && sudo GH_TOKEN=<token> %s/scripts/setup-strih.sh --box %s (step 13 installs the checkout's hub), then sudo systemctl restart intercom-hub"
-          % (verb, have, want, binp, binp, have, root, box))
+    print("NOTE\tthe hub %s %s, not the pinned release %s -- a VBAN format it cannot decode reads as a silent leg (issue 1467); reinstall: sudo %s/scripts/setup-strih.sh --box %s (step 13 installs the pinned release), then sudo systemctl restart intercom-hub"
+          % (verb, have, want, root, box))
 else:
-    print("OK\thub %s %s (this checkout %s)" % ("runs" if source == "runs" else "recorded", have, want))
+    print("OK\thub %s %s, the pinned release" % ("runs" if source == "runs" else "recorded", have))
 
 try:
     state = load(sfile)
@@ -431,7 +418,23 @@ PYHUBV
       *) note "(intercom-hub) grading the hub version failed: ${row}" ;;
     esac
   done <<<"$rows"
+  strih_intercom_hub_cap_grade "$bin"
   return 0
+}
+
+# strih_intercom_hub_cap_grade BIN -> verify item 16's capability row (issue 1485): CAP_NET_BIND_SERVICE on
+# the hub would start dlink's own PTP follower on UDP 319 beside dantesync, the box's only PTP owner (a port
+# collision upset the clock once, dantesync#109). FAIL names where it came from; always rc 0.
+# STRIH_HUB_AMBIENT_CAPS = the test seam for the unit's AmbientCapabilities.
+strih_intercom_hub_cap_grade() {
+  local bin="${1:-/usr/local/bin/intercom-hub}" file="" amb
+  if command -v getcap >/dev/null 2>&1; then file="$(getcap "$bin" 2>/dev/null || true)"; fi
+  amb="${STRIH_HUB_AMBIENT_CAPS-$(systemctl show -p AmbientCapabilities --value intercom-hub 2>/dev/null || true)}"
+  if [[ "${file,,}" == *cap_net_bind_service* ]] || [[ "${amb,,}" == *cap_net_bind_service* ]]; then
+    bad "(intercom-hub) CAP_NET_BIND_SERVICE granted (file: ${file:-none}, unit: ${amb:-none}) -- dlink would start its own PTP follower beside dantesync, the only PTP owner"
+  else
+    ok "(intercom-hub) no CAP_NET_BIND_SERVICE: dantesync stays the only PTP owner"
+  fi
 }
 
 # --- issue 1439: the stream role runs no intercom hub ------------------------------------------------

@@ -32,12 +32,12 @@
 #                 IPv4 (the fleet row is one; a hostname / flag-shaped override is refused up front);
 #     download -- the strih FULL artifact, REFUSED unless its GENLOCK_BUILD_SHA.txt is the canonical
 #                 SHA and its BUNDLE_MANIFEST.json carries the libobs.so.30 sha256 the read-back uses;
-#     tree     -- the COMMITTED scripts/ systemd/ intercom/ + vendor/realtek-r8152 (the rig NIC driver
+#     tree     -- the COMMITTED scripts/ systemd/ + vendor/realtek-r8152 (the rig NIC driver
 #                 source setup-strih step 1b builds through DKMS, issue 1391) + the vendored dock headers
 #                 the program-audio sampler step 16e builds its shim from (issue 1404; the list is
 #                 strih_lx_tree_paths) of this checkout (an archive
-#                 of HEAD) + the generated run-setup.sh, checked for the box's fact file scripts/strih-boxes/strih-snv.env
-#                 and the intercom routing file it names; the GH token (STRIH_LX_GH_TOKEN, else
+#                 of HEAD) + the pinned intercom release bundle (issue 1487) + the generated run-setup.sh, checked
+#                 for the box's fact file scripts/strih-boxes/strih-snv.env and the routing file it names; the GH token (STRIH_LX_GH_TOKEN, else
 #                 `gh auth token`). setup-strih.sh runs as `setup-strih.sh --box strih-snv` (issue 1361).
 #   strih_lx_apply (exit 4 on failure, every message names its step)
 #     preflight -- refuse unless the box is the fact file's host, while a previous setup-strih.sh
@@ -106,17 +106,21 @@ if ! declare -F avsync_venue_host >/dev/null; then
   # shellcheck source=scripts/lib/avsync-venues.sh
   . "$(dirname "${BASH_SOURCE[0]}")/avsync-venues.sh"
 fi
+if ! declare -F strih_intercom_release_ensure >/dev/null; then
+  # shellcheck source=scripts/lib/strih-intercom-release.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-release.sh"
+fi
 if ! declare -p STRIH_PROGRAM_AUDIO_FILES >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/strih-program-audio.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-program-audio.sh"
 fi
 
 # strih_lx_tree_paths -> the repo paths the provisioning tree archives, one per line: the dirs
-# setup-strih.sh / verify-strih.sh read (scripts/ systemd/ intercom/ + the vendored rig NIC driver)
+# setup-strih.sh / verify-strih.sh read (scripts/ systemd/ + the vendored rig NIC driver)
 # plus every STRIH_PROGRAM_AUDIO_FILES entry outside them (issue 1404: the decoder shim's vendored
 # av-sync-dock headers). Live 8.10.2026: a tree without them failed setup-strih step 16e.
 strih_lx_tree_paths() {
-  local base=(scripts systemd intercom vendor/realtek-r8152 Cargo.toml) f d covered
+  local base=(scripts systemd vendor/realtek-r8152 Cargo.toml) f d covered
   printf '%s\n' "${base[@]}"
   for f in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
     covered=0
@@ -435,11 +439,12 @@ strih_lx_guard_hosts() {
 # strih_lx_tree_check TREE BOX -> prints the fact file's STRIH_HOSTNAME (rc 0) when the staged tree
 # holds what the box deploy needs: setup-strih.sh, verify-strih.sh, obs-backup-retention.sh,
 # systemd/strih-obs.service, the box fact file scripts/strih-boxes/BOX.env (issue 1361) and the
-# intercom routing file its STRIH_INTERCOM_CONFIG names (setup-strih.sh step 13 installs it). The fact
+# routing file its STRIH_INTERCOM_CONFIG names in the pinned intercom release bundle (setup-strih.sh step
+# 13 installs from it). The fact
 # file is read through strih_box_parse_file, never sourced on dev1; one that does not parse is named as
 # such. rc 1 + a named reason on stderr otherwise. Pure.
 strih_lx_tree_check() {
-  local tree="$1" box="$2" env ic hn f
+  local tree="$1" box="$2" env ic hn f rel
   env="$tree/scripts/strih-boxes/$box.env"
   for f in scripts/setup-strih.sh scripts/verify-strih.sh scripts/obs-backup-retention.sh systemd/strih-obs.service; do
     [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f" >&2; return 1; }
@@ -448,12 +453,13 @@ strih_lx_tree_check() {
   strih_box_parse_file "$env" >/dev/null || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env does not parse (above)" >&2; return 1; }
   ic="$(strih_lx_fact "$box" STRIH_INTERCOM_CONFIG "$tree/scripts/strih-boxes")" || ic=""
   [ -n "$ic" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_INTERCOM_CONFIG" >&2; return 1; }
-  [ -f "$tree/$ic" ] || { echo "strih_lx_tree_check: no $ic (STRIH_INTERCOM_CONFIG) -- the intercom/ dir must be staged" >&2; return 1; }
   hn="$(strih_lx_fact "$box" STRIH_HOSTNAME "$tree/scripts/strih-boxes")" || hn=""
   [ -n "$hn" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_HOSTNAME" >&2; return 1; }
   for f in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
     [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f (setup-strih step 16e installs the program-audio sampler from it, issue 1404)" >&2; return 1; }
   done
+  rel="$(strih_intercom_release_dir "$tree")" || return 1
+  [ -f "$rel/$ic" ] || { echo "strih_lx_tree_check: no $ic (STRIH_INTERCOM_CONFIG) in the pinned intercom release ${rel##*/} -- the bundle must be staged" >&2; return 1; }
   printf '%s\n' "$hn"
 }
 
@@ -578,10 +584,9 @@ strih_lx_prepare() {
   local -a tree_paths; mapfile -t tree_paths < <(strih_lx_tree_paths)
   git -C "$repo" archive --format=tar HEAD "${tree_paths[@]}" | tar -x -C "$w/repo"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail tree "$rc" 3 "archiving ${tree_paths[*]} at $tree_rev failed"; return; }
-  # issue 1467: the staged tree is no git checkout; record its commit so setup-strih step 13 installs
-  # the intercom hub CI artifact of THIS commit (strih_checkout_source_sha), never main's older one.
-  git -C "$repo" rev-parse HEAD > "$w/repo/CAMERA_BOX_SOURCE_SHA" \
-    || { _strih_lx_fail tree 1 3 "cannot record the source commit of $tree_rev"; return; }
+  # issue 1487: the pinned intercom release goes into the tree, so the box installs it with no network.
+  strih_intercom_release_ensure "$w/repo" >/dev/null \
+    || { _strih_lx_fail tree 1 3 "the pinned intercom release (above)"; return; }
   for b in "${box_list[@]}"; do
     STRIH_LX_BOX="$b"
     STRIH_LX_BOX_HOSTNAME[$b]="$(strih_lx_tree_check "$w/repo" "$b")" \
@@ -831,9 +836,9 @@ strih_lx_plan_steps() {
 #          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30. The planner adds
 #          bundle/GENLOCK_STATS_ABI.txt = the stats + output-stats versions of obs.h at ${sha} (removed
 #          when either is unreadable; issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
-# STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 Cargo.toml + the program-audio sampler's
-#          vendored dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + its
-#          commit in CAMERA_BOX_SOURCE_SHA (the hub artifact of that commit, issue 1467) + the
+# STEP 1 (tree): the committed scripts/ systemd/ vendor/realtek-r8152 Cargo.toml + the program-audio sampler's
+#          vendored dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + the
+#          pinned intercom release, its sha256 verified (scripts/intercom-release.pin, issue 1487) + the
 #          generated run-setup.sh -> ${lstage}/repo.
 # STEP 2 (preflight): the box must be the fact file's host ('$(strih_lx_remote_identity_cmd)' == STRIH_HOSTNAME),
 #          and no previous install may run:  $(strih_lx_remote_installer_cmd)

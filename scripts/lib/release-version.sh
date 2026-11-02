@@ -22,9 +22,8 @@
 #   release_tag_decision CARGO_VERSION BINARY_VERSION TAG_SHA HEAD_SHA
 #                                   -> prints CREATE / EXISTS (rc 0) or FAIL: <reason> (rc 1)
 #
-# The intercom hub's verify grade (scripts/lib/strih-intercom-hub-unit.sh, its python `key()`)
-# orders the same workspace version for the hub binary with the same semver rule; a change to the
-# rule here is mirrored there.
+# The intercom hub's verify grade (scripts/lib/strih-intercom-hub-unit.sh) compares the hub to the pinned
+# intercom release for equality, so it carries no copy of this rule.
 
 # The sets are spelled out, never a bracket range: a range follows the locale under bash (an
 # en_US.UTF-8 `[0-9]` also matches non-ASCII digits), see .claude/rules/ci-testing-gotchas.md.

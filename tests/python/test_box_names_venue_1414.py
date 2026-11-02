@@ -75,14 +75,14 @@ def test_the_snv_strih_fact_file_is_strih_snv():
     assert f["STRIH_NDI_PREFIX"] == "STRIH-SNV"
     assert f["STRIH_OBS_PROFILE"] == "strih-snv"
     assert f["STRIH_OBS_COLLECTION"] == "strih-snv"
-    assert f["STRIH_INTERCOM_CONFIG"] == "intercom/intercom.strih-snv.toml"
+    assert f["STRIH_INTERCOM_CONFIG"] == "intercom.strih-snv.toml"
     assert f["STRIH_IP"] == "10.77.9.202"
-    assert (REPO / "intercom" / "intercom.strih-snv.toml").is_file()
-    assert not (REPO / "intercom" / "intercom.strih-lx.toml").exists()
+    assert (REPO / "tests" / "fixtures" / "intercom_pinned" / "intercom.strih-snv.toml").is_file()
+    assert not (REPO / "tests" / "fixtures" / "intercom_pinned" / "intercom.strih-lx.toml").exists()
 
 
 def test_the_intercom_file_names_the_strih_snv_interkom_output():
-    text = (REPO / "intercom" / "intercom.strih-snv.toml").read_text()
+    text = (REPO / "tests" / "fixtures" / "intercom_pinned" / "intercom.strih-snv.toml").read_text()
     assert 'ndi_source_name = "STRIH-SNV (interkom)"' in text
 
 
@@ -257,11 +257,6 @@ def test_the_ndi_portmap_baseline_names_strih_snv():
 def test_the_preview_source_default_is_strih_snv():
     src = (REPO / "src" / "preview_source.rs").read_text()
     assert 'pub const DEFAULT_PREVIEW_SOURCE: &str = "STRIH-SNV (interkom)";' in src
-
-
-def test_the_hub_default_receiver_name_is_strih_snv():
-    src = (REPO / "intercom" / "hub" / "src" / "matrix.rs").read_text()
-    assert '"STRIH-SNV (interkom)".to_string()' in src
 
 
 # --- the sweep ------------------------------------------------------------------------------------

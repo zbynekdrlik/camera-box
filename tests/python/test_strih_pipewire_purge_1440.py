@@ -209,6 +209,10 @@ def _fakes(tmp_path, pkgs=None, sim=SIM_OK, extra=None):
 
 
 def _bash(body, env, *args, box="strih-snv"):
+    # the routing file of the pinned release (issue 1487): a test tree has no bundle
+    env = dict(env)
+    env.setdefault("STRIH_PW_PURGE_INSTALLED_TOML", str(REPO / "tests" / "fixtures" / "intercom_pinned" /
+                                                        ("intercom.%s.toml" % box)))
     script = ('set -euo pipefail\n. "%s"\n. "%s"\nfail() { echo "FAIL: $*" >&2; exit 1; }\n'
               'ok() { echo "OK $*"; }\nnote() { echo "NOTE $*"; }\nbad() { echo "BAD $*"; }\n'
               'strih_box_load "%s"\n%s' % (PROVISION, BASELINE, box, body))

@@ -640,6 +640,8 @@ fi
 
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
+# issue 1487: the pinned intercom release, verified, before step 12's purge decision reads its routing file.
+if WHY="$(obs_box_step_applies 13)"; then IH_BUNDLE="$(strih_intercom_release_ensure "${HERE}/..")" || fail "the pinned intercom release (above)"; fi
 step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344); stream role: the locked operator PipeWire (issue 1465); a strih box that needs none: PipeWire purged (issue 1440)"
 # Root cause (design 20.9., live diagnosis issuecomment-5751113173): the OBS program (${AUDIO_NAME}) is a NETWORK
 # stream (fohabl-strih VBAN), NOT the MiniFuse (the operator TALKBACK mic, the hub reads it). The hub writes the
@@ -680,20 +682,18 @@ step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the stri
 # The strih intercom hub IS the interkom (the N-1 mix for the VBAN camboxes + the phones) since 20.9.2026:
 # unit + routing TOML + drop-ins, enabled; STARTED on the strih role after step 14, never restarted here.
 if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs no hub (lib: strih_intercom_hub_remove)
-  install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
+  # issue 1487: binary, unit and routing file come from the ONE bundle of the pinned intercom release.
+  strih_intercom_hub_binary_install /usr/local/bin/intercom-hub "$IH_BUNDLE" "${HERE}/.." || fail "intercom-hub install from ${IH_BUNDLE} failed (above)"
+  install -Dm644 "${IH_BUNDLE}/intercom-hub.service" /etc/systemd/system/intercom-hub.service
   # its drop-ins: NDI_CONFIG_DIR = /etc/ndi (step 4b, issue 1342) + run AS THE OPERATOR (step 12's PipeWire)
   mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")" /etc/systemd/system/intercom-hub.service.d
   ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
   strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" "$(strih_pipewire_purge_dropin_mode)" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf   # issue 1440: no pipewire group on a purged box
-  # issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
-  [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
-    || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
-  strih_intercom_hub_config_install "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml /usr/local/bin/intercom-hub || fail "intercom routing file install failed (above)"
+  [ -f "${IH_BUNDLE}/$(strih_lx_intercom_config)" ] || fail "no routing file $(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) in the release ${IH_BUNDLE}"
+  strih_intercom_hub_config_install "${IH_BUNDLE}/$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml /usr/local/bin/intercom-hub || fail "intercom routing file install failed (above)"
   strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d || fail "intercom-hub role drop-in (issue 1412) failed (above)"
   systemctl daemon-reload
   systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
-  # issue 1412 (G6) + 1467: a fresh box gets the hub CI binary of this checkout's commit; an installed one is kept.
-  strih_intercom_hub_binary_install /usr/local/bin/intercom-hub "${HERE}/.." || fail "intercom-hub binary install failed (above)"
   echo "  intercom-hub.service installed + enabled; /etc/intercom-hub/intercom.toml + its NDI_CONFIG_DIR and local-audio (User=${DESKTOP_USER}) drop-ins in place"
 else
   echo "  SKIP: ${WHY}"

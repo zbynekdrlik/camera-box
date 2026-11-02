@@ -1,7 +1,9 @@
 ---
 paths:
-  - "intercom/**"
-  - "intercom/*.toml"
+  - "scripts/lib/strih-vban-leg.sh"
+  - "scripts/lib/strih-dante-leg.sh"
+  - "scripts/lib/strih-intercom-release.sh"
+  - "scripts/intercom-release.pin"
   - "vendor/obs-vban/**"
 ---
 
@@ -27,11 +29,12 @@ constants named here. Never present a computed number as measured.
 | FLEET | `CLOCK_MONOTONIC` rate-disciplined by dantesync (PTP via the Dante grandmaster). The hub's mix grid, both OBS audio paths, the camboxes' own disciplined clocks. |
 | DANTE | The console / Dante network sample clock (mbc, lv1, fohabl's Dante side). On the PTP grandmaster the fleet follows. Its VBAN *packets* still leave on the sender PC's own timing. |
 | CAMBOX ADC | A cambox headset's USB audio crystal (cam1 measured ~+540 ppm, `capture 48026 samp/s`, 19.9.2026). |
+| DANTE MEDIA (dlink) | The media time of a dstack device: PTP ns = `CLOCK_MONOTONIC` + k, k read from the system clocks (`crates/dstack/src/clock.rs`). So it is the FLEET clock, on the one grandmaster the fleet follows. dantesync stays the box's only PTP owner: dlink's own follower needs CAP_NET_BIND_SERVICE for UDP 319, which is never granted, so it logs that it did not start and reads the clock dantesync disciplines (issue 1485). |
 | CARD | The cutters' USB card crystal: the MiniFuse 4 (strih-snv), the Yamaha MG-XU (strih-pp). |
 | HDMI | The HDMI audio clock of the strih-pp vestibule output (the GPU's HDA codec). |
 | BROWSER | A phone's WebRTC / Opus clock (Janus mixes on the box's own timer). |
 
-## The hub's crossings (`intercom/hub`, the mix runs on FLEET at 256 frames / 5.33 ms)
+## The hub's crossings (`hub/` in the intercom repo, the mix runs on FLEET at 256 frames / 5.33 ms)
 
 | Crossing | What does it | Status |
 |---|---|---|
@@ -126,6 +129,24 @@ strih-snv since 24.10.2026). lv1 sends two streams: `strih-obs` to OBS on 6981, 
 
 The picture reaches YouTube over NDI from the strih box. The A/V alignment there is the genlock's
 job (`OBS_GENLOCK_LATENCY_MS`, the av-sync dock), never a hub setting.
+
+## Dante on strih-snv (issue 1485, VLAN 70, `STRIH_DANTE_DEVICES`)
+
+Owner 2.11.2026: each application carries its own Dante device, no shared memory and no forwarding;
+strih-snv only, VBAN stays on every box and PP gets no Dante. Nothing below is deployed or routed yet.
+
+| Path | Source clock -> crossings -> listener | Fixed latency (computed) |
+|---|---|---|
+| dasio TX -> hub device `strih-snv-intercom` (`foh_dante`) | DANTE -> dlink RX on DANTE MEDIA (= FLEET by the code above) -> hub resampler leg -> mix | device latency 10 ms (dlink's `LATENCY_NS`) + the hub's leg, stated by the intercom project |
+| dasio TX -> OBS device `strih-obs` (not built yet, `zbynekdrlik/obs`) | DANTE -> dlink RX on FLEET -> OBS source | device latency 10 ms + the source's timeline, stated by the obs project |
+
+- **Crossing:** by the code, TX and RX are on one grandmaster, so no clock domain is crossed. That is
+  computed from dstack's source and dstack#20, nothing here is measured. mbc and strih-snv reported the
+  same `gm_uuid` over 40 s (finding 6562170531); that read does not prove the rate match. Measure
+  before VBAN goes.
+- **Budget:** against the strih program's R = 30 ms (VBAN today) the 10 ms device latency is the smaller
+  term, but neither total is known until the two projects state their source timelines. No double-sound
+  row is added until the paths exist.
 
 ## Where two paths meet one listener (the double-sound budget)
 

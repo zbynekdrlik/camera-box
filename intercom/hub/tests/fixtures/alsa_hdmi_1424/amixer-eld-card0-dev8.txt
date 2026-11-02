@@ -1,3 +1,0 @@
-numid=18,iface=PCM,name='ELD',device=8
-  ; type=BYTES,access=r--v----,values=0
-  : values=

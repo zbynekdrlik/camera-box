@@ -7,8 +7,8 @@ Covers:
   * G5 scripts/lib/dantesync-install.sh: the pinned binary + the role config, both only when absent;
   * G6 scripts/lib/strih-ci-artifact.sh: the intercom-hub binary from a CI artifact, only when absent;
   * G7 + G11 scripts/lib/obs-box-role.sh: step 11b (xhci IRQ unit) and 16e (the sampler) by box fact;
-  * intercom/intercom.strih-pp.toml against the hub's Matrix::from_toml rules (a python replica; the
-    real loader runs in intercom/hub/tests/deployed_matrix_pp_1412.rs at CI);
+  * intercom.strih-pp.toml (the pinned copy) against the hub's Matrix::from_toml rules (a python replica;
+    the real loader runs in the intercom repo's hub/tests/deployed_matrix_pp_1412.rs);
   * the setup-strih / verify-strih wiring.
 
 Tier-0: bash + pytest only (no cargo, no root, no rig, no network: downloads go through a fake curl).
@@ -32,10 +32,10 @@ ROLE = SCRIPTS / "lib" / "obs-box-role.sh"
 SETUP = SCRIPTS / "setup-strih.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
 BOXES = SCRIPTS / "strih-boxes"
-PP_TOML = REPO / "intercom" / "intercom.strih-pp.toml"
+PP_TOML = REPO / "tests" / "fixtures" / "intercom_pinned" / "intercom.strih-pp.toml"
 
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
-         "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "STRIH_LX_HUB_SRC",
+         "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN",
          "DANTESYNC_VERSION_PIN", "DANTESYNC_RELEASE_BASE", "DANTESYNC_NTP_UPSTREAM",
          "DANTESYNC_INSTALL_BIN", "DANTESYNC_INSTALL_CONFIG", "OBS_FLEET_HOME")
 
@@ -95,7 +95,7 @@ def test_strih_pp_loads_with_every_fact_answered():
 EXPECTED_PP = {
     "STRIH_HOSTNAME": "strih-pp", "STRIH_IP": "10.77.8.202", "STRIH_NDI_PREFIX": "STRIH-PP",
     "STRIH_DANTESYNC_ROLE": "server", "STRIH_DANTESYNC_UPSTREAM": "",
-    "STRIH_INTERCOM_CONFIG": "intercom/intercom.strih-pp.toml", "STRIH_NIC_DRIVER": "r8169",
+    "STRIH_INTERCOM_CONFIG": "intercom.strih-pp.toml", "STRIH_NIC_DRIVER": "r8169",
     "STRIH_NIC_OOT_DRIVER": "none", "STRIH_NIC_MIN_USB_MBPS": "none", "STRIH_NIC_MIN_LINK_MBPS": "2500",
     "STRIH_OBS_PROFILE": "strih-pp", "STRIH_OBS_COLLECTION": "strih-pp", "STRIH_NDI_RUNTIME_PEER": PEER,
     "STRIH_COMPANION_HOST": "10.77.8.205", "STRIH_CG_SENDER": "RESOLUME-PP (SP-program)",
@@ -333,36 +333,6 @@ def test_a_download_that_is_not_the_pin_is_refused(tmp_path):
 
 # --- G6: the intercom-hub binary --------------------------------------------------------------------
 
-def test_a_prestaged_hub_artifact_is_installed_when_absent(tmp_path):
-    art = tmp_path / "art"
-    art.mkdir()
-    (art / "intercom-hub").write_text("#!/bin/sh\necho hub\n")
-    dest = tmp_path / "bin" / "intercom-hub"
-    r = _bash('strih_intercom_hub_binary_install "%s"' % dest, sources=(CI_ART,), env={"STRIH_LX_HUB_SRC": str(art)})
-    assert r.returncode == 0, r.stderr
-    assert os.access(dest, os.X_OK) and dest.read_text() == "#!/bin/sh\necho hub\n"
-    assert art.is_dir(), "a pre-staged dir is never removed"
-
-
-def test_an_installed_hub_is_kept(tmp_path):
-    dest = tmp_path / "intercom-hub"
-    dest.write_text("old\n")
-    dest.chmod(0o755)
-    art = tmp_path / "art"
-    art.mkdir()
-    (art / "intercom-hub").write_text("new\n")
-    r = _bash('strih_intercom_hub_binary_install "%s"' % dest, sources=(CI_ART,), env={"STRIH_LX_HUB_SRC": str(art)})
-    assert r.returncode == 0, r.stderr
-    assert dest.read_text() == "old\n"
-
-
-def test_no_token_and_no_prestaged_dir_warns_and_installs_nothing(tmp_path):
-    dest = tmp_path / "intercom-hub"
-    r = _bash('strih_intercom_hub_binary_install "%s"' % dest, sources=(CI_ART,))
-    assert r.returncode == 0
-    assert "ABSENT" in r.stderr and not dest.exists()
-
-
 def _fake_github(tmp_path, branch_of_newest="dev"):
     """A curl that answers the GitHub artifacts API with two artifacts (newest on BRANCH_OF_NEWEST, the
     older on main) and serves each zip; it records its argv and the header it read on stdin."""
@@ -386,21 +356,6 @@ def _fake_github(tmp_path, branch_of_newest="dev"):
         "https://dl/main) cp %(d)s/main.zip \"$out\";; *) exit 22;; esac\n" % {"d": tmp_path})
     (bindir / "curl").chmod(0o755)
     return bindir
-
-
-def test_the_hub_comes_from_a_main_run_with_the_token_never_in_argv(tmp_path):
-    bindir = _fake_github(tmp_path)
-    tmproot = tmp_path / "tmproot"
-    tmproot.mkdir()
-    dest = tmp_path / "bin" / "intercom-hub"
-    r = _bash('strih_intercom_hub_binary_install "%s"' % dest, sources=(CI_ART,), path_prefix=bindir,
-              env={"GH_TOKEN": "tok-SECRET-1412", "STRIH_CI_ARTIFACT_TMP": str(tmproot)})
-    assert r.returncode == 0, r.stderr
-    assert dest.read_text() == "#!/bin/sh\necho main\n", "the newest NON-main artifact must be skipped"
-    log = (tmp_path / "gh.log").read_text()
-    assert "tok-SECRET-1412" not in "".join(ln for ln in log.splitlines() if ln.startswith("ARGV"))
-    assert log.count("HDR Authorization: token tok-SECRET-1412") == 2
-    assert list(tmproot.iterdir()) == [], "the fetch's temp dir is removed after the install"
 
 
 def _fake_paged_github(tmp_path, dev_on_page_1=100):
@@ -427,24 +382,6 @@ def _fake_paged_github(tmp_path, dev_on_page_1=100):
         "https://dl/main) cp %(d)s/main.zip \"$out\";; *) exit 22;; esac\n" % {"d": tmp_path})
     (bindir / "curl").chmod(0o755)
     return bindir
-
-
-def test_the_hub_is_found_on_a_later_page_when_dev_artifacts_fill_the_first_1412(tmp_path):
-    """Live 11.10.2026 (new strih notebook): dev CI fills the first page of the artifacts API, so the
-    newest main hub artifact sits on page 2+. A fetch that reads one page found no main artifact and
-    left the box without a hub. A branch-filtered fetch must page on until it finds one."""
-    bindir = _fake_paged_github(tmp_path)
-    tmproot = tmp_path / "tmproot"
-    tmproot.mkdir()
-    dest = tmp_path / "bin" / "intercom-hub"
-    r = _bash('strih_intercom_hub_binary_install "%s"' % dest, sources=(CI_ART,), path_prefix=bindir,
-              env={"GH_TOKEN": "tok-SECRET-1412", "STRIH_CI_ARTIFACT_TMP": str(tmproot)})
-    assert r.returncode == 0, r.stderr
-    assert dest.exists(), "the main hub on page 2 must be found:\n" + r.stderr
-    assert dest.read_text() == "#!/bin/sh\necho main\n"
-    log = (tmp_path / "gh.log").read_text()
-    assert "tok-SECRET-1412" not in log, "the token never reaches curl's argv"
-    assert "page=2" in log
 
 
 def test_a_branch_fetch_with_no_match_on_any_page_fails_cleanly_1412(tmp_path):
@@ -498,23 +435,13 @@ def test_the_new_libs_run_clean_under_the_callers_errexit(tmp_path):
             'if WHY="$(obs_box_step_applies 11b)"; then echo RAN; else echo "SKIP11b"; fi\n'
             'if WHY="$(obs_box_step_applies 16e)"; then echo RAN; else echo "SKIP16e"; fi\n'
             'dantesync_install server "$(strih_lx_dante_gm)"\n'
-            'strih_intercom_hub_binary_install "%s/hub"\n'
             'strih_ci_artifact_cleanup "" ""\nstrih_ci_artifact_cleanup /nonexistent/x\n'
-            "echo END\n" % tmp_path)
+            "echo END\n")
     full = {k: v for k, v in os.environ.items() if k not in LEAKY}
     full.update(env)
     r = subprocess.run(["bash", "-c", body], capture_output=True, text=True, env=full, cwd=str(REPO), timeout=60)
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines()[0:2] == ["SKIP11b", "SKIP16e"] and r.stdout.rstrip().endswith("END")
-
-
-def test_an_artifact_without_the_binary_fails(tmp_path):
-    art = tmp_path / "art"
-    art.mkdir()
-    (art / "README").write_text("x\n")
-    r = _bash('strih_intercom_hub_binary_install "%s"' % (tmp_path / "hub"), sources=(CI_ART,),
-              env={"STRIH_LX_HUB_SRC": str(art)})
-    assert r.returncode != 0
 
 
 # --- G7 + G11: the per-box step gate ----------------------------------------------------------------

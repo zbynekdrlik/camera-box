@@ -2883,22 +2883,22 @@ fn bkshading_config_text_seeds_the_venue_cameras_and_is_valid_toml() {
         "default operator bind :8770: {cfg}"
     );
     assert!(
-        cfg.contains("id = \"cam2\""),
-        "must carry the cam2 camera: {cfg}"
+        cfg.contains("id = \"cam5\""),
+        "must carry the cam5 camera: {cfg}"
     );
     assert!(
-        cfg.contains("address = \"register:cam2\""),
-        "issue 1431: cam2 is reached first through its relay's registration: {cfg}"
+        cfg.contains("address = \"register:cam5\""),
+        "issue 1431: cam5 is reached first through its relay's registration: {cfg}"
     );
     assert!(
-        cfg.contains("fallback_address = \"cam2.lan:8771\""),
-        "cam2 literal relay address as the fallback (host-independent of the service): {cfg}"
+        cfg.contains("fallback_address = \"cam5.lan:8771\""),
+        "cam5 literal relay address as the fallback (host-independent of the service): {cfg}"
     );
     assert!(
-        cfg.contains("ndi_preview = \"CAM2 (usb)\""),
-        "cam2 NDI preview name: {cfg}"
+        cfg.contains("ndi_preview = \"CAM5 (usb)\""),
+        "cam5 NDI preview name: {cfg}"
     );
-    assert!(cfg.contains("grab_fps = 60"), "cam2 grab fps: {cfg}");
+    assert!(cfg.contains("grab_fps = 60"), "cam5 grab fps: {cfg}");
     for n in 1..=7 {
         assert_eq!(
             cfg.matches(&format!("id = \"cam{n}\"\n")).count(),

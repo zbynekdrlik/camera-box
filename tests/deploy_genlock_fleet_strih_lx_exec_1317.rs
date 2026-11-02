@@ -228,8 +228,46 @@ impl Run {
     }
 }
 
+/// Issue 1487: a stand-in intercom release under DIR + the pin that matches it, so the tree step
+/// never reaches GitHub (the two seams of strih-intercom-release.sh). Returns (pin, tarball).
+fn fake_intercom_release(dir: &Path) -> (PathBuf, PathBuf) {
+    let d = dir.join("fake-intercom-release");
+    fs::create_dir_all(&d).unwrap();
+    let fix = manifest_dir().join("tests/fixtures/intercom_pinned");
+    for e in fs::read_dir(&fix).unwrap() {
+        let e = e.unwrap();
+        fs::copy(e.path(), d.join(e.file_name())).unwrap();
+    }
+    let hub = d.join("intercom-hub");
+    fs::write(&hub, "#!/bin/sh\necho 'intercom-hub 9.9.3'\n").unwrap();
+    let mut mode = fs::metadata(&hub).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+    fs::set_permissions(&hub, mode).unwrap();
+    let tb = dir.join("fake-intercom-release.tar.gz");
+    let st = Command::new("tar")
+        .arg("czf")
+        .arg(&tb)
+        .arg("-C")
+        .arg(&d)
+        .arg(".")
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let sum = Command::new("sha256sum").arg(&tb).output().unwrap();
+    let text = String::from_utf8(sum.stdout).unwrap();
+    let sha = text.split_whitespace().next().unwrap();
+    let pin = dir.join("fake-intercom-pin");
+    fs::write(
+        &pin,
+        format!("INTERCOM_RELEASE_TAG=v9.9.3\nINTERCOM_RELEASE_SHA256={sha}\n"),
+    )
+    .unwrap();
+    (pin, tb)
+}
+
 fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
     let dir = tempfile::tempdir().expect("tempdir");
+    let (intercom_pin, intercom_tarball) = fake_intercom_release(dir.path());
     let bin = stub_bin(dir.path());
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
@@ -247,6 +285,8 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
         .env("STUB_SHA", SHA)
         .env("STUB_TOKEN", TOKEN)
         .env("STUB_LIBSHA", LIBSHA)
+        .env("STRIH_INTERCOM_PIN_FILE", &intercom_pin)
+        .env("STRIH_INTERCOM_TARBALL_SRC", &intercom_tarball)
         .env("STRIH_LX_SETUP_POLLS", "3")
         .env("STRIH_LX_SETUP_POLL_SECS", "0")
         .env("STRIH_LX_VERIFY_POLLS", "3")
@@ -1185,16 +1225,9 @@ fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
     );
     fs::write(
         d.join("scripts/strih-boxes/strih-snv.env"),
-        "STRIH_HOSTNAME=strih-snv\nSTRIH_INTERCOM_CONFIG=intercom/x.toml\n",
+        "STRIH_HOSTNAME=strih-snv\nSTRIH_INTERCOM_CONFIG=intercom.x.toml\n",
     )
     .unwrap();
-    let (out, err) = check(d);
-    assert!(
-        out.contains("rc=1") && err.contains("intercom/x.toml"),
-        "{out}{err}"
-    );
-    fs::create_dir_all(d.join("intercom")).unwrap();
-    fs::write(d.join("intercom/x.toml"), "x").unwrap();
     // issue 1404: setup-strih step 16e installs the program-audio sampler from these files, two of
     // them vendored headers outside scripts/, so the tree check refuses a tree without them.
     let (out, err) = check(d);
@@ -1214,6 +1247,19 @@ fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
         fs::create_dir_all(d.join(f).parent().unwrap()).unwrap();
         fs::write(d.join(f), "x").unwrap();
     }
+    // issue 1487: the routing file comes from the pinned release bundle in the tree.
+    fs::write(
+        d.join("scripts/intercom-release.pin"),
+        "INTERCOM_RELEASE_TAG=v9.9.3\n",
+    )
+    .unwrap();
+    let (out, err) = check(d);
+    assert!(
+        out.contains("rc=1") && err.contains("intercom.x.toml"),
+        "{out}{err}"
+    );
+    fs::create_dir_all(d.join("intercom-release/v9.9.3")).unwrap();
+    fs::write(d.join("intercom-release/v9.9.3/intercom.x.toml"), "x").unwrap();
     let (out, err) = check(d);
     assert!(
         out.contains("strih-snv\nrc=0"),
