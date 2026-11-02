@@ -139,9 +139,12 @@ fn the_crates_the_obs_build_links_never_depend_on_the_appliance() {
         "rig/core/Cargo.toml",
     ] {
         let text = read(manifest);
-        let dep = text
-            .lines()
-            .find(|l| l.trim_start().starts_with("camera-box ="));
+        let dep = text.lines().map(str::trim_start).find(|l| {
+            l.starts_with("camera-box =")
+                || l.starts_with("camera-box.")
+                || l.ends_with(".camera-box]")
+                || l.contains("package = \"camera-box\"")
+        });
         assert_eq!(dep, None, "{manifest} depends on the camera-box crate");
     }
 }
@@ -154,6 +157,7 @@ fn ci_runs_the_moved_unit_tests_a_root_run_never_reaches() {
         ci.contains("run: cargo clippy -p camera-box-jxs -p rig-core --all-targets --all-features")
     );
     assert!(ci.contains("cargo llvm-cov -p camera-box -p camera-box-jxs -p rig-core"));
+    assert!(ci.contains("--package camera-box --package camera-box-jxs --package rig-core"));
 }
 
 #[test]

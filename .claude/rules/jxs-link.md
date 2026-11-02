@@ -94,6 +94,8 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   (`cargo tree -p jxs-recv-ffi` shows no camera-box). `src/lib.rs` re-exports every module at its old path.
   A root `cargo test` does not run these crates' unit tests: `cargo test -p camera-box-jxs -p rig-core
   --all-features` does (ci.yml runs them, the coverage job too). The `jxs` feature is forwarded by the root.
+  A crate that logs for the camera-box binary must be named in `src/log_filter.rs`: a target is a module
+  path, so a crate left out is filtered out silently, WARNs included (`tests/log_filter_1487.rs`).
 - **Wire format: `jxs/link/src/jxs_link.rs` module doc is THE definition.** 16 bytes LE: magic `0x4A`,
   version 1, camera id (`CAM<N>`), timecode (56 bits, 100 ns since the epoch, the SAME genlock
   timecode the NDI frame carries), slice index (0 = the picture header packet), slice count, byte

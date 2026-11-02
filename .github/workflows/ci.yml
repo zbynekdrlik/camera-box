@@ -324,9 +324,13 @@ jobs:
         # recording on disk (exercised by the on-rig recorded fixture), exactly like decode_for /
         # run_merge. The JUDGEMENT they wrap IS mutated + covered: the pure src/colour_verify.rs
         # (classify_patch / summarize_node_colour) and NodeVerdict::is_zero's colour_fail term.
+        # issue 1487: a root run mutates only the root package, so the JPEG XS and rig crates are
+        # named, and a mutant there runs the root integration tests too (--test-package).
         run: |
           if git diff --name-only origin/main...HEAD | grep -q '\.rs$'; then
             cargo mutants --in-diff pr.diff --features probe,jxs \
+              --package camera-box --package camera-box-jxs --package rig-core \
+              --test-package camera-box --test-package camera-box-jxs --test-package rig-core \
               -e 'src/probe/painter.rs' \
               -e 'src/probe/reader.rs' \
               -e 'src/probe/run.rs' \

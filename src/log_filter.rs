@@ -5,8 +5,8 @@
 /// The `EnvFilter` directives of the camera-box binary.
 pub fn directives(debug: bool) -> &'static str {
     if debug {
-        "camera_box=debug,grafton_ndi=debug"
+        "camera_box=debug,camera_box_jxs=debug,rig_core=debug,grafton_ndi=debug"
     } else {
-        "camera_box=info"
+        "camera_box=info,camera_box_jxs=info,rig_core=info"
     }
 }

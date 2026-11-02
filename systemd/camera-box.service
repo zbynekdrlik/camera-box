@@ -47,11 +47,11 @@ Nice=-10
 # NOT the SCHED_OTHER the design intended (measured on cam1: 27 FIFO threads on
 # core 3). It is now dropped: the process starts SCHED_OTHER and the binary raises
 # SCHED_FIFO prio 90 PER THREAD only on the capture+emit hot path
-# (src/affinity.rs set_current_thread_realtime, needs CAP_SYS_NICE — granted by the
+# (rig/core/src/affinity.rs set_current_thread_realtime, needs CAP_SYS_NICE — granted by the
 # fleet's `setcap cap_sys_nice,cap_ipc_lock`). So the reserved core now carries only
 # the grab under FIFO; every auxiliary thread stays SCHED_OTHER (idle slack), which
 # is finally the true state. On this non-PREEMPT_RT kernel a non-threaded hardirq
-# can still preempt the grab; issue 899's capture-IRQ fix (src/affinity.rs
+# can still preempt the grab; issue 899's capture-IRQ fix (rig/core/src/affinity.rs
 # select_irq_target_cores) routes the xhci IRQ OFF this core on a stock kernel, and
 # the remaining PREEMPT_RT/lowlatency kernel path is STAGED in
 # docs/runbooks/899-realtime-isolation.md. `Nice=-10` above still gives the
