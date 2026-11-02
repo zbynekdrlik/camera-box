@@ -367,13 +367,9 @@ jobs:
         working-directory: ${{ env.VSTACK_SRC }}
         # rustc prints the native-libs note in colour on the runner (run 40909341652), which the
         # `^note:` sed below cannot match; plain text only.
-        # issue 1487: camera-box's release profile; vstack's root declares none, so the archive
-        # would lose its LTO and strip.
+        # issue 1487: the release profile comes from vstack's own root.
         env:
           CARGO_TERM_COLOR: never
-          CARGO_PROFILE_RELEASE_LTO: "true"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
-          CARGO_PROFILE_RELEASE_STRIP: "true"
         run: |
           set -euo pipefail
           if ! cargo rustc --locked --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs 2> jxs-ffi-build.log; then

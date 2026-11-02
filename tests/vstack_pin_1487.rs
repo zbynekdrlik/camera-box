@@ -122,17 +122,8 @@ fn the_strih_build_links_the_pinned_tag_with_this_repos_release_profile() {
         assert!(fetch.contains(needle), "the fetch step lacks `{needle}`");
     }
     assert!(wf.contains("working-directory: ${{ env.VSTACK_SRC }}"));
-    let cargo = read("Cargo.toml");
-    for line in ["lto = true", "codegen-units = 1", "strip = true"] {
-        assert!(cargo.contains(line), "{line}");
-    }
-    for line in [
-        "CARGO_PROFILE_RELEASE_LTO: \"true\"",
-        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS: \"1\"",
-        "CARGO_PROFILE_RELEASE_STRIP: \"true\"",
-    ] {
-        assert!(wf.contains(line), "{line}");
-    }
+    // vstack's root carries the release profile since v0.1.4; a repeat here could only drift.
+    assert!(!wf.contains("CARGO_PROFILE_RELEASE_"));
     assert!(wf.contains("cargo rustc --locked --release -p jxs-recv-ffi"));
     assert!(
         wf.contains("-DCAMERA_BOX_JXS_FFI_LIB=\"$VSTACK_SRC/target/release/libjxs_recv_ffi.a\"")

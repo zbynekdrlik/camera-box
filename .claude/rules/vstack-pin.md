@@ -28,8 +28,7 @@ paths:
   vendored C stay here and test the pinned crate. A vendored header change and its Rust twin are a
   vstack tag plus a pin bump here, in one change.
 - **linux-genlock builds `libjxs_recv_ffi.a` in a clone of the tag** and refuses a commit that differs
-  from the pin. vstack's root declares no release profile, so the step passes this repo's own by
-  `CARGO_PROFILE_RELEASE_*` env: without them the archive silently loses LTO and strip.
+  from the pin. vstack's root carries the release profile (LTO, one codegen unit, strip) since v0.1.4.
 - **Reading pinned source from a test:** `tests/support/vstack.rs` (Rust), `tests/python/vstack_src.py`
   (pytest). Both find cargo's git checkout by the pin commit. The python-tests job compiles nothing, so
   it runs `cargo fetch` first; a missing checkout fails, it never skips.
