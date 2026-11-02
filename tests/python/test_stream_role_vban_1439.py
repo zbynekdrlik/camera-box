@@ -649,7 +649,7 @@ def test_a_failed_stop_moves_nothing(tmp_path):
 
 def test_setup_step_13_removes_the_hub_on_the_stream_role(tmp_path):
     s = SETUP.read_text()
-    a = s.index('if WHY="$(obs_box_step_applies 13)"; then')
+    a = s.index('if WHY="$(obs_box_step_applies 13)"; then', s.index('step 13 "'))
     block = s[a:s.index("\nfi\n", s.index("strih_intercom_hub_remove ||", a)) + 4]
     e = _plant_hub(tmp_path)
     stub, log = _fake_systemctl(tmp_path, "active", "enabled")
