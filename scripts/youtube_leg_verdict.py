@@ -215,7 +215,9 @@ def av_from_outputs(rec_j, vod_j, dur_s=AV_CLIP_S, scaled=(), heights=None):
         if name in scaled:
             src = f"{(heights or {}).get(name, '?')}p"
             audio = j.get("audio_markers_decoded")
-            if audio is not None and matched < audio - AV_SCALED_MARKER_SLACK:
+            # audio can decode a marker at either edge of the cut that no frame of the clip shows
+            fits = int(dur_s / AV_MARKER_PERIOD_S)
+            if audio is not None and matched < min(audio, fits) - AV_SCALED_MARKER_SLACK:
                 raise ValueError(f"the {AV_READ_HEIGHT}p read of the {src} {name} matched {matched} of the {audio} "
                                  f"audio markers it decoded (a scaled read is never re-read at {src}: A/V not "
                                  "measured)")
