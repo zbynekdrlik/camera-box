@@ -243,7 +243,7 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    IPv4 (`strih_lx_is_ipv4`; the fleet row is one, a DNS name is refused, a
    flag-shaped / mistyped override is refused). The box's OWN address is not the dial host: since
    issue 1361 setup-strih.sh reads it from the box's fact file, so the runner exports no STRIH_LX_IP.
-   The provisioning tree is the COMMITTED `scripts/ systemd/ intercom/` + `vendor/realtek-r8152` (the
+   The provisioning tree is the COMMITTED `scripts/ systemd/` + `vendor/realtek-r8152` (the
    rig NIC driver source setup-strih step 1b builds through DKMS, issue 1391) + every
    `STRIH_PROGRAM_AUDIO_FILES` entry outside those dirs (the two vendored av-sync-dock headers the
    step-16e decoder shim builds from, issue 1404) of the checkout (the archive of HEAD — uncommitted

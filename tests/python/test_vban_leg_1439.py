@@ -545,8 +545,21 @@ def test_the_dante_rules_admit_both_devices_and_keep_the_vban_and_ping():
 
 def test_a_peers_reply_to_an_ephemeral_client_socket_is_admitted_by_its_source_port():
     """dstack's ARC, flow and mDNS instance clients bind port 0: a dport list alone would drop every reply."""
-    assert re.search(r"ip saddr 10\.77\.7\.0/24 udp sport \{ 4440, 4441, 4455, 4456, 5353, 8700, 8800, 8801 \}",
-                     _dante_text())
+    assert re.search(r"ip saddr 10\.77\.7\.0/24 udp sport \{ 4440, 4441, 4455, 4456, 5353, 8700, 8800, 8801 \} "
+                     r"udp dport 32768-60999 counter accept", _dante_text())
+
+
+def test_a_peers_source_port_opens_only_the_ephemeral_range():
+    """A sender on 5353 must not reach 319 or the VBAN ports: both sit below the ephemeral range."""
+    t = _dante_text()
+    line = next(x for x in t.splitlines() if "udp sport" in x)
+    low = int(re.search(r"udp dport (\d+)-", line).group(1))
+    assert low > 6981 and low > 319
+
+
+def test_a_range_touching_a_common_port_is_never_lost():
+    r = _bash('. "%s"\nstrih_dante_in_ports "$1"' % LEG_LIB, "a=4440:8800:4455:8700-8710")
+    assert "8700-8710" in r.stdout, r.stdout
 
 
 @pytest.mark.parametrize("port", ["319", "320", "31900"])

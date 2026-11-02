@@ -641,7 +641,7 @@ fi
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
 # issue 1487: the pinned intercom release, verified, before step 12's purge decision reads its routing file.
-IH_BUNDLE="$(strih_intercom_release_ensure "${HERE}/..")" || fail "the pinned intercom release (above)"
+if IH_WHY="$(obs_box_step_applies 13)"; then IH_BUNDLE="$(strih_intercom_release_ensure "${HERE}/..")" || fail "the pinned intercom release (above)"; fi
 step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344); stream role: the locked operator PipeWire (issue 1465); a strih box that needs none: PipeWire purged (issue 1440)"
 # Root cause (design 20.9., live diagnosis issuecomment-5751113173): the OBS program (${AUDIO_NAME}) is a NETWORK
 # stream (fohabl-strih VBAN), NOT the MiniFuse (the operator TALKBACK mic, the hub reads it). The hub writes the

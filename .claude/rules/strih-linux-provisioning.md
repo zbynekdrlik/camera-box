@@ -129,7 +129,7 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION` from its environment). The NIC driver + target IP are
   substituted into the boot IRQ oneshot's `@STRIH_NIC_DRIVER@` / `@STRIH_TARGET_IP@` placeholders.
   The intercom file is only SHAPE-checked at load and checked for existence where step 13 installs it
-  — the dev1 deploy plan rsyncs `scripts/` + `systemd/` only (no `intercom/`), and a load that
+  — the dev1 deploy plan rsyncs `scripts/` + `systemd/` (the release bundle is staged separately), and a load that
   required the file would refuse the whole deploy before step 4.
 - **On-box artifact names are ROLE paths, not identity** (`/opt/camera-box/strih-seed.json`,
   the retired `strih-lx-projector.json` that setup step 6 now only removes (issue 1346),
@@ -852,7 +852,7 @@ with an old inline block that ran its tail unconditionally.
   `echo "$PW" | sudo -S -p "" bash -c "nohup … &"`.
 - **verify-strih from a staged tree also needs `vendor/av-sync-dock/src`.** Item 41's
   `(program-audio-files)` row compares the installed sampler headers with the checkout's
-  `vendor/av-sync-dock/src/camera-box-{audio,marker-scan}.hpp`; a `scripts/ systemd/ intercom/`-only
+  `vendor/av-sync-dock/src/camera-box-{audio,marker-scan}.hpp`; a `scripts/ systemd/`-only
   stage reads them as `differs` (a false FAIL, 21.10.2026: the installed files matched the repo's
   sha256). Stage that dir too, or check the two hashes before believing the row.
 - **A few steps on a live box, without the whole run:** a small driver does `set -- --box <box>;
@@ -1285,8 +1285,8 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
   byte-identical to the release, no dev1 build artifact, plus camera-box's own `dkms.conf`
   (`realtek-r8152` / `2.21.4` / module `r8152` / `/updates/dkms` / `AUTOINSTALL=yes`, DKMS's default
   make command, so the Realtek Makefile's own rmmod+modprobe install target never runs) and a
-  `SHA256SUMS` over all seven. The genlock deploy archives this directory with `scripts/ systemd/
-  intercom/` (`scripts/lib/strih-snv-deploy.sh`), so setup-strih finds it on the box.
+  `SHA256SUMS` over all seven. The genlock deploy archives this directory with `scripts/ systemd/`
+  (`scripts/lib/strih-snv-deploy.sh`), so setup-strih finds it on the box.
 - **Box facts** (loader-validated): `STRIH_NIC_OOT_DRIVER` = `<package>-<version>` of a driver vendored
   under `vendor/`, or `none`; `STRIH_NIC_MIN_USB_MBPS` = the lowest USB device speed (Mb/s, `none` for a
   non-USB NIC); `STRIH_NIC_MIN_LINK_MBPS` = the lowest Ethernet link speed. The returned strih-snv

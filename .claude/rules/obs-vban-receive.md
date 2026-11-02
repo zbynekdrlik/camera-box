@@ -1,5 +1,6 @@
 ---
 paths:
+  - "scripts/lib/strih-dante-leg.sh"
   - "vendor/obs-vban/src/vban-source.c"
   - "vendor/obs-vban/src/vban-receive-timeline.h"
   - "src/vban_receive_timeline.rs"
@@ -518,7 +519,7 @@ for the hub (one UDP port has one receiver). The console-side setting is the own
   - verify item 9: `strih_program_vban_declared` (strih-program-vban.sh) picks `strih_program_vban_grade`
     on every box that declares the stream; the strih-program sink / pulse / hub-rx verdict only on a
     hub-fed box; the hub's HDMI legs + the MiniFuse note on every hub box (`obs_box_step_applies 13`).
-- **The hub forwards nothing into OBS.** `scripts/vbmatrix_to_intercom_toml.py` drops VASIO8 (the
+- **The hub forwards nothing into OBS.** The converter (now in the intercom repo) drops VASIO8 (the
   Windows OBS `ASIO zvuk` capture) and its 4 points: the strih-snv TOML has no `program_out` (14
   participants, 212 points; fohabl/lv1 keep their cutters / speakers points and channel counts).
   `tests/python/test_strih_role_vban_1439.py` pins it per box: a strih box that declares a program
@@ -581,7 +582,7 @@ VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, ne
 - **Facts** (`scripts/lib/strih-box-facts.sh`): `STRIH_PROGRAM_VBAN_LEG` = `mac:<MAC>` (a second NIC;
   stream-snv `mac:00:e0:4c:68:01:85`, the USB-C r8152 `enx00e04c680185`) | `vlan:<id>` (a tagged VLAN
   on the rig NIC; strih-snv `vlan:70` = `enp7s0.70`) | `none`; `STRIH_PROGRAM_VBAN_LEG_ADDR` = the box's
-  /32 on it (stream-snv .204, strih-snv .202); `STRIH_PROGRAM_VBAN_SENDER` = the console (stream-snv
+  address on it, a /32 (stream-snv .204) or with Dante devices the /24 of the section below (strih-snv .202); `STRIH_PROGRAM_VBAN_SENDER` = the console (stream-snv
   mbc.lan 10.77.7.232) or `none` = the leg passes only ping (strih-snv until the phase-2 senders exist).
   The loader refuses a malformed MAC / VLAN id (1..4094), an address that is not IPv4 or is STRIH_IP, a
   sender outside the address's /24, and a sender without `STRIH_PROGRAM_VBAN_PORT`. Every role.
@@ -664,7 +665,8 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
 - **Applied live** by `connection modify` + `device reapply`, like every profile change: no VLAN create, no
   link change, a refused reapply fails by name (`test_the_live_32_moves_to_the_24_by_reapply_...`).
 - **The filter:** read from dstack's sockets: bound to the interface address, its ARC / flow / mDNS instance
-  CLIENT sockets on port 0, so a peer's reply is admitted by its SOURCE port. Input from the /24 to the
+  CLIENT sockets on port 0, so a peer's reply is admitted by its SOURCE port, to the ephemeral range only
+  (never 319 or the VBAN ports). The peer ports are the defaults + this box's devices. Input from the /24 to the
   devices' ports + 5353, 8700, 8702, 8708; output from the leg's address to the /24 and 224.0.0.231, .233,
   .251. IGMP both ways: without it a snooping switch ages the groups out.
 - **Traps:** `nft list` prints touching ports of an interval set merged (`4440-4441`) and a `skuid` as a
@@ -673,9 +675,13 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   the NDI announcement). UDP 319/320 and 31900 stay shut: dantesync is the only PTP owner.
 - **`rp_filter=2` on the leg:** an inbound multicast's reverse lookup has no `from` match and resolves
   through the rig NIC.
+- **Unproven until the first live run:** `man nm-settings-nmcli` says `ipv4.route-table` affects device-routes
+  too, but the fake NetworkManager assumes it, so the
+  first reapply on strih-snv is the proof: `ip route show table 70` carries the /24, main does not, and the
+  address reads `noprefixroute`. The change is a brief gap in .202, so run it with OBS stopped; the hub's VBAN
+  can lose packets.
 - **Known limit, unmeasured:** libndi sends its own mDNS from every interface; with 5353 open it can reach
-  the audio VLAN from the leg address (read it live, the steps in the 1485 lane return). Its NDI TCP stays
-  dropped.
+  the audio VLAN from the leg address (read with tcpdump on the leg). Its NDI TCP stays dropped.
 
 ## Verify
 

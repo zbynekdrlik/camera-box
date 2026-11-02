@@ -95,6 +95,17 @@ _strih_vban_leg_plen() { if strih_dante_leg_declared; then echo 24; else echo 32
 # _strih_vban_leg_devices -> the box fact STRIH_DANTE_DEVICES (`none` when unreadable).
 _strih_vban_leg_devices() { strih_lx_dante_devices 2>/dev/null || echo none; }
 
+# _strih_vban_leg_filter_words SENDER PORT -> what the leg's filter admits, for the setup + verify lines.
+_strih_vban_leg_filter_words() {
+  local vban="only ping (no sender declared yet)"
+  if [ "$1" != none ]; then vban="only ${1}'s VBAN to UDP ${2} + ping"; fi
+  if strih_dante_leg_declared; then
+    printf '%s + the Dante devices (%s), out echo replies + Dante from the leg address\n' "${vban#only }" "$(_strih_vban_leg_devices)"
+  else
+    printf '%s, out only echo replies\n' "$vban"
+  fi
+}
+
 # strih_vban_leg_kind -> mac | vlan | none (the loaded box's STRIH_PROGRAM_VBAN_LEG).
 strih_vban_leg_kind() {
   local v
@@ -608,7 +619,7 @@ strih_vban_leg_install() {
     return 1
   fi
   read -r ifc parent id <<<"${res##*$'\n'}"
-  echo "  the VBAN-only leg ${leg}: ${ifc} -> ${addr}/$(_strih_vban_leg_plen), $([ "$sender" = none ] && echo 'only ping (no sender declared yet)' || echo "only ${sender}'s VBAN to UDP ${port} + ping")"
+  echo "  the leg ${leg}: ${ifc} -> ${addr}/$(_strih_vban_leg_plen), $(_strih_vban_leg_filter_words "$sender" "$port")"
   _strih_vban_leg_filter_apply "$ifc" "$sender" "$port" "$addr" || return 1
   _strih_vban_leg_sysctl_apply "$ifc" || return 1
   _strih_vban_leg_nm_apply "$ifc" "$addr" "$mac" "$parent" "$id" || return 1
@@ -691,6 +702,7 @@ strih_vban_leg_grade() {
   fi
   if strih_dante_leg_declared; then
     ai="$(cat "${d}/rp_filter" 2>/dev/null || echo '?')"
+    if [ -z "$(_strih_dante_avahi_uid)" ]; then note "(vban-leg) dante: no avahi user, so no avahi drop in the filter"; fi
     if [ "$ai" = 2 ]; then ok "(vban-leg) dante: ${ifc} rp_filter=2, the devices' ports through the filter below"
     else bad "(vban-leg) dante: ${ifc} rp_filter=${ai}, wants 2: a strict filter drops mDNS and the Dante groups (re-run setup-strih.sh step 13)"; fi
   fi
@@ -705,7 +717,7 @@ strih_vban_leg_grade() {
      || ! systemctl is-active -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
     bad "(vban-leg) filter: table inet ${STRIH_VBAN_LEG_NFT_TABLE} is not $(_strih_vban_leg_nft_file) live, or ${STRIH_VBAN_LEG_UNIT} is not enabled + active (a reboot would leave the leg open) -- re-run setup-strih.sh step 13"
   else
-    ok "(vban-leg) filter: ${STRIH_VBAN_LEG_UNIT} enabled + active, table inet ${STRIH_VBAN_LEG_NFT_TABLE} = $([ "$sender" = none ] && echo 'in only ping' || echo "in only ${sender}'s VBAN to UDP ${port} + ping"), out only echo replies"
+    ok "(vban-leg) filter: ${STRIH_VBAN_LEG_UNIT} enabled + active, table inet ${STRIH_VBAN_LEG_NFT_TABLE} = $(_strih_vban_leg_filter_words "$sender" "$port")"
   fi
   if [ "$sender" = none ]; then
     note "(vban-leg) vban: no VBAN sender declared yet (STRIH_PROGRAM_VBAN_SENDER=none): the leg passes only ping"

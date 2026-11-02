@@ -8,7 +8,7 @@
 # checkout + the decode_rejects note; issue 1438: verify item 9's grade of the hub's card leg (the
 # cutters' USB card opened through ALSA).
 #
-# The base systemd/intercom-hub.service loads the Janus room secret with an unconditional
+# The released intercom-hub.service loads the Janus room secret with an unconditional
 #   LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
 # (issue 1345: DynamicUser cannot read the root 0600 file directly). setup-strih step 14 (Janus) creates
 # that file, but the stream role skips step 14 (obs_box_step_applies), so on stream-pp (11.10.2026) the
@@ -207,7 +207,7 @@ strih_intercom_hub_config_install() {
   if [ -x "$bin" ] && ! why="$(timeout 15 "$bin" --check-config --config "$src" 2>&1)"; then
     said="$(strih_intercom_hub_refusal_line "$why")"
     if [ -f "$dst" ]; then
-      echo "  WARNING: the installed hub ${bin} cannot load ${src} -- KEPT the installed ${dst}. Reinstall the hub (sudo mv ${bin} ${bin}.pre-old; re-run setup-strih), then re-run step 13. Hub said: ${said}" >&2
+      echo "  WARNING: the installed hub ${bin} cannot load ${src} -- KEPT the installed ${dst}. The pinned release is not a pair: fix scripts/intercom-release.pin, then re-run step 13. Hub said: ${said}" >&2
       return 0
     fi
     echo "  WARNING: the installed hub ${bin} cannot load ${src} and no routing file is installed yet -- installing it; reinstall the hub before starting it. Hub said: ${said}" >&2

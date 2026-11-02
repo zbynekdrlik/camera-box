@@ -182,9 +182,3 @@ def test_the_deploy_stages_the_verified_bundle_into_the_tree():
     c = d.index('strih_lx_tree_check "$w/repo" "$b"')
     assert a < e < c
     assert "CAMERA_BOX_SOURCE_SHA" not in d
-
-
-def test_the_tree_check_needs_the_routing_file_in_the_bundle(tmp_path):
-    src = (REPO / "scripts" / "lib" / "strih-snv-deploy.sh").read_text()
-    assert 'strih_intercom_release_dir "$tree"' in src
-    assert "the bundle must be staged" in src

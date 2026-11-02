@@ -20,9 +20,13 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from intercom_release_fake_1487 import fake_release_env  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 FLEET = REPO / "scripts" / "deploy-genlock-fleet.sh"
@@ -180,10 +184,6 @@ printf '{"genlock_build_sha":"%s"}\n' "$STUB_SHA"
 
 OBS_PHASE2 = r'''#!/usr/bin/env python3
 import json, os, sys
-
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from intercom_release_fake_1487 import fake_release_env  # noqa: E402
 with open(os.path.join(os.environ["STUB_DIR"], "calls.log"), "a") as f:
     f.write("obs_phase2 " + " ".join(sys.argv[1:]) + "\n")
 if sys.argv[1:2] == ["rig-busy-check"]:

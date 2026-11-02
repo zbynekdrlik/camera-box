@@ -13,7 +13,9 @@
 #
 # The filter, read from dstack's source (head of 2.11.2026): a device's sockets are bound to the
 # interface address; its ARC, flow and mDNS instance CLIENT sockets bind port 0, so a peer's reply comes
-# from the peer's service port to an ephemeral port (the second input rule). Multicast: mDNS, the info
+# from the peer's service port to an ephemeral port (the second input rule, bounded to the ephemeral
+# range: the source port alone must never open 319 or the VBAN ports). The peer list is the defaults plus
+# this box's own devices, so a peer device on other ports needs its port added. Multicast: mDNS, the info
 # group 224.0.0.231:8702, the heartbeat group 224.0.0.233:8708. IGMP goes both ways or a snooping switch
 # ages the groups out. No conntrack: its hooks would see every NDI packet of this box. avahi stays off
 # the leg by its uid (an avahi restart risks the NDI announcement). UDP 319/320 and dsync's 31900 are
@@ -26,6 +28,8 @@ STRIH_DANTE_GROUP_PORTS="8702 8708"
 STRIH_DANTE_GROUPS="224.0.0.231 224.0.0.233 224.0.0.251"
 # a peer's default ARC / flow control / CMC ports (dstack arc::PORT, flows::PORT, cmc::PORT)
 STRIH_DANTE_PEER_DEFAULT_PORTS="4440 4455 8800"
+# net.ipv4.ip_local_port_range's Linux default, where a port-0 client socket lands
+STRIH_DANTE_EPHEMERAL_PORTS="32768-60999"
 
 # strih_dante_leg_declared -> rc 0 when the LOADED box declares Dante devices on the leg.
 strih_dante_leg_declared() {
@@ -43,7 +47,7 @@ _strih_dante_sorted_set() {
 # _strih_dante_merged_set ITEM... -> the same with touching ports and ranges merged: `nft list` prints an
 # interval set that way, and the setup + verify read-back compares text.
 _strih_dante_merged_set() {
-  printf '%s\n' "$@" | sort -t- -k1,1n -u | awk -F- '
+  printf '%s\n' "$@" | sort -t- -k1,1n -k2,2n | awk -F- '
     function put() { out = out (out == "" ? "" : ", ") (lo == hi ? lo : lo "-" hi) }
     { f = $1 + 0; l = (NF > 1 ? $2 + 0 : f)
       if (NR == 1) { lo = f; hi = l } else if (f <= hi + 1) { if (l > hi) hi = l } else { put(); lo = f; hi = l } }
@@ -80,7 +84,8 @@ strih_dante_peer_ports() {
 strih_dante_nft_input() {
   local ifc="$1" net="$2" dev="$3"
   printf '        iifname "%s" ip saddr %s udp dport { %s } counter accept\n' "$ifc" "$net" "$(strih_dante_in_ports "$dev")"
-  printf '        iifname "%s" ip saddr %s udp sport { %s } counter accept\n' "$ifc" "$net" "$(strih_dante_peer_ports "$dev")"
+  printf '        iifname "%s" ip saddr %s udp sport { %s } udp dport %s counter accept\n' "$ifc" "$net" \
+    "$(strih_dante_peer_ports "$dev")" "$STRIH_DANTE_EPHEMERAL_PORTS"
   printf '        iifname "%s" ip protocol igmp counter accept\n' "$ifc"
 }
 
