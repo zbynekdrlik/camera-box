@@ -18,7 +18,7 @@
 # <BOX>-maxperf persistence), cstate (the PM QoS idle wake-up latency bound: the holder unit + no state
 # deeper than the bound entered over a 1 s sample), nosleep, boot (boot safety net), kernel (preempt=full low-latency),
 # affinity (AFFINITY-ONLY core reservation, no kernel isolcpus/nohz_full), rtprio (no retired
-# render-tick rtprio grant, issue 1357), gpu (PRIME nvidia-primary on
+# render-tick rtprio grant, issue 1357), background (background work off the OBS cores, issue 1387), gpu (PRIME nvidia-primary on
 # a dGPU box, the iGPU max-frequency pin otherwise), igpu-sink (no amdgpu Xorg DDX on a dGPU box, so its iGPU
 # panel sink runs on modesetting, issue 1418), dejitter (oomd + off-hours + OBS ProcessPriority=High
 # + the user-unit masks), crash (no operator crash popup), kiosk (lightdm + openbox installed, autologin
@@ -138,7 +138,11 @@ obs_box_baseline_gather_snippet() {
     declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units \
         obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
         obs_box_cpu_latency_bound_us rig_timezone_read obs_box_amdgpu_ddx_package obs_box_pkg_status \
-        obs_box_gpu_ready_wait_path obs_box_gpu_ready_dropin_path obs_box_gpu_ready_wait_text obs_box_gpu_ready_dropin_text
+        obs_box_gpu_ready_wait_path obs_box_gpu_ready_dropin_path obs_box_gpu_ready_wait_text obs_box_gpu_ready_dropin_text \
+        obs_box_cpulist_expand obs_box_cpulist_compress obs_box_background_cpus obs_box_background_smt_shared \
+        obs_box_background_slice_name obs_box_background_slice_path obs_box_background_dropin_path \
+        obs_box_background_run_path obs_box_background_memory_high obs_box_background_slice_text \
+        obs_box_background_dropin_text obs_box_background_run_text
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
@@ -207,6 +211,42 @@ echo "rtprio_grants=$(ls -1 /etc/security/limits.d/95-*-genlock-rtprio.conf 2>/d
 _op="$(pgrep -xo obs 2>/dev/null)"
 echo "obs_running=$(if ! command -v pgrep >/dev/null 2>&1; then :; elif [ -n "$_op" ]; then echo 1; else echo 0; fi)"
 echo "obs_rtprio_limit=$(if [ -n "$_op" ]; then awk '/^Max realtime priority/{print $4; exit}' "/proc/${_op}/limits" 2>/dev/null; fi)"
+# issue 1387: background work off the OBS cores. The slice file and the runner byte-identical to their
+# renderers, the runner allowed by sudo for the desktop user, the fbagent drop-in when fbagent exists,
+# every running restic / fbagent inside the fence, OBS's own live mask outside it, no SMT pair shared.
+_bg_online="$( { first < /sys/devices/system/cpu/online; } 2>/dev/null)"
+_bg_obs="$( { first < "/etc/${BOX}-isolated-cpus.conf"; } 2>/dev/null)"
+_bg_cpus="$(obs_box_background_cpus "$_bg_online" "$_bg_obs" 2>/dev/null)"
+_bg_slice="$(obs_box_background_slice_name)"
+_bg_run="$(obs_box_background_run_path)"
+echo "bg_online=${_bg_online}"
+echo "bg_obs_conf=${_bg_obs}"
+echo "bg_loaded=$(systemctl show -p LoadState --value "$_bg_slice" 2>/dev/null | first)"
+echo "bg_allowed=$(systemctl show -p AllowedCPUs --value "$_bg_slice" 2>/dev/null | first | tr ' ' ',')"
+echo "bg_enabled=$(systemctl is-enabled "$_bg_slice" 2>/dev/null | first)"
+echo "bg_obs_running=$(if ! command -v pgrep >/dev/null 2>&1; then :; elif [ -n "$_op" ]; then echo 1; else echo 0; fi)"
+echo "bg_file=$(if [ -n "$_bg_cpus" ] && cmp -s "$(obs_box_background_slice_path)" <(obs_box_background_slice_text "$_bg_cpus"); then echo 1; else echo 0; fi)"
+echo "bg_helper=$(if [ -x "$_bg_run" ] && cmp -s "$_bg_run" <(obs_box_background_run_text); then echo 1; else echo 0; fi)"
+echo "bg_sudo=$(if [ "$(id -u 2>/dev/null)" = 0 ]; then sudo -n -U "$U" -l "$_bg_run" >/dev/null 2>&1; else sudo -n -l "$_bg_run" >/dev/null 2>&1; fi && echo 1 || echo 0)"
+echo "bg_fbagent=$(if ! command -v systemctl >/dev/null 2>&1; then :; elif [ -n "$(systemctl list-unit-files --no-legend 'fbagent@*' 2>/dev/null)" ]; then echo 1; else echo 0; fi)"
+echo "bg_dropin=$(if cmp -s "$(obs_box_background_dropin_path)" <(obs_box_background_dropin_text); then echo 1; else echo 0; fi)"
+echo "bg_pgrep=$(if command -v pgrep >/dev/null 2>&1; then echo 1; else echo 0; fi)"
+_bg_procs=""
+for _bg_c in restic fbagent; do
+    for _bg_p in $(pgrep -x "$_bg_c" 2>/dev/null); do
+        _bg_m="$(awk '/^Cpus_allowed_list:/{print $2; exit}' "/proc/${_bg_p}/status" 2>/dev/null)"
+        if [ -d "/proc/${_bg_p}" ]; then _bg_procs="${_bg_procs}${_bg_procs:+ }${_bg_c}:${_bg_p}:${_bg_m:-unread}"; fi
+    done
+done
+echo "bg_procs=${_bg_procs}"
+echo "bg_obs_mask=$(if [ -n "$_op" ]; then awk '/^Cpus_allowed_list:/{print $2; exit}' "/proc/${_op}/status" 2>/dev/null; fi)"
+echo "bg_smt_shared=$(if [ -z "$_bg_cpus" ]; then echo unread; else
+    for _bg_f in /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list; do
+        _bg_n="${_bg_f#/sys/devices/system/cpu/cpu}"; printf '%s %s\n' "${_bg_n%%/*}" "$(cat "$_bg_f" 2>/dev/null)"
+    done | obs_box_background_smt_shared "$_bg_cpus" "$_bg_obs"
+fi)"
+echo "bg_cgroup_cpus=$( { first < "/sys/fs/cgroup/${_bg_slice}/cpuset.cpus.effective"; } 2>/dev/null)"
+echo "bg_iosched=$(cat /sys/block/nvme*/queue/scheduler 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')"
 echo "dgpu=$(if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then echo 1; else echo 0; fi)"
 echo "prime=$(prime-select query 2>/dev/null | first)"
 echo "display_gpus=$(lspci -nn 2>/dev/null | grep -Eic '(vga compatible controller|3d controller|display controller)')"
@@ -311,7 +351,7 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in timezone net perf cstate nosleep boot kernel affinity rtprio gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap; do
+        for v in timezone net perf cstate nosleep boot kernel affinity rtprio background gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
@@ -382,6 +422,14 @@ obs_box_baseline_verdict() {
     esac
     ok=0; [ -z "$(_obs_box_f rtprio_grants)" ] && [ "$live_ok" = 1 ] && ok=1
     _obs_box_item rtprio "$ok" "genlock rtprio grants=[$(_obs_box_f rtprio_grants)] OBS running=${orun:-unreadable} realtime limit=${rl:-unreadable}"
+    # background -- issue 1387: background work off the OBS cores (obs_box_background_slice); the grade is
+    # pure and fail-closed (scripts/lib/obs-box-background.sh)
+    local bg_detail
+    ok=0; bg_detail="$(obs_box_background_grade "$(_obs_box_f bg_online)" "$(_obs_box_f bg_obs_conf)" "$(_obs_box_f bg_loaded)" \
+        "$(_obs_box_f bg_allowed)" "$(_obs_box_f bg_file)" "$(_obs_box_f bg_helper)" "$(_obs_box_f bg_sudo)" "$(_obs_box_f bg_fbagent)" \
+        "$(_obs_box_f bg_dropin)" "$(_obs_box_f bg_pgrep)" "$(_obs_box_f bg_procs)" "$(_obs_box_f bg_obs_running)" "$(_obs_box_f bg_obs_mask)" \
+        "$(_obs_box_f bg_smt_shared)" "$(_obs_box_f bg_cgroup_cpus)" "$(_obs_box_f bg_iosched)" "$(_obs_box_f bg_enabled)")" && ok=1
+    _obs_box_item background "$ok" "$bg_detail"
     # gpu -- a dGPU box renders NVIDIA-primary (PRIME); an iGPU-only box has nothing to select
     if [ "$(_obs_box_f dgpu)" = 1 ]; then
         # issue 1412: with the NVIDIA as the ONLY display adapter (strih-pp, a desktop) there is no PRIME

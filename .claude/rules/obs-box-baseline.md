@@ -3,6 +3,9 @@ paths:
   - "scripts/lib/obs-box-baseline.sh"
   - "scripts/lib/obs-box-kiosk.sh"
   - "scripts/lib/obs-box-baseline-verify.sh"
+  - "scripts/lib/obs-box-background.sh"
+  - "scripts/background-load-bench.sh"
+  - "scripts/background_load_decision.py"
   - "scripts/lib/rig-timezone.sh"
   - "scripts/setup-imag.sh"
   - "scripts/setup-strih.sh"
@@ -260,6 +263,70 @@ OBS browser source and the restreamer (14.10.2026 09:37).
   disk writes) from setup-device / create-usb, graded by verify-device.
 - Tests: `tests/python/test_obs_box_swap_1428.py` (stubbed tools, path seams `OBS_BOX_SWAPFILE` /
   `OBS_BOX_FSTAB` / `OBS_BOX_MEMINFO`), the `swap` rows in `tests/obs_box_baseline_1357.rs`.
+
+## Background work off the OBS cores (item `obs_box_background_slice`, grader row `background`, issue 1387)
+
+Owner 2.11.2026: OBS on a broadcast box must be immune to background load; backups are never disabled or
+time-boxed. On strih-snv `/opt/fleetbackup/restic` (`fbagent@main`, nice 19, ionice idle, no CPU fence)
+raised `program-render-audit lagged` from 0 to 57-213 per 10 min and dropped render to 27 fps, with OBS
+render at 23 of 33 ms. The on-box decode did the same. nice is a weight; it fences no core and no SMT
+sibling. The E-core pin of the decode is empty on AMD (no `cpu_atom`).
+
+- **The slice:** `rig-background.slice`, `AllowedCPUs` = online CPUs minus `/etc/<BOX>-isolated-cpus.conf`,
+  always derived (`obs_box_background_cpus`). strih-snv: 0-1, one physical core. imag: 0-1 + the E-cores.
+  `CPUWeight=1`, `IOWeight=1`, `MemoryHigh=30%`. Enabled and started by setup (`[Install]`
+  multi-user.target), so the cpuset controller comes up at setup or boot, never when a backup starts
+  during a broadcast. The genlock deploy runs setup with OBS down; a hand-run setup on a live box does not.
+- **Install:** `scripts/lib/obs-box-background.sh`, sourced by the baseline (the system half is at its
+  line budget), called on the `obs_box_rtprio_off ; obs_box_swap` line of both setups, so it runs after
+  `obs_box_cpu_affinity`. Every file goes through `obs_box_write_if_changed`, daemon-reload only on a
+  change, so the genlock deploy's setup re-run stays quiet. It never stops or restarts a service.
+- **fbagent is the fleet-backup project's unit: a drop-in only**
+  (`/etc/systemd/system/fbagent@.service.d/50-rig-background.conf`, `Slice=` alone), inert while the
+  template is absent. `Slice=` applies at the next start, so a RUNNING instance (read from
+  `ControlGroup`, because the `Slice` property shows the drop-in as soon as it is loaded; `active` or
+  `activating`, a oneshot) gets the limits through `systemctl set-property --runtime`, with no stop.
+- **The decode:** `LOWPRIO_SNIPPET` (and its byte-pinned twin in `missing-slot-pixels.sh`) ends with
+  `LP="sudo -n /usr/local/sbin/obs-box-background-run"` when the runner exists. The runner is a root helper
+  behind a one-line sudoers drop-in (`visudo -cf` before the write). It starts a `systemd-run --scope` in
+  the slice, and `setpriv --reuid --regid --init-groups` drops to the sudo caller inside it, at nice 19 +
+  ionice idle. Never `systemd-run --uid --gid` alone: that keeps root's supplementary group 0 (read live
+  on dev1 by review). A scope keeps the process in the ssh session, so exit status, stdout, a stdin pipe
+  and av-soak's `pkill` are unchanged. It refuses a root caller and pins PATH. The snippet uses the
+  runner only when `sudo -n -l` allows it, else the old `nice` line.
+- **The decode's budget:** `decode_workers` follows `available_parallelism`, which reads the cpuset, so
+  the decode runs 2 workers on strih-snv instead of `MAX_DECODE_WORKERS` 8, on one physical core. Measured
+  before: 111 s for one recording on the whole box. Expect 4-5 x: ~8-10 min per box, NOT measured yet. No wider
+  fence: every CPU given to the decode is a CPU taken from OBS. The E2E job's 105 min and the soak's
+  `DECODE_TIMEOUT_S` (slot - window - merge - overhead) must be checked against the first live run, and
+  so must `MISSING_SLOT_PIXELS_TIMEOUT` (600 s): it bounds a full decode on these 2 CPUs.
+- **Kernel facts:**
+  - `memory.high` reclaims and throttles only this cgroup and never OOM-kills, hence no `MemoryMax`:
+    a full backup's page cache stays in the cgroup and the backup still finishes.
+  - `IOWeight` needs BFQ or io.cost. On an NVMe with scheduler `none` it does nothing, and neither does
+    ionice idle. The row prints the scheduler and never grades it. The fence is CPU + memory.
+  - `AllowedCPUs` enables the cpuset controller on the slice's siblings too (user.slice holds OBS). Since
+    kernel 6.2 the taskset mask is kept across that migration, from memory and unverified on a box; dev1
+    already has `cpuset` in the root `cgroup.subtree_control`. The row's `OBS-runs-on-background-cpu` and
+    the bench's mask compare catch a widened OBS.
+- **Who lives on the fence:** `intercom-hub` and `dantesync` are outside the slice (system.slice, weight
+  100 against 1; `hub-mix` is SCHED_FIFO), so background work only ever gets what they leave.
+- **Grader row `background`** (after `rtprio`), pure `obs_box_background_grade`, fail-closed: slice loaded
+  and enabled with the derived CPUs and byte-identical; runner byte-identical and allowed by `sudo -n -l` for the
+  desktop user; the drop-in present while `fbagent@*` is installed; every running `restic` / `fbagent`
+  inside the CPUs (`Cpus_allowed_list`); OBS's live mask outside them; no background CPU sharing an SMT
+  pair with OBS (an unread sibling list FAILs); the slice cgroup's `cpuset.cpus.effective` equal.
+  `systemctl show` prints `AllowedCPUs` space separated, the gather turns it into a cpulist.
+- **Bench:** `scripts/background-load-bench.sh` (`--plan` default; `--facts` = one read-only ssh read of SMT
+  pairs, IRQs, realtime threads; `--run` behind the rig lease, TEST mode and a proven idle rig). Phases:
+  baseline, inside, outside, in that order so the harmful phase cannot leak into the one under test.
+  It reads `lagged` only past a byte mark through `tail -c +N | head -c 5000000`, never a line count of
+  the 100 MB log. PASS = quiet baseline, inside 0, outside > 0, OBS mask unmoved; a load that never bites
+  or is not proven (rc 124 from the remote `timeout`, a mid-phase cgroup read of every sha256sum) is UNKNOWN
+  (`scripts/background_load_decision.py`). A PASS proves CPU immunity only: the load touches no disk or
+  page cache, so `MemoryHigh` is not measured by it. No sound, no scene change, no recording.
+- **Tests:** `tests/python/test_obs_box_background_1387.py` (stubs + moved paths, the real installer, runner
+  and gather), the `background` row in `tests/obs_box_baseline_1357.rs`.
 
 ## The rig time zone (item `obs_box_timezone`, grader row `timezone`, issue 1415)
 

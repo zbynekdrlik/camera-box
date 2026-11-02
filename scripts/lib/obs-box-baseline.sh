@@ -30,6 +30,7 @@
 #   obs_box_network_tuning [2]   obs_box_max_performance [4]   obs_box_never_sleep [5]
 #   obs_box_boot_safety_net [6]  obs_box_lowlatency_kernel [7] obs_box_cpu_affinity [8]
 #   obs_box_rtprio_off [8, after the affinity: removes a retired render-tick rtprio grant]
+#   obs_box_background_slice [8, after the affinity: background work off the OBS cores, issue 1387]
 #   obs_box_nvidia_prime [9]     obs_box_dejitter [14] (+ obs_box_crash_popups_off)
 #   obs_box_kiosk [15]           openbox autostart [16]: the caller writes its role autostart (which
 #                                OBS unit, which projector layout) starting with the
@@ -58,6 +59,8 @@ if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/
 # obs_box_swap (issue 1428) lives in its own file for the same reason (this one is at the line budget).
 # shellcheck source=scripts/lib/obs-box-swap.sh
 if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-swap.sh"; else . ./obs-box-swap.sh; fi
+# shellcheck source=scripts/lib/obs-box-background.sh
+if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-background.sh"; else . ./obs-box-background.sh; fi
 
 # obs_box_apt_lock_timeout_conf -> the apt drop-in that makes every apt-get WAIT for the dpkg lock.
 #
