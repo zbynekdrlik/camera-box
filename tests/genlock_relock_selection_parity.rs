@@ -1,6 +1,6 @@
 //! #1003 — an EXECUTABLE C-vs-Rust parity gate for the phase-continuity relock selection.
 //!
-//! `src/genlock_backlog.rs` is the Tier-0 authority and `vendor/obs-studio/libobs/obs-source.c`
+//! `vstack:rig/core/src/genlock_backlog.rs` is the Tier-0 authority and `vendor/obs-studio/libobs/obs-source.c`
 //! is the production port; the two are required to be numerically identical. Every other
 //! guard in this repo asserts that by STATIC TEXT ANCHOR (see
 //! `tests/genlock_release_cadence.rs`), which proves the C still *says* the right thing but

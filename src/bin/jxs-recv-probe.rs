@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
         args.max_bpp
     );
     // Issue 1387 slice 2: the receive loop is the library's `JxsReceiver`, the same code the
-    // strih OBS source runs through jxs/recv-ffi.
+    // strih OBS source runs through vstack:jxs/recv-ffi.
     let mut cfg = ReceiverConfig::new(args.listen);
     cfg.camera = args.camera;
     cfg.max_bpp = args.max_bpp as u8;

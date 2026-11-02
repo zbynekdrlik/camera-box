@@ -1,6 +1,6 @@
 //! Issue 1367 (ROZHODNUTÉ 5827497952) — a std-only static guard that the SHALLOW N==1 per-lock depth
 //! is WIRED into the vendored release cadence, not just defined. The pure helpers are held to
-//! `src/genlock_n1_depth.rs` by `tests/genlock_relock_selection_parity.rs`; this proves the C
+//! `vstack:rig/core/src/genlock_n1_depth.rs` by `tests/genlock_relock_selection_parity.rs`; this proves the C
 //! actually calls them:
 //!
 //! 1. the SHED (the N==1 route of `genlock_should_converge_phase`) and the HOLD

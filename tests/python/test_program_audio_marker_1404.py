@@ -46,6 +46,7 @@ import program_audio_marker_calibrate as cal  # noqa: E402
 import program_audio_ndi as pan  # noqa: E402
 import program_audio_sampler as pas  # noqa: E402
 import rig_serve_files as rsf  # noqa: E402
+import vstack_src  # noqa: E402
 from qpsk_guard_shim_1404 import FixedChain, NoMarkers, build_shim, real_marker_words  # noqa: E402
 
 FIX = _ROOT / "tests" / "fixtures" / "youtube_leg_1404"
@@ -91,11 +92,11 @@ def test_the_span_is_a_whole_number_of_windows():
 
 
 def test_the_index_rate_is_the_emitters_frame_rate():
-    """The painter's marker log header (written by src/qpsk_marker.rs) declares vr=60/1: the index
+    """The painter's marker log header (written by vstack:av/marker/src/qpsk_marker.rs) declares vr=60/1: the index
     is frame_id mod 256 at 60 fps."""
-    rs = (_ROOT / "src" / "qpsk_marker.rs").read_text(encoding="utf-8")
+    rs = vstack_src.read("av/marker/src/qpsk_marker.rs")
     m = re.search(r"# qpsk-params sr=(\d+) carrier=(\d+) c=(\d+) q=(\d+) vr=(\d+)/(\d+)", rs)
-    assert m, "the pinned `# qpsk-params` line is gone from src/qpsk_marker.rs"
+    assert m, "the pinned `# qpsk-params` line is gone from vstack:av/marker/src/qpsk_marker.rs"
     vr_num, vr_den = int(m.group(5)), int(m.group(6))
     assert pa.MARKER_INDEX_RATE_HZ == vr_num / vr_den
 
@@ -248,7 +249,7 @@ def test_the_build_script_and_the_loader_agree_on_the_default_path():
 
 def test_the_shim_runs_the_dock_decoder_with_the_rig_parameters(decoder):
     assert decoder.params == {"sample_rate": 48000, "carrier_hz": 442, "c": 1, "threshold": 0.35}
-    rs = (_ROOT / "src" / "qpsk_marker.rs").read_text(encoding="utf-8")
+    rs = vstack_src.read("av/marker/src/qpsk_marker.rs")
     assert re.search(r"pub const AUDIO_SAMPLE_RATE_HZ: u32 = 48_000;", rs)
     assert re.search(r"pub const CARRIER_HZ_DEFAULT: u32 = 442;", rs)
     m = re.search(r"# qpsk-params sr=(\d+) carrier=(\d+) c=(\d+)", rs)

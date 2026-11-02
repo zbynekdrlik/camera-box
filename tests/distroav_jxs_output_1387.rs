@@ -14,6 +14,9 @@
 //!    the strih CI job build it;
 //! 5. the receiving source hands a 4:2:0 / 4:4:4 frame to libobs in its own format.
 
+#[path = "support/vstack.rs"]
+mod vstack;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -190,9 +193,9 @@ fn the_whole_output_compiles_against_the_vendored_libobs_and_both_ffi_headers() 
                 .arg("-I")
                 .arg(repo("vendor/distroav/src"))
                 .arg("-I")
-                .arg(repo("jxs/recv-ffi/include"))
+                .arg(vstack::path("jxs/recv-ffi/include"))
                 .arg("-I")
-                .arg(repo("jxs/send-ffi/include"))
+                .arg(vstack::path("jxs/send-ffi/include"))
                 .arg(repo(file)),
             &format!("g++ -fsyntax-only {file}"),
         );
@@ -327,7 +330,7 @@ fn the_pace_setting_defaults_to_automatic_and_reaches_the_sender_config() {
     ));
     assert!(decide.contains("#define CB_JXS_OUT_PACE_MBPS_DEFAULT 0\n"));
     use camera_box::jxs_link::pace_auto::PaceSource;
-    // CBJXS_SEND_PACE_* (jxs/send-ffi pins its own mapping to these numbers)
+    // CBJXS_SEND_PACE_* (vstack:jxs/send-ffi pins its own mapping to these numbers)
     for (code, src) in [
         (0, PaceSource::LineRate),
         (1, PaceSource::Fixed),
@@ -491,21 +494,13 @@ fn the_output_is_registered_and_wired_into_the_frontend_lifecycle_only_in_the_st
 #[test]
 fn the_strih_build_hands_the_sender_header_to_distroav_and_checks_the_output_is_in() {
     let wf = read(".github/workflows/linux-genlock.yml");
-    assert!(
-        wf.contains("-DCAMERA_BOX_JXS_SEND_FFI_INCLUDE=\"$GITHUB_WORKSPACE/jxs/send-ffi/include\"")
-    );
+    assert!(wf.contains("-DCAMERA_BOX_JXS_SEND_FFI_INCLUDE=\"$VSTACK_SRC/jxs/send-ffi/include\""));
     assert!(wf.contains("grep -aq 'camera_box_jxs_output' \"$distroav_so\""));
     // the ONE archive carries the sender: its symbols are checked in the built archive
     assert!(wf.contains("nm -g --defined-only target/release/libjxs_recv_ffi.a"));
     assert!(wf.contains("cbjxs_send_open"));
-    // the sender, its congestion control and auto bpp live in jxs/link, its core split in
-    // rig/core: a change there must rebuild the strih bundle
-    for p in ["'jxs/**'", "'rig/**'"] {
-        assert!(wf.contains(p), "trigger path {p}");
-    }
-    let ci = read(".github/workflows/ci.yml");
-    assert!(ci.contains("run: cargo clippy -p jxs-send-ffi --all-targets -- -D warnings"));
-    assert!(ci.contains("run: cargo nextest run -p jxs-send-ffi"));
+    // the sender lives in vstack: a new pin must rebuild the strih bundle
+    assert!(wf.contains("'scripts/vstack-release.pin'"));
 }
 
 #[test]

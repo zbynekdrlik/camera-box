@@ -1,7 +1,5 @@
 ---
 paths:
-  - "src/qpsk_marker.rs"
-  - "src/qpsk_marker_scan.rs"
   - "vendor/av-sync-dock/src/camera-box-marker-scan.hpp"
   - "tests/qpsk_marker_scan_1381.rs"
   - "tests/av_sync_dock_streaming_decoder_1381.rs"
@@ -45,7 +43,7 @@ marker has the zero nibble == 0 by construction.
   chain (`scripts/program_audio.py`, `.claude/rules/program-audio-guard.md`).
 
 ## The scan kernel and the streaming decoder (issue 1381)
-Issue 1381 split the kernel out (`src/qpsk_marker_scan.rs`, `camera-box-marker-scan.hpp`) and made it
+Issue 1381 split the kernel out (`vstack:av/marker/src/qpsk_marker_scan.rs`, `camera-box-marker-scan.hpp`) and made it
 cheap without changing a decoded marker or a counter of the batch decode:
 - **The refine is a sliding-window maximum** (`RefineWindow` / `CbRefineWindow`): each position's
   preamble magnitude is computed once per scan, and a monotonic queue returns the LEFTMOST maximum of

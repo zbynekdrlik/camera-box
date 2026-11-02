@@ -1,6 +1,5 @@
 ---
 paths:
-  - "rig/core/src/genlock_grid.rs"
   - "src/genlock_grid_bench.rs"
   - "vendor/obs-studio/libobs/obs-genlock-grid.h"
   - "vendor/obs-studio/libobs/obs-video.c"
@@ -24,7 +23,7 @@ deep N==1 `NDI 2ME PGM` FIFO flipped 31 ↔ 32 frames 10–45 ×/h.
 Now ONE helper serves both receiver call sites: `vendor/obs-studio/libobs/obs-genlock-grid.h`
 (`genlock_grid_floor_ns` / `genlock_grid_next_boundary_ns`, ns units, the sender's
 multiply-then-divide order + the #1009 at-most-one-slot promotion). Rust authority:
-`rig/core/src/genlock_grid.rs` (`grid_floor_ns` / `grid_next_boundary_ns`; `genlock_backlog::
+`vstack:rig/core/src/genlock_grid.rs` (`grid_floor_ns` / `grid_next_boundary_ns`; `genlock_backlog::
 phase_pinned_deadline` delegates). Rules for anyone touching it:
 
 - **Integer rates only.** `integer_fps(interval)` accepts `|fps · interval − 1 s| < fps`

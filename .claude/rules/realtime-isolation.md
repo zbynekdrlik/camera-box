@@ -1,6 +1,5 @@
 ---
 paths:
-  - "rig/core/src/affinity.rs"
   - "scripts/lib/rt-kernel-plan.sh"
   - "scripts/rt-kernel-upgrade.sh"
   - "tests/rt_kernel_provision.rs"
@@ -22,7 +21,7 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
 
 ## What is DONE (merged, live on the fleet)
 
-- **`rig/core/src/affinity.rs`** — `kernel_is_preempt_rt()` + `select_irq_target_cores(is_rt, capture_core,
+- **`vstack:rig/core/src/affinity.rs`** — `kernel_is_preempt_rt()` + `select_irq_target_cores(is_rt, capture_core,
   online)`. `setup_irq_affinity()` routes the xhci capture IRQ **off** the isolated grab core on a
   stock/lowlatency (non-RT) kernel, and only co-locates it on the grab core on a real PREEMPT_RT
   kernel. RT-conditional + forward-compatible: it flips automatically once the fleet is on an RT
@@ -49,7 +48,7 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   (`scripts/setup-device.sh` STEP 7 heredoc + the checked-in `systemd/camera-box.service` that
   `build-image.sh` bakes) — it forced every thread (tokio/NDI ndis:*/disc:*/self-heal) onto
   SCHED_FIFO prio 50 on the isolated core (27 on cam1). The binary now raises SCHED_FIFO prio 90
-  PER THREAD only on the capture+emit hot path — `rig/core/src/affinity.rs::set_current_thread_realtime`
+  PER THREAD only on the capture+emit hot path — `vstack:rig/core/src/affinity.rs::set_current_thread_realtime`
   (pure decision `realtime_fifo_priority(RtThreadRole)`) called from the production capture loop
   and the cam1-burn emit thread; every auxiliary thread (painter/display/intercom/qpsk)
   stays SCHED_OTHER. NO thread moves cores (this is why it is safe without a live measurement,
@@ -70,7 +69,7 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
     `taskset -pc <set> 1` (the lib's apply program), a `daemon-reexec` does not move PID 1.
   - **the NIC IRQ** (`enp1s0`, allowed on 0-2 by `irqaffinity=0-2`): moving it off cut the re-seeds
     from 22-31 per run to 2. camera-box's `setup_irq_affinity` now moves every non-capture device IRQ
-    off the reserved core (pure plan `rig/core/src/irq_offload.rs`) and sets `/proc/irq/default_smp_affinity`
+    off the reserved core (pure plan `vstack:rig/core/src/irq_offload.rs`) and sets `/proc/irq/default_smp_affinity`
     to the same set, so an IRQ allocated later (a NIC re-open) does not land there.
   - **the split never ran on the fleet at all:** setup-device's unit had no
     `ExecStartPre=... --setup-irq-affinity` (only build-image's unit did). setup-device STEP 7 now

@@ -1,0 +1,37 @@
+---
+paths:
+  - "scripts/vstack-release.pin"
+  - "tests/vstack_pin_1487.rs"
+  - "tests/support/vstack.rs"
+  - "tests/python/vstack_src.py"
+  - "Cargo.toml"
+  - ".github/workflows/linux-genlock.yml"
+---
+
+# camera-box on a pinned vstack tag (issue 1487)
+
+`zbynekdrlik/vstack` owns the JPEG XS link, the rig primitives and the QPSK marker protocol. A
+`vstack:<path>` in this repo's prose is that path inside the pinned tag.
+
+- **One pin:** `scripts/vstack-release.pin` (tag + commit). The tag is repeated on the four git
+  dependencies in root `Cargo.toml` (`camera-box-jxs`, `rig-core`, `qpsk-marker`, optional
+  `svt-jpegxs-sys`). `tests/vstack_pin_1487.rs` fails until all of them and the lock agree.
+- **To bump:** edit the pin file and the four tags, `cargo update -p rig-core`, run the suite. A new
+  pin triggers linux-genlock.
+- **`src/lib.rs` keeps the old paths** with `pub use`, so `camera_box::genlock_wall_step` and the
+  binaries work unchanged. `qpsk_marker` is written `::qpsk_marker::qpsk_marker`: the leading `::`
+  names the crate, not the re-export.
+- **`jxs-recv-ffi` / `jxs-send-ffi` are never root dependencies.** They pull the codec in
+  unconditionally, and a default build must need no cmake or nasm.
+- **The moved crates' unit tests run in vstack's CI, not here.** Cargo refuses `-p` on a dependency,
+  so nextest, clippy, llvm-cov and mutants here cover the root package. Parity tests against the
+  vendored C stay here and test the pinned crate. A vendored header change and its Rust twin are a
+  vstack tag plus a pin bump here, in one change.
+- **linux-genlock builds `libjxs_recv_ffi.a` in a clone of the tag** and refuses a commit that differs
+  from the pin. vstack's root declares no release profile, so the step passes this repo's own by
+  `CARGO_PROFILE_RELEASE_*` env: without them the archive silently loses LTO and strip.
+- **Reading pinned source from a test:** `tests/support/vstack.rs` (Rust), `tests/python/vstack_src.py`
+  (pytest). Both find cargo's git checkout by the pin commit. The python-tests job compiles nothing, so
+  it runs `cargo fetch` first; a missing checkout fails, it never skips.
+- **Vendored comments keep old paths** on purpose (`vendor/obs-studio`, `vendor/distroav`): editing them
+  starts an OBS rebuild. They go with the next real vendor change.

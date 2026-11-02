@@ -16,7 +16,7 @@ YouTube-leg tick decoder reads the reserved id 911016 only when asked: `runs=CLI
            zone, the module size floor(700 / modules) of the qrcode crate's renderer, centred in its
            half, top at 24 px (`--qr-size 700`, `TOP_MARGIN_PX`). A seven-segment frame counter sits
            in the central gap between the two QRs (where the painter puts its colour column).
-  sound    48 kHz stereo, L == R. The QPSK marker (src/qpsk_marker.rs: 20-bit word = preamble 0xF,
+  sound    48 kHz stereo, L == R. The QPSK marker (vstack:av/marker/src/qpsk_marker.rs: 20-bit word = preamble 0xF,
            zero nibble, 8-bit index, CRC-4; carrier 442 Hz, c = 1, raised-cosine edges, amplitude
            0.8) every 30 ticks (0.5 s), index = tick & 0xFF (`frame_id_to_index`), over a
            -30 dBFS tone bed at `program_audio.MEASUREMENT_TONE_LINES_HZ` (imported: the guard
@@ -78,7 +78,7 @@ TOP_MARGIN_PX = 24                        # src/colour_scale.rs TOP_MARGIN_PX
 QR_BORDER_MODULES = 4                     # the qrcode crate's quiet zone (render().quiet_zone(true))
 MARKER_EVERY_TICKS = 30                   # frame-probe --audio-marker-cadence-ticks default (0.5 s)
 INDEX_MODULUS = pa.MARKER_INDEX_MODULUS   # 256: the 8-bit index = tick & 0xFF
-SAMPLE_RATE = 48_000                      # src/qpsk_marker.rs AUDIO_SAMPLE_RATE_HZ
+SAMPLE_RATE = 48_000                      # vstack:av/marker/src/qpsk_marker.rs AUDIO_SAMPLE_RATE_HZ
 CHANNELS = 2
 CARRIER_HZ = 442                          # CARRIER_HZ_DEFAULT
 CYCLES_PER_SYMBOL = 1                     # c = auto_c(q=2, 442, 60/1)
@@ -287,7 +287,7 @@ def render_audio(frames: int) -> np.ndarray:
 
 
 def qpsk_params_line() -> str:
-    """The painter's marker-log header (src/qpsk_marker.rs `qpsk_marker_log_header`)."""
+    """The painter's marker-log header (vstack:av/marker/src/qpsk_marker.rs `qpsk_marker_log_header`)."""
     return (f"# qpsk-params sr={SAMPLE_RATE} carrier={CARRIER_HZ} c={CYCLES_PER_SYMBOL} q={QPSK_Q} "
             f"vr={TICK_HZ}/1")
 

@@ -47,7 +47,7 @@ tc filter replace dev <if> parent 1: protocol all prio 1 handle 0x1387 fw classi
   bands. With this one, only the `fw` filter moves a packet, so NDI, PTP/NTP and the intercom reach
   the SAME fq as before.
 - **The JPEG XS socket carries `SO_MARK 0x1387`.** camera-box sets it in `JxsSocket::connect`
-  (`jxs/link/src/jxs_send.rs` `JXS_SOCKET_MARK`, pinned equal to `CAMBOX_EGRESS_PACING_JXS_MARK` by pytest).
+  (`vstack:jxs/link/src/jxs_send.rs` `JXS_SOCKET_MARK`, pinned equal to `CAMBOX_EGRESS_PACING_JXS_MARK` by pytest).
   It needs CAP_NET_ADMIN or CAP_NET_RAW; camera-box.service runs as root. A refused mark logs one
   WARN with the errno, and the "link ON" line says `egress mark NONE: paced with NDI`.
 - **A mark, not a port.** The boot script cannot know the runtime `CAMERA_BOX_JXS_TARGET` port, and

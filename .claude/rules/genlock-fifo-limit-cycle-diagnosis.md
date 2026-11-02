@@ -1,6 +1,5 @@
 ---
 paths:
-  - "src/genlock_backlog.rs"
   - "src/window_gate.rs"
   - "src/probe/recording_segments.rs"
   - "vendor/obs-studio/libobs/obs-source.c"
@@ -13,7 +12,7 @@ paths:
 The issue-998 root-cause (settle-back drain target used ROUND instead of CEIL, so any
 `frac(latency_ms / 33.333ms) < 0.5` made the natural hold depth permanently exceed the target →
 one drain drop + one late-hold regain every ~2.3 s = 1 duplicated + 1 skipped program frame,
-forever). The fix is `drain_target_frames` (ceil) in `src/genlock_backlog.rs`, mirrored in
+forever). The fix is `drain_target_frames` (ceil) in `vstack:rig/core/src/genlock_backlog.rs`, mirrored in
 `genlock_should_drain_one` (obs-source.c). `steady_depth_frames` (round) is UNTOUCHED — the
 issue-940 relock-margin caller needs round; do not "unify" them. What survives for the NEXT
 verdict investigation is the diagnostic toolkit that found it:
@@ -50,7 +49,7 @@ lane; commitment on #889 — when that lane shrinks the burden, the tolerance co
 
 The #998 limit cycle above is on the DEPTH/LATENCY axis (round-vs-ceil target undershoots the
 natural hold). #1049 added a bounded PHASE-convergence shed (`should_converge_phase` in
-`src/genlock_backlog.rs`, mirrored in `obs-source.c genlock_phase_converge_due`) that pulls a
+`vstack:rig/core/src/genlock_backlog.rs`, mirrored in `obs-source.c genlock_phase_converge_due`) that pulls a
 persistent per-camera acquire-phase back toward the configured latency — and its first cut hit the
 EXACT same drop/regain limit cycle on a NEW axis, the transport SKEW.
 
@@ -114,7 +113,7 @@ fighting a stable natural hold it cannot move.
 **Issue 1367 did NOT reverse this gate — it added a DIFFERENT N==1 target.** The reserve-aimed
 #1049 shed stays N>=2-only (`genlock_phase_converge_due` keeps `if (n < 2) return false;` byte for
 byte). A deep N==1 source now converges to its PIN-DERIVED depth `base + 1`
-(`src/genlock_n1_depth.rs`, routed by the SOURCE wrapper): that target IS the natural hold, so a
+(`vstack:rig/core/src/genlock_n1_depth.rs`, routed by the SOURCE wrapper): that target IS the natural hold, so a
 shed there removes only a frame a sender restart added and it sticks. Full rule:
 `genlock-n1-pin-derived-depth.md`. Tell for a misfiring N==1 rule: `n1_grows=` and `converge_sheds=`
 climbing in lockstep on the 2ME PGM in a steady window with no sender restart.
@@ -140,7 +139,7 @@ can:
   by #1168's re-arm trail — never a receiver-side code change.
 
 Full reasoning lives in code, where a worker lands first: the extended "WHY the #940 grid pin was
-not enough" narrative block in `src/genlock_backlog.rs` (MECHANISM half) + the
+not enough" narrative block in `vstack:rig/core/src/genlock_backlog.rs` (MECHANISM half) + the
 `AV_OFFSET_GATE_TOLERANCE_MS` doc in `src/av_window.rs` (GATE half, why the A/V tolerance is ±30 —
 owner ruling 17.9.2026 / issue 1333 — not the older ±90 or ±20).
 
@@ -227,7 +226,7 @@ depth the source is SUPPOSED to hold, and resets on `(sel_1003 == 0 || stale_136
 
 | Piece | Rust | C (`obs-source.c`) |
 |---|---|---|
-| governor depth: `base + 1` when deep, the latched D while it governs a shallow source, else 0 | `n1_expected_depth_frames` (`src/genlock_n1_depth.rs`, built only from `n1_is_deep_source` / `n1_target_frames` / `n1_shallow_governs`) | `genlock_n1_expected_depth_frames`, in the lifted N==1 block |
+| governor depth: `base + 1` when deep, the latched D while it governs a shallow source, else 0 | `n1_expected_depth_frames` (`vstack:rig/core/src/genlock_n1_depth.rs`, built only from `n1_is_deep_source` / `n1_target_frames` / `n1_shallow_governs`) | `genlock_n1_expected_depth_frames`, in the lifted N==1 block |
 | the pick at that depth, floored at the configured latency | `relock_expected_age_ns` + `relock_select_expected` (floor = newest queued frame, `n1` gate) | `genlock_relock_select_expected`, in the lifted #1003 block |
 | stale = more than `n + 1` source frames behind that pick | `relock_anchor_is_stale` | `genlock_relock_anchor_is_stale` |
 

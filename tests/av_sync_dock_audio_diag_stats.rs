@@ -6,7 +6,7 @@
 //! session with `Audio Frequency` detected but `Audio Index`/`Latency` stuck on dashes had no way
 //! to tell apart "the demod sees nothing" from "sees candidates but they're garbage" from "decodes
 //! fine but never ring-hits/clusters". Fix: `DecodeStats` (pure, Tier-0 tested in
-//! `src/qpsk_marker.rs` / mirrored in `camera-box-audio.hpp`, cross-checked by
+//! `vstack:av/marker/src/qpsk_marker.rs` / mirrored in `camera-box-audio.hpp`, cross-checked by
 //! `av_sync_dock_cpp_mirror_gate.rs`'s self-test) plus ring-hit/miss + video-frame counters and a
 //! rate-limited INFO blog() line in `sync-test-output-audio.cpp`.
 //!

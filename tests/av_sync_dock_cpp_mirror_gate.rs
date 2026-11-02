@@ -2,7 +2,7 @@
 //!
 //! The A/V-sync dock's audio decode (`camera-box-audio.hpp`) and video-QR geometry
 //! (`camera-box-video.hpp`) are byte-for-byte C++ MIRRORS of the Tier-0-tested Rust in
-//! `src/av_sync_dock.rs` / `src/qpsk_marker.rs` — because the deployed dock cannot be rig-verified in
+//! `src/av_sync_dock.rs` / `vstack:av/marker/src/qpsk_marker.rs` — because the deployed dock cannot be rig-verified in
 //! CI and the norihiro demod it replaces was silently broken at the rig's c=1 (the #398 bug). Those
 //! headers are dependency-free (STL only), so this test COMPILES AND RUNS the committed self-test
 //! (`vendor/av-sync-dock/test/camera-box-selftest.cpp`) with `g++ -std=c++11` on every push: it

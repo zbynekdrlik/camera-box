@@ -94,12 +94,13 @@ pub mod audio_marker_policy;
 // #188/#145 — QR-based (QPSK) audio marker, byte-compatible with the norihiro
 // obs-audio-video-sync-dock protocol. Pure Tier-0 (encode + decode + estimator); the continuous-feed
 // ALSA emitter (`probe::qpsk_emit`) and recording-verdict decode call into this. Supersedes the chirp.
-pub mod qpsk_marker;
+// In vstack's `qpsk-marker` crate since issue 1487; the leading `::` names that crate, not this path.
+pub use ::qpsk_marker::qpsk_marker;
 
 // issue 1381 — the QPSK marker demod kernel `scan_markers` (the ONE demod behind
 // `qpsk_marker::decode_markers_with_stats` and the live dock's streaming decoder), split out of
 // `qpsk_marker`. Pure Tier-0, default features.
-pub mod qpsk_marker_scan;
+pub use ::qpsk_marker::qpsk_marker_scan;
 
 // #1324 — the AUDIO-ONLY QPSK decodability probe decision (pure Tier-0, default features):
 // the [4b3/8] preflight's verdict from the demod's decoded markers + stats. No I/O, no probe deps
@@ -422,7 +423,7 @@ pub mod painter_priority;
 // the 923 ms latency #856's A/V controller must set, so the backlog branch fires every tick and
 // sheds a frame on every jitter excursion. No probe deps, so it unit-tests Tier-0; the probe-gated
 // `probe::genlock::ReleaseCadence` and the C `GENLOCK_QDEPTH_RELOCK` both derive from here.
-pub mod genlock_backlog;
+pub use rig_core::genlock_backlog;
 
 // issue 1367 — the N==1 PIN-DERIVED DEPTH: a deep single-cadence input (the stream `NDI 2ME PGM`)
 // settles on `ceil((pin - 1 us) / interval) + 1` frames after every restart, read from the
@@ -431,7 +432,7 @@ pub mod genlock_backlog;
 // stays inert for N==1; the SOURCE wrappers (the C `genlock_should_converge_phase`, the probe
 // `ReleaseCadence`) route an N==1 tick here, and the C `genlock_n1_*` helpers in obs-source.c are
 // held identical by `tests/genlock_relock_selection_parity.rs`.
-pub mod genlock_n1_depth;
+pub use rig_core::genlock_n1_depth;
 
 // #1355 — ONE per-second genlock frame grid: the sender stamps, the receiver ts-align deadline
 // and the render tick all floor on the same per-second grid, so the receiver no longer walks
@@ -493,7 +494,7 @@ const _: () = assert!(
 // 2 ms/tick slew-back that left the tick and the sender's floored stamps off phase. Crate-root +
 // std-only (Tier-0 verifiable); the C twin `vendor/obs-studio/libobs/obs-genlock-wall-step.h` is held
 // identical by the committed parity gate `tests/genlock_wall_step_parity_1372.rs`.
-pub mod genlock_wall_step;
+pub use rig_core::genlock_wall_step;
 
 // Issue 1367 (ROZHODNUTÉ 5857354949) — the genlock audio-buffering FLOOR: every OBS launch starts
 // with the same mix-window buffering (85 ms at 48 kHz, raised on the first audio tick) and OBS's own
@@ -631,7 +632,7 @@ pub mod send_stall;
 pub mod send_stagger;
 // Issue 1487: the camera-box binary's log filter names every crate that logs for it.
 pub mod log_filter;
-// Issue 1387: the JPEG XS link, a crate of its own since issue 1487 (jxs/link): the pure wire
+// Issue 1387: the JPEG XS link, in vstack since issue 1487 (`camera-box-jxs`): the pure wire
 // format, bpp and congestion control on every platform; the cambox sender (off unless
 // CAMERA_BOX_JXS_TARGET is set) and the receive side on Linux. The codec needs the `jxs` feature.
 pub use camera_box_jxs::{jxs_auto_bpp, jxs_bench, jxs_congestion, jxs_link};

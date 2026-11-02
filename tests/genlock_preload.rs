@@ -1330,7 +1330,7 @@ mod vendored_source {
              the issue-1007 hair-trigger). Re-apply the re-anchor guard."
         );
         // #1009: the margin must be the re-qualified max(3 intervals, 250 ms) — in lock-step
-        // with src/genlock_backlog.rs backward_step_margin_ns (Tier-0 unit-tested).
+        // with vstack:rig/core/src/genlock_backlog.rs backward_step_margin_ns (Tier-0 unit-tested).
         for marker in [
             "#define GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS 250000000ULL",
             "#define GENLOCK_BACKWARD_STEP_MARGIN_INTERVALS 3ULL",
@@ -1340,7 +1340,7 @@ mod vendored_source {
                 src.contains(marker),
                 "{OBS_SOURCE}: #1009 — the backward-step trigger margin marker `{marker}` is \
                  gone; the guard reverted to the one-interval hair-trigger that collapsed the \
-                 894 ms hold overnight. Re-apply (mirror: src/genlock_backlog.rs \
+                 894 ms hold overnight. Re-apply (mirror: vstack:rig/core/src/genlock_backlog.rs \
                  backward_step_margin_ns)."
             );
         }
@@ -1355,7 +1355,7 @@ mod vendored_source {
                 src.contains(marker),
                 "{OBS_SOURCE}: #1009 — the sustained-qualification marker `{marker}` is gone; \
                  a single-tick excursion would re-anchor again. Re-apply (mirror: \
-                 src/genlock_backlog.rs BACKWARD_STEP_SUSTAIN_TICKS / BackwardStepGuard)."
+                 vstack:rig/core/src/genlock_backlog.rs BACKWARD_STEP_SUSTAIN_TICKS / BackwardStepGuard)."
             );
         }
         // #1009 SELF-HEAL: leaving the regime must ZERO the locked boundary (the existing
@@ -1371,7 +1371,7 @@ mod vendored_source {
                 src.contains(marker),
                 "{OBS_SOURCE}: #1009 — the regime-exit SELF-HEAL marker `{marker}` is gone; a \
                  backward-step regime would again leave the hold collapsed permanently (only an \
-                 OBS relaunch cleared it). Re-apply (mirror: src/genlock_backlog.rs \
+                 OBS relaunch cleared it). Re-apply (mirror: vstack:rig/core/src/genlock_backlog.rs \
                  BackwardStepGuard SelfHeal)."
             );
         }
@@ -1388,7 +1388,7 @@ mod vendored_source {
                 src.contains(marker),
                 "{OBS_SOURCE}: #1009 — the persistent-regime visibility marker `{marker}` is \
                  gone; a sustained hold-bypass would run silent/uncounted again. Re-apply \
-                 (mirror: src/genlock_backlog.rs BACKWARD_REGIME_WARN_* / reanchor_ticks)."
+                 (mirror: vstack:rig/core/src/genlock_backlog.rs BACKWARD_REGIME_WARN_* / reanchor_ticks)."
             );
         }
         // The re-anchor must COUNT the event (the genlock_backward_steps audit counter).
@@ -1435,7 +1435,7 @@ mod vendored_source {
             assert!(
                 internal.contains(field),
                 "{OBS_INTERNAL}: #1009 — the backward-step guard field `{field}` is gone; \
-                 re-apply (mirror: src/genlock_backlog.rs BackwardStepGuard)."
+                 re-apply (mirror: vstack:rig/core/src/genlock_backlog.rs BackwardStepGuard)."
             );
         }
     }

@@ -1,7 +1,6 @@
 ---
 paths:
   - "src/probe/genlock.rs"
-  - "src/genlock_backlog.rs"
 ---
 
 # Re-pinning a probe-gated mirror against OBSERVED output (#1037)

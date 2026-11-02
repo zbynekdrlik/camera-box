@@ -1,8 +1,5 @@
 ---
 paths:
-  - "src/genlock_n1_depth.rs"
-  - "src/genlock_n1_depth_tests.rs"
-  - "src/genlock_n1_depth_latch_budget_tests.rs"
   - "src/genlock_grid_bench.rs"
   - "src/genlock_grid_bench_tests.rs"
   - "tests/genlock_relock_selection_parity.rs"
@@ -13,7 +10,6 @@ paths:
   - "tests/genlock_shallow_depth_wiring_1367.rs"
   - "tests/genlock_shallow_depth_parity_1367.rs"
   - "tests/genlock_shallow_sticky_parity_1367.rs"
-  - "src/genlock_n1_depth_sticky_tests.rs"
   - "src/genlock_shallow_av_bench_sticky.rs"
   - "tests/genlock_n1_lift/mod.rs"
 ---
@@ -128,7 +124,7 @@ frame at the tick's SCHEDULED instant, `n1_depth_frames(tick_wall, newest)`) ove
 (or a re-measure, below); the same one-frame hold / shed keeps the presented depth on it
 (`n1_shallow_hold_due` / `n1_shallow_shed_due`, the shared #859 throttle, the one-frame dead band).
 
-| Piece | Rust (`src/genlock_n1_depth.rs`) | C (`obs-source.c`) |
+| Piece | Rust (`vstack:rig/core/src/genlock_n1_depth.rs`) | C (`obs-source.c`) |
 |---|---|---|
 | latch target + imag cap | `n1_shallow_target_frames(base, floor_max, deep, min_latency)` → `(D, capped)`, `D = 0` when capped | `genlock_n1_shallow_target_frames(…, deep, min_latency_box, bool *capped)` |
 | relock gap | `n1_shallow_gap_is_relock` (≥ 1 s) | `genlock_n1_shallow_gap_is_relock`, `GENLOCK_N1_SHALLOW_RELOCK_GAP_NS` |
@@ -207,7 +203,7 @@ at ~233 ms, and the audio held the latched 400 ms against it (`audio_pairing_off
 +166, songplayer `audio_corr=0.13`). An OBS relaunch cleared it. The shallow bench reproduces it
 exactly on the old code (`latched [3, 3, 12]`, depth stuck at 7, 732 relocks once settled).
 
-| Piece | Rust (`src/genlock_n1_depth.rs`) | C (`obs-source.c`) |
+| Piece | Rust (`vstack:rig/core/src/genlock_n1_depth.rs`) | C (`obs-source.c`) |
 |---|---|---|
 | (a) window histogram relative to base, 4 bins (`floor − base`, saturating at 0 and at the over-clamp bin) | `n1_shallow_hist_bin`, `ShallowDepth.hist` | `genlock_n1_shallow_hist_bin`, `genlock_shallow_hist[GENLOCK_SHALLOW_HIST_FIELD_BINS]` (a `_Static_assert` holds it to `GENLOCK_N1_SHALLOW_HIST_BINS`) |
 | (a) the latch floor = the window's p90, not its max | `n1_shallow_percentile_bin`, `N1_SHALLOW_LATCH_PERCENTILE` 90 | `genlock_n1_shallow_percentile_bin` |
@@ -433,7 +429,7 @@ SongPlayer re-lock at 09:33:23 re-latched every `sp-*` on black frames at D 2
 sender re-lock (song change, E2E restart, reconnect) reset it to the idle level. The idle→content
 lag jump is > 15–20 ms (receive-side decode scales with content), beyond the arrival-jitter budget.
 
-| Piece | Rust (`src/genlock_n1_depth.rs`) | C (`obs-source.c`) |
+| Piece | Rust (`vstack:rig/core/src/genlock_n1_depth.rs`) | C (`obs-source.c`) |
 |---|---|---|
 | state | `ShallowSticky` (floor, seen instant, block ticks, block histogram) | `genlock_shallow_sticky_{frames,seen_ns,obs_ticks,obs_hist}` (obs-internal.h) |
 | observe / decay / clear | `n1_shallow_sticky_track(&mut ShallowSticky, &ShallowTick, audio_flowing, tick_wall)` | `genlock_n1_shallow_sticky_track` (in the lifted N==1 block) |

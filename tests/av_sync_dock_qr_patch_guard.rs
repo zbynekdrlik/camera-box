@@ -82,7 +82,7 @@ fn audio_decode_pairs_via_the_camera_box_video_ring() {
     let src = squish(&av_sync_dock_output::source());
     // The direct index->video_ts lookup that makes LIVE pairing possible with no side channel
     // (the audio index IS the dual-QR frame_id's low byte — see frame_id_to_index in
-    // src/qpsk_marker.rs). If this regresses, the dock silently stops showing a live offset for
+    // vstack:av/marker/src/qpsk_marker.rs). If this regresses, the dock silently stops showing a live offset for
     // camera-box's own audio marker (norihiro's phone method keeps working; ours goes silent).
     for marker in [
         "cb_video_ts_ns[256]",

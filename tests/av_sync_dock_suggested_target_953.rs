@@ -5,7 +5,7 @@
 //! #952 (closed, binding) established that the dock's own native offset convention
 //! (`ts = audio_ts - video_ts`) is sign-inverted versus the gate's authoritative convention
 //! (`offset_ms = video_time - audio_time`, `scripts/av_sync_calibrate.py::required_delay_ms` /
-//! `src/qpsk_marker.rs::required_delay_ms`) — `dock ~= -gate - 55` empirically. This ticket fixes
+//! `vstack:av/marker/src/qpsk_marker.rs::required_delay_ms`) — `dock ~= -gate - 55` empirically. This ticket fixes
 //! the SIGN half (a pure negation, `cb_dock_lock_display_offset_ms`) and replaces the SUGGESTED
 //! value with a fresh, uncapped alignment-target computation (`cb_dock_lock_suggested_target`) —
 //! `CbDockLockCorrector::decide()` itself (its hold-band/step/cooldown math,

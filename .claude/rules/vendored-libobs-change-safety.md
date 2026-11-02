@@ -98,7 +98,7 @@ The shipped bytes compile unchanged. Two traps:
 
 ## Promote the harness to a committed gate when it checks a MIRROR
 
-`src/genlock_backlog.rs` is the Rust authority and the C is the port; they are required to be
+`vstack:rig/core/src/genlock_backlog.rs` is the Rust authority and the C is the port; they are required to be
 numerically identical, and every other guard in this repo asserts that only by static text
 anchor — which proves the C still *says* the right thing, never that it *computes* it.
 `tests/genlock_relock_selection_parity.rs` closes that: it lifts the helpers by name, compiles
@@ -291,7 +291,7 @@ Taking the first increasing pair let a pair that straddled a dropped frame read 
 (33.3 ms → n=1 on a 60fps source), collapsing `genlock_backlog_relock_qdepth()`'s threshold below
 the source's real held depth and firing the backlog branch spuriously (~1/sec — the #796
 health-signal complaint). The min-delta authority is the pure seam
-`src/genlock_backlog.rs::source_interval_from_stamps`; the probe `measure_source_multiple` calls
+`vstack:rig/core/src/genlock_backlog.rs::source_interval_from_stamps`; the probe `measure_source_multiple` calls
 it and the C `genlock_measure_source_multiple` mirrors the same min-loop. **If you touch this
 derivation: min-delta is byte-identical to first-pair on any clean grid-stamped window, so a
 change that "simplifies" it back to `break`-on-first silently reintroduces #1042 on any source

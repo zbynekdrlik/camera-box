@@ -17,7 +17,7 @@ repository = "https://github.com/zbynekdrlik/camera-box"
 # already used standalone. A dedicated `bkshading` CI job builds/tests the members
 # (see .github/workflows/ci.yml); `cargo fmt --all` already covers them.
 [workspace]
-members = ["bkshading/proto", "bkshading/relay", "bkshading/service", "jxs/sys", "jxs/link", "jxs/recv-ffi", "jxs/send-ffi", "rig/core"]
+members = ["bkshading/proto", "bkshading/relay", "bkshading/service"]
 resolver = "2"
 
 # Single source of truth for the version across the appliance + the three bkshading
@@ -42,11 +42,13 @@ path = "src/main.rs"
 # Pure (only `anyhow`, already a root dep), cross-platform.
 intercom-vban = { git = "https://github.com/zbynekdrlik/intercom", tag = "v1.9.3" }
 
-# Issue 1487: the JPEG XS link and the rig primitives it shares with the appliance are crates of
-# their own (src/lib.rs re-exports them at their old paths), so the C ABI crates the OBS build
-# links depend on neither this crate nor its Linux capture and audio libraries.
-camera-box-jxs = { path = "jxs/link" }
-rig-core = { path = "rig/core" }
+# Issue 1487: the JPEG XS link, the rig primitives and the QPSK marker protocol live in vstack; a
+# tag names one version of all of them. src/lib.rs re-exports them at their old paths. The tag must
+# equal scripts/vstack-release.pin (tests/vstack_pin_1487.rs). jxs-recv-ffi and jxs-send-ffi are not
+# dependencies here: they pull the codec in unconditionally, and a default build needs no cmake.
+camera-box-jxs = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.3" }
+rig-core = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.3" }
+qpsk-marker = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.3" }
 
 # Dynamic library loading (for NDI SDK at runtime)
 libloading = "0.8"
@@ -101,10 +103,10 @@ alsa = "0.9"
 evdev = "0.12"
 # DRM/KMS page-flip presenter for the tear-free 1:1 painter (#79, Linux-only, probe).
 drm = { version = "0.15", optional = true }
-# Issue 1387: the JPEG XS link's codec (SVT-JPEG-XS, vendored under vendor/svt-jpeg-xs and built
-# statically by jxs/sys/build.rs: cmake + nasm). Behind the `jxs` feature so a default build needs
-# neither; CI's deployed camera-box-linux-amd64 is built WITH it (ci.yml `build`).
-svt-jpegxs-sys = { path = "jxs/sys", optional = true }
+# Issue 1387: the JPEG XS link's codec (SVT-JPEG-XS, vendored in vstack and built statically by its
+# jxs/sys/build.rs: cmake + nasm). Behind the `jxs` feature so a default build needs neither; CI's
+# deployed camera-box-linux-amd64 is built WITH it (ci.yml `build`).
+svt-jpegxs-sys = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.3", optional = true }
 
 [dev-dependencies]
 # Property-based testing for format conversions

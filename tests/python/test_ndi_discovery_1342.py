@@ -141,7 +141,7 @@ class ThirtyPStreamRemoved(unittest.TestCase):
         )
 
     def test_lib_and_main_carry_no_publish_30p_reference(self):
-        for rel in ("src/lib.rs", "src/main.rs", "rig/core/src/affinity.rs"):
+        for rel in ("src/lib.rs", "src/main.rs"):
             text = _read(os.path.join(REPO, rel))
             self.assertNotRegex(
                 text, r"publish_30p|PUBLISH_30P|publish-30p", f"{rel} still references the 30p publisher"

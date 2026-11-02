@@ -2,7 +2,7 @@
 """issue 1404 -- the program-audio guard's QPSK marker decoder: a ctypes binding to the shim.
 
 WHY a shim and not Python: the marker decoder already exists twice -- the Rust reference
-(`src/qpsk_marker.rs`) and its byte-for-byte C++ port in the av-sync dock
+(`vstack:av/marker/src/qpsk_marker.rs`) and its byte-for-byte C++ port in the av-sync dock
 (`vendor/av-sync-dock/src/camera-box-marker-scan.hpp`), pinned to each other by a parity gate. A
 third copy in Python would need its own parity proof and could drift (design: issue 1404 comment
 6026235697, Approach 1). So `scripts/qpsk_guard_shim.cpp` wraps the C++ port in a C ABI and

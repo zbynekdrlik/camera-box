@@ -1,6 +1,6 @@
 //! issue 899 (lane 3) — pure-function guard for `scripts/lib/rt-kernel-plan.sh`, the low-latency
 //! kernel provisioning DECISION logic (defect 1: the fleet runs a stock PREEMPT_DYNAMIC kernel with
-//! no full preemption). Lane 1 (merged: `rig/core/src/affinity.rs` capture-IRQ routing) already fixed
+//! no full preemption). Lane 1 (merged: `vstack:rig/core/src/affinity.rs` capture-IRQ routing) already fixed
 //! defect 3.
 //!
 //! OWNER DECISION (2026-08-20): Ubuntu Pro is REJECTED. STEP 1 is the FREE official-archive

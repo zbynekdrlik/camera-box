@@ -10,7 +10,7 @@
 //! obs-websocket — so the DECISION is defined ONCE, here, as a pure crate-root module.
 //!
 //! Pure + crate-root (not under `src/probe/`) so it is Tier-0 verifiable locally — the
-//! `src/genlock_backlog.rs` / `src/colour_scale.rs` pattern. The C port lives verbatim in
+//! `vstack:rig/core/src/genlock_backlog.rs` / `src/colour_scale.rs` pattern. The C port lives verbatim in
 //! `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` (`genlock_decide_lock_state`)
 //! and MUST stay numerically identical; the committed C-vs-Rust parity gate
 //! `tests/genlock_lock_state_parity.rs` lifts the C function, compiles it with `cc`, and

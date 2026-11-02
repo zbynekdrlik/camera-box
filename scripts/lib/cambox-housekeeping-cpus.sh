@@ -9,7 +9,7 @@
 #
 # The issue-1198 core split on a cambox: capture+emit thread on the isolated core (isolcpus), the
 # xhci capture IRQ on ONE reserved general core (the highest non-capture core,
-# rig/core/src/affinity.rs select_irq_reserved_core), camera-box's painter/display threads on the rest. That
+# vstack:rig/core/src/affinity.rs select_irq_reserved_core), camera-box's painter/display threads on the rest. That
 # reservation only covers camera-box's OWN threads. systemd PID 1 and every unit it starts still ran on
 # the reserved IRQ core, and the work PID 1 does on a unit start delayed the URB completion there:
 # measured live on cam5 (15.10.2026), 65 of 102 capture-phase re-seeds landed within 1 s of a unit
@@ -206,7 +206,7 @@ EOF
 cambox_hk_irq_dropin_content() {
   cat <<'EOF'
 # camera-box issue 1367: run the IRQ split before every start (the capture IRQ onto its reserved
-# core, every other device IRQ and default_smp_affinity off it; rig/core/src/affinity.rs setup_irq_affinity).
+# core, every other device IRQ and default_smp_affinity off it; vstack:rig/core/src/affinity.rs setup_irq_affinity).
 # '-' never blocks the start; '+' runs it outside the unit sandbox (ProtectSystem=strict and
 # ReadOnlyPaths=/ would make /proc/irq read-only).
 [Service]

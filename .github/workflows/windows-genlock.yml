@@ -1278,7 +1278,7 @@ jobs:
       # #1003: fail fast if the relock selection is no longer phase-anchored — mirrors the
       # Linux-CI guard
       # tests/genlock_release_cadence.rs::relock_selection_is_phase_anchored_not_newest_due_1003.
-      # The selection arithmetic itself is Tier-0 unit-tested in src/genlock_backlog.rs; this
+      # The selection arithmetic itself is Tier-0 unit-tested in vstack:rig/core/src/genlock_backlog.rs; this
       # guards the C wiring, which compiles on CI only.
       - name: Assert relock selection is phase-anchored (#1003)
         shell: pwsh

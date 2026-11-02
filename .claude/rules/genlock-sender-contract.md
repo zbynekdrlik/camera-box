@@ -27,7 +27,7 @@ The load-bearing invariants the contract pins to this code (keep them honest):
 - **The grid is the PER-SECOND grid** — slot `k` of whole second `S` is `S + floor(k·1 s/fps)`
   (contract §3/§4, corrected in #1355 from a `k · interval`-from-1970 wording that contradicted
   this very reference code). The receiver deadline + render tick use the same grid since #1355
-  (`rig/core/src/genlock_grid.rs` ↔ `obs-genlock-grid.h`); `src/ndi.rs` tests pin `floor_boundary_100ns`
+  (`vstack:rig/core/src/genlock_grid.rs` ↔ `obs-genlock-grid.h`); `src/ndi.rs` tests pin `floor_boundary_100ns`
   == `genlock_grid::per_second_floor` over a day. A sender stamping `k · interval_100ns` from 1970 walks 1 µs/s at 30 fps (4 µs/s at 60 — a
   whole frame in ~0.4 days); check SongPlayer + the cg OBS against contract §4.
 - **A locked 1:1 camera stamps + paces its TRACKED slot** (issue 1367 slice D2,
@@ -47,7 +47,7 @@ The load-bearing invariants the contract pins to this code (keep them honest):
   catch-up `GENLOCK_MAX_CATCHUP_INTERVALS` ≤ 8 grid slots, grid-resync beyond, backward-step
   re-latch, starvation repeat with the NEW boundary timecode (`src/genlock_pacing.rs`:
   `genlock_emit_gate` / `genlock_latched_boundary` / `genlock_advance_boundary` /
-  `starvation_repeat_timecode_100ns`, all over `rig/core/src/genlock_grid.rs`).
+  `starvation_repeat_timecode_100ns`, all over `vstack:rig/core/src/genlock_grid.rs`).
 - **Audio timecode = raw wall clock, no snap** (`vendor/distroav/src/ndi-output.cpp`), delivered
   at real-time rate; the receiver ASRC paces by arrival rate, not sender audio timecodes.
 - **Receiver side** (why all of the above matters): DistroAV maps the forced
