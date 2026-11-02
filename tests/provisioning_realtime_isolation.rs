@@ -326,7 +326,7 @@ fn setup_device_ensures_curl_before_first_download() {
 ///    `CPUSchedulingPolicy`/`CPUSchedulingPriority`. That policy forced EVERY thread to
 ///    SCHED_FIFO prio 50 on the isolated core (measured on cam1: 27 FIFO threads), not the
 ///    SCHED_OTHER the design intended. The binary now raises SCHED_FIFO PER THREAD only on
-///    the capture+emit hot path (src/affinity.rs `set_current_thread_realtime`, via the
+///    the capture+emit hot path (rig/core/src/affinity.rs `set_current_thread_realtime`, via the
 ///    STEP 9 `cap_sys_nice` setcap). The `CPUAffinity=3` drop-in (the grab's isolated-core
 ///    pin) is UNCHANGED — only the process-wide scheduling policy is dropped.
 #[test]

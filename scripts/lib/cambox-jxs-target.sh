@@ -6,7 +6,7 @@
 #
 # scripts/lib/cambox-jxs-target.sh -- issue 1387: the cambox JPEG XS link TARGET, provisioned.
 #
-# camera-box sends its JPEG XS copy of the camera to CAMERA_BOX_JXS_TARGET (src/jxs_send.rs); unset =
+# camera-box sends its JPEG XS copy of the camera to CAMERA_BOX_JXS_TARGET (jxs/link/src/jxs_send.rs); unset =
 # NDI only. Until this lib the target lived only in a RUNTIME drop-in (/run/systemd/system/
 # camera-box.service.d/jxs.conf, `systemctl edit --runtime`): the root is read-only, and a reboot
 # reverted the camera to NDI only. Now:
@@ -27,7 +27,7 @@
 #     is not running), and the read-back.
 # Tests: tests/python/test_cambox_jxs_target_1387.py.
 
-# The env var camera-box reads (src/jxs_send.rs JxsSender::start_from_env, pinned by pytest).
+# The env var camera-box reads (jxs/link/src/jxs_send.rs JxsSender::start_from_env, pinned by pytest).
 CAMBOX_JXS_ENV="CAMERA_BOX_JXS_TARGET"
 # The persistent drop-in and the runtime drop-in dir. Overridable so a test points them at a temp tree.
 CAMBOX_JXS_DROPIN="${CAMBOX_JXS_DROPIN:-/etc/systemd/system/camera-box.service.d/jxs.conf}"

@@ -27,7 +27,7 @@ LIB = REPO / "scripts" / "lib" / "cambox-jxs-target.sh"
 FACTS = REPO / "scripts" / "strih-boxes"
 SETUP = REPO / "scripts" / "setup-device.sh"
 VERIFY = REPO / "scripts" / "verify-device.sh"
-JXS_SEND = REPO / "src" / "jxs_send.rs"
+JXS_SEND = REPO / "jxs" / "link" / "src" / "jxs_send.rs"
 
 
 def _bash(body, *args, env=None):

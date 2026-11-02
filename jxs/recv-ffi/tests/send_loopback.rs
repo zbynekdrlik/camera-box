@@ -6,7 +6,7 @@
 //! sender's status window counts it.
 #![cfg(target_os = "linux")]
 
-use camera_box::jxs_link::psnr;
+use camera_box_jxs::jxs_link::psnr;
 use jxs_recv_ffi::jxs_send_ffi::*;
 use jxs_recv_ffi::*;
 use std::ffi::{c_char, CString};

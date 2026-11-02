@@ -1,11 +1,11 @@
 ---
 paths:
-  - "src/jxs_link.rs"
-  - "src/jxs_link/**"
-  - "src/jxs_send.rs"
-  - "src/jxs_send/**"
-  - "src/jxs_recv.rs"
-  - "src/jxs_recv/**"
+  - "jxs/link/src/jxs_link.rs"
+  - "jxs/link/src/jxs_link/**"
+  - "jxs/link/src/jxs_send.rs"
+  - "jxs/link/src/jxs_send/**"
+  - "jxs/link/src/jxs_recv.rs"
+  - "jxs/link/src/jxs_recv/**"
   - "vendor/distroav/src/jxs-source.cpp"
   - "vendor/distroav/src/jxs-source-decide.h"
   - "tests/jxs_receiver_1387.rs"
@@ -13,8 +13,8 @@ paths:
   - "tests/jxs_strih_build_1387.rs"
   - "src/bin/jxs-recv-probe.rs"
   - "src/bin/jxs-encode-bench.rs"
-  - "src/jxs_auto_bpp.rs"
-  - "src/jxs_bench.rs"
+  - "jxs/link/src/jxs_auto_bpp.rs"
+  - "jxs/link/src/jxs_bench.rs"
   - "jxs/**"
   - "vendor/svt-jpeg-xs/**"
   - "tests/jxs_loopback_1387.rs"
@@ -31,8 +31,8 @@ paths:
   - "vendor/obs-studio/frontend/components/SourceTreeItem.*"
   - "tests/genlock_jxs_state_parity_1387.rs"
   - "tests/genlock_jxs_indicator_1387.rs"
-  - "src/jxs_congestion.rs"
-  - "src/jxs_congestion_bench.rs"
+  - "jxs/link/src/jxs_congestion.rs"
+  - "jxs/link/src/jxs_congestion_bench.rs"
   - "scripts/lib/strih-jxs-verify.sh"
   - "tests/python/test_strih_jxs_verify_1387.py"
   - "scripts/lib/cambox-jxs-target.sh"
@@ -88,7 +88,15 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
 
 ## Where things are
 
-- **Wire format: `src/jxs_link.rs` module doc is THE definition.** 16 bytes LE: magic `0x4A`,
+- **The crates (issue 1487).** The modules of this rule live in `jxs/link` (crate `camera-box-jxs`), the
+  shared `affinity`, `irq_offload`, `genlock_grid` and the `CAM<N>` parser in `rig/core` (crate `rig-core`).
+  The FFI crates depend on those two, never on `camera-box`, so the OBS build needs no appliance code
+  (`cargo tree -p jxs-recv-ffi` shows no camera-box). `src/lib.rs` re-exports every module at its old path.
+  A root `cargo test` does not run these crates' unit tests: `cargo test -p camera-box-jxs -p rig-core
+  --all-features` does (ci.yml runs them, the coverage job too). The `jxs` feature is forwarded by the root.
+  A crate that logs for the camera-box binary must be named in `src/log_filter.rs`: a target is a module
+  path, so a crate left out is filtered out silently, WARNs included (`tests/log_filter_1487.rs`).
+- **Wire format: `jxs/link/src/jxs_link.rs` module doc is THE definition.** 16 bytes LE: magic `0x4A`,
   version 1, camera id (`CAM<N>`), timecode (56 bits, 100 ns since the epoch, the SAME genlock
   timecode the NDI frame carries), slice index (0 = the picture header packet), slice count, byte
   offset in the slice (u16), slice length (u16). Datagrams <= 1472 bytes (no IP fragmentation).
@@ -101,7 +109,7 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   Rust never re-declares an SVT struct. `Encoder::encode_frame` returns after the frame's last
   packet (one frame in flight: the tests and the probe); the sender uses the pipelined session
   (`session.rs`, below).
-- **Sender: `src/jxs_send.rs` + `src/jxs_send/handoff.rs` (slice 1b).**
+- **Sender: `jxs/link/src/jxs_send.rs` + `jxs/link/src/jxs_send/handoff.rs` (slice 1b).**
   - `JxsSender::start_from_env` reads `CAMERA_BOX_JXS_TARGET`; unset = `None`, nothing exists.
     **A target that cannot connect yet is retried, never given up (1.11.2026 SNV event):** the
     camboxes booted before their network, the socket's `connect` failed with `Network is
@@ -249,7 +257,7 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     and never re-opened per frame at that bpp (another bpp tries it again); the packet thread is
     told only when a step was pending (it cancels the step, no back-off), else the feeder's
     ERROR line is the whole report.
-- **Send pacing (`src/jxs_link/pace.rs` pure schedule, `src/jxs_send/pacing.rs` clock;
+- **Send pacing (`jxs/link/src/jxs_link/pace.rs` pure schedule, `jxs/link/src/jxs_send/pacing.rs` clock;
   slice-3 live finding, comment 6507194583).** `SenderOptions::pace_mbps` (0 = line rate,
   today's behaviour), else 100..=100000 Mb/s (`check_pace_mbps`).
   - **Why app-level:** `SO_MAX_PACING_RATE` is enforced only by the `fq` qdisc (and TCP's own
@@ -291,10 +299,10 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     value 100..=100000 = that rate, fixed (a refused env value WARNs and keeps automatic). The
     "link ON" line names it (`send paced automatically (90% of the receiver's link ...)` / `send
     paced at 800 Mb/s of wire, at most 16 datagrams per send`).
-- **The automatic pace (`src/jxs_link/pace_auto.rs` pure, `src/jxs_send/pace_control.rs` on the
+- **The automatic pace (`jxs/link/src/jxs_link/pace_auto.rs` pure, `jxs/link/src/jxs_send/pace_control.rs` on the
   packet thread; owner 29.10.2026: "nesmie to stáť na sieťovom tuningu", "aby zmeny co urobis pre
   snv fungovali aj v pp ak tam maju ine sietovky").**
-  - **Where the speeds come from (`src/jxs_link/link_speed.rs`).** The RECEIVER names the
+  - **Where the speeds come from (`jxs/link/src/jxs_link/link_speed.rs`).** The RECEIVER names the
     interface each datagram arrives on (`IP_PKTINFO` on its socket -> `ipi_ifindex` ->
     `if_indextoname`) and reads `/sys/class/net/<if>/speed` once per report; `-1` / `EINVAL` (down,
     Wi-Fi, a tunnel, loopback) = unknown, and a virtual device (VLAN, bond, bridge, macvlan) with
@@ -324,7 +332,7 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   a switch that trusts DSCP queues the link apart, one that does not ignores it (the MikroTik chain's
   trust is not configured by this repo). Read back on a box: `ss -tuie` does not show it; a capture
   (`tcpdump -v -c1 udp port 7100`) prints `tos 0x88`.
-- **Receive: `src/jxs_recv.rs` + `src/jxs_link/assembler.rs`.** `recvmmsg` + `UDP_GRO` +
+- **Receive: `jxs/link/src/jxs_recv.rs` + `jxs/link/src/jxs_link/assembler.rs`.** `recvmmsg` + `UDP_GRO` +
   `SO_TIMESTAMPNS` + `IP_PKTINFO` (the arriving interface, `last_ifindex`). The assembler hands each packet on as soon as everything before it in its
   frame is complete; it finalizes a frame (missing packets = lost) when the NEXT frame is complete
   or a third frame arrives. `DecodeSink` replaces a lost packet with the SAME index of the
@@ -390,7 +398,7 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
 
 ## Slice 2: the strih OBS source (design 6500573353)
 
-### The one receive loop: `jxs_recv::JxsReceiver` (`src/jxs_recv/receiver.rs`, feature `jxs`)
+### The one receive loop: `jxs_recv::JxsReceiver` (`jxs/link/src/jxs_recv/receiver.rs`, feature `jxs`)
 
 - socket -> assembler -> `DecodeSink` -> decoded frames, the per-window statistics, and the receiver
   report sent once a second to the address the slices came from. `jxs-recv-probe` and the OBS source
@@ -437,8 +445,8 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   `nm -D` export list of only the test's own symbol. The deployed `camera-box` BINARY links the same
   objects and also has an executable stack (an executable, so it still runs; a hardening follow-up).
 - The static library's native libraries (`rustc --print native-static-libs`, measured 29.10.2026):
-  `-lpthread -lm -ldl -lasound -lgcc_s -lutil -lrt -lc`. `-lasound` comes from the camera-box crate's
-  Linux deps; with `--as-needed` nothing of it reaches the plugin's NEEDED list.
+  `-lpthread -lm -ldl -lasound -lgcc_s -lutil -lrt -lc`. Since issue 1487 the archive no longer
+  carries the camera-box crate, so `-lasound` is gone.
 
 ### The DistroAV source: `vendor/distroav/src/jxs-source.cpp`, kind `camera_box_jxs_source`
 
@@ -483,8 +491,7 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   installs `nasm libclang-dev` + `dtolnay/rust-toolchain@stable`, runs
   `cargo rustc --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs`, hands
   the list to CMake through `$GITHUB_ENV`, and refuses a `distroav.so` without `camera_box_jxs_source`
-  or with GNU_STACK other than `RW`. A change to `jxs/**`, `vendor/svt-jpeg-xs/**`, `src/jxs_recv*`,
-  `src/jxs_link*`, `Cargo.toml` or `src/lib.rs` re-runs the strih build. ci.yml lints and tests
+  or with GNU_STACK other than `RW`. A change to `jxs/**`, `rig/**`, `vendor/svt-jpeg-xs/**` or `Cargo.toml` re-runs the strih build. ci.yml lints and tests
   `jxs-recv-ffi`.
 - `jxs_resolve` repeats ndi-source.cpp's `resolve_obs_export` (dlsym) on purpose: that one is
   `static` in ndi-source.cpp, carries the `_WIN32` branch and sits under the windows-genlock*.yml
@@ -577,7 +584,7 @@ wire.
   the 1080p loopback).
 - The receiver's plane pool is chroma-aware (a 4:2:0 frame never lands in a pooled 4:2:2 buffer).
 
-### The sender: a raw planar intake beside the YUYV one (`src/jxs_send/raw.rs` + `handoff.rs`)
+### The sender: a raw planar intake beside the YUYV one (`jxs/link/src/jxs_send/raw.rs` + `handoff.rs`)
 
 - `JxsHandoff::offer_raw(&RawFrame)`: `RawLayout` I420 / I422 / I444 / NV12 (NV12 = 4:2:0 with U V
   interleaved, split on the copy). The caller's thread copies the planes into a free picture
@@ -609,7 +616,7 @@ wire.
   caller's log; a process-global subscriber, installed once).
 - **ONE Rust archive in DistroAV.** `jxs-recv-ffi` depends on `jxs-send-ffi` (`pub use
   jxs_send_ffi;`), so `libjxs_recv_ffi.a` defines both ABIs. Two Rust static libraries in one
-  shared object would each carry std, the camera-box crate and a second SVT-JPEG-XS (duplicate
+  shared object would each carry std, the JPEG XS crate and a second SVT-JPEG-XS (duplicate
   symbols, two codec init states). The recv-ffi `tests/abi.rs` links a `-z defs` shared object that
   calls every `cbjxs_send_*` from that one archive; the strih CI job `nm`s the archive for
   `cbjxs_send_open` & co. before CMake runs.
@@ -896,7 +903,7 @@ fallback for a frame with no packet. Test: `the_codec_time_counts_only_the_waits
 ## The automatic bpp (issue 1387, owner decision 6495938345)
 
 - **The back channel: ONE 56-byte receiver report per second** (`jxs_link::ReceiverReport`,
-  layout in the `src/jxs_link.rs` module doc next to the slice datagram: magic `'R'`, version 2,
+  layout in the `jxs/link/src/jxs_link.rs` module doc next to the slice datagram: magic `'R'`, version 2,
   camera id, max bpp, seq, frames, lost slices, late frames, decode p99 us, last timecode, then
   link speed, delay MEAN (i32), delay spread, arrival span p50, FEC repaired, 4 reserved bytes;
   version 2 was 48 bytes for a few never-deployed commits of this lane, the version byte did not
@@ -910,7 +917,7 @@ fallback for a frame with no packet. Test: `the_codec_time_counts_only_the_waits
   this camera, garbage and queued ICMP errors skipped, at most 64 datagrams per call).
   `jxs-recv-probe` sends it (`--max-bpp`, `--late-ms` default 100, `--no-report`; `reports=` on its
   status line). The slice-2 OBS source must send the same report, or the auto bpp holds at its floor.
-- **The controller is pure: `src/jxs_auto_bpp.rs` `AutoBpp`** (crate root, default features,
+- **The controller is pure: `jxs/link/src/jxs_auto_bpp.rs` `AutoBpp`** (crate root, default features,
   every rule unit-tested), ticked once per second on `jxs-send` (`handoff.rs` `BppControl`) with
   the second's frames, encode p99 (submit -> last packet sent), `dropped_busy` (a separate
   per-tick counter, `Stats::dropped_tick`) and encode errors. `AutoBppConfig::new(min, max)`:
@@ -968,7 +975,7 @@ nejako obnovit rozchodit. Aby sa mi nestalo ze ... otvori nejake video na stream
 saturne prijem a zacne padat video spoj/kvalita zo strih pc." The WebRTC GCC / L4S principle:
 react to a GROWING QUEUE, before the switch buffer overflows.
 
-- **The receiver's signal (`src/jxs_link/congestion_meter.rs`, pure),** per report period, into
+- **The receiver's signal (`jxs/link/src/jxs_link/congestion_meter.rs`, pure),** per report period, into
   report v2:
   - `delay_mean_us` (i32): per frame `d` = first datagram arrival - genlock timecode, the
     period's MEAN (review round 2: a p50 of a sawtooth jumps by the whole slot when the sets of the
@@ -981,7 +988,7 @@ react to a GROWING QUEUE, before the switch buffer overflows.
     in its 60 fps emit slot (the timecode is the slot boundary), a sawtooth that wanders 0..16.7 ms
     and jumps a slot at an edge (the live cam5 `handoff_age` 21-39 ms). The receiver cannot remove
     it (review round 1 of item 2), so:
-- **The sender's half (`PathDelay` in `src/jxs_congestion.rs`):** its own first-send delay per
+- **The sender's half (`PathDelay` in `jxs/link/src/jxs_congestion.rs`):** its own first-send delay per
   frame (`PaceControl::on_first_send`, wall minus steps, its own `WallSteps`) over the timecodes
   the report's second covers; path = the receiver's mean - its own mean = the path delay + the
   clock offset, constant on a quiet path; the queue = the path above its minimum over the last 30
@@ -1003,7 +1010,7 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   moved the base on a "tight" jump over 3 ms: a real queue that drains at once (the download
   stops) then left a phantom queue as big as the drain, and a queue that appears at once was
   hidden. Small steps never reach `PathDelay` (both ends subtract `WallSteps`).
-- **The sender's controller (`src/jxs_congestion.rs`, pure, crate root like `jxs_auto_bpp.rs`),**
+- **The sender's controller (`jxs/link/src/jxs_congestion.rs`, pure, crate root like `jxs_auto_bpp.rs`),**
   owned by `PaceControl`, one decision per new report seq:
   - **overuse** = queue > 4 ms, or (only while PACED: at line rate the sender's own NIC is the
     bottleneck by construction, and on a cambox NDI leaves ahead of JPEG XS in the egress priority
@@ -1051,7 +1058,7 @@ react to a GROWING QUEUE, before the switch buffer overflows.
     span_rx/tx_ms=26.0/20.0 lost_slices=0) -- pace factor 85 %, asks the auto bpp for a step down
     (issue 1387)`. Status lines: `path=` (`unknown` | `clean` | `hold` | `overuse`) `cong_pct=`
     `queue_ms=`; the C ABI 3 stats carry `path_state` / `congestion_pct` / `queue_delay_us`.
-- **The bench (`src/jxs_congestion_bench.rs`, test only)** runs the real meter, report window,
+- **The bench (`jxs/link/src/jxs_congestion_bench.rs`, test only)** runs the real meter, report window,
   `PaceControl` and `AutoBpp` over a modelled path (FEC parity included): a 10 GbE sender, the
   receiver's 1 GbE drop-tail port with a 1 MB buffer, the receiver's clock 3 s ahead and 20 ppm
   fast, and a download that ramps 0 -> 600 Mb/s at 60..65 s, holds to 120 s and stops
@@ -1090,7 +1097,7 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   between frames does not delay (the span stretch catches that case); the bench's cross traffic
   does not back off as TCP does, so live adaptation should be gentler than the bench.
 
-## FEC with no added latency (issue 1387 item 3, `src/jxs_link/fec.rs`)
+## FEC with no added latency (issue 1387 item 3, `jxs/link/src/jxs_link/fec.rs`)
 
 - **One XOR parity datagram per group of up to 12 datagrams of a slice** (`FEC_GROUP`): ~9-10 %
   more wire (9.1 % at 4 bpp 1080p, 9.5 % at 8, 9.4 % at 12). The parity datagram is the slice
@@ -1641,7 +1648,7 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
 - **Time a paced send on the SENDING side, with the schedule's own clock.** A reader thread's
   `recv()` return time is late whenever it is descheduled, so a receive-side spread can read
   shorter than the schedule and fail a correct pacer. `monotonic_ns()` before the first send and
-  after the last bounds `t1 - t0 >= last departure` exactly (`src/jxs_send/pacing.rs`).
+  after the last bounds `t1 - t0 >= last departure` exactly (`jxs/link/src/jxs_send/pacing.rs`).
 - **A test of the WIRING must fail without it.** Run the pacing through the real packet thread
   (`jxs/recv-ffi/tests/send_loopback.rs` at 300 Mb/s, the sender's own `wire_ms_avg`) and mutate the
   call site to `None` once: the wire time must drop below the bound (it read 1.96 vs 26.39 ms).
@@ -1768,7 +1775,7 @@ line-rate ~8-12 ms. `first_arrival_ms` should stop wandering. The latency p50 sh
 - `SO_SNDBUF` asks for 4 MB; the kernel caps it at `net.core.wmem_max` (the "link ON" line logs
   what was granted). A frame is ~1.04 MB, so a small grant makes `send` block the `jxs-send`
   thread (never the capture thread) until the NIC drains it.
-- The PNG dump is a stored-deflate writer in `src/jxs_link/png.rs` (no compression, no
+- The PNG dump is a stored-deflate writer in `jxs/link/src/jxs_link/png.rs` (no compression, no
   dependency): the probe needs only the `jxs` feature, not the probe feature's `image` crate.
 
 ## One camera, one receive (owner 1.11.2026)

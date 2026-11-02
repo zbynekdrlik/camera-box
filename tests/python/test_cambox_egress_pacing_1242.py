@@ -169,7 +169,7 @@ def test_the_lib_is_the_one_declaration_of_rate_and_limits():
 
 def test_the_lib_declares_the_jpeg_xs_class_1387():
     # Issue 1387: the JPEG XS flow leaves the paced fq through a socket mark + fw filter. The mark
-    # is this lib's one declaration; src/jxs_send.rs JXS_SOCKET_MARK is pinned equal to it.
+    # is this lib's one declaration; jxs/link/src/jxs_send.rs JXS_SOCKET_MARK is pinned equal to it.
     r = _lib('echo "$CAMBOX_EGRESS_PACING_JXS_MARK $CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT"')
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == ["0x1387", "4000"]
@@ -177,9 +177,9 @@ def test_the_lib_declares_the_jpeg_xs_class_1387():
 
 def test_the_rust_sender_marks_its_socket_with_the_declared_mark_1387():
     lib = _lib('echo "$CAMBOX_EGRESS_PACING_JXS_MARK"').stdout.strip()
-    src = (REPO / "src" / "jxs_send.rs").read_text()
+    src = (REPO / "jxs" / "link" / "src" / "jxs_send.rs").read_text()
     m = re.search(r"pub const JXS_SOCKET_MARK: u32 = (0x[0-9A-Fa-f_]+);", src)
-    assert m, "src/jxs_send.rs declares JXS_SOCKET_MARK"
+    assert m, "jxs/link/src/jxs_send.rs declares JXS_SOCKET_MARK"
     assert int(m.group(1).replace("_", ""), 16) == int(lib, 16)
 
 

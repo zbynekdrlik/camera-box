@@ -3,7 +3,7 @@
 //! The strih OBS program output (`vendor/distroav/src/jxs-output.cpp`) calls the functions
 //! declared in `include/camera_box_jxs_send.h` (written by hand; `tests/abi.rs` pins every size,
 //! offset and name against this file). Every call wraps ONE existing type,
-//! `camera_box::jxs_send::JxsHandoff`, the sender the cambox runs: the picture pool, the two
+//! `camera_box_jxs::jxs_send::JxsHandoff`, the sender the cambox runs: the picture pool, the two
 //! sender threads (`jxs-feed` / `jxs-send`), the slice packets with UDP GSO, the receiver-report
 //! listener and the automatic bpp all live there. This crate only adds the raw planar intake's C
 //! face and a log bridge. No encode or packet code here.
@@ -20,8 +20,8 @@ use std::ffi::{c_char, c_int, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::RwLock;
 
-use camera_box::jxs_link::SendWindow;
-use camera_box::jxs_send::{
+use camera_box_jxs::jxs_link::SendWindow;
+use camera_box_jxs::jxs_send::{
     BppMode, JxsHandoff, JxsSender, LinkConfig, Offered, RawFrame, RawLayout, SenderOptions,
     DEFAULT_AUTO_MAX_BPP, DEFAULT_AUTO_MIN_BPP, MAX_BPP,
 };
@@ -43,8 +43,8 @@ pub const CBJXS_SEND_PATH_HOLD: u32 = 2;
 pub const CBJXS_SEND_PATH_OVERUSE: u32 = 3;
 
 /// The C code of a path state.
-pub fn path_state_code(s: camera_box::jxs_congestion::PathState) -> u32 {
-    use camera_box::jxs_congestion::PathState as S;
+pub fn path_state_code(s: camera_box_jxs::jxs_congestion::PathState) -> u32 {
+    use camera_box_jxs::jxs_congestion::PathState as S;
     match s {
         S::Unknown => CBJXS_SEND_PATH_UNKNOWN,
         S::Clean => CBJXS_SEND_PATH_CLEAN,
@@ -54,8 +54,8 @@ pub fn path_state_code(s: camera_box::jxs_congestion::PathState) -> u32 {
 }
 
 /// The C code of a pace source.
-pub fn pace_source_code(s: camera_box::jxs_link::pace_auto::PaceSource) -> u32 {
-    use camera_box::jxs_link::pace_auto::PaceSource as P;
+pub fn pace_source_code(s: camera_box_jxs::jxs_link::pace_auto::PaceSource) -> u32 {
+    use camera_box_jxs::jxs_link::pace_auto::PaceSource as P;
     match s {
         P::LineRate => CBJXS_SEND_PACE_LINE_RATE,
         P::Fixed => CBJXS_SEND_PACE_FIXED,
@@ -257,7 +257,7 @@ unsafe fn link_config(c: &CbjxsSendConfig) -> Result<LinkConfig, String> {
         return Err("no target (host:port)".to_string());
     }
     let cores_text = text(c.cores)?;
-    let cores = camera_box::affinity::parse_cpulist(cores_text.trim());
+    let cores = rig_core::affinity::parse_cpulist(cores_text.trim());
     if !cores_text.trim().is_empty() && cores.is_empty() {
         return Err(format!("cores '{cores_text}' is not a cpulist"));
     }
@@ -265,8 +265,9 @@ unsafe fn link_config(c: &CbjxsSendConfig) -> Result<LinkConfig, String> {
         target: target.trim().to_string(),
         camera_id: c.stream_id,
         cores,
-        opts: SenderOptions::new(bpp_mode(c.bpp_min, c.bpp_max)?, None)
-            .with_pace(camera_box::jxs_link::pace::check_pace_mbps(c.pace_mbps)?),
+        opts: SenderOptions::new(bpp_mode(c.bpp_min, c.bpp_max)?, None).with_pace(
+            camera_box_jxs::jxs_link::pace::check_pace_mbps(c.pace_mbps)?,
+        ),
         egress_mark: false,
     })
 }
@@ -686,10 +687,10 @@ mod tests {
             reports: 5,
             window_s: 5.0,
             pace_mbps: 900,
-            pace_source: camera_box::jxs_link::pace_auto::PaceSource::ReceiverLink,
+            pace_source: camera_box_jxs::jxs_link::pace_auto::PaceSource::ReceiverLink,
             rx_link_mbps: 1000,
             own_link_mbps: 10_000,
-            path_state: camera_box::jxs_congestion::PathState::Overuse,
+            path_state: camera_box_jxs::jxs_congestion::PathState::Overuse,
             congestion_pct: 85,
             queue_delay_us: Some(6_100),
             fec_sent: 600,
@@ -710,7 +711,7 @@ mod tests {
             (CBJXS_SEND_PACE_RECEIVER_LINK, 1000, 10_000)
         );
         // the C codes (the DistroAV output's cb_jxs_out_pace_source reads these numbers)
-        use camera_box::jxs_link::pace_auto::PaceSource as P;
+        use camera_box_jxs::jxs_link::pace_auto::PaceSource as P;
         assert_eq!(
             [
                 P::LineRate,
@@ -727,7 +728,7 @@ mod tests {
             (CBJXS_SEND_PATH_OVERUSE, 85, 6_100)
         );
         assert_eq!((s.fec_sent, s.fec_repaired), (600, 3));
-        use camera_box::jxs_congestion::PathState as S;
+        use camera_box_jxs::jxs_congestion::PathState as S;
         assert_eq!(
             [S::Unknown, S::Clean, S::Hold, S::Overuse].map(path_state_code),
             [0, 1, 2, 3]

@@ -15,7 +15,7 @@ fn read(rel: &str) -> String {
 /// pins what camera-box itself runs).
 #[test]
 fn the_cambox_entry_retries_with_the_real_socket_every_second() {
-    let s = read("src/jxs_send.rs");
+    let s = read("jxs/link/src/jxs_send.rs");
     let start = s.find("pub fn start_from_env(").expect("the entry");
     let body = &s[start..];
     let body = &body[..body[1..]
@@ -266,7 +266,9 @@ fn the_vendored_library_is_built_out_of_tree_without_lto_or_native_flags() {
 fn the_codec_is_an_optional_linux_dependency_behind_the_jxs_feature() {
     let c = read("Cargo.toml");
     assert!(c.contains("svt-jpegxs-sys = { path = \"jxs/sys\", optional = true }"));
-    assert!(c.contains("jxs = [\"dep:svt-jpegxs-sys\"]"));
+    assert!(c.contains("jxs = [\"dep:svt-jpegxs-sys\", \"camera-box-jxs/jxs\"]"));
+    let link = read("jxs/link/Cargo.toml");
+    assert!(link.contains("jxs = [\"dep:svt-jpegxs-sys\"]"));
     let linux = c
         .find("[target.'cfg(target_os = \"linux\")'.dependencies]")
         .unwrap();

@@ -23,7 +23,7 @@
 # (no painter). The gate was measuring a CPU environment the operator never runs.
 #
 # APPROACH: derive the mask from the BOX'S OWN `/sys/devices/system/cpu/isolated` at deploy time
-# -- the exact same source src/affinity.rs's `read_isolated_cores()` reads -- never a hardcoded
+# -- the exact same source rig/core/src/affinity.rs's `read_isolated_cores()` reads -- never a hardcoded
 # core number, so burn mode and production can never drift apart again. An un-isolated box
 # (empty file) gets NO `--property=CPUAffinity=` at all, rather than inventing a bogus core.
 #

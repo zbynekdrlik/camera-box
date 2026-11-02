@@ -6,7 +6,7 @@
 # reads only its args + emits to stdout, no side effects, no globals, no I/O.
 #
 # scripts/lib/rt-kernel-plan.sh -- issue 899: the low-latency kernel provisioning DECISION logic.
-# Lane 1 (merged: src/affinity.rs capture-IRQ routing) fixed defect 3; defect 1 (the fleet runs a
+# Lane 1 (merged: rig/core/src/affinity.rs capture-IRQ routing) fixed defect 3; defect 1 (the fleet runs a
 # stock PREEMPT_DYNAMIC kernel with no full preemption) remains.
 #
 # OWNER DECISION (2026-08-20): Ubuntu Pro / subscription is REJECTED ("linux has its own free

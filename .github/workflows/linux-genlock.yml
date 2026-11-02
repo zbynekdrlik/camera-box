@@ -41,26 +41,14 @@ on:
       - 'tests/qt/**'
       - 'tests/python/fixtures/obs_dock_state_1470/**'
       - 'scripts/genlock-manifest.sh'
-      # issue 1387 slice 2: the strih variant links the JPEG XS receiver (jxs/recv-ffi over the
-      # camera-box receive code + the vendored SVT-JPEG-XS) into DistroAV's JPEG XS source.
+      # issue 1387 + 1487: the strih variant links the JPEG XS C ABIs (jxs/recv-ffi + jxs/send-ffi
+      # over jxs/link, rig/core and the vendored SVT-JPEG-XS) into DistroAV's JPEG XS source and
+      # program output.
       - 'jxs/**'
+      - 'rig/**'
       - 'vendor/svt-jpeg-xs/**'
-      - 'src/jxs_recv.rs'
-      - 'src/jxs_recv/**'
-      - 'src/jxs_link.rs'
-      - 'src/jxs_link/**'
-      # issue 1387 slice 3: the same archive carries the SENDER (jxs/send-ffi over the camera-box
-      # sender) for DistroAV's JPEG XS program output.
-      - 'src/jxs_send.rs'
-      - 'src/jxs_send/**'
-      - 'src/affinity.rs'
-      # the sender's pace + bpp decisions (live 31.10.2026: a congestion fix that never rebuilt)
-      - 'src/jxs_congestion.rs'
-      - 'src/jxs_auto_bpp.rs'
-      # the static library links the whole camera-box crate: a dependency or module change can move
-      # its native-library list or break the strih link.
+      # a dependency change can move the static library's native-library list or break the link.
       - 'Cargo.toml'
-      - 'src/lib.rs'
       - '.github/workflows/linux-genlock.yml'
 
 permissions:
@@ -360,7 +348,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }} nasm libclang-dev  # issue 1387: nasm for SVT-JPEG-XS, libclang for the v4l2 sys crate's bindgen (the jxs-recv-ffi build below)
 
       # issue 1387 slice 2: DistroAV's JPEG XS source links the jxs-recv-ffi static library (a C ABI
-      # over camera-box's receive loop, the code jxs-recv-probe runs). rustc names the native
+      # over the JPEG XS crate's receive loop, the code jxs-recv-probe runs). rustc names the native
       # libraries a static library needs only when it builds one; the step hands that list to
       # DistroAV's CMake, so a new Rust dependency can never leave the plugin with an undefined symbol.
       - name: Install the Rust toolchain (issue 1387)

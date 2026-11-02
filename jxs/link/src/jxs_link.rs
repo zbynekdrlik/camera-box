@@ -321,7 +321,7 @@ pub fn split_gro(buf: &[u8], gso_size: Option<usize>) -> impl Iterator<Item = &[
 
 /// The camera id for the header: the `CAM<N>` number of the hostname, or 0.
 pub fn camera_id_from_hostname(hostname: &str) -> u8 {
-    crate::send_stagger::camera_number_from_hostname(hostname)
+    crate::camera_number::camera_number_from_hostname(hostname)
         .and_then(|n| u8::try_from(n).ok())
         .unwrap_or(0)
 }

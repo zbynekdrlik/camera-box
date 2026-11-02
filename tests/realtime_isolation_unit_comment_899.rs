@@ -6,7 +6,7 @@
 //! thread the binary did not re-pin inherited FIFO 50 on the isolated core (measured on
 //! cam1: 27 FIFO threads on core 3) — not the SCHED_OTHER the design intended. Defect 2's
 //! fix drops that policy entirely; the binary now raises SCHED_FIFO PER THREAD only on the
-//! capture+emit hot path (src/affinity.rs `set_current_thread_realtime`), and every other
+//! capture+emit hot path (rig/core/src/affinity.rs `set_current_thread_realtime`), and every other
 //! thread keeps the process default SCHED_OTHER. These static assertions pin the honest
 //! state so it can't silently regress back to the process-wide policy or the old false
 //! "idle slack" comment.
@@ -37,7 +37,7 @@ fn unit_has_no_process_wide_cpuscheduling_policy_899() {
         !on_directive_line(&text, "CPUSchedulingPolicy"),
         "camera-box.service must NOT set a process-wide CPUSchedulingPolicy — it forces \
          EVERY thread to SCHED_FIFO on the isolated core (issue 899 defect 2); the binary \
-         raises FIFO per-thread instead (src/affinity.rs set_current_thread_realtime)"
+         raises FIFO per-thread instead (rig/core/src/affinity.rs set_current_thread_realtime)"
     );
     assert!(
         !on_directive_line(&text, "CPUSchedulingPriority"),

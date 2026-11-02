@@ -3,7 +3,7 @@
 //! The strih OBS source (`vendor/distroav/src/jxs-source.cpp`) links this crate's static library
 //! and calls the functions declared in `include/camera_box_jxs.h` (written by hand; `tests/abi.rs`
 //! pins every size, offset and name against this file). Every call wraps ONE existing type,
-//! `camera_box::jxs_recv::JxsReceiver`, the receive loop `jxs-recv-probe` runs too: reassembly,
+//! `camera_box_jxs::jxs_recv::JxsReceiver`, the receive loop `jxs-recv-probe` runs too: reassembly,
 //! slice-wise decode, concealment and the 32-byte receiver report back to the sender all happen
 //! inside it, so there is one receiver implementation for the probe and for OBS.
 //!
@@ -16,7 +16,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
-use camera_box::jxs_recv::{JxsReceiver, ReceiverConfig};
+use camera_box_jxs::jxs_recv::{JxsReceiver, ReceiverConfig};
 use svt_jpegxs_sys::ChromaFormat;
 
 /// Issue 1387 slice 3: the SENDER's C ABI (`cbjxs_send_*`, `jxs/send-ffi`) is linked into this
@@ -269,7 +269,7 @@ pub unsafe extern "C" fn cbjxs_set_late_ms(rx: *mut CbjxsReceiver, late_ms: u32)
     match rx.as_mut() {
         Some(r) => {
             // the floor holds whatever the caller passes (a latency of 3 ms is never 3 ms late)
-            r.rx.set_late_ms(camera_box::jxs_recv::late_ms_for_latency(late_ms));
+            r.rx.set_late_ms(camera_box_jxs::jxs_recv::late_ms_for_latency(late_ms));
             0
         }
         None => -1,
