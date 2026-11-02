@@ -983,7 +983,7 @@ RestartSec=3
 # process-wide CPUSchedulingPolicy=fifo was REMOVED here -- it forced EVERY thread to
 # SCHED_FIFO prio 50 on the isolated core (measured: 27 on cam1), not the SCHED_OTHER the
 # design intended. The binary now raises SCHED_FIFO PER THREAD (via CAP_SYS_NICE, STEP 9
-# setcap) only on the capture+emit hot path (rig/core/src/affinity.rs set_current_thread_realtime);
+# setcap) only on the capture+emit hot path (vstack:rig/core/src/affinity.rs set_current_thread_realtime);
 # every other thread stays SCHED_OTHER. See docs/runbooks/899-realtime-isolation.md.
 Nice=-10
 
@@ -1025,7 +1025,7 @@ cleanup_bak_cruft /etc/systemd/system/camera-box.service.d '*.bak' '*.bak-*'   #
 # #289 — pin the SCHED_FIFO grab onto the isolcpus=3 reserved core. Soft (inherited)
 # CPUAffinity mask, NOT a hard cpuset: the per-thread sched_setaffinity calls in the
 # binary still move painter / --display / intercom threads OFF onto the general cores
-# and re-pin capture+emit to the /sys-derived isolated core (rig/core/src/affinity.rs, the
+# and re-pin capture+emit to the /sys-derived isolated core (vstack:rig/core/src/affinity.rs, the
 # authoritative path). This static value just matches the fleet's isolcpus=3.
 cat > /etc/systemd/system/camera-box.service.d/cpu-affinity.conf << 'EOF'
 [Service]

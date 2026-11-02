@@ -3,7 +3,7 @@
 The mining (15.9. 20:15) shows a STABLE per-box presented-age offset (cam4 71.3 .. cam2 85.0 ms,
 median cross-camera spread 13.7 ms) at the same 3 ms pin -- so production is NOT equalized between
 runs. Task 2 wanted to carry that excess via strih pins; task 3 wanted a hard-fail re-tighten on the
-residual. The DECISIVE physics (issue 1049 narrative in src/genlock_backlog.rs; issue 1252 gate; live
+residual. The DECISIVE physics (issue 1049 narrative in vstack:rig/core/src/genlock_backlog.rs; issue 1252 gate; live
 run 1899055119): the strih FIFO is a WHOLE-source-frame conveyor, so a SUB-source-frame cross-camera
 spread is IRREDUCIBLE by any pin -- a whole-frame hold overshoots, a sub-frame hold limit-cycles and
 DOUBLES the on-screen spread. These pure functions encode the DIRECTION-CORRECT (anchor = OLDEST /

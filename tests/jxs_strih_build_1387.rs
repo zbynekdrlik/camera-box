@@ -1,8 +1,11 @@
 //! Issue 1387 slice 2 -- the CI wiring of the JPEG XS source (std-only, every build):
 //! the strih Linux variant builds the jxs-recv-ffi static library (Rust + nasm), hands it and
 //! rustc's native-library list to DistroAV's CMake, and refuses a distroav.so without the source
-//! or with an executable stack; no other DistroAV build turns the source on; ci.yml lints and tests
-//! the FFI crate; a receiver change re-runs the strih build.
+//! or with an executable stack; no other DistroAV build turns the source on; a new vstack pin
+//! re-runs the strih build.
+
+#[path = "support/vstack.rs"]
+mod vstack;
 
 use std::path::Path;
 
@@ -65,7 +68,7 @@ fn the_strih_build_makes_the_static_library_and_hands_it_to_distroav() {
     assert!(strih.contains("uses: dtolnay/rust-toolchain@stable"));
     let ffi = step(strih, "Build the jxs-recv-ffi static library (issue 1387)");
     for needle in [
-        "cargo rustc --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs",
+        "cargo rustc --locked --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs",
         "sed -n 's/^note: native-static-libs: //p'",
         "echo \"JXS_FFI_NATIVE_LIBS=$libs\" >> \"$GITHUB_ENV\"",
         "target/release/libjxs_recv_ffi.a",
@@ -75,8 +78,8 @@ fn the_strih_build_makes_the_static_library_and_hands_it_to_distroav() {
     let cfg = step(strih, "Configure DistroAV against the genlocked OBS SDK");
     for needle in [
         "-DCAMERA_BOX_JXS_SOURCE=ON",
-        "-DCAMERA_BOX_JXS_FFI_LIB=\"$GITHUB_WORKSPACE/target/release/libjxs_recv_ffi.a\"",
-        "-DCAMERA_BOX_JXS_FFI_INCLUDE=\"$GITHUB_WORKSPACE/jxs/recv-ffi/include\"",
+        "-DCAMERA_BOX_JXS_FFI_LIB=\"$VSTACK_SRC/target/release/libjxs_recv_ffi.a\"",
+        "-DCAMERA_BOX_JXS_FFI_INCLUDE=\"$VSTACK_SRC/jxs/recv-ffi/include\"",
         "-DCAMERA_BOX_JXS_FFI_NATIVE_LIBS=\"$JXS_FFI_NATIVE_LIBS\"",
     ] {
         assert!(
@@ -117,12 +120,7 @@ fn no_other_distroav_build_turns_the_source_on() {
 fn a_receiver_change_reruns_the_strih_build() {
     let wf = read(WF);
     let paths = &wf[wf.find("    paths:").unwrap()..wf.find("\npermissions:").unwrap()];
-    for p in [
-        "'jxs/**'",
-        "'vendor/svt-jpeg-xs/**'",
-        "'rig/**'",
-        "'Cargo.toml'",
-    ] {
+    for p in ["'scripts/vstack-release.pin'", "'Cargo.toml'"] {
         assert!(paths.contains(p), "trigger path {p}");
     }
 }
@@ -138,7 +136,7 @@ fn the_crates_the_obs_build_links_never_depend_on_the_appliance() {
         "jxs/sys/Cargo.toml",
         "rig/core/Cargo.toml",
     ] {
-        let text = read(manifest);
+        let text = vstack::read(manifest);
         let dep = text.lines().map(str::trim_start).find(|l| {
             l.starts_with("camera-box =")
                 || l.starts_with("camera-box.")
@@ -147,26 +145,4 @@ fn the_crates_the_obs_build_links_never_depend_on_the_appliance() {
         });
         assert_eq!(dep, None, "{manifest} depends on the camera-box crate");
     }
-}
-
-#[test]
-fn ci_runs_the_moved_unit_tests_a_root_run_never_reaches() {
-    let ci = read(".github/workflows/ci.yml");
-    assert!(ci.contains("run: cargo nextest run -p camera-box-jxs -p rig-core --all-features"));
-    assert!(
-        ci.contains("run: cargo clippy -p camera-box-jxs -p rig-core --all-targets --all-features")
-    );
-    assert!(ci.contains("cargo llvm-cov -p camera-box -p camera-box-jxs -p rig-core"));
-    assert!(ci.contains("--package camera-box --package camera-box-jxs --package rig-core"));
-}
-
-#[test]
-fn ci_lints_and_tests_the_ffi_crate() {
-    let ci = read(".github/workflows/ci.yml");
-    assert!(ci.contains("run: cargo clippy -p jxs-recv-ffi --all-targets -- -D warnings"));
-    assert!(ci.contains("run: cargo nextest run -p jxs-recv-ffi"));
-    let root = read("Cargo.toml");
-    // issue 1387 slice 3: the sender's C ABI crate is a member too (carried in the one archive)
-    assert!(root
-        .contains("\"jxs/sys\", \"jxs/link\", \"jxs/recv-ffi\", \"jxs/send-ffi\", \"rig/core\"]"));
 }

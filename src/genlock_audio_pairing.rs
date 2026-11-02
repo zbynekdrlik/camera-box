@@ -63,7 +63,7 @@
 //!
 //! The whole `probe` module is `#[cfg(feature = "probe")]` (pulls image/qr/drm deps that balloon
 //! the shared `target/`, per the Local Build Policy). This decision needs none of that, so it
-//! lives here as a pure module — the exact `src/genlock_lock_state.rs` / `src/genlock_backlog.rs`
+//! lives here as a pure module — the exact `src/genlock_lock_state.rs` / `vstack:rig/core/src/genlock_backlog.rs`
 //! pattern: it unit-tests Tier-0 (standalone-rustc,
 //! `.claude/rules/vendored-libobs-change-safety.md` §"pure-std crate-root module"), and its C
 //! mirror (the contiguous `genlock_audio_*` / `genlock_video_delay_*` `static inline` block in

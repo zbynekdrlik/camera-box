@@ -1,6 +1,5 @@
 ---
 paths:
-  - "src/genlock_backlog.rs"
   - "scripts/genlock_audit_snapshot.py"
   - "scripts/lib/genlock-audit-snapshot.sh"
   - "vendor/obs-studio/libobs/obs-source.c"
@@ -31,7 +30,7 @@ per-camera delivery lag until the depth-15 relock).
 
 The constant lives in exactly TWO arithmetic copies kept byte-parallel (the #1201-style discipline):
 
-- `src/genlock_backlog.rs` — `pub const GENLOCK_N2_JITTER_BUDGET_NS` + the `budget` line in
+- `vstack:rig/core/src/genlock_backlog.rs` — `pub const GENLOCK_N2_JITTER_BUDGET_NS` + the `budget` line in
   `should_converge_phase` (the authority).
 - `vendor/obs-studio/libobs/obs-source.c` — `#define GENLOCK_N2_JITTER_BUDGET_NS 15000000ULL` +
   the `budget` line in `genlock_phase_converge_due`.

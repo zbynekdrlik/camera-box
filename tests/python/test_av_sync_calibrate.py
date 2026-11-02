@@ -3,7 +3,7 @@ controller: measured offset -> genlock video-delay over OBS WS + persisted av-sy
 
 Covers, with NO live OBS:
   a. required_delay_ms() -- MUST mirror camera_box::qpsk_marker::required_delay_ms
-     (src/qpsk_marker.rs) sign + clamp EXACTLY (same 5 cases pinned on the Rust side).
+     (vstack:av/marker/src/qpsk_marker.rs) sign + clamp EXACTLY (same 5 cases pinned on the Rust side).
   b. offset_from_verdict_json() -- reads the REAL landed `recording-verdict --av-sync`
      top-level `av_offset_ms` field (src/bin/recording-verdict.rs::run_av_sync); fails loud
      on a missing/unresolved measurement, never guesses 0.
@@ -34,7 +34,7 @@ import av_sync_calibrate  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# (a) required_delay_ms -- MUST mirror src/qpsk_marker.rs::required_delay_ms exactly
+# (a) required_delay_ms -- MUST mirror vstack:av/marker/src/qpsk_marker.rs::required_delay_ms exactly
 # ---------------------------------------------------------------------------
 
 class TestRequiredDelayMs:

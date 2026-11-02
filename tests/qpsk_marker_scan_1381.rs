@@ -2,7 +2,7 @@
 //! recomputed preamble magnitudes per passing position, and a start position for the live dock's
 //! incremental scan). This pins that every decoded marker AND every counter is unchanged: the
 //! current `decode_markers_with_stats` against a FROZEN copy of the pre-1381 kernel (below, verbatim
-//! from `src/qpsk_marker.rs` at 1.7.0-dev.716), over markers on silence, on white / pink noise, on a
+//! from `vstack:av/marker/src/qpsk_marker.rs` at 1.7.0-dev.716), over markers on silence, on white / pink noise, on a
 //! music-like mix (which decodes false markers too), on a 442 Hz tone (every position passes the
 //! screen), every one of the 256 indices, a non-finite sample, and both channels of the real stereo
 //! mbc fixture.

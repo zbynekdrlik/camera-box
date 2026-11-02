@@ -1,6 +1,5 @@
 ---
 paths:
-  - "src/genlock_wall_step.rs"
   - "src/genlock_wall_step_bench.rs"
   - "vendor/obs-studio/libobs/obs-genlock-wall-step.h"
   - "vendor/obs-studio/libobs/obs-video.c"
@@ -21,7 +20,7 @@ three of them. The decision is ROZHODNUTÉ 5841039244 on the ticket.
 
 | consumer | before | now |
 |---|---|---|
-| render tick, `genlock_next_deadline` (obs-video.c) | the correction toward the stepped wall grid is clamped to 2 ms/tick: ~9 ticks off phase at 30 fps, and the NDI sender (DistroAV floors the wall clock AT EMIT) stamps off phase meanwhile | ONE detector (`obs-genlock-wall-step.h` ↔ `src/genlock_wall_step.rs`): a bracketed mono/wall/mono read; a wall−media jump > 2 ms vs the previous tick is a step; the deadline takes the wall-grid target UNCLAMPED in that one tick. One `genlock-regrid:` log line. |
+| render tick, `genlock_next_deadline` (obs-video.c) | the correction toward the stepped wall grid is clamped to 2 ms/tick: ~9 ticks off phase at 30 fps, and the NDI sender (DistroAV floors the wall clock AT EMIT) stamps off phase meanwhile | ONE detector (`obs-genlock-wall-step.h` ↔ `vstack:rig/core/src/genlock_wall_step.rs`): a bracketed mono/wall/mono read; a wall−media jump > 2 ms vs the previous tick is a step; the deadline takes the wall-grid target UNCLAMPED in that one tick. One `genlock-regrid:` log line. |
 | LOCK indicator `qpc_drift` (OBSBasicStatusBar.cpp) | the single-sample jump sat in the 300 s history: DEGRADED for 300 s | `genlock_qpc_wall_step_rebase_ms` (GenlockLockState.hpp ↔ `src/genlock_lock_state/qpc_step.rs`) BOOKS a jump with 33 ms < \|jump\| ≤ 66 ms (two frames; dantesync steps the date at a 50 ms error), at most 1 per window: the history is re-based by it, one `genlock-wall-step:` line, LOCKED. A bigger jump (> 66 ms: a clock set, an NTP-fallback step) or a second step in the window stays in the history and DEGRADES through the unchanged `genlock_qpc_drift_beyond_bound`. |
 | ASRC (asrc-compensator.c ↔ `src/asrc_bench.rs`) | the stream `mbc` really lost 44 ms of Dante samples (upstream of OBS); the re-base armed the proportional ±100 ppm restore: 3–4 min | a re-based step the buffer level CONFIRMS is booked as `step_recover_ms` with a setpoint move of the same size, and paid back at `ASRC_STEP_RECOVER_PPM` = 1000 ppm as `step_recover_ppm`, a separate term on top of `applied_ppm`. `recover_ms=` on the `asrc:` line. |
 
@@ -64,7 +63,7 @@ sender) is the supervisor's rig investigation, not this code.
   `((int)GENLOCK_WALL_STEP_MAX_SLEW_NS)` from the header (the `render tick ENABLED` log still prints
   it); the detector's step threshold is the same constant (pinned by
   `render_tick_uses_the_wall_step_regrid_1372`). The N==1 on-grid window `GENLOCK_N1_ON_GRID_NS`
-  (obs-source.c ↔ `src/genlock_n1_depth.rs` `N1_ON_GRID_NS`) is a SEPARATE 2 ms literal with its own
+  (obs-source.c ↔ `vstack:rig/core/src/genlock_n1_depth.rs` `N1_ON_GRID_NS`) is a SEPARATE 2 ms literal with its own
   parity; change the two together.
 - **A re-grid stays PENDING until a tick lands on the new grid** (`genlock_wall_step_regrid_due` ↔
   `WallStepState::regrid_due`): if the render that follows the detection stalls past the re-grid

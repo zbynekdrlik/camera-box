@@ -23,13 +23,15 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 #[path = "support/av_sync_dock_output.rs"]
 mod av_sync_dock_output;
+#[path = "support/vstack.rs"]
+mod vstack;
 
 const DOCK_OUTPUT: &str = av_sync_dock_output::LABEL;
 const DOCK_AUDIO_HPP: &str = "vendor/av-sync-dock/src/camera-box-audio.hpp";
 // issue 1381 moved the decode kernel and the streaming decoder into their own files.
 const DOCK_SCAN_HPP: &str = "vendor/av-sync-dock/src/camera-box-marker-scan.hpp";
 const RUST_DOCK: &str = "src/av_sync_dock.rs";
-const RUST_KERNEL: &str = "src/qpsk_marker_scan.rs";
+const RUST_KERNEL: &str = "av/marker/src/qpsk_marker_scan.rs";
 
 fn repo_file(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -101,7 +103,7 @@ fn cpp_mirror_carries_the_watchdog_and_the_kernel_sanitize() {
             src.contains(marker),
             "{DOCK_AUDIO_HPP} + {DOCK_SCAN_HPP}: #1153 marker `{marker}` is gone — the C++ mirror of the \
              dead-pairing watchdog / decoder window reset / kernel non-finite sanitize regressed. \
-             Re-apply in lockstep with src/av_sync_dock.rs + src/qpsk_marker.rs."
+             Re-apply in lockstep with src/av_sync_dock.rs + vstack:av/marker/src/qpsk_marker.rs."
         );
     }
 }
@@ -121,7 +123,7 @@ fn rust_reference_carries_the_watchdog_and_the_kernel_sanitize() {
              dead-pairing watchdog / decoder window reset regressed. Re-apply."
         );
     }
-    let kernel = squish(&repo_file(RUST_KERNEL));
+    let kernel = squish(&vstack::read(RUST_KERNEL));
     assert!(
         kernel.contains("let x = if x.is_finite() { x } else { 0.0 };"),
         "{RUST_KERNEL}: #1153 non-finite input sanitize is gone from the decode kernel's \

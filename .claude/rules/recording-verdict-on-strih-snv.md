@@ -32,6 +32,11 @@ at `[8/8a]` it ssh-runs `recording-verdict --extract-partial strih …` ON strih
 against the recording where it already lives, then scps back only the small partial JSON (+ the
 `<partial>-pixels` dir). Nothing is copied off-box.
 
+**Since issue 1387 the prefix ends in the baseline's background runner when the box has it and sudo
+allows it:** `sudo -n /usr/local/sbin/obs-box-background-run` = `rig-background.slice` on the CPUs OBS
+does not use. The `nice` + E-core text below stays only for a box not yet provisioned (AMD has no
+`cpu_atom`, so it fenced nothing there). `.claude/rules/obs-box-baseline.md` has the slice.
+
 ## Why STEP 2 must be low-priority + E-core-pinned
 
 The decode is a multi-core QR/pixel sweep over a 1080p60 5-min recording. Run at nice 0, unpinned,

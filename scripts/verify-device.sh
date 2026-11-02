@@ -115,7 +115,7 @@
 #   (ac) realtime-isolation drift (issue 899) -- WARNING ONLY (never fails the gate for now): reports
 #       whether the kernel is PREEMPT_RT (defect 1 -- the fleet is not yet, informational) and whether
 #       the xhci capture IRQ is routed OFF the isolated grab core on a stock kernel (defect 3 -- the
-#       fix is in rig/core/src/affinity.rs and lands on the next fleet redeploy; a pre-899 box WARNs). The flip
+#       fix is in vstack:rig/core/src/affinity.rs and lands on the next fleet redeploy; a pre-899 box WARNs). The flip
 #       to a hard FAIL is a follow-up gated on the redeploy (docs/runbooks/899-realtime-isolation.md).
 #   (ad) provisioning netplan interface pin (#1155): the installed /etc/netplan/01-netcfg.yaml pins
 #       the LAN stanza to `match: name: "enp*"` (the PCI NIC), never `driver: "*"` -- a driver
@@ -1641,7 +1641,7 @@ fi
 #   * whether the running kernel is PREEMPT_RT (defect 1 -- the fleet is NOT yet, so this is
 #     informational, never a FAIL);
 #   * whether the xhci capture IRQ is routed OFF the isolated grab core on a stock kernel (defect 3
-#     -- the fix lives in rig/core/src/affinity.rs setup_irq_affinity and lands on the next fleet redeploy).
+#     -- the fix lives in vstack:rig/core/src/affinity.rs setup_irq_affinity and lands on the next fleet redeploy).
 # Scope (deliberate, WARN-only surfacing): it grades the REPRESENTATIVE first capture IRQ (head -1)
 # -- the fleet has one xhci host-controller IRQ, and setup_irq_affinity writes the same mask to every
 # matching IRQ, so the first is representative of the routing decision. It also derives the grab core
@@ -1811,7 +1811,7 @@ fi
 # CPUSchedulingPolicy (it forced EVERY thread to SCHED_FIFO prio 50 on the isolated core --
 # measured on cam1: 27 FIFO threads -- instead of the SCHED_OTHER the design intended), AND the
 # LIVE camera-box process must show only a handful of SCHED_FIFO threads (the binary now raises
-# FIFO per-thread via rig/core/src/affinity.rs set_current_thread_realtime only on the capture+emit hot
+# FIFO per-thread via vstack:rig/core/src/affinity.rs set_current_thread_realtime only on the capture+emit hot
 # path). Two facts, read in ONE ssh call: (1) does the deployed base unit have an uncommented
 # CPUSchedulingPolicy directive (grep excludes '#'-comment lines -- the corrected honest note
 # mentions it in prose); (2) how many SCHED_FIFO threads (ps -L class == FF) the running

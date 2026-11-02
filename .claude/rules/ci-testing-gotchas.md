@@ -113,7 +113,7 @@ move. Do this alongside the count sweep, which only proves literal counts.
 ## Raising a shared formula constant (a `PHASE_SYNC_FLOOR_MS`-style floor/cap) breaks EVERY hardcoded literal test expectation that assumed the old value -- across BOTH languages (#707)
 
 Several "pure kernel" constants in this repo are deliberately duplicated across THREE places:
-the Rust kernel (`src/phase_sync.rs`, `src/qpsk_marker.rs`, ...), a CLI-boundary parity-check test
+the Rust kernel (`src/phase_sync.rs`, `vstack:av/marker/src/qpsk_marker.rs`, ...), a CLI-boundary parity-check test
 file that pins the SAME numeric vectors the kernel's own unit tests use
 (`tests/harness_phase_sync_gate.rs` etc.), and a Python mirror + its own pytest suite
 (`scripts/phase_sync_calibrate.py` / `tests/python/test_phase_sync_calibrate.py`). Changing the

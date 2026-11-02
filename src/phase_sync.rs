@@ -1,6 +1,6 @@
 //! Pure Tier-0 4-camera MUTUAL phase-sync offset kernel (#286).
 //!
-//! WHY crate root, not `src/probe/`: same pure-seam pattern as `src/qpsk_marker.rs` /
+//! WHY crate root, not `src/probe/`: same pure-seam pattern as `vstack:av/marker/src/qpsk_marker.rs` /
 //! `src/colour_scale.rs` — NO I/O, NO probe deps, so it compiles + unit-tests on DEFAULT
 //! features (Tier-0). The probe-gated MEASUREMENT (`src/probe/recording_latency.rs`'s
 //! `n_camera_strih_samples` / `n_camera_median_latency_ms`) feeds this kernel a measured

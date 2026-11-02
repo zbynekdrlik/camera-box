@@ -6,7 +6,7 @@ What is landed vs what this adds:
   - MEASUREMENT (PR #397): `recording-verdict --av-sync` (src/bin/recording-verdict.rs) decodes
     the cam2 QPSK marker + audio track and prints a JSON with a top-level `av_offset_ms` field.
     The sign+clamp controller math it documents is ALREADY the pure Tier-0 kernel
-    `camera_box::qpsk_marker::required_delay_ms` (src/qpsk_marker.rs) — already locked by its own
+    `camera_box::qpsk_marker::required_delay_ms` (vstack:av/marker/src/qpsk_marker.rs) — already locked by its own
     Rust unit test (`required_delay_sign_and_clamp`). This script does NOT duplicate that kernel;
     it MIRRORS it in Python (Rust and Python can't share code across the WS boundary) and keeps
     the two in lock-step (see `required_delay_ms` below — same formula, same test values).
@@ -193,7 +193,7 @@ def _opt_float(x: "str | float | int | None") -> "float | None":
 def required_delay_ms(current_delay_ms: int, offset_ms: float) -> int:
     """Required genlock video-delay to zero the measured offset.
 
-    MIRRORS `camera_box::qpsk_marker::required_delay_ms` (src/qpsk_marker.rs) EXACTLY — same
+    MIRRORS `camera_box::qpsk_marker::required_delay_ms` (vstack:av/marker/src/qpsk_marker.rs) EXACTLY — same
     sign, same step clamp, same hardware clamp, same rounding. Keep the two in lock-step; do not
     diverge.
 

@@ -472,7 +472,7 @@ Clean up any `*verify*`/scratch `.py` you copy over when done.
 `recording-verdict --av-sync` (`av_sync_from_recording`, `src/probe/av_sync_recording.rs`) pairs a
 recording's decoded AUDIO INDEX against the cam2 emit-log's `frame_id`s — with NO check, before
 #936, that the emit-log was actually alive during this recording. Live incident: the QPSK marker
-thread died silently ~24 minutes before a recording was made (see `src/qpsk_marker.rs`'s marker
+thread died silently ~24 minutes before a recording was made (see `vstack:av/marker/src/qpsk_marker.rs`'s marker
 silent-death gotcha below); the "measurement" against that dead window still produced a
 plausible-looking `av_offset_ms=-544.8 matched=41 mad_ms=12.0` — every existing count/spread
 threshold passed on pure CRC-4 false decodes.

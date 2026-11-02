@@ -828,11 +828,11 @@ pub fn genlock_release_guarded(
     // so the guard never touches it.
     //
     // #1009: the margin is the RE-QUALIFIED max(3×interval, 250 ms) from the Tier-0 authority
-    // (src/genlock_backlog.rs backward_step_margin_ns) — the old ONE-interval margin sat only
+    // (vstack:rig/core/src/genlock_backlog.rs backward_step_margin_ns) — the old ONE-interval margin sat only
     // network-delay away from the sender's deliberate ceil-to-boundary future bias and fired
     // on a few ms of inter-box skew (the 2026-08-07 overnight −900 ms hold collapse). The
     // STATEFUL parts of #1009 (sustained-tick qualification + regime self-heal + bounded
-    // regime warns) live in the C and in src/genlock_backlog.rs BackwardStepGuard ONLY —
+    // regime warns) live in the C and in vstack:rig/core/src/genlock_backlog.rs BackwardStepGuard ONLY —
     // this stateless per-tick mirror keeps just the raw condition in lock-step (same
     // minimal-glue shape as the #940 phase-pin, which is also C+Tier-0-mirror only).
     let max_ts = queued_ts_ascending.iter().copied().max();
@@ -1516,7 +1516,7 @@ impl ReleaseCadence {
     /// #940 piece 3 SCOPE NOTE: the deadline below is intentionally the RAW (non-grid-
     /// -pinned) `genlock_present_ts_reserve()` value, unlike the C `ready_async_frame()`
     /// ts-align path, which now grid-quantizes it (`genlock_phase_pin_deadline` +
-    /// `GENLOCK_PHASE_PIN_HYSTERESIS_NS`, see `src/genlock_backlog.rs`
+    /// `GENLOCK_PHASE_PIN_HYSTERESIS_NS`, see `vstack:rig/core/src/genlock_backlog.rs`
     /// `phase_pinned_deadline`/`PHASE_PIN_HYSTERESIS_NS` — the Tier-0-tested pure mirror of
     /// that C arithmetic). This simulation harness is NOT wired to it: this struct's own
     /// test suite pins dozens of exact ACQUIRE/RELOCK frame-selection outcomes against the

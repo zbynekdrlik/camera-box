@@ -48,7 +48,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev nasm  # nasm: issue 1387, the jxs feature builds the vendored SVT-JPEG-XS (jxs/sys/build.rs)
+          sudo apt-get install -y libv4l-dev libasound2-dev nasm  # nasm: issue 1387, the jxs feature builds the vendored SVT-JPEG-XS (vstack's jxs/sys/build.rs)
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -60,24 +60,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-
-      # Issue 1387: the JPEG XS codec crate is a workspace member the root clippy above only
-      # compiles as a dependency; lint its own code and tests too.
-      - name: Clippy (svt-jpegxs-sys)
-        run: cargo clippy -p svt-jpegxs-sys --all-targets -- -D warnings
-
-      # Issue 1387 slice 2: the C ABI static library the strih DistroAV build links.
-      - name: Clippy (jxs-recv-ffi)
-        run: cargo clippy -p jxs-recv-ffi --all-targets -- -D warnings
-      - name: Clippy (jxs-send-ffi)
-        run: cargo clippy -p jxs-send-ffi --all-targets -- -D warnings
-
-      # Issue 1487: the JPEG XS link and the rig primitives are workspace members the root clippy
-      # only compiles as dependencies: lint their own code and tests, with and without the codec.
-      - name: Clippy (camera-box-jxs, rig-core)
-        run: cargo clippy -p camera-box-jxs -p rig-core --all-targets --all-features -- -D warnings
-      - name: Clippy (camera-box-jxs, no codec)
-        run: cargo clippy -p camera-box-jxs --all-targets -- -D warnings
 
   test:
     name: Test
@@ -149,22 +131,6 @@ jobs:
       - name: Run tests (nextest)
         run: cargo nextest run --all-features
 
-      # Issue 1387: the codec crate's own encode -> decode tests (the root run above covers the
-      # link through camera-box's `jxs` feature).
-      - name: Run tests (svt-jpegxs-sys)
-        run: cargo nextest run -p svt-jpegxs-sys
-
-      # Issue 1387 slice 2: the C ABI pinned against its header by the C compiler, the static
-      # library linked into a -z defs shared object, and the real-codec loopback through it.
-      - name: Run tests (jxs-recv-ffi)
-        run: cargo nextest run -p jxs-recv-ffi
-      - name: Run tests (jxs-send-ffi)
-        run: cargo nextest run -p jxs-send-ffi
-
-      # Issue 1487: a root run compiles these crates but never runs their unit tests.
-      - name: Run tests (camera-box-jxs, rig-core)
-        run: cargo nextest run -p camera-box-jxs -p rig-core --all-features
-
       - name: Build benchmarks (compile check only)
         run: cargo bench --no-run
 
@@ -225,14 +191,9 @@ jobs:
         # threshold reflects testable logic. kms.rs's PURE decision functions (pick_mode,
         # copy_plan, copy_bgra_into, next_bo_index) are unit-tested, but its live DRM
         # `hw` glue cannot be, so the file follows the same exclusion as fb.rs.
-        # rig/core/src/affinity.rs (#289): its PURE selection/parse functions are unit- AND
-        # mutation-tested, but its sched_setaffinity / /proc-irq / /sys IO glue cannot
-        # be — so the file follows the same whole-file exclusion as kms.rs (glue
-        # excluded from coverage, pure functions still mutated in the mutants job).
-        # -p (issue 1487): the moved JPEG XS + rig unit tests count toward the total.
         # src/bin/jxs-recv-probe.rs (issue 1387): the probe's CLI + print loop; the pieces it runs
         # (jxs_link, jxs_recv) are library code covered by tests/jxs_loopback_1387.rs.
-        run: cargo llvm-cov -p camera-box -p camera-box-jxs -p rig-core --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader|colour_sample)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict|jxs-recv-probe)\.rs|src/affinity\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader|colour_sample)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict|jxs-recv-probe)\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
   mutants:
     name: Mutation Testing
@@ -313,24 +274,14 @@ jobs:
         # zero-loss/real-drop assertions in merge_of_partials_reproduces_the_fused_verdict), the
         # burn-id contiguity engine, and RecordingPartial::{from_frames,to_json,from_json} (the
         # recording_partial roundtrip + schema unit tests).
-        # #289 affinity glue (env_capture_core / read_online_cores / read_isolated_cores /
-        # pin_current_thread / pin_capture_thread / pin_off_capture_core / setup_irq_affinity):
-        # sched_setaffinity + /sys + /proc-irq IO — uncatchable by a unit test (no live core
-        # topology / no writable /proc/irq in CI). The PURE logic they wrap IS mutated + covered:
-        # parse_cpulist, select_capture_core, select_painter_cores, parse_capture_irqs,
-        # smp_affinity_mask_hex (the rig/core/src/affinity.rs unit tests).
         # #364 colour-gate I/O glue (src/probe/colour_sample.rs ffmpeg colour pass + ffprobe;
         # build_node_colour_fail in recording-verdict): uncatchable by a unit test without a live
         # recording on disk (exercised by the on-rig recorded fixture), exactly like decode_for /
         # run_merge. The JUDGEMENT they wrap IS mutated + covered: the pure src/colour_verify.rs
         # (classify_patch / summarize_node_colour) and NodeVerdict::is_zero's colour_fail term.
-        # issue 1487: a root run mutates only the root package, so the JPEG XS and rig crates are
-        # named, and a mutant there runs the root integration tests too (--test-package).
         run: |
           if git diff --name-only origin/main...HEAD | grep -q '\.rs$'; then
             cargo mutants --in-diff pr.diff --features probe,jxs \
-              --package camera-box --package camera-box-jxs --package rig-core \
-              --test-package camera-box --test-package camera-box-jxs --test-package rig-core \
               -e 'src/probe/painter.rs' \
               -e 'src/probe/reader.rs' \
               -e 'src/probe/run.rs' \
@@ -353,13 +304,6 @@ jobs:
               --exclude-re 'RecordingPartial::load' \
               --exclude-re '\breport_recording_diag\b' \
               --exclude-re '\bbuild_node_colour_fail\b' \
-              --exclude-re '\benv_capture_core\b' \
-              --exclude-re '\bread_online_cores\b' \
-              --exclude-re '\bread_isolated_cores\b' \
-              --exclude-re '\bpin_current_thread\b' \
-              --exclude-re '\bpin_capture_thread\b' \
-              --exclude-re '\bpin_off_capture_core\b' \
-              --exclude-re '\bsetup_irq_affinity\b' \
               --timeout 120
           else
             echo "No Rust source changes in this PR — skipping mutation testing."
@@ -375,6 +319,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # Issue 1487: pytest pins constants against the pinned vstack source; `cargo fetch` puts cargo's
+      # git checkout of the tag on disk (tests/python/vstack_src.py), this job compiles nothing.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch the pinned vstack source
+        run: cargo fetch
 
       - name: Install test deps
         # websocket-client: obs_phase2.py imports it at module load (sys.exit if
@@ -603,7 +555,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev nasm  # nasm: issue 1387, the jxs feature builds the vendored SVT-JPEG-XS (jxs/sys/build.rs)
+          sudo apt-get install -y libv4l-dev libasound2-dev nasm  # nasm: issue 1387, the jxs feature builds the vendored SVT-JPEG-XS (vstack's jxs/sys/build.rs)
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

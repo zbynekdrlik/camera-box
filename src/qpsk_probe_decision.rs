@@ -1,6 +1,6 @@
 //! Pure Tier-0 decision for the AUDIO-ONLY QPSK decodability probe (#1324).
 //!
-//! WHY crate root, not `src/probe/`: like `src/qpsk_marker.rs` / `src/colour_scale.rs`, this is
+//! WHY crate root, not `src/probe/`: like `vstack:av/marker/src/qpsk_marker.rs` / `src/colour_scale.rs`, this is
 //! pure decision math with NO I/O and NO probe deps, so it compiles + unit-tests on DEFAULT
 //! features (Tier-0). The probe-gated ffmpeg/WAV glue (`src/bin/recording-verdict.rs`
 //! `--qpsk-probe`) reads the audio, runs `qpsk_marker::decode_markers_with_stats`, and hands the

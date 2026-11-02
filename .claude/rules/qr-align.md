@@ -238,7 +238,7 @@ pin at pin 3 until the quantum gate or the ceiling is revisited for the grid (pr
 budget-bound for every spread of 25 ms or more too).
 
 (Historical, pre-D1.) **The frame-mover LANDED (sibling genlock-C, `genlock_relock_acquire_should_hold` in
-`src/genlock_backlog.rs` + `vendor/obs-studio/libobs/obs-source.c`):** on a pin RISE the setter zeroes
+`vstack:rig/core/src/genlock_backlog.rs` + `vendor/obs-studio/libobs/obs-source.c`):** on a pin RISE the setter zeroes
 the conveyor boundary to force a bounded re-acquire, and the ACQUIRE branch (N>=2) HOLDs until the
 oldest queued frame ages to the raised reserve, then re-anchors via the history-anchored
 `genlock_relock_select_nearest` (a fail-open cap prevents a new hold-collapse). It moves the frame
@@ -537,7 +537,7 @@ The mining (15.9.) showed a STABLE ~13.7 ms median cross-camera spread on the JI
 to carry that excess via strih pins + persist as the baseline; task 3 to re-tighten to a hard-fail.
 
 **The decisive physics (why the pin lever cannot carry a sub-frame excess).** The strih FIFO is a
-WHOLE-source-frame conveyor (the issue-1049 narrative in `src/genlock_backlog.rs`: it moves a source's
+WHOLE-source-frame conveyor (the issue-1049 narrative in `vstack:rig/core/src/genlock_backlog.rs`: it moves a source's
 on-air age `S` only in `interval/n` = 16.667 ms steps, so `S mod 16.667` is INVARIANT under every pin).
 The mining deficits vs the OLDEST camera are all SUB-source-frame (max ~14 ms < 16.667). Correcting
 them with the whole-frame conveyor is defeated on two fronts: a whole-frame hold OVERSHOOTS the anchor

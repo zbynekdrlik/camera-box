@@ -539,7 +539,7 @@ uniform in HOW it hosts that runtime, discovered incrementally:
 
 The cam-box grab/emit must run ALONE on the `isolcpus`-reserved core or it wobbles under box load
 (USB kworkers, ssh, the QR painter on .62) → fps dips + underruns + head_skew. The logic lives in
-`rig/core/src/affinity.rs` (pure, unit-tested) + its call sites:
+`vstack:rig/core/src/affinity.rs` (pure, unit-tested) + its call sites:
 - **Capture+emit** thread → the isolated core; **painter / `--display` / intercom** → OFF it (cores 0-2).
 - The isolated core is DERIVED from `/sys/devices/system/cpu/isolated` (highest online isolated;
   fallback last online; `CAMERA_BOX_CAPTURE_CORE` override) — **never hardcode a core number**.

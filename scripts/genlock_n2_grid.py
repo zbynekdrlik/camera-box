@@ -18,7 +18,7 @@ audit head is one source frame older than the target, so the old estimate read a
 
 THE CONSTANT is never retyped here: `load_age_base_ns()` reads `GENLOCK_N2_AGE_BASE_NS` from
 src/genlock_n2_grid.rs at run time (the scripts/av_soak_decision.py pattern) and fails closed
-(`N2GridConstantError`) when it cannot. The per-second grid helpers mirror rig/core/src/genlock_grid.rs.
+(`N2GridConstantError`) when it cannot. The per-second grid helpers mirror vstack:rig/core/src/genlock_grid.rs.
 tests/fixtures/genlock_n2_present_age_1367.tsv is the ONE present-age table read by BOTH the Rust
 test in src/genlock_n2_grid.rs and tests/python/test_genlock_n2_grid_twin_1367.py.
 
@@ -117,7 +117,7 @@ def _age_base(age_base_ns):
     return load_age_base_ns() if age_base_ns is None else int(age_base_ns)
 
 
-# --- the per-second grid (mirror of rig/core/src/genlock_grid.rs) ----------------------------------------
+# --- the per-second grid (mirror of vstack:rig/core/src/genlock_grid.rs) ----------------------------------------
 
 
 def integer_fps(interval_ns):

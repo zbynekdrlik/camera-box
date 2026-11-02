@@ -40,6 +40,7 @@ import program_audio as pa  # noqa: E402
 import program_audio_marker as pam  # noqa: E402
 import program_audio_marker_calibrate as cal  # noqa: E402
 import rig_marker_mirror as rmm  # noqa: E402
+import vstack_src  # noqa: E402
 import youtube_leg_ticks as ylt  # noqa: E402
 from qpsk_guard_shim_1404 import build_shim  # noqa: E402
 
@@ -359,7 +360,7 @@ def test_the_marker_word_is_preamble_zero_nibble_index_crc4():
 
 
 def test_the_qpsk_parameters_are_the_rust_painters_the_docks_and_the_shims(decoder):
-    rs = _src("src/qpsk_marker.rs")
+    rs = vstack_src.read("av/marker/src/qpsk_marker.rs")
     assert gen.SAMPLE_RATE == _rust_const(rs, "AUDIO_SAMPLE_RATE_HZ")
     assert gen.CARRIER_HZ == _rust_const(rs, "CARRIER_HZ_DEFAULT")
     assert gen.N_PAYLOAD_BITS == _rust_const(rs, "N_PAYLOAD_BITS")

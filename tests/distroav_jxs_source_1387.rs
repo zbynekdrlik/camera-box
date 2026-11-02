@@ -10,6 +10,9 @@
 //! 4. libobs' audit line under a JPEG XS input's name is read by the existing parser, and the
 //!    source's own status line is never mistaken for one.
 
+#[path = "support/vstack.rs"]
+mod vstack;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -174,7 +177,7 @@ fn the_whole_source_compiles_against_the_vendored_libobs_and_the_ffi_header() {
             .arg("-I")
             .arg(repo("vendor/distroav/src"))
             .arg("-I")
-            .arg(repo("jxs/recv-ffi/include"))
+            .arg(vstack::path("jxs/recv-ffi/include"))
             .arg(repo(SOURCE)),
         "g++ -fsyntax-only jxs-source.cpp",
     );

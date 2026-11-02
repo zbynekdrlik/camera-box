@@ -560,7 +560,7 @@ def floor_samples_sufficient(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES
 # instrument (arrival_floors_from_jitter = latency_ms + mean_head_skew_ms). These pure helpers reason
 # about THAT instrument for the production-persistence + re-tighten questions issue 1168 asks.
 #
-# THE PHYSICS (issue 1049 narrative in src/genlock_backlog.rs; live run 1899055119): the strih FIFO is
+# THE PHYSICS (issue 1049 narrative in vstack:rig/core/src/genlock_backlog.rs; live run 1899055119): the strih FIFO is
 # a WHOLE-source-frame conveyor -- it moves a source's on-air age S only in interval/n = 16.667 ms
 # (one 60 fps source frame) steps, so `S mod 16.667` is INVARIANT under every pin. A SUB-source-frame
 # cross-camera spread is HARD to correct: a whole-frame hold OVERSHOOTS (adds a full frame past the

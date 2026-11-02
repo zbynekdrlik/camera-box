@@ -3,6 +3,9 @@
 //! is built with the codec; every CI job that compiles `--all-features` installs nasm; the
 //! vendored library is built out of tree.
 
+#[path = "support/vstack.rs"]
+mod vstack;
+
 use std::path::Path;
 
 fn read(rel: &str) -> String {
@@ -15,7 +18,7 @@ fn read(rel: &str) -> String {
 /// pins what camera-box itself runs).
 #[test]
 fn the_cambox_entry_retries_with_the_real_socket_every_second() {
-    let s = read("jxs/link/src/jxs_send.rs");
+    let s = vstack::read("jxs/link/src/jxs_send.rs");
     let start = s.find("pub fn start_from_env(").expect("the entry");
     let body = &s[start..];
     let body = &body[..body[1..]
@@ -229,34 +232,28 @@ fn every_ci_job_that_builds_all_features_installs_nasm() {
 }
 
 #[test]
-fn the_codec_crate_is_linted_and_tested_on_its_own() {
+fn the_mutation_run_builds_the_codec_paths() {
     let ci = read(".github/workflows/ci.yml");
-    assert!(ci.contains("run: cargo clippy -p svt-jpegxs-sys --all-targets -- -D warnings"));
-    assert!(ci.contains("run: cargo nextest run -p svt-jpegxs-sys"));
-    // the on-demand mutation run builds the codec paths it mutates
     assert!(ci.contains("cargo mutants --in-diff pr.diff --features probe,jxs \\"));
 }
 
 #[test]
 fn the_vendored_library_is_built_out_of_tree_without_lto_or_native_flags() {
-    let c = read("jxs/sys/csrc/CMakeLists.txt");
+    let c = vstack::read("jxs/sys/csrc/CMakeLists.txt");
     assert!(
         c.contains("set(CMAKE_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}/lib\" CACHE PATH \"\" FORCE)")
     );
     assert!(c.contains("set(JPEGXS_LTO OFF CACHE BOOL \"\" FORCE)"));
     assert!(c.contains("set(NATIVE OFF CACHE BOOL \"\" FORCE)"));
     assert!(c.contains("set(BUILD_SHARED_LIBS OFF CACHE BOOL \"\" FORCE)"));
-    let b = read("jxs/sys/build.rs");
+    let b = vstack::read("jxs/sys/build.rs");
     assert!(b.contains(".profile(\"Release\")"));
-    let pin = read("vendor/svt-jpeg-xs/CAMERA-BOX-VENDOR.md");
+    let pin = vstack::read("vendor/svt-jpeg-xs/CAMERA-BOX-VENDOR.md");
     assert!(pin.contains("01bc7cc7123d2e4a3e330632fabec873f3cee62b"));
     // the vendored tree carries only the library, not the upstream apps/tests/build outputs
     for absent in ["Source/App", "tests", "Bin", "Build"] {
         assert!(
-            !Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("vendor/svt-jpeg-xs")
-                .join(absent)
-                .exists(),
+            !vstack::path("vendor/svt-jpeg-xs").join(absent).exists(),
             "{absent} must not be vendored"
         );
     }
@@ -265,9 +262,9 @@ fn the_vendored_library_is_built_out_of_tree_without_lto_or_native_flags() {
 #[test]
 fn the_codec_is_an_optional_linux_dependency_behind_the_jxs_feature() {
     let c = read("Cargo.toml");
-    assert!(c.contains("svt-jpegxs-sys = { path = \"jxs/sys\", optional = true }"));
+    assert!(c.contains("svt-jpegxs-sys = { git = \"https://github.com/zbynekdrlik/vstack\""));
     assert!(c.contains("jxs = [\"dep:svt-jpegxs-sys\", \"camera-box-jxs/jxs\"]"));
-    let link = read("jxs/link/Cargo.toml");
+    let link = vstack::read("jxs/link/Cargo.toml");
     assert!(link.contains("jxs = [\"dep:svt-jpegxs-sys\"]"));
     let linux = c
         .find("[target.'cfg(target_os = \"linux\")'.dependencies]")
@@ -284,13 +281,13 @@ fn the_codec_is_an_optional_linux_dependency_behind_the_jxs_feature() {
 /// the feeder takes before it opens a session).
 #[test]
 fn the_vendored_codec_never_raises_its_workers_to_a_realtime_policy() {
-    let t = read("vendor/svt-jpeg-xs/Source/Lib/Common/Codec/Threads/SvtThreads.c");
+    let t = vstack::read("vendor/svt-jpeg-xs/Source/Lib/Common/Codec/Threads/SvtThreads.c");
     assert!(
         !t.contains("pthread_setschedparam("),
         "no realtime policy set by the library itself"
     );
     assert!(!t.contains("sched_priority = 99"), "no FIFO 99 worker");
-    let pin = read("vendor/svt-jpeg-xs/CAMERA-BOX-VENDOR.md");
+    let pin = vstack::read("vendor/svt-jpeg-xs/CAMERA-BOX-VENDOR.md");
     assert!(
         pin.contains("SvtThreads.c") && !pin.contains("**No local patches.**"),
         "the patch is recorded in CAMERA-BOX-VENDOR.md"

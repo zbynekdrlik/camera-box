@@ -8,10 +8,10 @@
 //! else the configured latency — and is stale when more than `n + 1` source frames behind it.
 //!
 //! Authority → C twin:
-//! - `src/genlock_backlog.rs` `relock_anchor_is_stale` → `genlock_relock_anchor_is_stale`, and
+//! - `vstack:rig/core/src/genlock_backlog.rs` `relock_anchor_is_stale` → `genlock_relock_anchor_is_stale`, and
 //!   `relock_select_nearest(q, wall, relock_expected_age_ns(..))` → `genlock_relock_select_expected`
 //!   (both in the contiguous #1003 relock-selection block, lifted by `lift_relock_helpers`);
-//! - `src/genlock_n1_depth.rs` `n1_expected_depth_frames` → `genlock_n1_expected_depth_frames`
+//! - `vstack:rig/core/src/genlock_n1_depth.rs` `n1_expected_depth_frames` → `genlock_n1_expected_depth_frames`
 //!   (in the contiguous issue-1367 N==1 block, lifted by `lift_converge_helper`), built only from
 //!   the N==1 governor's own predicates.
 //!

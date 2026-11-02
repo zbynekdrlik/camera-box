@@ -232,7 +232,7 @@ Since #859 the threshold is `genlock_backlog_relock_qdepth()` = the depth that s
 configured latency implies (using the SOURCE rate — a 60-into-30 input queues two entries per canvas
 interval) **plus the unchanged margin 6**. Sub-half-frame sources (the 3 ms global default, the 3 ms
 imag contract) are byte-identical to before. The decision is unit-tested in
-`src/genlock_backlog.rs`; the C and `src/probe/genlock.rs` both derive from it and
+`vstack:rig/core/src/genlock_backlog.rs`; the C and `src/probe/genlock.rs` both derive from it and
 `tests/genlock_release_cadence.rs` asserts the C actually CALLS it and that the margin stays 6.
 
 **Reading the audit for this class of bug:** compare `depth` against the latency's implied frames
@@ -1106,7 +1106,7 @@ fixed (a boundary impossibly far in the future re-latches).
   flap around the margin neither enters nor exits), SELF-HEAL on regime end
   (`genlock_backward_regime_end` zeroes the locked boundary → re-ACQUIRE the configured hold),
   bounded-cadence regime WARNs, and senders stamp the FLOOR boundary (never future-dated).
-  Authority: `src/genlock_backlog.rs BackwardStepGuard`; diagnosis rule:
+  Authority: `vstack:rig/core/src/genlock_backlog.rs BackwardStepGuard`; diagnosis rule:
   `.claude/rules/genlock-hold-collapse-diagnosis.md`.
 - **Audit signal:** the `genlock-fifo audit` line prints `backward_steps=%llu` (one per real step
   EVENT) and, since #1009, `backward_regime_ticks=%llu` (one per re-anchored TICK — a healthy
@@ -1177,14 +1177,14 @@ is now pinned by `genlock_pin_render_tick_thread()` — called from `obs_graphic
 `os_set_thread_name`, `#if defined(__linux__) && !defined(_WIN32)` guarded (Windows/macOS builds are
 unaffected; imag-nb is the only Linux OBS box):
 - **Affinity** → the kernel-reserved cores, DERIVED from `/sys/devices/system/cpu/nohz_full`
-  (robust, like `rig/core/src/affinity.rs`), hardcoded `{10,11}` fallback tied to #483's `nohz_full=10,11`
+  (robust, like `vstack:rig/core/src/affinity.rs`), hardcoded `{10,11}` fallback tied to #483's `nohz_full=10,11`
   reservation, via `pthread_setaffinity_np(pthread_self(), ...)`.
 - **Scheduler** → `sched_setscheduler(0, SCHED_FIFO, &param)` with a **LOW** prio (`GENLOCK_RT_PRIORITY
   10`). `pid 0` = the calling THREAD on Linux, so ONLY the render-tick thread goes FIFO (NOT the
   ~106-thread process — that would hang the box).
 - **WARN-and-CONTINUE**: any failure logs `genlock: … — continuing SCHED_OTHER (#484)` at
   `LOG_WARNING` and runs on. NEVER abort/retry/hang (a high-prio runaway FIFO thread hangs a headless
-  box). Mirror of `rig/core/src/affinity.rs` (#289).
+  box). Mirror of `vstack:rig/core/src/affinity.rs` (#289).
 - **rtprio grant dependency**: OBS runs as the unprivileged desktop user, so the SCHED_FIFO call
   needs `setup-imag.sh`'s `/etc/security/limits.d/95-imag-genlock-rtprio.conf` (`${DESKTOP_USER} -
   rtprio 20`, applied by PAM at next login). Without it the pin warn-degrades to SCHED_OTHER.

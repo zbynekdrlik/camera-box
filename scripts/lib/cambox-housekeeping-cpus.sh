@@ -9,7 +9,7 @@
 #
 # The issue-1198 core split on a cambox: capture+emit thread on the isolated core (isolcpus), the
 # xhci capture IRQ on ONE reserved general core (the highest non-capture core,
-# rig/core/src/affinity.rs select_irq_reserved_core), camera-box's painter/display threads on the rest. That
+# vstack:rig/core/src/affinity.rs select_irq_reserved_core), camera-box's painter/display threads on the rest. That
 # reservation only covers camera-box's OWN threads. systemd PID 1 and every unit it starts still ran on
 # the reserved IRQ core, and the work PID 1 does on a unit start delayed the URB completion there:
 # measured live on cam5 (15.10.2026), 65 of 102 capture-phase re-seeds landed within 1 s of a unit

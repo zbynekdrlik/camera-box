@@ -1,5 +1,5 @@
 """#1161 -- a floor-3 pin INCREASE does not move the presented frame, so a one-canvas-frame residual
-survives apply. Root cause (traced in vendor/obs-studio/libobs/obs-source.c + src/genlock_backlog.rs):
+survives apply. Root cause (traced in vendor/obs-studio/libobs/obs-source.c + vstack:rig/core/src/genlock_backlog.rs):
 obs_source_set_genlock_latency_ms clears the phase anchor but never the locked conveyor boundary and
 never forces a re-acquire, and should_converge_phase only sheds DOWNWARD toward max(reserve, floor) --
 so raising a source's genlock_latency_ms (the floor-3 plan's lever for delaying a faster camera into

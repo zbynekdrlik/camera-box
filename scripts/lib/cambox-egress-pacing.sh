@@ -29,7 +29,7 @@
 #   band 0 = class 1:1 -> the SAME fq maxrate/flow_limit/limit as before: NDI, PTP/NTP, intercom;
 #   band 1 = class 1:2 -> a `pfifo` (CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT), no pacing;
 #   `fw` filter: skb mark CAMBOX_EGRESS_PACING_JXS_MARK -> 1:2. camera-box sets that mark
-#     (SO_MARK) on its JPEG XS socket only (jxs/link/src/jxs_send.rs JXS_SOCKET_MARK, pinned equal by pytest).
+#     (SO_MARK) on its JPEG XS socket only (vstack:jxs/link/src/jxs_send.rs JXS_SOCKET_MARK, pinned equal by pytest).
 # prio serves band 0 first: a ready NDI/PTP packet always goes before JPEG XS, and while fq holds a
 # paced packet back its dequeue returns nothing, so JPEG XS fills the idle wire. A mark, not a port:
 # the boot script cannot know the runtime CAMERA_BOX_JXS_TARGET port.

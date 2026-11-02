@@ -29,7 +29,7 @@
 //! deep for A/V alignment (923 ms on the stream box's `NDI 2ME PGM`) sits at ~28 and exceeded it
 //! permanently, relocking every tick and shedding paired duplicate/skip frames. The threshold is
 //! now the depth each source's OWN configured latency implies plus the unchanged margin — see
-//! `src/genlock_backlog.rs` for the Tier-0-tested decision.
+//! `vstack:rig/core/src/genlock_backlog.rs` for the Tier-0-tested decision.
 //!
 //! This is a SOURCE-presence guard (same convention as tests/distroav_genlock_lockdown.rs,
 //! tests/obs_updater_disabled.rs): it runs on DEFAULT features (per-PR Linux CI + local
@@ -123,7 +123,7 @@ fn release_is_phase_locked_not_per_tick_wall_compare() {
          genlock_backlog_relock_qdepth(source, reserve_ms, interval); it is back to comparing \
          against a bare constant, which a deep-latency source exceeds permanently (steady depth \
          ~28 at 923 ms) and which therefore relocks every tick and sheds paired duplicate/skip \
-         frames. Mirror: src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested) \
+         frames. Mirror: vstack:rig/core/src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested) \
          and src/probe/genlock.rs ReleaseCadence::backlog_relock_qdepth."
     );
     // The margin must stay the ORIGINAL 6 — #859 changed what the threshold is RELATIVE TO, it
@@ -394,20 +394,20 @@ fn slew_limited_settle_back_drain_present_and_wired_in_859() {
         "{OBS_SOURCE}: #859 follow-up — the drain hysteresis constant \
          (GENLOCK_DRAIN_HYSTERESIS_FRAMES, must stay 2) is missing or changed; without it \
          ordinary arrival jitter around the target would trigger spurious drains. Mirror: \
-         src/genlock_backlog.rs DRAIN_HYSTERESIS_FRAMES (Tier-0 unit-tested)."
+         vstack:rig/core/src/genlock_backlog.rs DRAIN_HYSTERESIS_FRAMES (Tier-0 unit-tested)."
     );
     assert!(
         src.contains("#define GENLOCK_DRAIN_MIN_TICK_INTERVAL 30"),
         "{OBS_SOURCE}: #859 follow-up — the drain rate-limit constant \
          (GENLOCK_DRAIN_MIN_TICK_INTERVAL, must stay 30) is missing or changed; without it the \
          drain could reproduce the every-tick backlog-relock burst it exists to avoid. Mirror: \
-         src/genlock_backlog.rs DRAIN_MIN_TICK_INTERVAL."
+         vstack:rig/core/src/genlock_backlog.rs DRAIN_MIN_TICK_INTERVAL."
     );
     assert!(
         src.contains("static bool genlock_should_drain_one("),
         "{OBS_SOURCE}: #859 follow-up — the slew-limited drain decision helper \
          (genlock_should_drain_one) is gone; the FIFO would park at a setpoint-change overshoot \
-         indefinitely again. Mirror: src/genlock_backlog.rs should_drain_one (Tier-0 tested) / \
+         indefinitely again. Mirror: vstack:rig/core/src/genlock_backlog.rs should_drain_one (Tier-0 tested) / \
          src/probe/genlock.rs ReleaseCadence::should_drain_one."
     );
     // Wired IN, not merely defined — the same "assert the call site, not just the helper"
@@ -450,7 +450,7 @@ fn raw_drain_erases_index_zero(raw: &str) -> bool {
 /// #1049 — the bounded PHASE CONVERGENCE on the steady conveyor must be present and WIRED. It was
 /// built for the N>=2 conveyor (no depth drain there, the strih 60-into-30 A/V-offset ladder);
 /// issue 1367 D1 moved N>=2 sources to the grid-exact release, so the shed now serves the N==1
-/// STEADY branch only (its source wrapper routes an N==1 tick to the pin-derived depth). Mirror of src/genlock_backlog.rs
+/// STEADY branch only (its source wrapper routes an N==1 tick to the pin-derived depth). Mirror of vstack:rig/core/src/genlock_backlog.rs
 /// should_converge_phase (Tier-0 tested) + the C-vs-Rust parity gate
 /// tests/genlock_relock_selection_parity.rs.
 #[test]
@@ -462,7 +462,7 @@ fn phase_convergence_present_and_wired_in_1049() {
         src.contains("static inline bool genlock_phase_converge_due("),
         "{OBS_SOURCE}: #1049 — the pure phase-converge decision genlock_phase_converge_due is \
          gone; the per-camera acquire-phase would never converge again. Mirror: \
-         src/genlock_backlog.rs should_converge_phase."
+         vstack:rig/core/src/genlock_backlog.rs should_converge_phase."
     );
     assert!(
         src.contains("static bool genlock_should_converge_phase("),
@@ -550,7 +550,7 @@ fn phase_convergence_present_and_wired_in_1049() {
 /// `genlock_n1_hold_due` called at the HEAD of the N==1 STEADY branch. Both read the depth at the
 /// render tick's SCHEDULED instant (review round 2: `video_sleep` catches a late tick up without
 /// losing its slot, so the processing wall of a late tick over-reads the conveyor). Mirrors:
-/// src/genlock_n1_depth.rs n1_shed_due / should_hold_n1_phase / n1_tick_wall_ns + the C-vs-Rust
+/// vstack:rig/core/src/genlock_n1_depth.rs n1_shed_due / should_hold_n1_phase / n1_tick_wall_ns + the C-vs-Rust
 /// parity gates in tests/genlock_relock_selection_parity.rs.
 #[test]
 fn n1_pin_derived_depth_present_and_wired_1367() {
@@ -922,14 +922,14 @@ fn ts_align_deadline_is_phase_pinned_to_the_wall_grid_940() {
     // ±1-2-frame A/V-offset step between lock episodes at deep latency. Quantizing the
     // deadline to the canvas frame GRID (floor(deadline/interval)*interval) makes it a
     // pure function of wall time instead. The pure floor/hysteresis math is Tier-0
-    // unit-tested in src/genlock_backlog.rs; this guards the C wiring.
+    // unit-tested in vstack:rig/core/src/genlock_backlog.rs; this guards the C wiring.
     let src = squish(&vendor_file(OBS_SOURCE));
     assert!(
         src.contains("static inline uint64_t genlock_phase_pin_deadline("),
         "{OBS_SOURCE}: #940 piece 3 — the grid-quantization helper \
          (genlock_phase_pin_deadline) is gone; the deadline reverted to the raw continuous \
          quantity that re-samples a different phase every lock episode. Mirror: \
-         src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested)."
+         vstack:rig/core/src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested)."
     );
     // The floor-to-grid ARITHMETIC itself (not just the helper's existence) — a subtree
     // pull or a "simplify this" edit could keep the helper but neuter its body. #1355: the
@@ -958,7 +958,7 @@ fn ts_align_deadline_is_phase_pinned_to_the_wall_grid_940() {
         "{OBS_SOURCE}: #940 piece 3 — the grid-comparison hysteresis constant \
          (GENLOCK_PHASE_PIN_HYSTERESIS_NS, must stay 5ms) is missing or changed; without \
          it a frame landing exactly on a grid line could flap due/not-due. Mirror: \
-         src/genlock_backlog.rs PHASE_PIN_HYSTERESIS_NS."
+         vstack:rig/core/src/genlock_backlog.rs PHASE_PIN_HYSTERESIS_NS."
     );
     assert!(
         src.contains("array[due]->timestamp <= present_ts + due_hysteresis_ns"),
@@ -987,7 +987,7 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
     // FIXED edge inside a DRIFTING relative phase). Two edges = up to four outcomes
     // spanning two frames = the measured −64.5 / +56..63 ms per-episode steps.
     //
-    // The selection arithmetic itself is Tier-0 unit-tested in src/genlock_backlog.rs
+    // The selection arithmetic itself is Tier-0 unit-tested in vstack:rig/core/src/genlock_backlog.rs
     // (relock_select_nearest / relock_anchor_age_ns / phase_anchor_from_present, incl. the
     // whole-frame-step defect lock); this guards the C WIRING, which compiles on CI only.
     let src = squish(&vendor_file(OBS_SOURCE));
@@ -998,7 +998,7 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
         internal.contains("uint64_t genlock_phase_anchor_ns;"),
         "{OBS_INTERNAL}: #1003 — the per-source phase anchor (genlock_phase_anchor_ns) is \
          gone; without remembered state the relock has nothing to inherit a phase FROM and \
-         necessarily re-samples one. Mirror: src/genlock_backlog.rs relock_anchor_age_ns."
+         necessarily re-samples one. Mirror: vstack:rig/core/src/genlock_backlog.rs relock_anchor_age_ns."
     );
 
     // (b) the selection helper exists AND its nearest-neighbour body is intact — a
@@ -1007,7 +1007,7 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
         src.contains("static inline size_t genlock_relock_select_nearest("),
         "{OBS_SOURCE}: #1003 — the phase-continuity selection helper \
          (genlock_relock_select_nearest) is gone; the relock reverted to instant-sampled \
-         selection. Mirror: src/genlock_backlog.rs relock_select_nearest."
+         selection. Mirror: vstack:rig/core/src/genlock_backlog.rs relock_select_nearest."
     );
     assert!(
         // SHORT + wrap-independent on purpose: a clang-format bump or a loop-variable
@@ -1024,7 +1024,7 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
         "{OBS_SOURCE}: #1003 — the nearest scan's STRICT `<` is gone. A non-strict compare \
          resolves ties toward the NEWER frame, which lets an exactly-equidistant target \
          oscillate between neighbours on successive episodes — the very failure this \
-         function exists to remove. Mirror: src/genlock_backlog.rs relock_select_nearest."
+         function exists to remove. Mirror: vstack:rig/core/src/genlock_backlog.rs relock_select_nearest."
     );
     assert!(
         src.contains("return anchor > configured ? anchor : configured;"),
@@ -1032,7 +1032,7 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
          anchor FLOORED at the configured latency. Without the anchor it targets a fixed \
          latency instead of the conveyor's real on-air age; without the floor a degenerate \
          or stale anchor below the hold targets the live edge and one relock erases the \
-         entire delay line. Mirror: src/genlock_backlog.rs relock_anchor_age_ns."
+         entire delay line. Mirror: vstack:rig/core/src/genlock_backlog.rs relock_anchor_age_ns."
     );
 
     // (c) BOTH relock branches are wired in — ACQUIRE and BACKLOG STORM. Defining the
@@ -1173,7 +1173,7 @@ fn backlog_relock_margin_scales_with_the_source_multiple_940() {
         ),
         "{OBS_SOURCE}: #940 piece 2 — genlock_backlog_relock_qdepth no longer scales the \
          margin by the measured source multiple n; re-apply. Mirror: \
-         src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested)."
+         vstack:rig/core/src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested)."
     );
     // The OLD flat-add form (margin never scaled) must be GONE — a subtree pull or a
     // "simplify this" edit reverting to it would silently reintroduce the #940 churn on

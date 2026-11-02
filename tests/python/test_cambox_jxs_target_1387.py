@@ -18,6 +18,8 @@ import shutil
 import subprocess
 import sys
 
+import vstack_src
+
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from ro_window_fakes_1407 import build, index, log, make_box, root, run_text, starts_on_rw  # noqa: E402
@@ -27,7 +29,7 @@ LIB = REPO / "scripts" / "lib" / "cambox-jxs-target.sh"
 FACTS = REPO / "scripts" / "strih-boxes"
 SETUP = REPO / "scripts" / "setup-device.sh"
 VERIFY = REPO / "scripts" / "verify-device.sh"
-JXS_SEND = REPO / "jxs" / "link" / "src" / "jxs_send.rs"
+JXS_SEND = "jxs/link/src/jxs_send.rs"
 
 
 def _bash(body, *args, env=None):
@@ -81,7 +83,7 @@ def test_the_venue_lookup_keeps_its_two_old_answers(tmp_path):
 
 
 def test_the_env_var_is_camera_boxs_own():
-    assert 'pub const TARGET_ENV: &str = "CAMERA_BOX_JXS_TARGET";' in JXS_SEND.read_text()
+    assert 'pub const TARGET_ENV: &str = "CAMERA_BOX_JXS_TARGET";' in vstack_src.read(JXS_SEND)
     assert _bash('printf "%s\\n" "$CAMBOX_JXS_ENV"').stdout == "CAMERA_BOX_JXS_TARGET\n"
 
 

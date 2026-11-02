@@ -41,13 +41,10 @@ on:
       - 'tests/qt/**'
       - 'tests/python/fixtures/obs_dock_state_1470/**'
       - 'scripts/genlock-manifest.sh'
-      # issue 1387 + 1487: the strih variant links the JPEG XS C ABIs (jxs/recv-ffi + jxs/send-ffi
-      # over jxs/link, rig/core and the vendored SVT-JPEG-XS) into DistroAV's JPEG XS source and
-      # program output.
-      - 'jxs/**'
-      - 'rig/**'
-      - 'vendor/svt-jpeg-xs/**'
-      # a dependency change can move the static library's native-library list or break the link.
+      # issue 1387 + 1487: the strih variant links the JPEG XS C ABIs, built from the pinned vstack
+      # tag, into DistroAV's JPEG XS source and program output.
+      - 'scripts/vstack-release.pin'
+      # the root manifest carries the same vstack tag.
       - 'Cargo.toml'
       - '.github/workflows/linux-genlock.yml'
 
@@ -354,14 +351,28 @@ jobs:
       - name: Install the Rust toolchain (issue 1387)
         uses: dtolnay/rust-toolchain@stable
 
+      # issue 1487: the C ABI crates live in vstack. The tag from the one pin file, the commit proved
+      # so a moved tag fails here, never an unpinned build.
+      - name: Fetch the pinned vstack source (issue 1487)
+        run: |
+          set -euo pipefail
+          tag="$(sed -n 's/^VSTACK_RELEASE_TAG=//p' scripts/vstack-release.pin)"
+          commit="$(sed -n 's/^VSTACK_RELEASE_COMMIT=//p' scripts/vstack-release.pin)"
+          git clone --quiet --depth 1 --branch "$tag" https://github.com/zbynekdrlik/vstack "$RUNNER_TEMP/vstack"
+          have="$(git -C "$RUNNER_TEMP/vstack" rev-parse HEAD)"
+          if [ "$have" != "$commit" ]; then echo "ERROR: vstack $tag is $have, the pin says $commit (issue 1487)"; exit 1; fi
+          echo "VSTACK_SRC=$RUNNER_TEMP/vstack" >> "$GITHUB_ENV"
+
       - name: Build the jxs-recv-ffi static library (issue 1387)
+        working-directory: ${{ env.VSTACK_SRC }}
         # rustc prints the native-libs note in colour on the runner (run 40909341652), which the
         # `^note:` sed below cannot match; plain text only.
+        # issue 1487: the release profile comes from vstack's own root.
         env:
           CARGO_TERM_COLOR: never
         run: |
           set -euo pipefail
-          if ! cargo rustc --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs 2> jxs-ffi-build.log; then
+          if ! cargo rustc --locked --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs 2> jxs-ffi-build.log; then
             cat jxs-ffi-build.log
             exit 1
           fi
@@ -442,9 +453,9 @@ jobs:
           cmake --preset ubuntu-ci-x86_64
           -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
           -DCAMERA_BOX_JXS_SOURCE=ON
-          -DCAMERA_BOX_JXS_FFI_LIB="$GITHUB_WORKSPACE/target/release/libjxs_recv_ffi.a"
-          -DCAMERA_BOX_JXS_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/recv-ffi/include"
-          -DCAMERA_BOX_JXS_SEND_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/send-ffi/include"
+          -DCAMERA_BOX_JXS_FFI_LIB="$VSTACK_SRC/target/release/libjxs_recv_ffi.a"
+          -DCAMERA_BOX_JXS_FFI_INCLUDE="$VSTACK_SRC/jxs/recv-ffi/include"
+          -DCAMERA_BOX_JXS_SEND_FFI_INCLUDE="$VSTACK_SRC/jxs/send-ffi/include"
           -DCAMERA_BOX_JXS_FFI_NATIVE_LIBS="$JXS_FFI_NATIVE_LIBS"
 
       - name: Build DistroAV

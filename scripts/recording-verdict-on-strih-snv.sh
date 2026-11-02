@@ -85,10 +85,17 @@ build_onstrihlx_command() {
 # remote-shell REPLICA of this same contract (the range is read on the BOX so a replacement
 # notebook resolves its own cores); this pure function is what
 # tests/recording_verdict_on_strih_lx_lowprio.rs pins.
+# issue 1387: when the box carries the baseline's background runner the decode runs through it instead:
+# rig-background.slice on the CPUs OBS does not use (AMD has no cpu_atom, so the E-core pin fenced
+# nothing there), idle priority included. <runner> is the second argument (test seam).
 strih_lx_lowprio_prefix() {
-  local sysfs_root="${1:-/sys}"
+  local sysfs_root="${1:-/sys}" runner="${2:-/usr/local/sbin/obs-box-background-run}"
   local cpus_file="${sysfs_root%/}/devices/cpu_atom/cpus"
   local cpus=""
+  if [ -x "$runner" ] && sudo -n -l "$runner" >/dev/null 2>&1; then
+    printf 'sudo -n %s' "$runner"
+    return 0
+  fi
   if [ -r "$cpus_file" ]; then
     cpus="$(tr -d '[:space:]' < "$cpus_file" 2>/dev/null || true)"
   fi
@@ -173,7 +180,7 @@ main() {
   fi
 
   # STEP 2: run the verdict ON strih-snv against the LOCAL recording (NEVER copied off-box), at IDLE
-  # priority pinned to the E-cores (issue 1351). Unpinned at nice 0 the multi-core QR/pixel sweep
+  # priority off the OBS cores (rig-background.slice, issue 1387; else the E-cores, issue 1351). Unpinned at nice 0 the multi-core QR/pixel sweep
   # competes with OBS's ndir:video decode threads on the P-cores and the live receivers relock-storm
   # for minutes after the run (issue 1354). LOWPRIO_SNIPPET is the remote-shell replica of
   # strih_lx_lowprio_prefix (the unit-tested pure contract): SINGLE-QUOTED on the dev1 side so the
@@ -181,8 +188,8 @@ main() {
   # then `$LP` prefixes the on-box command. The scp of the binary and the partial pull are unchanged.
   local ONSTRIHLX_CMD LOWPRIO_SNIPPET
   ONSTRIHLX_CMD="$(build_onstrihlx_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
-  LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi;'
-  echo "[recording-verdict-on-${LABEL}] running on ${LABEL} (${STRIH_LX_BOX}) at idle priority (E-cores): $ONSTRIHLX_CMD"
+  LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi;'
+  echo "[recording-verdict-on-${LABEL}] running on ${LABEL} (${STRIH_LX_BOX}) at idle priority (off the OBS cores): $ONSTRIHLX_CMD"
   # The brace group keeps the decode gated on `mkdir -p` (the && short-circuits the WHOLE group, not
   # just the LP assignment the snippet begins with) — same failure semantics as before this change.
   sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && { $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD; }"

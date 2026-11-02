@@ -3,7 +3,7 @@
 MIRRORS the test vectors in `src/asrc_outer_loop.rs`'s own `#[cfg(test)]` module literally (same
 numbers, same expected outcomes) -- proving numeric parity between the Rust reference and this
 Python port, the same convention `tests/python/test_av_sync_calibrate.py`'s
-`TestRequiredDelayMs` already established for `required_delay_ms` vs `src/qpsk_marker.rs`.
+`TestRequiredDelayMs` already established for `required_delay_ms` vs `vstack:av/marker/src/qpsk_marker.rs`.
 """
 
 import pathlib

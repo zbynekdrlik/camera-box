@@ -119,7 +119,7 @@ contiguous non-silent audio, read per channel (never a downmix), best channel.
 
 **The decoder is the dock's own**, never a third copy. `scripts/qpsk_guard_shim.cpp` is a thin C ABI
 (`qpsk_guard_decode_channel`) over `cb_scan_markers` in
-`vendor/av-sync-dock/src/camera-box-marker-scan.hpp`, the C++ port pinned to `src/qpsk_marker.rs`.
+`vendor/av-sync-dock/src/camera-box-marker-scan.hpp`, the C++ port pinned to `vstack:av/marker/src/qpsk_marker.rs`.
 - It runs with the dock's constants: 442 Hz, c = 1, threshold 0.35. They match `rig60()`,
   `DOCK_QPSK_THRESHOLD` and the painter log's `# qpsk-params` line, pinned by a test.
 - It returns each CRC-valid word as (start sample, index) and decides nothing.

@@ -76,7 +76,7 @@ and the cause was NOT the clock:
 
 - **#289 / PR #304** (["Pin cam-box capture+emit to the isolated core + IRQ affinity
   (#289)"](https://github.com/zbynekdrlik/camera-box/pull/304), merged 2026-06-28; see
-  `rig/core/src/affinity.rs:8`: *"#289: CAM2 55-60fps wobble + underruns + 28ms head_skew"*).
+  `vstack:rig/core/src/affinity.rs:8`: *"#289: CAM2 55-60fps wobble + underruns + 28ms head_skew"*).
   Root cause (`docs/autopilot-log.md`, 2026-06-28 entry): `isolcpus=3` reserved a CPU core
   on every box, but NOTHING was pinned to it — the realtime capture/emit thread ran on the
   LOADED general cores (USB kworkers, ssh, painter) instead, so it wobbled under load. The

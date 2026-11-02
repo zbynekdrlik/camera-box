@@ -1279,7 +1279,7 @@ def test_lib_painter_ok_needs_active_and_a_growing_log(tmp_path):
 def test_lib_marker_csv_check(tmp_path):
     good = tmp_path / "g.csv"
     good.write_text("index,frame_id,emit_ts_ns\n1,2,3\n")
-    # the real emitter log (src/qpsk_marker.rs) starts with a `# qpsk-params` line
+    # the real emitter log (vstack:av/marker/src/qpsk_marker.rs) starts with a `# qpsk-params` line
     params = tmp_path / "p.csv"
     params.write_text("# qpsk-params sr=48000 carrier=442 c=1 q=2 vr=60/1\nindex,frame_id,emit_ts_ns\n1,2,3\n")
     params_no_header = tmp_path / "n.csv"

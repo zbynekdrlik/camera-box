@@ -730,6 +730,23 @@ isolated_cpus=2,3,4,5,6,7,8,9,10,11
 rtprio_grants=
 obs_running=1
 obs_rtprio_limit=0
+bg_online=0-15
+bg_obs_conf=2,3,4,5,6,7,8,9,10,11
+bg_loaded=loaded
+bg_enabled=enabled
+bg_obs_running=1
+bg_allowed=0-1,12-15
+bg_file=1
+bg_helper=1
+bg_sudo=1
+bg_fbagent=1
+bg_dropin=1
+bg_pgrep=1
+bg_procs=restic:900:0-1,12-15
+bg_obs_mask=2-11
+bg_smt_shared=
+bg_cgroup_cpus=0-1,12-15
+bg_iosched=[none] mq-deadline
 dgpu=1
 prime=nvidia
 display_gpus=2
@@ -772,7 +789,7 @@ swap_fstab=1
 gather_done=1
 ";
 
-const ITEMS: [&str; 20] = [
+const ITEMS: [&str; 21] = [
     "timezone",
     "net",
     "perf",
@@ -782,6 +799,7 @@ const ITEMS: [&str; 20] = [
     "kernel",
     "affinity",
     "rtprio",
+    "background",
     "gpu",
     "igpu-sink",
     "dejitter",
@@ -1003,6 +1021,17 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ("swap", "swap_bytes=17179865088", "swap_bytes=4294967296"),
         ("swap", "swap_fstab=1", "swap_fstab=0"),
         ("swap", "swap_bytes=17179865088", "swap_bytes="),
+        // issue 1387: background work off the OBS cores.
+        ("background", "bg_loaded=loaded", "bg_loaded=not-found"),
+        ("background", "bg_dropin=1", "bg_dropin=0"),
+        (
+            "background",
+            "bg_procs=restic:900:0-1,12-15",
+            "bg_procs=restic:900:0-15",
+        ),
+        ("background", "bg_online=0-15", "bg_online="),
+        ("background", "bg_obs_running=1", "bg_obs_running="),
+        ("background", "bg_enabled=enabled", "bg_enabled=disabled"),
     ] {
         assert!(GOOD_FACTS.contains(from), "fixture must carry `{from}`");
         let (c, rows) = verdict(&GOOD_FACTS.replacen(from, to, 1));
@@ -1580,6 +1609,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/strih-box-facts.sh",
         // issue 1415: the rig time zone (sourced by the kiosk half)
         "scripts/lib/rig-timezone.sh",
+        // issue 1387: background work off the OBS cores (sourced by the system half)
+        "scripts/lib/obs-box-background.sh",
         "scripts/lib/strih-provision.sh",
         "scripts/lib/strih-drm-output.sh",
         // issue 1424: the X config of the fixed HDMI outputs (sourced by strih-drm-output.sh)
