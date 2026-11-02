@@ -1648,6 +1648,13 @@ EXPORT uint32_t obs_source_get_genlock_latency_ms(const obs_source_t *source);
 EXPORT void obs_source_set_genlock_burn(obs_source_t *source, bool enabled);
 EXPORT bool obs_source_get_genlock_burn(const obs_source_t *source);
 
+/* camera-box issue 1387: per-source opt-in to the FIXED grid release for an N==1 source (a 30 fps
+ * camera into the 30 fps canvas, e.g. a JPEG XS camera): it presents the stamp
+ * grid_floor(T - 50 ms - pin) like a 60 fps camera (N >= 2) instead of the N==1 conveyor and its
+ * shallow latch. A plain bool (same shape as obs_source_set_genlock_burn), default false, runtime. */
+EXPORT void obs_source_set_genlock_grid(obs_source_t *source, bool enabled);
+EXPORT bool obs_source_get_genlock_grid(const obs_source_t *source);
+
 /* camera-box #1299: per-source NDI RECEIVER-CONNECTION flag (runtime, no OBS restart). Driven by
  * DistroAV's ndi-source receiver loop from NDIlib_recv_get_no_connections() (>0 == connected); the
  * in-OBS lock indicator + the #1299 fleet bundle-state facet read it via obs_genlock_stats.connected

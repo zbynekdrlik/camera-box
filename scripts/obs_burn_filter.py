@@ -28,6 +28,10 @@ from obs_phase2 import _conn, _rpc  # noqa: E402
 BURN_FILTER_KIND = "distroav_qr_burn_filter"  # ndi-burn-filter.cpp OBS_NDI_BURN_FILTER_ID
 BURN_FILTER_NAME = "DistroAV QR Burn (latency probe)"  # burn_filter_getname()
 BURN_SETTING = "genlock_burn"  # #257: PROP_BURN — the per-source measurement-burn bool
+# Every OBS input kind that carries the per-source burn: the NDI source and (issue 1387, live
+# 31.10.2026: the strih cameras and the stream program on JPEG XS) the JPEG XS source. The ONE set
+# every sweep enumerates, so a burn on either kind is never outside the swept set (#938/#1011).
+BURN_INPUT_KINDS = frozenset({"ndi_source", "camera_box_jxs_source"})
 
 
 def _filter_kinds(ws):
@@ -208,7 +212,7 @@ def ndi_source_input_names(input_list):
     only applies to `ndi_source` inputs, so those are exactly the inputs a burn can leak onto —
     enumerate them from reality, never a static or CAMERA_ACTIVE_SET-derived list (#938/#1011)."""
     return [i.get("inputName") for i in (input_list or [])
-            if i.get("inputKind") == "ndi_source" and i.get("inputName")]
+            if i.get("inputKind") in BURN_INPUT_KINDS and i.get("inputName")]
 
 
 # Distinct exit code for the sweep actions: the ENUMERATION itself failed (WS error / timeout /

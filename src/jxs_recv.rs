@@ -272,7 +272,10 @@ pub use decode::{DecodeSink, FINISH_TIMEOUT};
 #[cfg(feature = "jxs")]
 mod receiver;
 #[cfg(feature = "jxs")]
-pub use receiver::{DecodedFrame, JxsReceiver, ReceiverConfig, ReceiverTotals, MAX_READY_FRAMES};
+pub use receiver::{
+    late_ms_for_latency, DecodedFrame, JxsReceiver, ReceiverConfig, ReceiverTotals,
+    MAX_READY_FRAMES,
+};
 
 #[cfg(feature = "jxs")]
 mod decode {

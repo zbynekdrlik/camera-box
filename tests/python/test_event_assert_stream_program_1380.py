@@ -17,7 +17,8 @@ import event_assert as ea  # noqa: E402
 
 def test_the_contract_has_no_stream_program_item():
     assert not any("stream_program" in name for name in ea.ITEM_ORDER)
-    assert len(ea.ITEM_ORDER) == 8
+    # issue 1387 added the JPEG XS item (jxs_live); still no stream-program item
+    assert len(ea.ITEM_ORDER) == 9
 
 
 def test_the_stream_program_scene_never_fails_the_contract():
@@ -32,6 +33,7 @@ def test_the_stream_program_scene_never_fails_the_contract():
         "latency_calibrated_ms": 925,
         "ndi_mismatches": [],
         "artifacts_existing": [],
+        "jxs_windows": {"strih": {"head": "13:30:10.559", "lines": ["13:30:06.594: [distroav] jxs-source 'JXS cam5 src': fps=30.00 frames=150 lost_slices=0"]}},
     }
     for scene in ("Development", "PRO", "PRE", None):
         facts = dict(clean, stream_program_scene=scene)

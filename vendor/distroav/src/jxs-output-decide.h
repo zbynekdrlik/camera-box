@@ -99,10 +99,10 @@ static inline uint32_t cb_jxs_out_fps(double fps)
 	return (uint32_t)(fps + 0.5);
 }
 
-/* Whether a frame's stamp may go: never the stamp just sent. The stamp is taken when libobs hands
- * the frame to this output (genlock_emit_timecode_100ns, the NDI output's function), so two
- * callbacks inside one slot (libobs' video thread catching up after a lag) carry the same stamp;
- * the receiver would drop the second as a duplicate, unseen by the sender. A stamp BEHIND the last
+/* Whether a frame's stamp may go: never the stamp just sent. The stamp is the frame's own render
+ * tick (genlock_emit_timecode_100ns, the NDI output's function, issue 1367), so a repeat can only
+ * come from a frame whose tick maps into an already-sent slot (a clamp to the send floor, a wall
+ * step); the receiver would drop the second as a duplicate, unseen by the sender. A stamp BEHIND the last
  * one goes: that is a wall-clock step back (the nightly dantesync date step), which the receiver
  * resyncs on; holding frames until the clock passes the old stamp would cost up to ~200 ms of
  * program. 0 = none sent. */

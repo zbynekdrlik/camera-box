@@ -80,6 +80,11 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   `tests/python/test_strih_https_1399.py` and `tests/python/test_obs_box_stream_role_1412.py` (both pin
   the tail of the key list). Every other fixture copies the real `scripts/strih-boxes/*.env`, so the four
   fact files carrying the key is enough; the 1361 golden renders no raw fact.
+  - **A fact validated AGAINST another fact adds the fixtures that rewrite that other fact** (issue 1387:
+    `STRIH_JXS_CAMERAS` must be a subset of `STRIH_CAMERAS`, like `STRIH_BKSHADING_RELAYS`). Every copied
+    fixture that shrinks `STRIH_CAMERAS` (the 1361 `strih-zz` box and `seed_manifest_follows_the_camera_and_cg_facts`)
+    must shrink the dependent fact too, or the load refuses before the assertion. Grep the test tree for
+    the other fact's literal (`STRIH_CAMERAS=2 3 5`) and read each replacement.
 - **Changing strih-snv's `STRIH_CAMERAS` is a fact change with four test consumers** (issue 1413):
   regenerate the 1361 golden from the new facts (`render.sh`), and update the default-box tests that
   read the live list -- `tests/strih_provision_pure_functions.rs` (`strih_lx_ndi_inputs` count, the

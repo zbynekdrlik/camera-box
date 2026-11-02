@@ -4,6 +4,8 @@ Description=Refresh wall-fallback every 5 min
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=5min
+# issue 1387: never at one instant with the other 5-minute watchdogs (a batch dropped program frames on strih)
+RandomizedDelaySec=2min
 
 [Install]
 WantedBy=timers.target

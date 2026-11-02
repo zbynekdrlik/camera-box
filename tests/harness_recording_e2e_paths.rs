@@ -835,10 +835,12 @@ fn recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286() {
          (never a second hardcoded source list): {real_block}"
     );
     assert!(
-        real_block.contains(r#"_acs="NDI $_acn""#)
+        // issue 1387 slice 1b: the name comes from camera_strih_input (`NDI <cam>`, or the JPEG XS
+        // input on a JPEG XS venue), so the burn lands on the input the strih scene shows.
+        real_block.contains(r#"_acs="$(camera_strih_input "$_acn")""#)
             && real_block.contains(r#"if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then"#)
             && real_block.contains(r#"BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")"#),
-        "#286: recording-e2e.sh must build 'NDI <cam>' from each active camera and exclude the \
+        "#286: recording-e2e.sh must build each active camera's strih input and exclude the \
          current STRIH_PROG_SOURCE, appending the REMAINING sources as \
          strih-<name>=$STRIH=<source> triples: {real_block}"
     );
@@ -847,6 +849,7 @@ fn recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286() {
     // env var the harness itself reads via camera-set.sh) — driven here directly, no rig needed.
     let snippet = r#"
 set -euo pipefail
+. "${CAMERA_SET_SH:?}"
 STRIH="10.77.9.202"
 STREAM="10.77.9.204"
 IMAG_IP="10.77.9.182"
@@ -856,7 +859,7 @@ IMAG_PROG_SOURCE="NDI CAM1"
 BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE" "imag=$IMAG_IP=$IMAG_PROG_SOURCE")
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   for _acn in $CAMERA_ACTIVE_SET; do
-    _acs="NDI $_acn"
+    _acs="$(camera_strih_input "$_acn")"
     if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then
       BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")
     fi
@@ -870,6 +873,11 @@ printf '%s\n' "${BURN_TARGETS[@]}"
         .arg("-c")
         .arg(snippet)
         .arg("bash")
+        .env(
+            "CAMERA_SET_SH",
+            format!("{}/scripts/camera-set.sh", env!("CARGO_MANIFEST_DIR")),
+        )
+        .env_remove("CAMERA_STRIH_JXS_SET")
         .arg("NDI cam1")
         .env("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
         .output()
@@ -888,6 +896,11 @@ printf '%s\n' "${BURN_TARGETS[@]}"
         .arg("-c")
         .arg(snippet)
         .arg("bash")
+        .env(
+            "CAMERA_SET_SH",
+            format!("{}/scripts/camera-set.sh", env!("CARGO_MANIFEST_DIR")),
+        )
+        .env_remove("CAMERA_STRIH_JXS_SET")
         .arg("NDI cam1")
         .env("ALL_CAMBOX", "1")
         .env("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
@@ -919,6 +932,11 @@ printf '%s\n' "${BURN_TARGETS[@]}"
         .arg("-c")
         .arg(snippet)
         .arg("bash")
+        .env(
+            "CAMERA_SET_SH",
+            format!("{}/scripts/camera-set.sh", env!("CARGO_MANIFEST_DIR")),
+        )
+        .env_remove("CAMERA_STRIH_JXS_SET")
         .arg("NDI cam3")
         .env("ALL_CAMBOX", "1")
         .env("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
@@ -948,6 +966,11 @@ printf '%s\n' "${BURN_TARGETS[@]}"
         .arg("-c")
         .arg(snippet)
         .arg("bash")
+        .env(
+            "CAMERA_SET_SH",
+            format!("{}/scripts/camera-set.sh", env!("CARGO_MANIFEST_DIR")),
+        )
+        .env_remove("CAMERA_STRIH_JXS_SET")
         .arg("NDI cam1")
         .env("ALL_CAMBOX", "1")
         .env("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5")

@@ -14,6 +14,7 @@ paths:
   - scripts/rt-kernel-upgrade.sh
   - scripts/lib/cambox-ro-units.sh
   - scripts/cambox-ro-units-apply.sh
+  - scripts/lib/cambox-jxs-target.sh
   - tests/python/test_cambox_ro_units_1394.py
   - tests/python/ro_window_fakes_1407.py
   - tests/python/test_rig_mode_relay_rc_1407.py
@@ -110,6 +111,7 @@ Three dev1-side pure parsers:
 | `cambox-ro-units.sh` apply (`scripts/cambox-ro-units-apply.sh`, issue 1394) | (the apt units stopped just before it) the logrotate drop-in + netconsole unit (temp file + rename), with the box's log sink also the netconsole setup script (0755), journal-upload.conf + the upload drop-in (the venue-strih re-point), `systemctl mask --no-reload` of the apt units | daemon-reload, reset-failed, `start logrotate`, `restart cambox-netconsole`, `restart systemd-journal-upload` when its files changed, the `is-system-running` read-back |
 | `cambox-egress-pacing.sh` apply (`cambox_egress_pacing_apply_program`, issue 1387) | the boot script (0755) and the unit (0644), each a temp file + rename, `systemctl enable` when not enabled | daemon-reload, `systemctl restart cambox-egress-pacing` (applies the tree), the `tc qdisc` + `tc filter` read-back graded by the lib's verdict |
 | `rig-test-feed.sh` direct-feed drop-ins (`_rig_test_feed_persist_cmds`, issue 1482; rig-mode TEST writes, the optical feed and EVENT remove) | mkdir, a `.new` temp file + `mv -f` rename, `rm` / `rmdir` of the `/etc/systemd/system` drop-ins; NO window when every drop-in already reads its wanted state | `systemctl daemon-reload` (the painter / EVENT builders), the caller's camera-box restart |
+| `cambox-jxs-target.sh` apply (`cambox_jxs_apply_program`, issue 1387; `--apply-program camN`) | the JPEG XS drop-in `camera-box.service.d/jxs.conf` (temp file + rename) or its removal for a camera the venue does not declare; NO window when it already reads its declared state on a ro root | the `/run` drop-ins that set the target removed (tmpfs), `systemctl daemon-reload`, `systemctl restart camera-box` ONLY when its running target differs and nothing above failed (never a start of a stopped camera-box), the loaded + running read-back |
 | `cambox-zram.sh` apply (`cambox_zram_apply_program`, issue 1428) | the `systemd-zram-generator` apt install (dpkg file writes only: the package has no maintainer scripts; the .deb lands in the /var/cache tmpfs), the drop-in (temp file + rename) | daemon-reload, `modprobe zram`, `systemctl start dev-zram0.swap`, the swapon read-back |
 
 - **cambox-ro-units apply (issue 1394):** a cambox-only site, so a root found writable is also

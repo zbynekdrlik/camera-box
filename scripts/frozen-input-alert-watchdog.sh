@@ -83,6 +83,23 @@ SENDER_NAME="${FROZEN_INPUT_SENDER:-strih}"
 # feed only -- the always-live input whose #767 receiver freeze this ticket targets. Listing a source
 # here IS the "expected live" scope (an idle input that may legitimately stop is simply not listed).
 SOURCES="${FROZEN_INPUT_SOURCES:-NDI 2ME PGM}"
+SOURCES_EXPLICIT="${FROZEN_INPUT_SOURCES+1}"
+
+# -- issue 1387 slice 3: the JPEG XS path. The box facts decide WHICH inputs carry the on-air picture,
+# through the ONE resolver the E2E uses (scripts/lib/program-inputs.sh + camera-set.sh camera_strih_input,
+# never a literal name): on a JPEG XS venue the stream receiver's default source is the resolved stream
+# program input (`JXS PGM src`) and the strih receiver always watches every declared JPEG XS camera input
+# (`JXS camN src`) beside what it enumerates. The JPEG XS source writes the same `genlock-fifo audit`
+# lines, so the tap is unchanged. An NDI venue resolves nothing (both behave as before); an explicit
+# FROZEN_INPUT_SOURCES still wins. The resolver needs the venue's two hosts: the receiver's own address
+# for its role, the fleet default for the other.
+case "$RECEIVER_NAME" in
+  strih) _fi_strih_default="$RECEIVER_IP" _fi_stream_default=10.77.9.204 ;;
+  stream) _fi_strih_default=10.77.9.202 _fi_stream_default="$RECEIVER_IP" ;;
+  *) _fi_strih_default=10.77.9.202 _fi_stream_default=10.77.9.204 ;;
+esac
+PATH_STRIH_HOST="${FROZEN_INPUT_STRIH_HOST:-$_fi_strih_default}"
+PATH_STREAM_HOST="${FROZEN_INPUT_STREAM_HOST:-$_fi_stream_default}"
 
 # -- #1069 dynamic-enumeration mode (default OFF -> the #1052 stream instance behaves identically) --
 # When ENUMERATE=1 the watched source LIST is derived from the receiver's live OBS log each pass
@@ -144,6 +161,35 @@ EXPECTED_LIVE=1
 
 log() { printf '%s [frozen-input-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
+# -- issue 1387 slice 3: the inputs the box facts put on air (local fact-file reads, no network) ---
+# resolved_required_sources -> stdout: the ';'-joined inputs this receiver must carry on the JPEG XS path
+# (the stream program input on the stream role, every declared JPEG XS camera input on the strih role);
+# EMPTY on the NDI path, on another role, or when the facts refuse the venue (the resolver's own line
+# says why, plus one WARNING: the NDI defaults stay, a watchdog never stops watching). Runs its
+# resolver in this command substitution's subshell, so nothing it sets reaches the watchdog's shell.
+resolved_required_sources() {
+  local cam names=""
+  # shellcheck source=scripts/camera-set.sh
+  . "$HERE/camera-set.sh" || return 0
+  # shellcheck source=scripts/lib/program-inputs.sh
+  . "$HERE/lib/program-inputs.sh" || return 0
+  if ! program_inputs_resolve "$PATH_STRIH_HOST" "$PATH_STREAM_HOST" ""; then
+    log "WARNING: issue 1387: the box facts of strih $PATH_STRIH_HOST / stream $PATH_STREAM_HOST do not resolve (above) -- keeping the NDI default sources"
+    return 0
+  fi
+  program_path_ndi && return 0
+  case "$RECEIVER_NAME" in
+    stream) printf '%s' "${STREAM_PROG_SOURCE:-}" ;;
+    strih)
+      for cam in ${CAMERA_STRIH_JXS_SET:-}; do
+        names="${names:+$names;}$(camera_strih_input "$cam")"
+      done
+      printf '%s' "$names"
+      ;;
+  esac
+  return 0
+}
+
 # -- I/O probe (dev1-local; NOT pure -- kept out of the lib) -------------------------------------
 # probe_received <receiver_ip> <source> -> stdout: the newest cumulative `received=` value for the
 # source (a bare integer), or EMPTY when the read failed / the source's audit line was absent this
@@ -152,26 +198,10 @@ probe_received() {
   local ip="$1" source="$2" raw
   if [ -n "${FROZEN_INPUT_PROBE_CMD:-}" ]; then
     raw="$($FROZEN_INPUT_PROBE_CMD "$ip" "$source" 2>/dev/null || true)"
+  elif [ "$PASS_LOG_READ" = "1" ]; then
+    raw="$PASS_LOG" # issue 1387: this pass's one shared read (main's pass_log_fill)
   else
-    # #1259: -EncodedCommand (base64 UTF-16LE), NEVER the naive -Command "…| sort …| select …".
-    # Win32-OpenSSH's default cmd.exe shell leaks the unescaped `|` pipes -> a mangled/blind read (the
-    # issue-1258 root cause). ps_encoded_command (scripts/lib/ps-encoded.sh) encodes the tail command
-    # to a pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> UNKNOWN, never an abort.
-    local _enc _tail
-    _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 800)" # #1259: guard the env count before the payload
-    # issue 1360: a Linux strih (strih-snv, the production strih since the M4 cut-over) is read
-    # through the ONE shared reader (newest ~/.config/obs-studio/logs/*.txt over plain ssh, the
-    # spaced filename quoted) -- the PowerShell read below would come back EMPTY there (UNKNOWN
-    # forever, never a page). Every other box (stream, resolume) keeps the PowerShell read.
-    if [ "$(strih_log_os "$ip")" = linux ]; then
-      raw="$(strih_log_tail "$ip" "$SSH_USER" "$SSH_PW" "$_tail" "$SSH_TIMEOUT")"
-    else
-      _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail")"
-      # shellcheck disable=SC2086
-      raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
-        "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
-        2>/dev/null || true)"
-    fi
+    raw="$(read_receiver_log "$ip")"
   fi
   # Newest audit line for THIS source -> the received= integer. Empty if none found.
   # #1258 layer 2: LC_ALL=C + grep -a -- PowerShell 5.1 `gc` (no -Encoding) reads the UTF-8
@@ -186,6 +216,50 @@ probe_received() {
     | tail -1
 }
 
+# read_receiver_log <receiver_ip> -> stdout: the last OBS_LOG_TAIL lines of the receiver's newest OBS
+# log, or EMPTY when the read failed. One ssh login; on a Linux box the reader runs tail at nice 19.
+read_receiver_log() {
+  local ip="$1" raw
+  # #1259: -EncodedCommand (base64 UTF-16LE), NEVER the naive -Command "…| sort …| select …".
+  # Win32-OpenSSH's default cmd.exe shell leaks the unescaped `|` pipes -> a mangled/blind read (the
+  # issue-1258 root cause). ps_encoded_command (scripts/lib/ps-encoded.sh) encodes the tail command
+  # to a pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> UNKNOWN, never an abort.
+  local _enc _tail
+  _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 800)" # #1259: guard the env count before the payload
+  # issue 1360: a Linux strih (strih-snv, the production strih since the M4 cut-over) is read
+  # through the ONE shared reader (newest ~/.config/obs-studio/logs/*.txt over plain ssh, the
+  # spaced filename quoted) -- the PowerShell read below would come back EMPTY there (UNKNOWN
+  # forever, never a page). Every other box (stream, resolume) keeps the PowerShell read.
+  if [ "$(strih_log_os "$ip")" = linux ]; then
+    raw="$(strih_log_tail "$ip" "$SSH_USER" "$SSH_PW" "$_tail" "$SSH_TIMEOUT")"
+  else
+    _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail")"
+    # shellcheck disable=SC2086
+    raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
+      "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
+      2>/dev/null || true)"
+  fi
+  printf '%s' "$raw"
+  return 0
+}
+
+# -- issue 1387: ONE read of the receiver log per pass ------------------------------------------
+# The owner's 1.11.2026 rule: no watchdog may risk a frame on a broadcast box. The pass used to log in
+# once for the enumeration and once per watched input (1 + 5 on the JPEG XS strih every 5 min). main
+# fills PASS_LOG once (outside any command substitution, so every later $(...) inherits it); the
+# enumeration and every probe_received read it. A failed read is EMPTY: every input reads UNKNOWN and
+# the blind counters count it, never a false page and never a retry per input. The *_CMD seams keep
+# their own per-call reads.
+PASS_LOG=""
+PASS_LOG_READ=0
+
+pass_log_fill() {
+  local ip="$1"
+  PASS_LOG="$(read_receiver_log "$ip")"
+  PASS_LOG_READ=1
+  log "read the $RECEIVER_NAME OBS log once for this pass: $(printf '%s' "$PASS_LOG" | grep -c "genlock-fifo audit '") audit line(s) in the last $OBS_LOG_TAIL lines"
+}
+
 # -- #1069 dynamic enumeration probe (dev1-local; NOT pure) -------------------------------------
 # probe_enumerate <receiver_ip> -> stdout: newline-separated cambox source names to watch this pass
 # (dynamic, derived from the receiver's live OBS log). The RAW OBS-log read reuses the round-24
@@ -198,6 +272,8 @@ probe_enumerate() {
   local ip="$1" raw
   if [ -n "${FROZEN_INPUT_ENUMERATE_CMD:-}" ]; then
     raw="$($FROZEN_INPUT_ENUMERATE_CMD "$ip" 2>/dev/null || true)"
+  elif [ "$PASS_LOG_READ" = "1" ]; then
+    raw="$PASS_LOG" # issue 1387: this pass's one shared read
   else
     # Reuse the #1093 strih OBS-log reader (source name unused for the raw read -> ""). Thread the
     # watchdog's OWN FROZEN_INPUT_SSH_* env into mv_reverify_probe_raw's STRIH_*/tail/timeout knobs so
@@ -403,13 +479,31 @@ main() {
     sender_reachable=1
   fi
 
+  # issue 1387 slice 3: the inputs the box facts put on air on the JPEG XS path (empty on NDI).
+  local required
+  required="$(resolved_required_sources)"
+  if [ -n "$required" ]; then
+    log "issue 1387: the JPEG XS path -- the box facts put '$required' on air on $RECEIVER_NAME"
+    if [ "$ENUMERATE" != "1" ] && [ -z "$SOURCES_EXPLICIT" ]; then
+      SOURCES="$required"
+    fi
+  fi
+
+  # issue 1387: the one shared read, when a real read is needed at all (a seam replaces each one)
+  if [ "$sender_reachable" = "1" ] && { [ -z "${FROZEN_INPUT_PROBE_CMD:-}" ] ||
+    { [ "$ENUMERATE" = "1" ] && [ -z "${FROZEN_INPUT_ENUMERATE_CMD:-}" ]; }; }; then
+    pass_log_fill "$RECEIVER_IP"
+  fi
+
   # #1069 enumeration mode: derive the watched cambox set from the receiver's live OBS log each pass
   # (never a static list). Only when the receiver is reachable -- a box-down pass has nothing to read
   # and must not count as an enumeration-blind streak. A box-down pass leaves SOURCES empty -> the
-  # loop below simply iterates nothing (every source would SKIP anyway).
+  # loop below simply iterates nothing (every source would SKIP anyway). issue 1387: every input the
+  # facts declare is watched FIRST, beside what the log enumerates -- a declared input whose audit line
+  # is missing then reaches the tap-broken WARN instead of never being watched.
   if [ "$ENUMERATE" = "1" ]; then
     if [ "$sender_reachable" = "1" ]; then
-      SOURCES="$(enumerate_and_guard "$RECEIVER_IP")"
+      SOURCES="$(frozen_input_watch_list "$required" "$(enumerate_and_guard "$RECEIVER_IP")")"
     else
       SOURCES=""
       log "enumerate mode: receiver not reachable per #1001 -> no enumeration this pass (SKIP)"

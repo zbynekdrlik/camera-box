@@ -11,6 +11,7 @@ and exit code -- lives in the pure module and is verified here against captured 
 (confirmed from the probe sources / decision modules).
 """
 
+import json
 import pathlib
 import sys
 
@@ -404,6 +405,13 @@ def test_evaluate_over_a_work_dir(tmp_path):
         "watchdogs": (WATCHDOGS_OK, 0),
         # issue 1371: no production-exposure snapshot pending for the test camera
         "exposure": ("exposure state=none\n", 0),
+        # issue 1387: the JPEG XS inputs on their box facts, every link delivering frames
+        "jxs_strih": ("PASS (jxs-inputs) 'JXS cam5 src': UDP 7000, camera 5, pin 36 ms\n", 0),
+        "jxs_stream": ("PASS (jxs-inputs) 'JXS PGM src': UDP 7100, camera 100, pin 1054 ms\n", 0),
+        "jxs_live": (json.dumps({"strih": {"head": "13:30:10.000", "lines": [
+            "13:30:05.000: [distroav] jxs-source 'JXS cam5 src': fps=30.00 frames=150 lost_slices=0"]},
+            "stream": {"head": "13:30:10.000", "lines": [
+                "13:30:05.000: [distroav] jxs-source 'JXS PGM src': fps=30.00 frames=150 lost_slices=0"]}}), 0),
     }
     for name, (text, rc) in caps.items():
         (tmp_path / (name + ".out")).write_text(text, encoding="utf-8")

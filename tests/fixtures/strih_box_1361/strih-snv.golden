@@ -60,6 +60,7 @@ Wants=network.target
 
 [Service]
 Type=simple
+ExecStartPre=/usr/bin/timeout 120 /bin/sh -c 'until ip -o -4 addr show | grep -qF " 10.77.9.202/"; do sleep 1; done'
 ExecStart=/usr/local/bin/dantesync
 Restart=always
 RestartSec=5

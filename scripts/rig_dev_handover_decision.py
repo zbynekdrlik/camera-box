@@ -243,6 +243,120 @@ def classify_exposure(text, mode_text=""):
                        "hodnoty vlastníka treba z nej obnoviť ručne" % detail}
 
 
+# --- item 18: jxs (issue 1387 slice 3) -----------------------------------------------------------
+# Per broadcast box the orchestrator captures the RAW `obs_jxs_inputs.py --verify` rows against the box
+# FACTS' render (scripts/lib/program-inputs.sh program_inputs_jxs_box_rows): PASS / FAIL / NOTE, or ONE
+# `NONE (jxs) ...` (the box declares no JPEG XS) / `ERROR (jxs) ...` row. Then the links' liveness: the
+# EVENT contract's bounded facet JSON (scripts/lib/event-jxs-facet.sh) of the declaring boxes, graded by
+# event_assert.py (jxs_live_ok / jxs_live_detail / jxs_box_readable), or one `NONE (jxs-live)` row.
+_JXS_TAG_RE = re.compile(r"^\((jxs-[a-z-]+|jxs)\)\s*")
+_JXS_INPUT_FIX = ("spusti `scripts/rig-mode.sh test` (vráti kamery na ich JPEG XS vstupy); nastavenia vstupov "
+                  "a JPEG XS výstup obnoví štart OBS zo seedu faktov, keď sa nevysiela")
+_JXS_LINK_FIX = ("over camera-box na tej kamere (CAMERA_BOX_JXS_TARGET, verify-device (ay)) a JPEG XS výstup "
+                 "strihu")
+
+
+def _jxs_row_text(rest):
+    """`(jxs-inputs) 'JXS PGM src': pin 987 != 1054 -- <English remedy>` -> `'JXS PGM src': pin 987 != 1054`."""
+    t = _JXS_TAG_RE.sub("", (rest or "").strip())
+    return t.split(" -- ", 1)[0].split(", the operator", 1)[0].strip()
+
+
+def classify_jxs_box(role, text):
+    """One box's raw rows -> (status, forgot [names], unknown [reasons], declares). FAIL rows and a camera
+    moved off its declared input (the `(jxs-pick)` NOTE) are FORGOT; an unreachable websocket, an ERROR
+    row, an empty / missing capture or rows with no PASS are UNKNOWN; `(jxs-place)` is report-only; a
+    box whose only rows are NONE declares no JPEG XS (OK, nothing to grade)."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return UNKNOWN, [], ["%s: kontrola JPEG XS vstupov nič nevypísala" % role], True
+    if lines[0].startswith("MISSING"):
+        return UNKNOWN, [], ["%s: kontrola JPEG XS vstupov nebežala (chýba skript)" % role], True
+    if all(ln.startswith("NONE") for ln in lines):
+        return OK, [], [], False
+    passes, forgot, unknown = 0, [], []
+    for ln in lines:
+        level, _, rest = ln.partition(" ")
+        if level == "PASS":
+            passes += 1
+        elif level == "FAIL" or (level == "NOTE" and "(jxs-pick)" in rest):
+            forgot.append("%s %s" % (role, _jxs_row_text(rest)))
+        elif level == "NOTE" and "not reachable" in rest:
+            unknown.append("%s: OBS WebSocket nedostupné" % role)
+        elif level == "NOTE":
+            continue  # (jxs-place) and the other report-only notes
+        elif level == "ERROR":
+            unknown.append("%s: %s" % (role, _jxs_row_text(rest)))
+        else:
+            unknown.append("%s: neočakávaný riadok '%s'" % (role, ln[:80]))
+    if forgot:
+        return FORGOT, forgot, unknown, True
+    if unknown or not passes:
+        return UNKNOWN, [], unknown or ["%s: žiadny PASS riadok JPEG XS vstupov" % role], True
+    return OK, [], [], True
+
+
+def _event_assert():
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import event_assert  # the EVENT contract's own jxs_live decision, never re-derived here
+    return event_assert
+
+
+def classify_jxs_live(text):
+    """The links' liveness capture -> (status, forgot [details], unknown [reasons]). A link with no frames
+    or a stale newest window is FORGOT (named by event_assert.jxs_live_detail); an unread box, a box
+    without a window line, a malformed facet or a missing capture is UNKNOWN; `NONE (jxs-live)` is OK."""
+    t = (text or "").strip()
+    if t.startswith("NONE"):
+        return OK, [], []
+    try:
+        facet = json.loads(t.splitlines()[-1]) if t and not t.startswith("MISSING") else None
+    except ValueError:
+        facet = None
+    if not isinstance(facet, dict) or not facet:
+        return UNKNOWN, [], ["stav JPEG XS liniek sa nepodarilo prečítať (OBS log strihu/streamu)"]
+    ea = _event_assert()
+    forgot, unknown = [], []
+    for name in sorted(facet):
+        one = {name: facet[name]}
+        if ea.jxs_live_ok(one):
+            continue
+        (unknown if not ea.jxs_box_readable(facet[name]) else forgot).append(ea.jxs_live_detail(one))
+    if forgot:
+        return FORGOT, forgot, unknown
+    if unknown:
+        return UNKNOWN, [], unknown
+    return OK, [], []
+
+
+def classify_jxs(strih_text, stream_text, live_text):
+    """Decide the `jxs` item: FORGOT (any input off its facts or a dead link) > UNKNOWN > OK. Returns
+    {status, message}."""
+    forgot, unknown, declares = [], [], False
+    input_forgot = link_forgot = False
+    for role, text in (("strih", strih_text), ("stream", stream_text)):
+        st, f, u, decl = classify_jxs_box(role, text)
+        forgot += f
+        unknown += u
+        declares = declares or decl
+        input_forgot = input_forgot or st == FORGOT
+    st, f, u = classify_jxs_live(live_text)
+    forgot += f
+    unknown += u
+    link_forgot = st == FORGOT
+    if forgot:
+        fixes = [fix for cond, fix in ((input_forgot, _JXS_INPUT_FIX), (link_forgot, _JXS_LINK_FIX)) if cond]
+        return {"status": FORGOT, "message": "JPEG XS nesedí: %s — %s" % ("; ".join(forgot), "; ".join(fixes))}
+    if unknown:
+        return {"status": UNKNOWN, "message": "JPEG XS sa nepodarilo overiť: %s" % "; ".join(unknown)}
+    if not declares:
+        return {"status": OK, "message": "žiaden broadcast box nedeklaruje JPEG XS (NDI cesta) — nie je čo overiť"}
+    return {"status": OK,
+            "message": "JPEG XS vstupy sedia s faktami boxov a každá linka prenáša snímky"}
+
+
 # --- item specifications ------------------------------------------------------------------------
 class Item(object):
     """One checklist item. `captures` are the <name> keys the orchestrator wrote (.out/.rc). `kind`
@@ -304,6 +418,11 @@ class Item(object):
             text, _rc = captures_data.get(self.captures[0], ("", RC_MISSING))
             mode_text, _mrc = captures_data.get(self.captures[1], ("", RC_MISSING))
             r = classify_exposure(text, mode_text)
+            return {"key": self.key, "label": self.label, "status": r["status"],
+                    "message": r["message"]}
+        if self.kind == "jxs":
+            texts = [captures_data.get(n, ("", RC_MISSING))[0] for n in self.captures]
+            r = classify_jxs(*texts)
             return {"key": self.key, "label": self.label, "status": r["status"],
                     "message": r["message"]}
         if self.kind == "watchdogs":
@@ -510,6 +629,12 @@ ITEMS = [
     # handover moment) it means the EVENT switch never restored it.
     Item("exposure", "expozícia testovacej kamery (ISO/uzávierka)", ["exposure", "mode"], "exposure",
          ok_msg="", forgot_msg="", unknown_msg=""),  # messages come from classify_exposure
+    # issue 1387 slice 3: the JPEG XS path -- every declared input present with its declared settings
+    # (obs_jxs_inputs.py --verify against the box facts, strih + stream, + the strih's program output)
+    # and every link delivering frames (the EVENT contract's bounded facet). A box that declares no JPEG XS
+    # is N/A; the messages come from classify_jxs.
+    Item("jxs", "JPEG XS vstupy a linky (strih+stream)", ["jxs_strih", "jxs_stream", "jxs_live"], "jxs",
+         ok_msg="", forgot_msg="", unknown_msg=""),
 ]
 
 

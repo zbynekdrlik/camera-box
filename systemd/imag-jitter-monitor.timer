@@ -6,6 +6,8 @@ Documentation=https://github.com/zbynekdrlik/camera-box
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=5min
+# issue 1387: never at one instant with the other 5-minute watchdogs (a batch dropped program frames on strih)
+RandomizedDelaySec=2min
 AccuracySec=30s
 Persistent=false
 

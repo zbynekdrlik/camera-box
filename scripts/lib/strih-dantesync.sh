@@ -98,6 +98,36 @@ strih_dantesync_running_argv() {
   printf '%s\n' "$argv"
 }
 
+# strih_dantesync_join_verdict IP -> verify-strih item 6d (issue 1439, 1.11.2026): the NIC dantesync
+# joined PTP on in THIS boot vs the NIC that carries IP (the box's STRIH_IP, the rig NIC):
+#   ok:<iface> | wrong:<joined>:<rig> | nojoin (no join line this boot) | norig (no NIC holds IP).
+# dantesync 1.20.0 picks the first IPv4 interface it lists and never re-selects, so a boot that
+# addresses the VBAN leg first kept stream-snv off the Dante clock for a whole event; the owner's
+# ruling is an explicitly configured NIC (dantesync#131), which this grade stands in for until then.
+# ONE bounded journal read (the newest match of this boot), never the whole journal. Always rc 0.
+strih_dantesync_join_verdict() {
+  local ip="${1-}" line joined rig="" ifl rest
+  line="$(journalctl -u dantesync -b --no-pager -o cat -g 'Joined Multicast Groups on' -n 1 2>/dev/null || true)"
+  joined="${line##*Joined Multicast Groups on }"
+  joined="${joined%% *}"
+  if [ -n "$ip" ]; then
+    while IFS= read -r ifl; do
+      case "$ifl" in
+        *" inet ${ip}/"*) rest="${ifl#*: }"; rig="${rest%% *}"; break ;;
+      esac
+    done < <(ip -o -4 addr show 2>/dev/null || true)
+  fi
+  if [ -z "$rig" ]; then
+    echo norig
+  elif [ -z "$line" ] || [ "$joined" = "$line" ] || [ -z "$joined" ]; then
+    echo nojoin
+  elif [ "$joined" = "$rig" ]; then
+    echo "ok:${rig}"
+  else
+    echo "wrong:${joined}:${rig}"
+  fi
+}
+
 # strih_dantesync_unit_masked PATH -> 0 iff PATH is an operator mask: a symlink to /dev/null
 # (`systemctl mask`). Step 2 never replaces, enables or starts a masked unit.
 strih_dantesync_unit_masked() {

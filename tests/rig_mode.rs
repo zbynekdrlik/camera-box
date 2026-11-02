@@ -940,9 +940,10 @@ fn source_role_derives_off_camera_source_box_1135() {
     assert!(
         cam1retired.contains("BOX=cam3")
             && cam1retired.contains("IP=10.77.9.63")
-            && cam1retired.contains("STRIH=NDI cam3"),
-        "#1135: with cam1 retired, source must resolve to cam3 / 10.77.9.63 / 'NDI cam3', never the \
-         retired cam1. got=\n{cam1retired}"
+            && cam1retired.contains("STRIH=JXS cam3 src"),
+        "#1135: with cam1 retired, source must resolve to cam3 / 10.77.9.63, never the retired cam1; \
+         issue 1387: on the SNV facts (cam3 a JPEG XS camera) its strih input is 'JXS cam3 src'. \
+         got=\n{cam1retired}"
     );
 }
 

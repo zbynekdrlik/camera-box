@@ -20,7 +20,12 @@
 //!   different points (an encoder-bound send, the program's NDI frame sharing the receiver's port
 //!   once a frame) and read 1.5-2.5 ms apart report after report with the queue at 0 and nothing
 //!   lost; judged raw, that constant offset read "overuse" every ~8 s, sawed the pace 900 -> 738
-//!   and pinned the auto bpp at 4.
+//!   and pinned the auto bpp at 4. Live 31.10.2026 (the first end-to-end run) the offset was not
+//!   constant: the NDI frame lands at a different point of the JPEG XS frame each second, the
+//!   stretch varies by up to the burst's time on the port, and an ordinary report crossed the
+//!   bound over the minimum (39 overuses in 7 min, the link at 4 bpp). So a stretch must ALSO
+//!   exceed its level's quiet ENVELOPE -- the largest stretch of its last [`BASE_REPORTS`]
+//!   full-pace reports -- by [`ENVELOPE_MARGIN_US`]; a download's growing stretch passes both.
 //!   The base is kept per send regime (the bpp) and ages by STEADY time ([`STRETCH_BASE_S`]: the
 //!   time since the first report minus the time after an overuse, so a persistent bottleneck never
 //!   ages its own evidence out, while a level left in quiet times re-learns its base, that report
@@ -55,6 +60,9 @@
 pub const BASE_REPORTS: usize = 30;
 /// The span stretch's base is the minimum over this many seconds of its level's reports.
 pub const STRETCH_BASE_S: f64 = 30.0;
+/// A stretch must also exceed the largest stretch of the level's full-pace reports of the window by
+/// this much (us) to read overuse.
+pub const ENVELOPE_MARGIN_US: i64 = 500;
 /// A path delay this far above the base: start over (a BACKSTOP). A clock step should never get
 /// here: the receiver removes its own steps (`WallSteps`), a sender step cancels per frame (its
 /// timecode and its own delay move together) and the report windows around it are not judged
@@ -220,6 +228,14 @@ pub struct Congestion {
     /// never ages it.
     stretch_history:
         std::collections::BTreeMap<Option<u32>, std::collections::VecDeque<(f64, i64)>>,
+    /// Per send regime, the stretches of its last [`BASE_REPORTS`] reports judged at the FULL pace
+    /// (factor 1): their maximum is the quiet path's envelope, which a stretch must exceed by
+    /// [`ENVELOPE_MARGIN_US`] (besides the bound over the base) to read overuse. Live 31.10.2026:
+    /// the program's NDI frame lands at a varying point of the JPEG XS frame, so the quiet
+    /// stretch varies report to report by up to the burst's own time on the port. Kept by count,
+    /// never aged: fed only at the full pace, so a download's cut-pace reports never widen it and
+    /// a level left during one still has its envelope afterwards.
+    quiet_envelope: std::collections::BTreeMap<Option<u32>, std::collections::VecDeque<i64>>,
     /// The caller's time of the previous judged report, and the seconds spent after an overuse
     /// since the first one: the steady clock the stretch base ages on is `now - congested_s`.
     last_report_s: Option<f64>,
@@ -243,6 +259,7 @@ impl Congestion {
             last_bpp_down_s: None,
             state: PathState::Unknown,
             stretch_history: std::collections::BTreeMap::new(),
+            quiet_envelope: std::collections::BTreeMap::new(),
             last_report_s: None,
             congested_s: 0.0,
         }
@@ -297,7 +314,23 @@ impl Congestion {
         }
         let c = self.cfg;
         let bound = (c.stretch_overuse_us as f64).max(c.stretch_overuse_frac * tx as f64);
-        base.is_some_and(|b| (stretch - b) as f64 > bound)
+        let Some(b) = base else {
+            return false;
+        };
+        // the level's quiet envelope: the largest stretch of its last full-pace reports (kept by
+        // count, never aged: a congested time never feeds it and a level left during a download
+        // still has it afterwards)
+        let quiet = self.quiet_envelope.entry(r.stretch_regime).or_default();
+        let envelope = quiet.iter().copied().max();
+        let over = (stretch - b) as f64 > bound
+            && envelope.is_none_or(|e| stretch - e > ENVELOPE_MARGIN_US);
+        if self.factor >= 1.0 {
+            quiet.push_back(stretch);
+            while quiet.len() > BASE_REPORTS {
+                quiet.pop_front();
+            }
+        }
+        over
     }
 
     /// Judge `r` at `now_s` (the caller's seconds). A report already judged (the same seq) holds.
@@ -742,5 +775,31 @@ mod tests {
             let s = c.on_report(&r, k as f64);
             assert_ne!(s.state, PathState::Overuse, "report {k}");
         }
+    }
+
+    /// Live 31.10.2026: a quiet stretch that varies report to report (0.0 .. 2.6 ms, the NDI burst
+    /// landing at a varying point) never reads overuse once its envelope is learnt, while a stretch
+    /// that grows past the envelope by more than the margin does.
+    #[test]
+    fn a_varying_quiet_stretch_is_not_overuse_and_one_past_its_envelope_is() {
+        let mut c = Congestion::default();
+        let pattern = [0u32, 2_600, 1_200, 400, 2_300, 1_800, 100, 2_500];
+        for k in 1..=40u32 {
+            let extra = pattern[k as usize % pattern.len()];
+            let s = c.on_report(&rep(k, 0, 12_000 + extra, 12_000), k as f64);
+            if k > pattern.len() as u32 {
+                assert_ne!(
+                    s.state,
+                    PathState::Overuse,
+                    "report {k} (stretch {extra} us)"
+                );
+            }
+        }
+        let s = c.on_report(&rep(41, 0, 12_000 + 2_600 + 600, 12_000), 41.0);
+        assert_eq!(
+            s.state,
+            PathState::Overuse,
+            "past the envelope by more than the margin"
+        );
     }
 }

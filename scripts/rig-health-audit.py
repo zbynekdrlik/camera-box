@@ -554,7 +554,7 @@ def _linux_obs_log_tail_cmd(tail: int | str = 500) -> str:
     # HEAD + TAIL of the NEWEST log, same read shape as the Windows command (the launch-time
     # audio-buffering burst lives in the head). The filename carries SPACES -> always "$F".
     return ('F=$(ls -t ~/.config/obs-studio/logs/*.txt 2>/dev/null | head -1); [ -n "$F" ] && '
-            f'{{ head -n 600 "$F"; tail -n {n} "$F"; }}')
+            f'{{ nice -n 19 head -n 600 "$F"; nice -n 19 tail -n {n} "$F"; }}')
 
 
 def _linux_obs_count_cmd() -> str:

@@ -132,7 +132,9 @@ rig_test_feed_burn_setenv() {
 # (25.-27.10.2026, E2E runs + soak windows): -38..-52 ms, uniform over the cameras, median -46.5 (the ROZHODNUTE on
 # the ticket). The direct feed has no camera filming cam2's monitor and takes its marker from the jack, not a mic,
 # so its leg differs from the camera+monitor feed and from production. A property of the test feed only.
-RIG_DIRECT_AV_EXPECTED_MS="${RIG_DIRECT_AV_EXPECTED_MS:--45}"
+# Issue 1387: -74 since the program takes the JPEG XS inputs: their strih pin is 36 ms against NDI's 3 ms, so the video
+# comes 33 ms later (-46.5 - 33 = -79.5). E2E 41338338452 on the JPEG XS path measured cam2 -73.6, cam3 -76.5, cam5 -73.3.
+RIG_DIRECT_AV_EXPECTED_MS="${RIG_DIRECT_AV_EXPECTED_MS:--74}"
 
 # rig_test_feed_av_expected_ms -> the A/V gate's expected offset for this feed (0 camera+monitor, the direct leg).
 rig_test_feed_av_expected_ms() {

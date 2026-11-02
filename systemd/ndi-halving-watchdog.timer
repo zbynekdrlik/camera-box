@@ -14,6 +14,8 @@ Documentation=https://github.com/zbynekdrlik/camera-box
 # they never all fire the same instant.
 OnBootSec=6min
 OnUnitActiveSec=5min
+# issue 1387: never at one instant with the other 5-minute watchdogs (a batch dropped program frames on strih)
+RandomizedDelaySec=2min
 AccuracySec=20s
 Persistent=false
 

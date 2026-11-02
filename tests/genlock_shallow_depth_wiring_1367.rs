@@ -145,7 +145,7 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
     );
     assert_in(
         helper,
-        "source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval), genlock_n1_depth_frames(tick_wall, newest_stamp, interval), genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames, genlock_n1_is_deep_source(",
+        "shallow_eligible, relock, genlock_n1_tick_is_on_grid(tick_wall, interval), genlock_n1_depth_frames(tick_wall, newest_stamp, interval), genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames, genlock_n1_is_deep_source(",
         "the latch samples the newest frame's raw tick floor (the rise / fell watch) and its budgeted \
          receive-lag latch floor (the histogram) on an on-grid N==1 tick (an N>=2 tick clears it)",
     );
@@ -177,7 +177,7 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
     );
     assert_in(
         helper,
-        "&source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring, &source->genlock_shallow_capped, source->genlock_last_known_n < 2, relock,",
+        "&source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring, &source->genlock_shallow_capped, shallow_eligible, relock,",
         "the latch counts the window's deep ticks (the MAJORITY decides deep, review round 2)",
     );
     // the relock flag is set before the present tail reads it, and never elsewhere.

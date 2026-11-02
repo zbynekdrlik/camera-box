@@ -25,11 +25,12 @@ Discord confirmation composer) when --result-out is given.
 
 import argparse
 import json
+import re
 import sys
 
-# The 8 contract items, in a FIXED order -- both the Slovak summary and the aggregate()
-# failed-items list always follow this order, never dict/insertion order (a missing/absent item
-# must never silently vanish from the printed summary).
+# The contract items (8 since #722, + jxs_live since issue 1387), in a FIXED order -- both the
+# Slovak summary and the aggregate() failed-items list always follow this order, never
+# dict/insertion order (a missing/absent item must never silently vanish from the printed summary).
 ITEM_ORDER = [
     "paint_processes",
     "pixel_proof",
@@ -39,6 +40,7 @@ ITEM_ORDER = [
     "latency_calibrated",
     "ndi_mapping",
     "artifacts_cleared",
+    "jxs_live",
 ]
 
 ITEM_LABELS_SK = {
@@ -50,6 +52,7 @@ ITEM_LABELS_SK = {
     "latency_calibrated": "latencia zodpoveda kalibrovanej hodnote",
     "ndi_mapping": "mapovanie kamier je spravne (#399)",
     "artifacts_cleared": "testovacie artefakty su vymazane",
+    "jxs_live": "vsetky JPEG XS vstupy a vystupy prenasaju snimky",
 }
 
 
@@ -200,6 +203,98 @@ def artifacts_cleared_ok(existing_paths: list) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Item 9 (issue 1387) -- every JPEG XS link is up on every broadcast OBS box.
+# ---------------------------------------------------------------------------
+
+# The 5 s window line every JPEG XS source and output logs (vendor/distroav/src/jxs-source.cpp,
+# jxs-output.cpp): `HH:MM:SS.mmm: [distroav] jxs-source '<name>': fps=… frames=N …`.
+_JXS_WINDOW_RE = re.compile(
+    r"^(?P<h>[0-9]{2}):(?P<m>[0-9]{2}):(?P<s>[0-9]{2}(?:\.[0-9]+)?): \[distroav\] "
+    r"jxs-(?P<kind>source|output) '(?P<name>[^']+)': fps=[0-9.]+ frames=(?P<frames>[0-9]+)\b"
+)
+_JXS_HEAD_RE = re.compile(r"^(?P<h>[0-9]{2}):(?P<m>[0-9]{2}):(?P<s>[0-9]{2}(?:\.[0-9]+)?)$")
+
+# A link whose newest window is older than this (vs the log's newest line) has stopped writing.
+JXS_WINDOW_MAX_AGE_S = 20.0
+
+
+def _clock_s(m) -> float:
+    return int(m.group("h")) * 3600 + int(m.group("m")) * 60 + float(m.group("s"))
+
+
+def parse_jxs_window_line(line):
+    """One window line -> {t (seconds of the day), kind source|output, name, frames}, or None."""
+    if not isinstance(line, str):
+        return None
+    m = _JXS_WINDOW_RE.match(line)
+    if not m:
+        return None
+    return {"t": _clock_s(m), "kind": m.group("kind"), "name": m.group("name"),
+            "frames": int(m.group("frames"))}
+
+
+def _jxs_box_links(box):
+    """One box's facet -> {name: (frames, age_s)} of each link's newest window, or None when the
+    facet is unread / malformed / names no link (UNKNOWN, fails closed)."""
+    if not isinstance(box, dict) or not isinstance(box.get("lines"), list):
+        return None
+    head = _JXS_HEAD_RE.match(box.get("head") or "")
+    if not head:
+        return None
+    now = _clock_s(head)
+    newest = {}
+    for line in box["lines"]:
+        p = parse_jxs_window_line(line)
+        if p is not None:
+            newest[p["name"]] = p  # the lines come in log order: the last one per name is the newest
+    if not newest:
+        return None
+    return {n: (p["frames"], (now - p["t"]) % 86400) for n, p in newest.items()}
+
+
+def jxs_box_readable(box) -> bool:
+    """True when one box's facet names at least one link under a log head (the development handover
+    check, issue 1387 slice 3: an unreadable box is UNKNOWN there, a dead link FORGOT)."""
+    return _jxs_box_links(box) is not None
+
+
+def jxs_live_ok(jxs_windows) -> bool:
+    """jxs_windows: {box: {"head": "HH:MM:SS.mmm", "lines": [window lines]} | None} from rig-mode.sh.
+    PASS iff it names at least one box and on every box every JPEG XS link's newest window carries
+    frames and is at most JXS_WINDOW_MAX_AGE_S older than the log's newest line. An unread box, a
+    box with no window line or no head, or a malformed facet fails CLOSED (#1225)."""
+    if not isinstance(jxs_windows, dict) or not jxs_windows:
+        return False
+    for box in jxs_windows.values():
+        links = _jxs_box_links(box)
+        if links is None:
+            return False
+        if any(frames <= 0 or age > JXS_WINDOW_MAX_AGE_S for frames, age in links.values()):
+            return False
+    return True
+
+
+def jxs_live_detail(jxs_windows) -> str:
+    """The summary detail of item 9: each unread box and each link without frames or with a stale
+    window, named. Empty when every link delivers."""
+    if not isinstance(jxs_windows, dict) or not jxs_windows:
+        return "JPEG XS stav sa nepodarilo precitat"
+    parts = []
+    for name in sorted(jxs_windows):
+        links = _jxs_box_links(jxs_windows[name])
+        if links is None:
+            parts.append(f"{name}: necitatelne / ziadny JPEG XS riadok")
+            continue
+        for link in sorted(links):
+            frames, age = links[link]
+            if frames <= 0:
+                parts.append(f"{name}: '{link}' 0 snimok")
+            elif age > JXS_WINDOW_MAX_AGE_S:
+                parts.append(f"{name}: '{link}' bez okna {age:.0f} s")
+    return "; ".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Aggregation.
 # ---------------------------------------------------------------------------
 
@@ -264,6 +359,7 @@ def compute_item_results(facts: dict) -> dict:
         ),
         "ndi_mapping": ndi_mapping_ok(facts.get("ndi_mismatches", [])),
         "artifacts_cleared": artifacts_cleared_ok(facts.get("artifacts_existing", [])),
+        "jxs_live": jxs_live_ok(facts.get("jxs_windows")),
     }
 
 
@@ -291,6 +387,9 @@ def main(argv=None):
     qr_detail = pixel_proof_detail(facts.get("qr_findings") or {})
     if qr_detail:
         details.setdefault("pixel_proof", qr_detail)
+    jxs_detail = jxs_live_detail(facts.get("jxs_windows"))
+    if jxs_detail:
+        details.setdefault("jxs_live", jxs_detail)
     summary = format_summary_sk(overall_pass, item_results, details)
     print(summary)
 

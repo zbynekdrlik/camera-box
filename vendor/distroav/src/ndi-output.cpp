@@ -17,6 +17,7 @@
 
 #include "plugin-main.h"
 #include "genlock-emit-timecode.h"
+#include <util/platform.h>
 #include <util/threading.h>
 #include <chrono>
 #include <cmath>
@@ -100,13 +101,44 @@ static int64_t genlock_floor_boundary_100ns(int64_t now_100ns, int64_t fps)
 	return current_second + (frame_in_second * GENLOCK_UNITS_PER_SECOND / fps);
 }
 
+// camera-box issue 1367: a frame older than this (media-clock age at the stamp call) is stamped at
+// the call, not from its own timestamp (libobs never holds a raw frame that long).
+static const uint64_t GENLOCK_FRAME_STAMP_MAX_AGE_NS = 1000000000ULL;
+
+// camera-box issue 1367: the genlock stamp of a frame an OBS output sends, from the frame's OWN
+// render tick (frame_ts_ns, the media-clock instant libobs gave the frame: video_sleep's
+// vframe_info.timestamp, the tick's grid point), never the send instant. A frame the output thread
+// handed over late used to take the NEXT slot and the following on-time frame that slot again
+// (stamp_gap + stamp_dup on the receiver; the stream's N==1 `NDI 2ME PGM` shed a frame). The tick
+// is mapped to wall with the offset read at the call, the NEAREST boundary is taken (the tick sits
+// ON its grid point), clamped to the floor of the send instant so a stamp is never future-dated
+// (#1009). A frame timestamp that is 0, ahead of the media clock or older than the bound is stamped
+// at the call. Mirrored by camera_box::genlock_stamp::obs_frame_stamp_100ns (parity gate
+// tests/obs_frame_stamp_parity_1367.rs).
+static int64_t genlock_frame_stamp_100ns(int64_t wall_now_100ns, uint64_t mono_now_ns, uint64_t frame_ts_ns,
+					 int64_t fps)
+{
+	const int64_t send_floor = genlock_floor_boundary_100ns(wall_now_100ns, fps);
+	if (fps <= 0 || frame_ts_ns == 0 || frame_ts_ns > mono_now_ns ||
+	    mono_now_ns - frame_ts_ns > GENLOCK_FRAME_STAMP_MAX_AGE_NS)
+		return send_floor;
+	const int64_t tick_wall_100ns = wall_now_100ns - (int64_t)((mono_now_ns - frame_ts_ns) / 100);
+	const int64_t half_slot_100ns = GENLOCK_UNITS_PER_SECOND / (2 * fps);
+	const int64_t stamp = genlock_floor_boundary_100ns(tick_wall_100ns + half_slot_100ns, fps);
+	return stamp < send_floor ? stamp : send_floor;
+}
+
 // Boundary-aligned real wall-clock emit timecode for a frame at `framerate` fps.
-// camera-box #1009: the boundary at-or-before the emit instant (floor).
+// camera-box #1009: never future-dated (the floor of the send instant bounds it).
 // Issue 1387 slice 3: shared (genlock-emit-timecode.h), the JPEG XS program output stamps with it.
-int64_t genlock_emit_timecode_100ns(double framerate)
+// Issue 1367: keyed on the frame's own render tick (frame_ts_ns), so both outputs give one frame
+// one stamp however late each callback runs.
+int64_t genlock_emit_timecode_100ns(double framerate, uint64_t frame_ts_ns)
 {
 	int64_t fps = (int64_t)llround(framerate);
-	return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);
+	const int64_t wall_now = genlock_wall_now_100ns();
+	const uint64_t mono_now = os_gettime_ns();
+	return genlock_frame_stamp_100ns(wall_now, mono_now, frame_ts_ns, fps);
 }
 
 typedef void (*uyvy_conv_function)(uint8_t *input[], uint32_t in_linesize[], uint32_t start_y, uint32_t end_y,
@@ -699,7 +731,7 @@ void ndi_output_rawvideo(void *data, video_data *frame)
 	// Genlock fork: real DanteSync wall-clock boundary, NOT synthesize (see helper
 	// above) — so the emitted timecode is the ACTUAL per-frame emit instant and
 	// cam->OBS / OBS<->OBS latency share one timebase.
-	video_frame.timecode = genlock_emit_timecode_100ns(o->video_framerate);
+	video_frame.timecode = genlock_emit_timecode_100ns(o->video_framerate, frame->timestamp);
 	video_frame.FourCC = o->frame_fourcc;
 
 	if (video_frame.FourCC == NDIlib_FourCC_type_UYVY) {

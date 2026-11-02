@@ -119,6 +119,17 @@ only when the block passed). See `.claude/rules/youtube-leg-e2e-stage.md`.
 (overall_pass=false with no matched blocking gate → a generic "pozri CI log" line) so a forgotten
 blocking gate degrades to a generic FAIL rather than a hidden one — but attribute it properly.
 
+## The report names the inputs the run measured (issue 1387 slice 3)
+
+`meta["inputs"]` (`--program-path ndi|jxs`, `--strih-input`, `--stream-input`, `--stream-pin-fact`,
+forwarded by the sender's args 8-11 from recording-e2e.sh's resolver) drives three FULL-report spots: the
+`Merané vstupy (cesta …)` header line, the `Video sync <NDI|JPEG XS> kamier` title, and the pins section's
+stream hold line, which names the input the snapshot READ (`stream_hold_source`, absent = the pre-1387
+`NDI 2ME PGM`) and, on the JPEG XS path, compares it with the fact `STRIH_JXS_PROGRAM_PIN_MS` instead of
+av-sync-last.json. No inputs = byte-identical to before; `compose_summary` never reads them (its PASS
+names no input). Never hard-code an input name in a new section: read it from `_inputs(meta)`. Detail:
+`.claude/rules/jxs-link.md` (slice 3).
+
 ## Per-camera totals come from the shared grouping (issue 1386)
 
 `_aggregate_segments` (the per-camera lines of the IMAG path; the stream lines read

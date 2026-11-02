@@ -430,6 +430,18 @@ def test_plan_is_the_default_and_touches_nothing(rig):
         assert needle in out, needle
 
 
+
+def test_an_input_override_still_wins_over_the_jpeg_xs_facts(rig):
+    # issue 1387 slice 1b: the soak defaults its inputs from the box facts; the env override wins.
+    env, p = rig
+    env = dict(env, AV_SOAK_STRIH_INPUT_FMT="NDI %s", STREAM_PROG_SOURCE="NDI 2ME PGM")
+    r = _soak(env, "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    burns = _calls(p["log"], "burn")
+    added = {c[c.index("--input") + 1] for c in burns if c[0] == "add"}
+    removed = {c[c.index("--input") + 1] for c in burns if c[0] == "remove"}
+    assert added == {"NDI cam1", "NDI cam3", "NDI 2ME PGM"} and removed == added
+
 def test_the_default_slot_leaves_the_measured_strih_lx_decode_time(tmp_path):
     # ROZHODNUTÉ 5861667625: strih-snv decodes at ~8.5 frames/s on its idle E-cores, so the
     # defaults are a 20 min slot and 20 s camera segments, and the decode budget must cover a
@@ -535,7 +547,8 @@ def test_one_window_end_to_end(rig):
     burns = _calls(p["log"], "burn")
     added = {c[c.index("--input") + 1] for c in burns if c[0] == "add"}
     removed = {c[c.index("--input") + 1] for c in burns if c[0] == "remove"}
-    assert added == {"NDI cam1", "NDI cam3", "NDI 2ME PGM"} and removed == added
+    # issue 1387 slice 1b: the SNV facts put cam3 and the program on JPEG XS (cam1 is no SNV camera)
+    assert added == {"NDI cam1", "JXS cam3 src", "JXS PGM src"} and removed == added
 
     decodes = [line for line in p["log"].read_text().splitlines() if line.startswith("decode ")]
     assert any("--extract-partial strih" in d for d in decodes)
@@ -545,7 +558,7 @@ def test_one_window_end_to_end(rig):
     assert merge[merge.index("--cam2-run-id") + 1] == "4242"
     # issue 1482: the soak centres the A/V gate on the test feed's own leg, the same expected offset the
     # E2E passes (the rig's default feed is direct: -45 ms), never the verdict's camera+monitor default.
-    assert merge[merge.index("--av-expected-ms") + 1] == "-45"
+    assert merge[merge.index("--av-expected-ms") + 1] == "-74"
     assert not any(a.startswith("--burn-") for a in merge)
 
     _assert_rig_restored(p)
@@ -1360,7 +1373,7 @@ def test_the_direct_feed_soak_centres_the_av_gate_on_the_direct_leg_1482(rig):
     env = dict(env, RIG_TEST_FEED="direct")
     env.pop("AV_EXPECTED_MS", None)
     out = _soak(env, "--plan").stdout
-    assert "--av-expected-ms -45" in _merge_line(out)
+    assert "--av-expected-ms -74" in _merge_line(out)
 
 
 def test_the_optical_feed_soak_keeps_the_zero_centre_1482(rig):
@@ -1376,4 +1389,15 @@ def test_an_explicit_av_expected_ms_wins_over_the_feed_1482(rig):
     env = dict(env, RIG_TEST_FEED="direct", AV_EXPECTED_MS="-12")
     out = _soak(env, "--plan").stdout
     line = _merge_line(out)
-    assert "--av-expected-ms -12" in line and "-45" not in line
+    assert "--av-expected-ms -12" in line and "-74" not in line
+
+
+def test_the_soak_measures_the_jpeg_xs_inputs_when_asked_1387(rig):
+    """Issue 1387 (live 31.10.2026): the live path runs on JPEG XS, so the soak burns the strih
+    camera inputs `JXS <cam> src` and the stream program input `JXS PGM src` when told to."""
+    env, p = rig
+    env = dict(env, AV_SOAK_STRIH_INPUT_FMT="JXS %s src", STREAM_PROG_SOURCE="JXS PGM src")
+    _soak(env, "--run")
+    burns = _calls(p["log"], "burn")
+    added = {c[c.index("--input") + 1] for c in burns if c[0] == "add"}
+    assert added == {"JXS cam1 src", "JXS cam3 src", "JXS PGM src"}, added

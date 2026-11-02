@@ -43,6 +43,7 @@ set -euo pipefail
 # #notifications is now a LOGGED FALLBACK, used ONLY when the owner vars are genuinely absent.
 
 # e2e_discord_report_send <verdict-json-path> <run-id> <gate-exit-code> <duration-secs> [pins-json-path]
+#   [mv-skew-json] [genlock-audit-json] [program-path] [strih-input] [stream-input] [stream-pin-fact]
 # Public entrypoint — ALWAYS returns 0 (fail-open). See header comment above.
 # #756 Member 3: the optional 5th arg is the path scripts/latency_pins_snapshot.py wrote (live
 # genlock latency pins + this run's own recommended pins) — omit it (or pass "") to compose the
@@ -58,6 +59,20 @@ e2e_discord_report_send() {
 
 _e2e_discord_report_send_inner() {
   local verdict_json="$1" run_id="$2" gate_exit="$3" duration_secs="$4" pins_json="${5:-}" mv_skew_json="${6:-}" genlock_audit_json="${7:-}"
+  # issue 1387 slice 3: args 8-11 = what recording-e2e.sh's resolver set (scripts/lib/program-inputs.sh):
+  # the path, the strih + stream program inputs measured, the stream box's STRIH_JXS_PROGRAM_PIN_MS. Each
+  # is forwarded only when non-empty, and a path the composer would refuse is dropped with a WARNING (a
+  # composer usage error would cost the whole report).
+  local program_path="${8:-}" strih_input="${9:-}" stream_input="${10:-}" stream_pin_fact="${11:-}"
+  local inputs_arg=()
+  case "$program_path" in
+    ndi | jxs) inputs_arg+=(--program-path "$program_path") ;;
+    "") ;;
+    *) echo "WARNING: issue 1387 e2e_discord_report_send: unknown program path '$program_path' -- left out of the report" >&2 ;;
+  esac
+  [ -z "$strih_input" ] || inputs_arg+=(--strih-input "$strih_input")
+  [ -z "$stream_input" ] || inputs_arg+=(--stream-input "$stream_input")
+  [ -z "$stream_pin_fact" ] || inputs_arg+=(--stream-pin-fact "$stream_pin_fact")
   local here
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -133,7 +148,8 @@ _e2e_discord_report_send_inner() {
   local chunks_json
   chunks_json="$(python3 "$here/../e2e_discord_report.py" \
     --json "$verdict_json" --run-id "$run_id" --event "$event" \
-    --duration "$duration_secs" --gate-exit "$gate_exit" "${pins_arg[@]}" "${mv_skew_arg[@]}" "${genlock_audit_arg[@]}" --json-chunks 2>&1)"
+    --duration "$duration_secs" --gate-exit "$gate_exit" "${pins_arg[@]}" "${mv_skew_arg[@]}" "${genlock_audit_arg[@]}" \
+    "${inputs_arg[@]}" --json-chunks 2>&1)"
   if [ $? -ne 0 ]; then
     echo "WARNING: #711 e2e_discord_report_send: report composer failed — skipping Discord report (fail-open). Output:" >&2
     echo "$chunks_json" >&2

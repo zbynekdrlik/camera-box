@@ -154,7 +154,7 @@ def test_the_orchestrator_reports_a_foreign_guard_as_forgot(tmp_path):
         "RDH_IMAG_RETIRED": "1",
     }
     for item in ("PAINTER", "CLOCK", "OBS", "NET", "AUDIOLAG", "GENLOCK", "BURN", "MAPPING",
-                 "PINS", "DANTESYNC", "CAMBOX", "AVLATENCY", "EXPOSURE", "RIGMODE_LIB",
+                 "PINS", "DANTESYNC", "CAMBOX", "AVLATENCY", "EXPOSURE", "JXS", "JXS_LIVE_LIB", "RIGMODE_LIB",
                  "WATCHDOG_ROSTER", "CAMSET_LIB"):
         key = f"RDH_{item}" if item.endswith("_LIB") or item == "WATCHDOG_ROSTER" else f"RDH_{item}_PROBE"
         env[key] = missing

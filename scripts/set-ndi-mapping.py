@@ -71,6 +71,8 @@ import base64
 import hashlib
 import json
 import os
+import pathlib
+import re
 import sys
 import time
 
@@ -155,6 +157,22 @@ def _ws():
 
 
 # ─── pure helpers (unit-testable without OBS) ────────────────────────────────
+
+def jxs_cameras_of(host):
+    """Issue 1387: the cameras the strih at `host` takes over JPEG XS, from its box fact file ({"cam2", ...}, empty
+    for any other host). A camera is received once, JPEG XS or NDI, never both (owner 1.11.2026)."""
+    for path in sorted(pathlib.Path(__file__).resolve().parent.joinpath("strih-boxes").glob("*.env")):
+        facts = dict(ln.split("=", 1) for ln in path.read_text().splitlines() if re.match(r"[A-Z_]+=", ln))
+        if facts.get("STRIH_IP") == host:
+            cams = facts.get("STRIH_JXS_CAMERAS", "none")
+            return set() if cams == "none" else {"cam" + e.split(":")[0] for e in cams.split()}
+    return set()
+
+
+def without_jxs_cameras(want, cams):
+    """`want` without the inputs of the JPEG XS cameras `cams`: their NDI receive stays stopped."""
+    return [(inp, snd) for inp, snd in want if _camera_name_of(inp) not in cams]
+
 
 def parse_map_args(items, active_set=None):
     """Parse repeated `--map "INPUT=SENDER"` into [(input, sender), ...]; an explicit --map
@@ -586,6 +604,8 @@ def main():
 
     try:
         want = parse_map_args(args.map, args.active)
+        if not args.map:
+            want = without_jxs_cameras(want, jxs_cameras_of(args.host))
     except ValueError as e:
         sys.exit(f"ERROR: {e}")
 

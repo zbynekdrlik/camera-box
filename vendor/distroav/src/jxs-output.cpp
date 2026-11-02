@@ -290,9 +290,9 @@ static void jxs_output_rawvideo(void *data, struct video_data *frame)
 		pic.planes[i] = frame->data[i];
 		pic.strides[i] = frame->linesize[i];
 	}
-	/* the NDI output's stamp function, read at this callback (it runs after the NDI output's on
-	 * the same thread, so near a slot edge it can be the next slot) */
-	pic.timecode_100ns = genlock_emit_timecode_100ns(o->framerate);
+	/* the NDI output's stamp function on the frame's own render tick (issue 1367), so this
+	 * frame gets the same stamp the NDI output put on it */
+	pic.timecode_100ns = genlock_emit_timecode_100ns(o->framerate, frame->timestamp);
 	o->offered++;
 	if (!cb_jxs_out_stamp_fresh(o->last_stamp_100ns, pic.timecode_100ns)) {
 		/* a second frame in one slot: the receiver would drop it unseen, count it here */

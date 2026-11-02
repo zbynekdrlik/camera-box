@@ -1101,6 +1101,7 @@ struct obs_source {
 	bool async_decoupled;
 	bool genlock_fifo; /* camera-box #42: consume exactly one queued frame per render tick */
 	bool genlock_burn; /* camera-box #257: per-source measurement-burn toggle (runtime, no restart) */
+	bool genlock_grid_release; /* camera-box issue 1387: an N==1 source on the fixed grid release (N = 1) */
 	bool genlock_connected; /* camera-box #1299: DistroAV receiver has a live NDI connection (no_connections>0). Default true (an unreported source / an old build with the setter unresolved reads connected — no regression); the DistroAV receiver loop drives it live via obs_source_set_genlock_connected. */
 	/* camera-box #70: genlock FIFO preload reserve + audit counters. The FIFO
 	 * holds `genlock_preload` frames of jitter buffer (set once at startup from

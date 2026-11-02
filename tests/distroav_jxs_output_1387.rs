@@ -203,7 +203,8 @@ fn the_whole_output_compiles_against_the_vendored_libobs_and_both_ffi_headers() 
 fn every_frame_carries_the_one_genlock_emit_stamp_the_ndi_output_uses() {
     // ONE definition, in ndi-output.cpp, declared in the shared header both outputs include
     let header = read(EMIT_HEADER);
-    assert!(header.contains("int64_t genlock_emit_timecode_100ns(double framerate);"));
+    assert!(header
+        .contains("int64_t genlock_emit_timecode_100ns(double framerate, uint64_t frame_ts_ns);"));
     let ndi = read(NDI_OUTPUT);
     assert!(ndi.contains("#include \"genlock-emit-timecode.h\""));
     assert!(
@@ -211,13 +212,18 @@ fn every_frame_carries_the_one_genlock_emit_stamp_the_ndi_output_uses() {
         "the stamp is shared, not file-static"
     );
     assert_eq!(
-        ndi.matches("int64_t genlock_emit_timecode_100ns(double framerate)\n{")
-            .count(),
+        ndi.matches(
+            "int64_t genlock_emit_timecode_100ns(double framerate, uint64_t frame_ts_ns)\n{"
+        )
+        .count(),
         1
     );
     // the anchored lines of the NDI output stay as they were (#78, #1009 gates)
-    assert!(ndi.contains("video_frame.timecode = genlock_emit_timecode_100ns(o->video_framerate);"));
-    assert!(ndi.contains("return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);"));
+    assert!(ndi.contains(
+        "video_frame.timecode = genlock_emit_timecode_100ns(o->video_framerate, frame->timestamp);"
+    ));
+    assert!(ndi
+        .contains("const int64_t send_floor = genlock_floor_boundary_100ns(wall_now_100ns, fps);"));
     let out = read(OUTPUT);
     assert!(out.contains("#include \"genlock-emit-timecode.h\""));
     assert!(
@@ -226,7 +232,7 @@ fn every_frame_carries_the_one_genlock_emit_stamp_the_ndi_output_uses() {
     );
     let raw = function_body(&out, "static void jxs_output_rawvideo(");
     for needle in [
-        "pic.timecode_100ns = genlock_emit_timecode_100ns(o->framerate);",
+        "pic.timecode_100ns = genlock_emit_timecode_100ns(o->framerate, frame->timestamp);",
         "pic.format = o->send_format;",
         "pic.planes[i] = frame->data[i];",
         "pic.strides[i] = frame->linesize[i];",
@@ -496,6 +502,10 @@ fn the_strih_build_hands_the_sender_header_to_distroav_and_checks_the_output_is_
         "'src/jxs_send.rs'",
         "'src/jxs_send/**'",
         "'src/affinity.rs'",
+        // live 31.10.2026: the sender's congestion control and auto bpp are crate-root modules
+        // the archive carries too; a change there must rebuild the strih bundle
+        "'src/jxs_congestion.rs'",
+        "'src/jxs_auto_bpp.rs'",
     ] {
         assert!(wf.contains(p), "trigger path {p}");
     }

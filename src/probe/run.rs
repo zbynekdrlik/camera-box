@@ -304,6 +304,10 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     // of SIGTERM's default disposition killing the process with the last frame frozen on the
     // monitor. Idempotent.
     crate::shutdown::install();
+    // Issue 1387: every painter thread below camera-box's unit nice, before the first spawn (the
+    // threads below inherit it), so the JPEG XS encoder on cam2's general cores never makes the
+    // painter miss vsync (it painted ~47 fps and broke the QPSK marker chain).
+    crate::painter_priority::raise_painter_priority();
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
     let emitted: Arc<Mutex<Vec<(u32, i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));

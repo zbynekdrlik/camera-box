@@ -574,7 +574,11 @@ fn recording_e2e_execute_mode_runs_the_merge_and_propagates_its_exit_code() {
     // (one comment line + the `program_audio_continuity_gate` call folding into $GATE) added ~224
     // bytes between the merge call and the exit, same justified-growth pattern as above (measured
     // distance 11786 bytes, the issue-1367 pixel-proof step had already brought it to 11562).
-    let window = &s[exec_merge_block..(exec_merge_block + 13000).min(s.len())];
+    // issue 1387: widened from 13000 to 14000 bytes -- the BLOCKING JPEG XS link continuity gate
+    // (one comment line + the `jxs_link_continuity_gate` call folding into $GATE) added ~235 bytes
+    // between the merge call and the exit, same justified-growth pattern as above (measured
+    // distance 12608 bytes; the issue-1404 YouTube gate had already brought it to 12373).
+    let window = &s[exec_merge_block..(exec_merge_block + 14000).min(s.len())];
     assert!(
         window.contains(r#"exit "$GATE""#),
         "#703: after running the real merge, the branch must `exit \"$GATE\"` (the merge's own \

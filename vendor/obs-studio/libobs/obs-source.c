@@ -6114,6 +6114,13 @@ static size_t genlock_source_drop_cap(const obs_source_t *source)
 				latency_frames = extra > UINT32_MAX - latency_frames ? UINT32_MAX
 										     : latency_frames + extra;
 			}
+			/* camera-box issue 1387: an N==1 source on the grid release (the opt-in) holds the
+			 * same grid age -- the same headroom */
+			if (source->genlock_last_known_n < 2 && source->genlock_grid_release) {
+				const uint32_t grid_extra = genlock_n2_drop_cap_extra_frames(fps_num, fps_den);
+				latency_frames = grid_extra > UINT32_MAX - latency_frames ? UINT32_MAX
+											  : latency_frames + grid_extra;
+			}
 		}
 		if (latency_frames > depth)
 			depth = latency_frames;
@@ -6738,7 +6745,10 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	 * head age; latency_ms before any measurement) via the pure mirror (0 = paired, -video delay =
 	 * audio not held). Parsed by src/jitter_audit.rs; consumed by the LOCK indicator's audio health
 	 * via src/genlock_audio_pairing.rs::decide_audio_health. */
-	stats->audio_enabled = obs_source_audio_active(source);
+	/* issue 1387: libobs creates every source with audio_active = true, so a source type without
+	 * audio (the JPEG XS receiver) read as audio-enabled and its never-held "audio" degraded the
+	 * LOCK indicator. A source that cannot carry audio is never an audio-enabled genlock source. */
+	stats->audio_enabled = (source->info.output_flags & OBS_SOURCE_AUDIO) != 0 && obs_source_audio_active(source);
 	stats->audio_delay_ms = source->genlock_audio_delay_ms;
 	/* issue 1367: a WITHHELD source (no video delay known yet, nothing placed) is not unpaired -- 0,
 	 * so the LOCK widget does not read DEGRADED for the first seconds after every OBS start. Mid-slew
@@ -7945,6 +7955,9 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	if (source->genlock_audio_step_relock_pending)
 		relock = true;
 	source->genlock_audio_step_relock_pending = false;
+	/* camera-box issue 1387: a source on the grid release (the opt-in) is presented like an N>=2 source,
+	 * so like one it is never shallow-eligible: the latch below clears its state and never latches */
+	const bool shallow_eligible = source->genlock_last_known_n < 2 && !source->genlock_grid_release;
 	const bool was_latched = !source->genlock_shallow_measuring && source->genlock_shallow_target_frames != 0;
 	const uint32_t rejects_before = source->genlock_shallow_rejects;
 	/* design 5844353368: the STICKY content floor first; the latch below never goes under it. The audio
@@ -7953,7 +7966,7 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	const uint64_t sticky_floor = genlock_n1_shallow_sticky_track(
 		&source->genlock_shallow_sticky_frames, &source->genlock_shallow_sticky_seen_ns,
 		&source->genlock_shallow_sticky_obs_ticks, source->genlock_shallow_sticky_obs_hist,
-		source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
+		shallow_eligible, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
 		source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_min_latency_box(),
 		genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames, tick_wall);
 	const bool latched =
@@ -7961,7 +7974,7 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 				      &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks,
 				      &source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring,
 				      &source->genlock_shallow_capped,
-				      source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
+				      shallow_eligible, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
 				      genlock_n1_depth_frames(tick_wall, newest_stamp, interval),
 				      genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames,
 				      genlock_n1_is_deep_source(wall_now > newest_stamp ? wall_now - newest_stamp : 0,
@@ -8092,6 +8105,11 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 	const uint32_t release_n = genlock_effective_source_multiple(source, interval);
 	if (release_n >= 2)
 		return genlock_release_tick_n2_grid(source, wall_now, present_ts, interval, reserve_ms, release_n, now_ns);
+	/* camera-box issue 1387: an N==1 source that opted in (a 30 fps JPEG XS camera) takes the same
+	 * grid release with N = 1 -- the stamp grid_floor(T - 50 ms - pin) on the canvas grid, the NDI
+	 * cameras' age -- never the shallow latch below, which re-measures its depth at run time. */
+	if (source->genlock_grid_release)
+		return genlock_release_tick_n2_grid(source, wall_now, present_ts, interval, reserve_ms, 1, now_ns);
 	/* ---- camera-box #401: PHASE-LOCKED release cadence (v2) ---------
 	 * WHY: this release used to re-derive the deadline from the wall
 	 * clock EVERY tick (present_ts above) and present the NEWEST due
@@ -10711,6 +10729,25 @@ void obs_source_set_genlock_burn(obs_source_t *source, bool enabled)
 bool obs_source_get_genlock_burn(const obs_source_t *source)
 {
 	return obs_source_valid(source, "obs_source_get_genlock_burn") ? source->genlock_burn : false;
+}
+
+/* camera-box issue 1387: per-source opt-in to the fixed grid release for an N==1 source (see
+ * obs.h). A plain bool write (same shape as obs_source_set_genlock_burn); the release tick reads it
+ * under the async mutex it already holds, a torn bool is not a concept on the target ABIs. */
+void obs_source_set_genlock_grid(obs_source_t *source, bool enabled)
+{
+	if (!obs_source_valid(source, "obs_source_set_genlock_grid"))
+		return;
+	const bool prev = source->genlock_grid_release;
+	source->genlock_grid_release = enabled;
+	if (prev != enabled)
+		blog(LOG_INFO, "genlock: fixed grid release %s for source '%s' (issue 1387)",
+		     enabled ? "ON" : "OFF", obs_source_get_name(source));
+}
+
+bool obs_source_get_genlock_grid(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_get_genlock_grid") ? source->genlock_grid_release : false;
 }
 
 /* camera-box #1299: per-source NDI RECEIVER-CONNECTION flag write. A plain bool (same shape as

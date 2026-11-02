@@ -148,12 +148,15 @@ remote_log_camera_venue() {
   local row venue
   row="$(_remote_log_strih_row "${1-}")" || return 1
   venue="${row#*$'\t'}"
+  venue="${venue%%$'\t'*}"
   [ -n "$venue" ] || { echo "remote-logging: the strih fact file of ${1-} declares no STRIH_VENUE (issue 1450)" >&2; return 1; }
   printf '%s\n' "$venue"
 }
 
-# _remote_log_strih_row CAMERA -> "<STRIH_IP><TAB><STRIH_VENUE>" of the ONE strih fact file that lists
-# CAMERA (the lookup + checks remote_log_sink_ip documents above).
+# _remote_log_strih_row CAMERA -> "<STRIH_IP><TAB><STRIH_VENUE><TAB><JXS port>" of the ONE strih fact file
+# that lists CAMERA (the lookup + checks remote_log_sink_ip documents above). The third field is the UDP
+# port that file's STRIH_JXS_CAMERAS gives the camera, or `none` (issue 1387: the cambox JPEG XS target of
+# scripts/lib/cambox-jxs-target.sh is the same venue strih -- ONE camera -> venue-strih lookup).
 _remote_log_strih_row() {
   (
     set +f
@@ -170,18 +173,19 @@ _remote_log_strih_row() {
       . "${REMOTE_LOG_LIB_DIR}/strih-box-facts.sh" || exit 1
     fi
     dir="$(strih_box_dir)"
-    hits="" sink="" venue=""
+    hits="" sink="" venue="" jxs=""
     for f in "$dir"/*.env; do
       [ -f "$f" ] || continue
       parsed="$(strih_box_parse_file "$f")" \
         || { echo "remote-logging: ${f} does not parse -- no log sink for ${cam} (issue 1394)" >&2; exit 1; }
-      role="" cams="" ip="" fvenue=""
+      role="" cams="" ip="" fvenue="" fjxs=""
       while IFS= read -r line; do
         case "$line" in
           STRIH_ROLE=*) role="${line#*=}" ;;
           STRIH_CAMERAS=*) cams="${line#*=}" ;;
           STRIH_IP=*) ip="${line#*=}" ;;
           STRIH_VENUE=*) fvenue="${line#*=}" ;;
+          STRIH_JXS_CAMERAS=*) fjxs="${line#*=}" ;;
         esac
       done <<<"$parsed"
       [ "$role" = strih ] || continue
@@ -189,6 +193,7 @@ _remote_log_strih_row() {
       hits="${hits:+${hits} }${f##*/}"
       sink="$ip"
       venue="$fvenue"
+      jxs="$(strih_box_jxs_port_of "$fjxs" "$n")"
     done
     case "$hits" in
       "") echo "remote-logging: no strih fact file in ${dir} lists ${cam} in STRIH_CAMERAS -- no log sink (issue 1394)" >&2; exit 1 ;;
@@ -196,7 +201,7 @@ _remote_log_strih_row() {
     esac
     remote_log_ipv4_ok "$sink" \
       || { echo "remote-logging: ${hits} STRIH_IP '${sink}' is not an IPv4 address -- no log sink for ${cam} (issue 1394)" >&2; exit 1; }
-    printf '%s\t%s\n' "$sink" "$venue"
+    printf '%s\t%s\t%s\n' "$sink" "$venue" "$jxs"
   )
 }
 

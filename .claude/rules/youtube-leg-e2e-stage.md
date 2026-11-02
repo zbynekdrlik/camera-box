@@ -61,7 +61,7 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   `processingStatus processing` for 30+ min while it is already fetchable, so restreamer reports done at
   lifeCycle `complete` + `uploaded`/`processed`/`succeeded`. The 1080p + audio check stays here:
   `fetch_vod` retries yt-dlp every `YTDLP_RETRY_S` (30 s) until `YTDLP_READY_S` (600 s, inside the
-  1500 s tool timeout), then fails (UNKNOWN).
+  2400 s tool timeout), then fails (UNKNOWN).
 - Quota: one session of restreamer's rolling-24 h budget (~10 sessions/day across both gates) per run.
   There is no per-SHA cache (the spec's Review Focus 4): the stage runs on every run, and a cached FAIL
   could never pass on a rerun.
@@ -108,14 +108,14 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
 - Every outside step runs through `youtube_leg_proc.run_bounded` (a timeout kills the whole process
   group: yt-dlp, ffmpeg, the decode pool), and `install_cleanup()` kills them on SIGTERM / SIGINT.
 - **Deadlines:** wait-ready 420 s, wait-done `YOUTUBE_LEG_DONE_DEADLINE_S` 900 s (it starts after the
-  merge, ~10 min after the stop), the tool `YOUTUBE_LEG_TOOL_TIMEOUT_S` 1500 s (on dev2, under the
+  merge, ~10 min after the stop), the tool `YOUTUBE_LEG_TOOL_TIMEOUT_S` 2400 s (issue 1387: at dev2 load 21-25 the pool sized 2 and 1500 s ended at window 8 of 10; on dev2, under the
   host's own `timeout`; the early decode has the same bound, `--decode-timeout`). The painter's
   pre-record slack (`PAINTER_PRE_RECORD_SLACK_SECS`) grew 1200 -> 1800 for the ready wait. A run that
   still hits the job timeout leaves no block: the per-point page reads the stage dir (`--stage-dir`)
   and shows that as RED ("no verdict was folded"), never as "not measured".
 - **Where the measurement runs: dev2** (design 6387919956 part c, next section); dev1 orchestrates + folds.
-- The 703 byte window (merge -> `exit "$GATE"`): 12373 of 13000 bytes after this stage. The next step
-  added there must widen it.
+- The 703 byte window (merge -> `exit "$GATE"`): 12373 of 13000 bytes after this stage; 12608 of
+  14000 after the issue-1387 JPEG XS link gate. The next step added there must re-measure it.
 
 ## The measurement on dev2 (main design 6387919956, parts b + c, 24.10.2026)
 

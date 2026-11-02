@@ -12,7 +12,8 @@ genlock_latency_ms_src for every strih 'NDI cam<N>' (strih has no multiview twin
 1242) and imag 'NDI CAM<N>' + 'MV CAM<N>', for N in CAMERA_ACTIVE_SET (#893 -- env var, default
 cam1/cam2/cam4 (#898: cam3 retired 2026-07-31, grabber card destroyed); NEVER a literal N=1..7 range, see
 .claude/rules/camera-active-set.md -- a retired camera's stale pin must never be swept/reported
-as if it meant anything), the stream 'NDI 2ME PGM' hold, reads
+as if it meant anything), the hold of the stream program input the run measured ('NDI 2ME PGM', or
+`--stream-input` -- issue 1387: `JXS PGM src` on the JPEG XS path), reads
 ~/.camera-box/av-sync-last.json for the source-of-truth applied hold, and computes a RECOMMENDED
 pin set from THIS run's own delivery-latency table by shelling out to the SAME compiled
 phase-sync-gate binary phase_sync_calibrate.py (#286/#438) already uses -- one formula
@@ -127,14 +128,19 @@ def snapshot_box_pins(host: str, password: str, main_fmt: str, mv_fmt: "str | No
     return out
 
 
-def read_stream_hold(host: str, password: str) -> "int | None":
+STREAM_HOLD_DEFAULT_SOURCE = "NDI 2ME PGM"
+
+
+def read_stream_hold(host: str, password: str, source: str = STREAM_HOLD_DEFAULT_SOURCE) -> "int | None":
+    """The live pin of the stream program input the run measured (issue 1387 slice 3: `JXS PGM src` on
+    the JPEG XS path, from recording-e2e.sh's resolver; the NDI program by default)."""
     try:
         ws = _conn(host, password)
     except Exception as e:  # noqa: BLE001
         print(f"WARNING: latency_pins_snapshot: could not connect to stream {host}: {e}", file=sys.stderr)
         return None
     try:
-        return read_pin(ws, "NDI 2ME PGM")
+        return read_pin(ws, source)
     finally:
         ws.close()
 
@@ -178,7 +184,10 @@ def main(argv=None):
     ap.add_argument("--verdict-json", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--gate-bin", default=None)
+    ap.add_argument("--stream-input", default=None,
+                    help="issue 1387: the stream program input whose pin to read (empty = 'NDI 2ME PGM')")
     args = ap.parse_args(argv)
+    stream_input = args.stream_input or STREAM_HOLD_DEFAULT_SOURCE
 
     result: dict = {}
     if args.strih_host:
@@ -186,7 +195,8 @@ def main(argv=None):
     if args.imag_host:
         result["imag"] = snapshot_box_pins(args.imag_host, args.password, "NDI CAM{n}", "MV CAM{n}")
     if args.stream_host:
-        result["stream_hold_active_ms"] = read_stream_hold(args.stream_host, args.password)
+        result["stream_hold_active_ms"] = read_stream_hold(args.stream_host, args.password, stream_input)
+        result["stream_hold_source"] = stream_input
 
     result["av_sync_last"] = load_av_sync_last()
 

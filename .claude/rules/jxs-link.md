@@ -19,6 +19,8 @@ paths:
   - "vendor/svt-jpeg-xs/**"
   - "tests/jxs_loopback_1387.rs"
   - "tests/jxs_wiring_1387.rs"
+  - "src/probe/burn_jxs.rs"
+  - "tests/jxs_burn_1387.rs"
   - "vendor/distroav/src/jxs-output.cpp"
   - "vendor/distroav/src/jxs-output-decide.h"
   - "vendor/distroav/src/genlock-emit-timecode.h"
@@ -33,6 +35,27 @@ paths:
   - "src/jxs_congestion_bench.rs"
   - "scripts/lib/strih-jxs-verify.sh"
   - "tests/python/test_strih_jxs_verify_1387.py"
+  - "scripts/lib/cambox-jxs-target.sh"
+  - "scripts/lib/strih-jxs-provision.sh"
+  - "scripts/obs_jxs_inputs.py"
+  - "tests/python/test_cambox_jxs_target_1387.py"
+  - "tests/python/test_strih_jxs_provision_1387.py"
+  - "scripts/lib/event-jxs-facet.sh"
+  - "tests/python/test_event_assert_jxs_1387.py"
+  - "tests/python/test_cambox_preview_cap_1387.py"
+  - "tests/python/test_obs_jxs_inputs_1387.py"
+  - "scripts/lib/jxs-mapping-enforce.sh"
+  - "tests/distroav_jxs_pick_1387.rs"
+  - "tests/python/test_jxs_camera_pick_1387.py"
+  - "scripts/lib/program-inputs.sh"
+  - "tests/python/test_program_inputs_1387.py"
+  - "scripts/jxs_link_continuity.py"
+  - "scripts/lib/jxs-link-continuity.sh"
+  - "scripts/e2e_report_jxs_link.py"
+  - "tests/python/test_jxs_link_continuity_1387.py"
+  - "tests/python/test_jxs_link_continuity_e2e_1387.py"
+  - "tests/python/test_e2e_report_jxs_link_1387.py"
+  - "tests/python/jxs_link_fakes_1387.py"
 ---
 
 # The cambox JPEG XS link (issue 1387, slices 1, 1b, 2 + 3, and the in-OBS indicator)
@@ -80,6 +103,18 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   (`session.rs`, below).
 - **Sender: `src/jxs_send.rs` + `src/jxs_send/handoff.rs` (slice 1b).**
   - `JxsSender::start_from_env` reads `CAMERA_BOX_JXS_TARGET`; unset = `None`, nothing exists.
+    **A target that cannot connect yet is retried, never given up (1.11.2026 SNV event):** the
+    camboxes booted before their network, the socket's `connect` failed with `Network is
+    unreachable` and the link stayed off for good, every strih camera black on JPEG XS while NDI
+    recovered. Now the cambox entry (`start_retrying` -> `JxsLink`) tries once at start as before;
+    on a failure other than `Unsupported` (IPv6, `connect_error_retries`) a `jxs-connect` thread
+    tries again every `CONNECT_RETRY` (1 s). That thread pins itself OFF the capture core first
+    (`pin_off_capture_core`: camera-box.service starts the process on core 3, and the encoder
+    threads it spawns on connect start from its mask), logs a WARN on the first failure, each other
+    error text once (at most 8, `RetryLog`) and `still retrying (N tries, no connect yet)` every 600
+    tries (10 min), and an INFO `connected after N tries` before the usual "link ON" line. Until then
+    `JxsLink::offer` skips the frame (one channel read, never a wait); NDI and the capture never
+    wait for it. The C ABI and the tests keep the one-try `start*` calls.
     The bpp mode comes from `parse_bpp_mode` (`CAMERA_BOX_JXS_BPP` = fixed, a whole number
     1..=12, a refused value keeps a FIXED 4; else auto between `_MIN`/`_MAX`, each refused bound
     keeps its default, a floor above the ceiling keeps 4..=8; every refusal WARNs). 12 is the most
@@ -91,6 +126,28 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     `floor(j/30 s)`, the same integer). Never a frame counter: a dropped capture costs only its own
     frame and a second boundary never shifts the parity. Genlock off (emit 0) floors on an assumed
     60 fps grid; an emit rate at or below 30 sends every frame.
+  - **A skipped 30 fps slot is filled (`jxs_link::jxs_fill_slot`, the 1.11.2026 night soak).** A
+    camera slower than the grid skips one 60 fps slot per edge crossing (cam2: `src_ppm` -420, a
+    crossing about every 40 s, an EVEN skip about every 80 s; also a hidden drop or a busy-dropped
+    even frame), and NDI gets one starvation
+    repeat of the CURRENT frame on it. The hand-off sees only the current frame, so a skipped EVEN
+    slot left the link without a frame and strih repeated the previous one (`stamp_gap` +
+    `late_holds` on `JXS camN src`, one repeated frame on the program; 6 copies in 22 soak windows).
+    Now the odd-slot frame right after such a hole is sent stamped on it, like the NDI repeat, but
+    only when the last frame the hand-off TOOK (`Stats::last_taken_100ns`) is the 30 fps point
+    right before the hole: a start, a longer hole, a re-latch or a clock step back never fills (a
+    forward step of about two emit slots that lands on an odd slot right after a taken even frame
+    does fill, exactly as the NDI gap fill does). The filled frame reaches strih ~16.7 ms later
+    against its stamp than a normal one (inside the 100 ms grid age). `slot_fills=` on the 5 s
+    line counts the fills that were taken. `handoff_age` is sampled against the frame's OWN stamp,
+    so a fill keeps the documented `handoff_age - capture_age` split. A busy-dropped even frame
+    whose fill also finds no picture adds 2 to `dropped_busy` for one missing 30 fps point (the auto
+    bpp reacts to any drop in a second, so only the line's count changes).
+    Known limits: a two-slot hole that ends on an EVEN frame (slots 4 and 5 skipped, frame 6: a
+    hidden drop plus a crossing) leaves slot 4 unfilled (filling it would need a second conversion
+    and a second picture from one capture); a clock step back of about one slot right after a fill
+    can offer the hole's slot again, which goes out as a duplicate stamp the receiver drops
+    (benign, very rare).
   - **Hand-off BEFORE the NDI send:** main.rs calls `jxs.offer(&JxsFrame { .., timecode_100ns:
     capture_timecode_100ns, emit_fps: send_fps })` right after the timecode is fixed
     (`note_emitted_stamp_100ns`) and BEFORE the #1242 stagger sleep and every `emit_one`
@@ -100,6 +157,19 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     frame is `dropped_busy`. Never blocks. Its cost lands inside the stagger offset (the sleep
     shrinks by it), so the NDI send time of every camera but CAM1 (offset 0) is unchanged; CAM1's
     NDI send moves by the conversion (~0.25 ms on dev1, more on the N150).
+  - **Burn mode: JPEG XS carries the BURNED frame (issue 1387 slice 1a).** In the E2E's probe
+    build with `CAMERA_BOX_BURN_RUN_ID` the NDI sender lives on the `cam1-burn` thread; the link
+    moves there with it (`let burn_jxs_link = jxs_sender.take();`, probe-only), so the capture
+    loop's raw offer finds `None`. The capture thread stamps the CURRENT frame's job with a
+    `probe::burn_jxs::BurnJxsOffer` (the production offer's timecode, `send_fps` and raw capture
+    instant) right before `emit_one(capture_timecode_100ns)`; a starvation repeat's job carries
+    none (NDI-only, as in production). The burn thread runs `burn_then_offer_jxs`: the QR into the
+    job's buffer, then `offer` of that same buffer, then the NDI send. Production (no burn) is
+    byte-identical. Pinned by `tests/jxs_burn_1387.rs` (the burned QR decodes from the picture
+    the real decoder rebuilds over loopback) and the main.rs anchors in
+    `tests/jxs_wiring_1387.rs`. In burn mode the hand-off runs after the #1242 stagger sleep, the
+    ring and the QR draw, so `handoff_age_ms` / `capture_age_ms` read that much later than in
+    production; the timecode and the 30 fps choice are the same.
   - **AVX2 conversion** (`jxs_link::planar`): four 32-byte loads per 64 pixels, `packus` of the
     low bytes (Y) and the high bytes (chroma), split once more into U and V, `permute4x64(0,2,1,3)`
     restoring the lane order; the scalar loop does the tail; runtime-detected
@@ -127,7 +197,7 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
     capture_age_ms_avg/min/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors=
     encode_errors= report_age_s= reports= pace_mbps= wire_ms_avg/max= pace_src= rx_link_mbps=
-    tx_link_mbps= path= cong_pct= queue_ms= fec_sent= fec_repaired= (issue 1387)`
+    tx_link_mbps= path= cong_pct= queue_ms= fec_sent= fec_repaired= slot_fills= (issue 1387)`
     (`pace_mbps` 0 = line rate; `wire_ms` = a whole frame's first send -> its last send returned,
     see "Send pacing"; the rest: "The automatic pace", "Early congestion control", "FEC").
   - **`handoff_age_ms` / `capture_age_ms`** (coordinator request 29.10, the cam5 sawtooth: the
@@ -348,9 +418,14 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
 - Calls: `cbjxs_open(port, camera, max_bpp, err, err_len)` (0.0.0.0; camera 0 = the first heard;
   max_bpp 0 = no limit, sent in every report), `cbjxs_next_frame(rx, timeout_ms, &frame)` (1 / 0 /
   -1 socket error / -2 NULL or a panic), `cbjxs_set_max_bpp` (the report's cap, no reopen),
+  `cbjxs_set_late_ms` (ABI 4, live 31.10.2026: the bound past which a decoded frame counts as late
+  in the report; the source sets `cb_jxs_late_ms(genlock latency)` = the latency, never under
+  100 ms, at every open and on a latency change, no reopen -- a 1087 ms strih program input on
+  stream-snv read 100 ms as late and stepped the program link down to 4-6 bpp),
   `cbjxs_recv_buffer_bytes`, `cbjxs_get_stats`, `cbjxs_take_error`, `cbjxs_local_port`,
   `cbjxs_abi_version` (`CBJXS_ABI_VERSION` 2 since slice 3's `cbjxs_frame.chroma`, 3 since
-  `cbjxs_stats.link_mbps` + `fec_repaired`; bump it on any struct or signature change), and
+  `cbjxs_stats.link_mbps` + `fec_repaired`, 4 since `cbjxs_set_late_ms`; bump it on any struct
+  or signature change), and
   `cbjxs_close`. The stats call is `cbjxs_get_stats`: C cannot have a function named like the
   `cbjxs_stats` typedef. The frame's planes stay valid until the next `next_frame` / `close`.
 - No panic crosses into C (`catch_unwind`). A panic poisons the receiver: `-2` from then on, close it.
@@ -460,6 +535,17 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
      compared with the detail metric + a crop for the owner (the slice-0 comparison method).
 7. Leave nothing behind unasked: the `JXS cam5` scene stays only if the owner wants it on the
    program; remove the cambox drop-in (step 4 of the slice-1 runbook) when the run is over.
+
+### The measurement burn on a JPEG XS input (live 31.10.2026, design 6543355618)
+
+The JPEG XS source carries `genlock_burn` like ndi-source (default off, applied live through the
+runtime-resolved `obs_source_set_genlock_burn`; the QR burn filter reads the parent's flag). It is
+safe only because the ONE burn enumeration `obs_burn_filter.BURN_INPUT_KINDS` lists
+`camera_box_jxs_source` next to `ndi_source`: sweep-check / sweep-off, the EVENT contract and the
+E2E restore see a JPEG XS burn. Never add a burn-carrying input kind without adding it to that set.
+The soak measures the JPEG XS path by itself on a JPEG XS venue (the box facts, section "The E2E,
+rig-mode TEST and the soak measure the JPEG XS path" below); `AV_SOAK_STRIH_INPUT_FMT` +
+`STREAM_PROG_SOURCE` still override it (the restart matrix inherits both from its environment).
 
 ### Slice 2 known limits
 
@@ -796,6 +882,17 @@ is on, and per source whether it comes over NDI or JPEG XS.
   the proc handler is registered once at module load and never removed (libobs has no removal), safe
   because the frontend's status bar is gone before modules unload.
 
+**The codec time the auto bpp judges (live 31.10.2026):** `jxs_link::pace::CodecClock` on the
+sender's packet loop = the time from the frame's submit to its FIRST packet plus every wait for the
+encoder's NEXT packet; the sender's own work on a packet (send calls, pace sleeps) is never counted.
+The old `encode_ms - paced_ns` subtracted only the pace SLEEPS: on strih-snv's program link at 8 bpp
+into stream's 1 GbE port the send span is ~21-23 ms and the send calls between sleeps read as codec
+time (~20 ms against a codec that the on-box `jxs-encode-bench` measured at p99 10.44 ms), so the
+link never had the 60 % headroom to climb past 6-7. An encoder slower than the link still reads slow
+(its waits count); a link too slow for the frames shows as `dropped_busy`. `codec_ms` stays as the
+fallback for a frame with no packet. Test: `the_codec_time_counts_only_the_waits_for_the_encoder_never_the_send_work`.
+
+
 ## The automatic bpp (issue 1387, owner decision 6495938345)
 
 - **The back channel: ONE 56-byte receiver report per second** (`jxs_link::ReceiverReport`,
@@ -927,6 +1024,17 @@ react to a GROWING QUEUE, before the switch buffer overflows.
     stream's 1 GbE port once a frame -- and read 1.6-2.0 ms apart report after report with the
     queue at 0.0-0.1 ms and nothing lost; judged raw against the 1.75 ms bound it read "overuse"
     every ~8 s, sawed the pace 900 -> 738 and asked the auto bpp down each time: the bpp stayed at 4.
+    **The quiet ENVELOPE (live 31.10.2026, the first end-to-end run):** the NDI frame lands at a
+    different point of the JPEG XS frame each second, so the stretch is not constant but varies
+    report to report by up to the burst's own time on the port (~3 ms for a 400 KB frame); over the
+    minimum an ordinary report crossed the bound (39 overuses in 7 min, the pace 900 -> 720, the
+    link at 4 bpp). A stretch now reads overuse only when it is ALSO more than `ENVELOPE_MARGIN_US`
+    (0.5 ms) above its level's envelope = the largest stretch of the level's last 30 FULL-pace
+    reports. Fed only at factor 1 (so a download's cut-pace reports never widen it), kept by count
+    and never aged (a level left during a download still has it). The bench's
+    `cross_burst_wander_us` scenarios (the burst moves each second, splitmix64) pin both halves: the
+    varying burst alone reaches 8 bpp with no congestion step, and with the download it still steps
+    at 63 s and recovers to 8 bpp / 900; every older scenario's outcome is unchanged.
     The send span = max(`wire_ms` p50 over its last 30 frames, the
     frame's wire bytes over its OWN link: a 1 GbE cambox's NIC needs ~19 ms for an 8 bpp frame its
     encoder hands over in ~14 ms, never a stretched path). Or a lost slice. Then the pace
@@ -1021,6 +1129,386 @@ FAILs naming it; a clean one PASSes; a source that stopped writing and no source
 The OBS indicator reads DEGRADED from the same counters. Pytest:
 `tests/python/test_strih_jxs_verify_1387.py` (the lines rendered from the SHIPPED C format string).
 
+## The EVENT contract grades every JPEG XS link (1.11.2026, item `jxs_live`)
+
+- **Why:** on the SNV event morning the cameras were moved and rebooted after the rig was set up,
+  their JPEG XS senders stayed off, and the strih camera scenes were black on air for ~8 min while
+  every contract item read clean (the NDI items were fine, just not on program).
+- `scripts/lib/event-jxs-facet.sh` reads, per broadcast box (strih + stream), the last 1 MiB of the
+  newest OBS log at nice 19 (`tail -c`, a seek) and returns its last 40 `jxs-source` / `jxs-output`
+  5 s window lines plus the log's newest timestamp. Never a whole-log read: the owner's 1.11.2026
+  rule (an ssh read of the 100+ MB log on strih dropped frames on the program link).
+- `scripts/event_assert.py` `jxs_live_ok`: every link's newest window carries frames and is at most
+  `JXS_WINDOW_MAX_AGE_S` (20 s) older than the log's newest line (a midnight wrap is mod 86400). An
+  unread box, a box without a window line or head, or a malformed facet FAILS (#1225). The detail
+  names the link (`strih: 'JXS cam5 src' 0 snimok`).
+- Do not grade the `jxs-state:` indicator line here: it is logged only on a CHANGE, so a bounded tail
+  usually does not hold it.
+- Tests: `tests/python/test_event_assert_jxs_1387.py` (the decision, the gather with a fake
+  sshpass, the remote command run against a 1.2 MB fake log).
+
+## The sender retries a target it cannot reach yet (1.11.2026)
+
+- At boot camera-box starts before the network; the old sender failed `connect` once (ENETUNREACH)
+  and the link stayed off until a service restart. `start_retrying` / `JxsLink` retry every
+  `CONNECT_RETRY` (1 s) on a `jxs-connect` thread pinned off the capture core, log each error kind
+  once and `connected after N tries`; only `Unsupported` (an IPv6 target) stops it.
+- Live proof: a camera that boots with the new binary logs `connected after N tries` and then
+  `jxs send: fps=30`.
+
+## The cameraman HDMI preview is capped at 1080p (1.11.2026)
+
+- cam5's operator monitor prefers 3840x2160@60 in its EDID, which its link cannot carry ("no
+  signal"). setup-device STEP 10 puts `video=1920x1080@60` on the kernel cmdline (a global `video=`
+  applies to every connector); verify-device `(az)` grades the running cmdline and the fb0 size.
+  It takes effect at the next power-on, never a remote reboot. The runtime stopgap before that is an
+  `edid_override` (debugfs) with a 1080p EDID plus a connector re-detect, lost at reboot.
+
+## The JPEG XS path is PROVISIONED from the box facts (issue 1387, owner: no hand state)
+
+Until 31.10.2026 the whole path was hand state: the cambox target in a `/run` drop-in (gone at a
+reboot), the strih inputs' 36 ms pin only in the running OBS (the saved collection read 3), the strih
+`jxs-output.json` hand-written, the stream `JXS PGM src` created over WS. Now every value is a FACT and
+everything else is derived.
+
+**The four facts** (`scripts/strih-boxes/<box>.env`, validated by `strih_box_jxs_facts_ok` in the loader):
+
+| Fact | Role | strih-snv / stream-snv | PP boxes |
+|---|---|---|---|
+| `STRIH_JXS_CAMERAS` | strih: `N:PORT` per camera on the link, N in STRIH_CAMERAS, each N and port once | `2:7002 3:7003 5:7000` (the live ports, kept) | `none` |
+| `STRIH_JXS_CAMERA_PIN_MS` | strih: their genlock pin, 3..2000 (the jxs-source clamp) | `36` (ROZHODNUTE 6546700019: the fixed 100 ms grid age) | `none` |
+| `STRIH_JXS_PROGRAM_PORT` | stream: the UDP port `JXS PGM src` listens on | `7100` | `none` |
+| `STRIH_JXS_PROGRAM_PIN_MS` | stream: its genlock pin = the stream A/V pin | `1054` on stream-snv (read live 1.11.2026; re-measured values are this one line) | `none` |
+
+A value is `none` exactly when its partner is; the camera facts are `none` on the stream role and the
+program facts `none` on the strih role. **PP is deferred by the owner**: every PP file declares `none`,
+so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
+
+**The cambox (`scripts/lib/cambox-jxs-target.sh`).**
+- `cambox_jxs_target camN` = the venue strih's `STRIH_IP` + the camera's port, or `none`. It rides the
+  ONE camera -> venue-strih lookup of issue 1394: `_remote_log_strih_row` (remote-logging.sh) prints a
+  third field, the camera's `STRIH_JXS_CAMERAS` port (`strih_box_jxs_port_of`) or `none`.
+- setup-device resolves it right after the log sink (fail when none resolves) and STEP 7 writes
+  `/etc/systemd/system/camera-box.service.d/jxs.conf` (`[Service]` + `Environment=CAMERA_BOX_JXS_TARGET=...`)
+  next to genlock.conf, enable-only; a camera that stays NDI only gets the file REMOVED. The name equals
+  the runtime file's, so `/etc` masks `/run` for the same name.
+- verify-device `(ay)` (after `(ak)`, before `(ax)`): the file byte-identical to the renderer (or absent
+  for `none`), the LOADED unit environment's last `CAMERA_BOX_JXS_TARGET` (a missing daemon-reload, an
+  overriding drop-in), the RUNNING camera-box's `/proc/<MainPID>/environ`, and no `/run` drop-in that
+  sets it. A target on a camera its venue does not declare FAILs (hand state). Unread = FAIL.
+- **A live box: `bash scripts/lib/cambox-jxs-target.sh --apply-program camN`** piped into
+  `sshpass ... ssh -o UserKnownHostsFile=/dev/null root@<box> bash -s`. It reads first (PLAN line), writes
+  or removes the drop-in inside ONE rw window closed by `ro_window_close_cmds` (`.claude/rules/ro-window.md`),
+  then after the close removes the `/run` drop-ins that set the variable, daemon-reloads, RESTARTS
+  camera-box only when its running target differs (a ~3 s camera outage; never a start of a stopped
+  camera-box) and reads back the loaded + running target. A busy root fails by name and reloads /
+  restarts nothing. On cam2/3/5 today the declared target equals the running one: no restart.
+- Tests: `tests/python/test_cambox_jxs_target_1387.py` (the resolver over the real and synthetic fact
+  files, the drop-in, the gather + verdict on the fake box, `(ay)` executed, the apply on the issue-1407
+  fake read-only-root box with a systemctl wrapper modelling the loaded and running environment).
+
+**The workstation boxes (`scripts/lib/strih-jxs-provision.sh`, sourced by strih-provision.sh).**
+- setup-strih step 6, ONE call (`strih_jxs_provision`, setup-strih is at its 1000-line budget):
+  - installs `scripts/obs_jxs_inputs.py` to `/usr/local/bin` and renders `/opt/camera-box/jxs-seed.json`
+    (`strih_jxs_seed_manifest_json`): `JXS camN src` per camera (scene `JXS camN`, port, camera N, the
+    camera pin, `genlock_fifo` + `genlock_grid` ON, `jxs_max_bpp` 0 = full quality) on the strih role,
+    `JXS PGM src` (scene `JXS PGM`, the program port, camera = `STRIH_JXS_PROGRAM_STREAM_ID` 100 =
+    `CB_JXS_OUT_STREAM_ID_DEFAULT`, the program pin, grid OFF) on the stream role; none declared = no
+    manifest;
+  - strih role: upserts `~/.config/obs-studio/plugin_config/distroav/jxs-output.json` = enabled +
+    `jxs_target` = the VENUE's stream box (the stream-role fact file of the same `STRIH_VENUE`: its
+    `STRIH_IP` + `STRIH_JXS_PROGRAM_PORT`, `strih_jxs_program_target`) + `jxs_stream_id` 100. The
+    operator's `jxs_bpp_*` / `jxs_cores` / `jxs_pace_mbps` and any other key are KEPT; the render of the
+    live file is the live file byte-for-byte (147 bytes). Root works in the user's tree, so a symlinked
+    file is REFUSED, every read is O_NOFOLLOW + a regular-file check, and an unparseable file is moved
+    aside with `mv -T` (never copied through a planted link), then rewritten. A venue with no program
+    port gets an ENABLED file disabled (`"enabled": false`, every other key kept) so setup converges to
+    what verify grades; anything else is left alone. Written through `obs_box_write_if_changed` as the
+    desktop user, 0644. The plugin reads it at the next OBS start.
+- `strih-obs-start.sh` runs `obs_jxs_inputs.py --bootstrap` after the strih_scenes seed when the
+  manifest exists, best effort (a WARN never stops OBS):
+  - an existing JPEG XS input gets ONE `SetInputSettings` overlay of the declared keys that differ
+    (update-only; a matching input is a pure read). A `jxs_port` + `jxs_camera` pair that names ANOTHER
+    declared camera is the operator's pick and is kept (section "The Kamera list" below);
+  - an ABSENT input is created in its own holding scene `JXS camN` / `JXS PGM` (the slice-2/3 runbook
+    shape), never in an operator scene: `Cam N`, `Moderatori`, `MULTIVIEW` and `PRO` are the operator's
+    arrangement, and no tool writes the production scene;
+  - an input of another kind under the declared name is never touched (reported);
+  - `genlock_burn` is never written (the burn sweeps own it, TEST mode turns it on);
+  - nothing is written while OBS streams or records, or when that cannot be read (`obs_live`): a
+    latency never changes on air (owner rule); at the launch nothing is live yet;
+  - **pin ownership:** the declared pin is the FACT. A tool that writes another pin onto a JPEG XS
+    input over WS (an E2E measurement profile with `STREAM_PROG_SOURCE="JXS PGM src"`, a hand
+    calibration) is reverted at the next OBS start; a new pin is a fact change.
+- verify-strih item 49 gained `strih_jxs_config_verify_row "$USER_HOME"` (one line):
+  - `(jxs-seed)`: the installed manifest = the facts' render, the installed seeder = the checkout's;
+  - `(jxs-inputs)` + `(jxs-place)`: `obs_jxs_inputs.py --verify` against the FACTS' render over
+    obs-websocket (verify-strih's `WS_HOST`; `STRIH_JXS_OBS_PORT` is the test seam): every declared
+    input present, of the kind, the declared settings (EFFECTIVE = the kind's defaults under the explicit
+    ones: a live input whose `genlock_grid` sits at its default true reads on); a report-only NOTE names
+    the scenes it is shown in; an unreachable websocket is a NOTE only while no obs process runs
+    (`strih_operator_obs_running`, the studio-mode row's rule), else a FAIL;
+  - `(jxs-output-live)` (strih role, `--output-target`): the RUNNING `camera-box JPEG XS program` output
+    exists, is active and runs the derived target + stream id (`GetOutputStatus` / `GetOutputSettings`):
+    a stopped output or a WS re-target lives in OBS only, the file cannot show it;
+  - `(jxs-output)` (strih role): the file reads `enabled true`, the derived target, stream id 100; a
+    hand-enabled file on a venue that declares no program FAILs (setup step 6 disables it).
+- Read-only check of the live boxes on 31.10.2026: `obs_jxs_inputs.py --verify` from dev1 against
+  strih-snv and stream-snv PASSes every input with the declared facts, so the first setup-strih run there
+  is a pure read for the inputs and `unchanged` for jxs-output.json.
+- Tests: `tests/python/test_strih_jxs_provision_1387.py` (the facts + validator, the manifest, the
+  program target, the output render, step 6 end to end on temp paths, the verify rows, the wiring and
+  budgets), `tests/python/test_obs_jxs_inputs_1387.py` (the seeder against a fake obs-websocket, the
+  kind and keys pinned to jxs-source.cpp).
+
+### Supervisor apply (the lane was code-only)
+
+1. Camboxes cam2 / cam3 / cam5 (no E2E holding the rig lease, never a reboot):
+   `prog="$(mktemp)"; bash scripts/lib/cambox-jxs-target.sh --apply-program camN > "$prog"` (read it: the
+   target is baked in), then `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@<camN> bash -s < "$prog"`
+   -> `PLAN (...): ... drop-in write; runtime drop-ins: .../jxs.conf; camera-box runs 10.77.9.202:700N`,
+   the verified close, `removed the runtime drop-in`, `camera-box already runs the declared target -- not
+   restarted`, `READBACK (...): OK`. A `NOTE: ... also sets ...` line names any other hand knob the removed
+   runtime file carried (a slice-1 `CAMERA_BOX_JXS_BPP` etc.): it is dropped with it. `rm -f "$prog"`.
+   Then `./scripts/verify-device.sh CAMn`: `(ay)` PASS.
+2. strih-snv + stream-snv: the next genlock deploy runs setup-strih (or `sudo ./scripts/setup-strih.sh
+   --box <box>` from a checkout): step 6 prints `jxs-seed.json written`, `jxs-output.json unchanged` on
+   strih-snv. The inputs are healed at the next OBS start (a pure read on the live state: every live
+   input already matches); a hand `python3 /usr/local/bin/obs_jxs_inputs.py --bootstrap` refuses every
+   write while OBS streams or records. The saved collection gets the 36 ms pin when OBS next saves it
+   (on exit).
+3. `sudo ./scripts/verify-strih.sh --box <box>`: `(jxs-seed)`, `(jxs-inputs)` and (strih) `(jxs-output-live)`
+   + `(jxs-output)` PASS.
+4. After the stream A/V re-measure: change `STRIH_JXS_PROGRAM_PIN_MS` in `stream-snv.env`, merge, re-run
+   setup-strih on stream-snv, restart its OBS while it is off air (the pin is written at the launch,
+   never on air); never a WS-only pin change (the seeder heals it back at the next OBS start).
+
+## The Kamera list: the operator picks the camera (owner 1.11.2026, design 6558038959)
+
+Owner: "to co sa dalo povodne v obs vybrat ze ktory ndi stream do ktorej sceny tak teraz to uz nejde".
+
+- **The list.** `camera_box_jxs_source` has a first property `jxs_pick` "Kamera" (string list). Items:
+  - one per camera `/opt/camera-box/jxs-seed.json` declares, label `CAM<N> (UDP <port>)`, value
+    `<port>:<camera>`;
+  - then `Vlastné (UDP port a Camera id nižšie)` (value `custom`), which leaves the two raw numbers to
+    the operator.
+  Picking a camera writes `jxs_port` + `jxs_camera` (its modified callback, then a refresh). The
+  receiver reads only the pair, so `jxs_pick` is a view of it.
+- **Why the pick is re-derived when the properties open.** `obs_source_properties` runs every modified
+  callback once with the input's settings right after `get_properties`. A stale pick (the pair was
+  changed by the seeder, rig-mode or a WS write) would write its old pair back on a mere open.
+  - The properties view also applies the FIRST item on its own when the stored value is not in the
+    list (`AddList`, `idx == -1`).
+  - So `jxs_pick_list` sets the pick from the pair first: the pair's value when it is listed, else
+    `custom` (`cb_jxs_pick_shown`). The shown value is always an item of the list.
+- **The pure helpers** (`jxs-source-decide.h`): `cb_jxs_pick_value` / `_label` / `_parse` / `_shown`.
+  The parse takes exactly `<port>:<camera>`: ASCII digits, no sign, no leading zero, a digit cap,
+  port 1..65535, camera 0..255.
+- **The manifest** is read with `obs_data_create_from_json_file`. A missing or unparseable file gives
+  only the custom entry, never a crash. A pair is listed once.
+- **Limit (by design).** A UDP port binds one input, so two inputs on one camera leave the second one
+  black. Its state-table row then reads `UDP <p>, camera <c>: cannot listen (<error>)` in the status
+  bar tooltip. One camera in two scenes = the same input added to both scenes.
+- **The seeder.** `--bootstrap` keeps a pair that is ANOTHER declared camera's (`picked_camera`). It
+  heals an undeclared or mixed pair and every other key. `--verify` adds a `(jxs-pick)` NOTE (never a
+  FAIL) naming the camera shown, its declared one, and any other input on the same port.
+- **rig-mode puts the 1:1 mapping back** (the NDI issue-399 parity). TEST and EVENT call
+  `jxs_mapping_enforce <mode> "$STRIH_IP" "$OBS_WS_PASSWORD"` (`scripts/lib/jxs-mapping-enforce.sh`)
+  right after the strih NDI mapping.
+  - The lib finds the strih-ROLE fact file whose `STRIH_IP` is that address and renders its manifest
+    with `strih_jxs_seed_manifest_json` (dev1 has no `/opt/camera-box`).
+  - It then runs `obs_jxs_inputs.py --enforce-mapping`: ONE overlay of the pair keys that differ, a
+    read-back, nothing while OBS streams or records, no create and no other key.
+  - Exit codes: 3 = a mapping not proven, 1 = OBS unreachable, 2 = a bad manifest.
+  - No strih at the address, or a strih that declares none, is a NOTE and rc 0.
+  - The rc is recorded (`_jxsmap_rc`), warned by name and folded into the exit: an EVENT RESULT line,
+    the Discord ⚠️ line `nastavenie JPEG XS kamier na strihu`, and a TEST RESULT line before the
+    "WHOLE CHAIN" verdict.
+- **Tests.**
+  - `tests/distroav_jxs_pick_1387.rs`: the helpers' truth table, and the dropdown block LIFTED out of
+    the source and run against a fake libobs `obs_data` (every reference released), plus the anchors.
+  - `tests/python/test_jxs_camera_pick_1387.py`: the seeder, verify, enforce + CLI, the lib with a
+    fake seeder, and the mode bodies through the issue-1407 harness.
+- **Deploy:** a vendored DistroAV change, so the FULL strih bundle on strih-snv. Then check by hand:
+  open a `JXS camN src` properties dialog, read the list, pick another camera, and read the
+  `listening on UDP` line in the OBS log.
+
+## The E2E, rig-mode TEST and the soak measure the JPEG XS path (design 6558387590, its slice 1b)
+
+The full-path E2E had never run on the JPEG XS rig: its burns, pins and checks named `NDI camN` /
+`NDI 2ME PGM`, which are not on air there (the scenes show `JXS camN src` / `JXS PGM src`).
+
+- **ONE resolver, the facts decide** (`scripts/lib/program-inputs.sh`, `program_inputs_resolve STRIH
+  STREAM [SOURCE_CAM]`). The host -> box is `obs_fleet_name_for_host` + a fact file named after it.
+  - The strih's `STRIH_JXS_CAMERAS` covers EVERY `STRIH_CAMERAS` camera and the stream declares a
+    `STRIH_JXS_PROGRAM_PORT` -> `E2E_PROGRAM_PATH=jxs`, `CAMERA_STRIH_JXS_SET` (cam names),
+    `STRIH_PROG_SOURCE` (`JXS camN src` of the source camera), `STREAM_PROG_SOURCE` (`JXS PGM src`),
+    plus `PROGRAM_INPUTS_STRIH_BOX` / `_STREAM_BOX` / `_STREAM_PIN_MS`.
+  - Neither box declares JPEG XS (PP, a Windows box with no fact file) -> `ndi`: nothing preset, the
+    callers' own NDI defaults fire, every list byte-identical.
+  - Anything between (an NDI camera beside JPEG XS ones, a JPEG XS strih with a stream that receives
+    no JPEG XS program, the reverse) is a MIXED venue: refused, naming the cameras / the box.
+  - Each variable is set only when UNSET (an env override wins); an `E2E_PROGRAM_PATH` the facts
+    contradict refuses. `program_path_ndi` is true when nothing resolved (the pre-1387 shape).
+- **The one naming rule** `strih_jxs_input_name` lives in `strih-box-facts.sh` (moved from
+  strih-jxs-provision.sh; the seed manifest still uses it). camera-set.sh's `camera_strih_input camN`
+  returns the JPEG XS name for a camera in `CAMERA_STRIH_JXS_SET`, else `NDI camN`; the four CSV
+  helpers (`camera_active_ndi_sources_csv`, `camera_align_ndi_sources_csv`, both `_excluding_csv`)
+  follow it under their old names, so the frozen gate, the settle-wait, the freeze watch and the
+  sweeps read the measured inputs.
+- **recording-e2e.sh:** the resolve right after `STRIH_LX_GATE_PREFIX` (exit 2 on a refusal, before
+  any rig mutation), together with `program_inputs_refuse_ndi_only_optins` (`COLD_CUT_BYPASS_CAM`,
+  `MEASUREMENT_EQ=1`, `PRERECORD_PHASE_CALIBRATE=1` refuse on JPEG XS: their pins are facts);
+  - both temporary burn units get the camera's own target: `cambox_jxs_burn_setenv_resolve_cmd` reads
+    the LOADED camera-box unit's `CAMERA_BOX_JXS_TARGET` (the facts' jxs.conf) into
+    `\$CAMBOX_JXS_BURN_SETENV` next to `\$CPU_AFFINITY_BURN_PROPERTY` (IPv4:port only, else a
+    WARNING and NDI only), so the burned frame reaches strih over JPEG XS (the burn thread's offer is
+    slice 1a);
+  - the all-camera burn targets use `camera_strih_input`;
+  - the NDI pin steps (the #900 re-anchor, the #893 floor gate, the floor-3 align) carry
+    `&& program_path_ndi`;
+  - **`[4i/8jxs]`** (`program_inputs_jxs_preflight`, BLOCKING on JPEG XS): `obs_jxs_inputs.py
+    --verify` against the facts' manifest (rendered on dev1 with `strih_jxs_seed_manifest_json`) on
+    strih + stream, `--output-target` (the venue's program target, stream id 100) on the strih. A
+    FAIL row, an unreachable websocket NOTE and a `(jxs-pick)` NOTE (a camera off its declared input:
+    the run would measure the wrong camera; `rig-mode.sh test` puts it back) abort; `(jxs-place)` is
+    fine. Then (b) `qr_align_pins.py --measure-only` over the active cameras' JPEG XS inputs, saved to
+    `jxs-measure-<RUN_ID>.json` and graded COMMON / SPREAD / UNKNOWN -- **REPORT-ONLY**: the measure
+    counts 60 fps painter frames while a JPEG XS camera input runs on the 30 fps grid, and no rig run
+    has shown how it reads there yet;
+  - `program_inputs_rendered_verify` (BLOCKING, before StartRecord, the issue-1204 pattern): the strih
+    program scene, every ALL_CAMBOX sweep scene and the stream program scene must render the measured
+    input (`obs_phase2.py program-rendered-input --scene`, which descends `Development` -> `PRO`);
+    every scene is read before it fails;
+  - the #856 A/V apply on JPEG XS is a RECOMMENDATION (`program_inputs_av_pin_hold`, right after the
+    issue-1482 feed hold in cleanup): `av_sync_calibrate.required_delay_ms(<the fact pin>, <offset>)`
+    printed as `STRIH_JXS_PROGRAM_PIN_MS=<new>` (stderr + `av-sync-jxs-pin-recommendation-<RUN>.txt`),
+    `AV_SYNC_APPLY_OFFSET_MS` cleared with a HOLD reason; never a runtime pin write. Applying it =
+    the fact change + setup-strih on the stream box + an OBS restart off air (runbook step 4 above);
+  - the frozen-gate heredoc gets the measured CSV as a 5th argument; a JPEG XS input has no
+    `ndi_source_name`, so the painter box is excluded by its CAMERA number (`CAM2 (usb)` -> cam2);
+    `frozen-camera-gate.py` maps `JXS camN src` to `Cam N` for its warm-up.
+  - mv-reverify: `mv_reverify_input` / `mv_reverify_ndi_cures` (mv-reverify-escalate.sh); detection
+    and the received= escalation probe read the measured input; the reattach, the proactive reset and
+    the finder heal-wait (NDI `ndi_source_name` cures) are skipped on a JPEG XS input; the strih OBS
+    restart stays.
+- **rig-mode.sh:** the resolve sits between `STREAM_IP=` and `STRIH_PROG_SOURCE=` (above the source
+  guard), so TEST burns follow the JPEG XS inputs; a refusal is a WARNING and the NDI defaults stay
+  (an EVENT switch must still run). EVENT item 6 reads `$STREAM_PROG_SOURCE` against the box fact
+  `STRIH_JXS_PROGRAM_PIN_MS` on JPEG XS (av-sync-last.json on NDI). `jxs_live` and
+  `jxs_mapping_enforce` are unchanged.
+- **av-soak.sh:** resolves once (`die 3` on a refusal); each camera's input is `camera_strih_input`
+  unless `AV_SOAK_STRIH_INPUT_FMT` is set; `STREAM_PROG_SOURCE` still overrides.
+- **Stays NDI on purpose:** the issue-399 NDI mapping, the NDI cadence heal, the #924 per-input burn
+  clears (the `sweep-off` covers JPEG XS) and imag -- the backup path's health.
+- **Testing gotcha:** never `strih_box_known | grep -qxF` under a caller's pipefail: grep's early
+  exit SIGPIPEs the lister and a found box reads as missing (a parallel-run flake; the test pads the
+  fact dir with 8000 names to make it certain). The lib tests a file instead.
+- Tests: `tests/python/test_program_inputs_1387.py` (every function under `set -euo pipefail`, the
+  resolver over real + edited fact files, fakes for obs_jxs_inputs / qr_align_pins / obs_phase2 /
+  systemctl / systemd-run, the frozen heredoc run, rig-mode sourced, the e2e wiring).
+- **Live acceptance (supervisor, SNV, TEST mode):** the E2E log reads `[program-inputs] ... the jxs
+  path`, one `[jxs-burn] camN: the burn unit sends JPEG XS to <strih>:<port>` per camera, the
+  `[4i/8jxs]` PASS rows, the `(b) REPORT-ONLY` verdict (record it: flipping (b) to blocking needs it),
+  four `[rendered-inputs]` lines, and the strih + stream recordings decode the camera burns +
+  911002 / 911004. Open: (b) blocking.
+
+## The E2E's BLOCKING JPEG XS link continuity gate (design 6558387590, its slice 2)
+
+Every JPEG XS link the run measures must lose nothing over the recording window, the
+program-audio continuity gate's shape (`obs-vban-receive.md`). A concealed slice is a LOST slice
+(the owner's 23.10.2026 audio ruling): concealment hides it on screen, never in the verdict.
+
+- **The decision** is the pure `scripts/jxs_link_continuity.py` (pytest
+  `tests/python/test_jxs_link_continuity_1387.py`, every line rendered from the SHIPPED C format
+  strings by `tests/python/jxs_link_fakes_1387.py`). Per link, from the 5 s window lines (every count
+  a per-window DELTA):
+  - which windows count: the first written after the START byte mark through the first written at
+    or after the STOP mark (the window straddling each edge is counted: one window of slack);
+  - inputs (`jxs-source '<name>'`): `lost_slices + concealed + undecodable + dropped_unread + foreign`
+    must be 0, and `reopens` 0 (a reopen restarts the receiver's counters: what came before it was
+    never counted);
+  - the strih program output (`jxs-output 'camera-box JPEG XS program'`, the name imported from
+    `obs_jxs_inputs.OUTPUT_NAME`): `dropped_busy + not_taken + refused + send_errors + encode_errors`
+    must be 0;
+  - coverage: no counted window with `frames=0`; no gap over `GAP_MAX_S` (one period + 1 s) between
+    two window lines from the last one before the start to the closing one; a link with no window
+    before the start may begin up to one window late, one with no closing window (once the log went
+    on) may end up to one window early; a hole event of the link inside the window FAILS (`not
+    connected`, `receiver failed`, `listening on UDP`, `cannot listen`, `settings changed --
+    reopening`; the output's `started --`, `stopped`, `cannot start the sender`, `did not start`);
+  - report-only: `fec_repaired` (rebuilt, nothing lost), `decoder_reopens` (a bpp step), `reports`,
+    `report_errors`, the output's `stamp_dup` / `offered` / `taken` / `fec_sent`, the lowest fps;
+  - UNKNOWN (fails the run): no window line of the link in the window (the link is missing), a gated
+    token absent, an unreadable box, a missing mark, a new log after the start (OBS restarted), a log
+    shorter than the stop mark. `retryable` = the closing window is not in the log yet.
+  The block `jxs_link_continuity` = every link's result; FAIL wins over UNKNOWN, PASS only when all
+  passed. Midnight is the program-audio module's `file_order_times`.
+- **The E2E side** is `scripts/lib/jxs-link-continuity.sh` (pytest
+  `tests/python/test_jxs_link_continuity_e2e_1387.py`: a fake READ_CMD RUNS the real remote text in a
+  fake home per host). Both functions do nothing on the NDI path (`program_path_ndi`).
+  - `jxs_link_continuity_mark start|stop DIR STRIH STREAM` sits right after each program-audio mark;
+    per box `<newest log name>\t<size in bytes>\t<newest HH:MM:SS.mmm>`, fail-open (a missing mark is
+    UNKNOWN at the gate).
+  - `jxs_link_continuity_gate HERE STRIH STREAM DIR VERDICT` in BOTH tails right after the YouTube gate
+    line, folded `if ! ...; then [ "$GATE" -ne 0 ] || GATE=1; fi`. It reads per box the bytes
+    `[start - LOOKBACK, stop + CLOSE)` (256 KiB each by default), merges the block into the verdict
+    JSON and retries (bounded, 60 s) while a closing window is not in the log yet.
+  - **BOUNDED, never a whole-log read** (owner 1.11.2026): a mark is `stat -c %s` + a 64 KiB `tail -c`
+    seek, never `wc -l` (the line-count readers `strih_log_line_count` / the program-audio mark scan the
+    whole file on the box); the read is `nice -n 19 tail -c +N | head -c LEN | grep -a -b` of the JPEG XS
+    lines, so only those lines and their byte offsets leave the box. A read cut mid-line (the first
+    line at a nonzero FROM, the last one at the cap or at the file's end) is dropped.
+  - Transport: `stream_box_exec` for BOTH boxes (plain ssh by the obs-fleet class), `timeout`-bounded;
+    a Windows-class box is UNKNOWN before any contact (no JPEG XS there). Credentials
+    STRIH_USER/STRIH_PW, STREAM_USER/STREAM_PW.
+  - Measured inputs: ALL_CAMBOX = every active camera on `CAMERA_STRIH_JXS_SET`
+    (`camera_active_excluding "$PREFLIGHT_EXCLUDED_CAMS"` + `camera_strih_input`, cam2 included: its
+    burn unit sends JPEG XS too); single camera = `STRIH_PROG_SOURCE`; stream = `STREAM_PROG_SOURCE`.
+    No input resolved on a box = UNKNOWN.
+- **The report** (`scripts/e2e_report_jxs_link.py`, pytest `tests/python/test_e2e_report_jxs_link_1387.py`):
+  `_run_passed` reads the block; the summary names each failing link (`strih vstup 'JXS cam3 src':
+  concealed +1 (zamaskované = STRATENÉ)`) or `NEOVERENÉ = ZLYHANIE`; the full report has a
+  `📡 Kontinuita JPEG XS liniek` section with one line per link. A PASS block keeps the 3-line PASS.
+- The 703 byte window (merge -> `exit "$GATE"`): 12608 of 14000 bytes after this gate.
+- **Known limits:** the camera senders' own `jxs send` counters are not read (one more ssh per camera);
+  a whole frame whose every datagram was lost never reaches the assembler, so no input counter sees it
+  (the genlock FIFO's `stamp_gap` does); `not_taken` also counts an OFF-GRID frame, so a strih canvas
+  above 30 fps would read every second frame as a loss (strih-snv runs 30 fps); `stamp_dup` (two
+  frames in one slot after a render lag: the slot before had none) is report-only; a reopen just
+  before the start reads as a gap into the first counted window (conservative).
+- **Live acceptance (supervisor, SNV, TEST mode):** the E2E log reads two `[jxs-link] ... window start
+  mark = byte N` lines (strih + stream) before `[5/8]`, two `stop` lines after StopRecord, and after the
+  merge `JPEG XS link continuity: PASS` with one line per camera link, the output and `JXS PGM src`;
+  the verdict JSON carries `jxs_link_continuity`.
+
+## Design 6558387590 slice 3: the report, the handover check and the frozen-input watchdog follow the resolver
+
+- **The report** (`e2e_discord_report.py`): recording-e2e.sh hands what the resolver set through the
+  existing `e2e_discord_report_send` call (args 8-11: `${E2E_PROGRAM_PATH:-ndi}`, the strih + stream
+  program inputs, `PROGRAM_INPUTS_STREAM_PIN_MS`; the sender drops an unknown path, a composer usage
+  error would cost the whole report). The full report gets a `Merané vstupy (cesta JPEG XS|NDI)` header
+  line, `Video sync JPEG XS kamier`, and the stream hold line names the input the pins snapshot READ
+  (`latency_pins_snapshot.py --stream-input`, recorded as `stream_hold_source`): on the JPEG XS path it
+  is graded against the fact `STRIH_JXS_PROGRAM_PIN_MS`, never av-sync-last.json (the NDI pin's record).
+  The per-camera strih cell reads `strih NDI záloha=` there (the snapshot still reads the `NDI camN`
+  backups; the JPEG XS camera pin is the one fact). A caller that passes nothing renders as before; the
+  phone summary never changes. Tests: `tests/python/test_e2e_report_inputs_1387.py`.
+- **The handover check** (`rig-dev-handover-check.sh` item `jxs`, `.claude/rules/rig-dev-handover-check.md`):
+  `program_inputs_jxs_box_rows` (program-inputs.sh, sharing `_program_inputs_verify_run` with the
+  [4i/8jxs] grade) runs `obs_jxs_inputs.py --verify` against each box's facts render (strih + its program
+  output, stream) -> raw rows, or ONE `NONE` row for a box that declares no JPEG XS (never dialled); then
+  the EVENT facet (`event_jxs_windows_json`, bounded) on the declaring boxes only. FAIL / `(jxs-pick)` /
+  a dead or stale link = FORGOT naming it; unreachable / unread / malformed = UNKNOWN. Tests:
+  `tests/python/test_rig_dev_handover_jxs_1387.py`.
+- **The frozen-input watchdog** (`.claude/rules/frozen-input-watchdog.md`): its stream instance watches
+  the resolved `JXS PGM src`, its strih instance always watches every declared `JXS camN src` beside the
+  enumeration (`frozen_input_watch_list`). Tests: `tests/python/test_frozen_input_jxs_1387.py`.
+- **Since:** the strih instance's cure text names the JPEG XS cure first (77304b7bb1), and each pass
+  reads the receiver log ONCE at nice 19 (`frozen-input-watchdog.md`, issue 1387).
+- **Open:** the per-camera strih pins in the report are the NDI backups' (a JPEG XS per-camera pin read
+  would need the naming rule in python).
+
 ## Supervisor runbook: the saturation test (owner scenario, strih-snv -> stream-snv)
 
 Prerequisite: the FULL strih bundle on strih-snv AND stream-snv from the same CI run (send + receive
@@ -1080,6 +1568,14 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
   sign handling fast/full doubles the cost; significance coding off saves ~1 ms but codes less
   efficiently. The defaults (rc 1, signs 0, sigf 1, vpred 0, deadzone) stay.
 - SCHED_FIFO 50 on an idle core pair: 13.5/14.0 ms vs 13.8/14.8 SCHED_OTHER.
+- **The library itself must never set a realtime policy (live 31.10.2026).** Upstream
+  `svt_jxs_create_thread` raised every worker to SCHED_FIFO 99 when `geteuid() == 0`; camera-box runs
+  as root, so until the vendored patch (CAMERA-BOX-VENDOR.md, pinned by
+  `the_vendored_codec_never_raises_its_workers_to_a_realtime_policy`) the cambox encoder ran ABOVE the
+  capture thread (four `jxs-feed` threads FF 99 in `ps -L` on cam5, verify-device `(ah)` FAIL on
+  cam2/3/5). Every root-run `jxs-encode-bench` number before that patch (the N150 table below, its
+  "SCHED_OTHER" row included) was measured with FIFO 99 workers. OBS runs as the desktop user, so the
+  strih program output was never affected.
 - **The encoder SCHED_FIFO is OPT-IN** (`CAMERA_BOX_JXS_FIFO_PRIO`, `affinity::JXS_ENCODER_FIFO_PRIORITY`
   = 50 is the suggested value, below the capture's 90). The feeder raises itself with
   `affinity::set_current_thread_fifo_inherited` (FIFO WITHOUT reset-on-fork) right before it opens
@@ -1265,10 +1761,28 @@ line-rate ~8-12 ms. `first_arrival_ms` should stop wandering. The latency p50 sh
 - One receiver per cambox; only YUYV captures are sent (another format logs one WARN).
 - A frame whose slice count (a geometry change) or picture header packet (a bpp change) differs
   from the decoder's restarts it; that frame decodes after its last packet, not slice by slice.
-- In TEST mode with the cam1 QR burn active, NDI carries the burned frame and JPEG XS the
-  unburned capture: a pixel comparison of the two during an E2E differs by the burn.
+- In burn mode (the E2E's temporary probe unit) NDI and JPEG XS both carry the burned frame
+  (slice 1a, "Burn mode" above); the temporary unit gets the camera's own
+  `CAMERA_BOX_JXS_TARGET` from its loaded camera-box unit (slice 1b,
+  `cambox_jxs_burn_setenv_resolve_cmd`).
 - `SO_SNDBUF` asks for 4 MB; the kernel caps it at `net.core.wmem_max` (the "link ON" line logs
   what was granted). A frame is ~1.04 MB, so a small grant makes `send` block the `jxs-send`
   thread (never the capture thread) until the NIC drains it.
 - The PNG dump is a stored-deflate writer in `src/jxs_link/png.rs` (no compression, no
   dependency): the probe needs only the `jxs` feature, not the probe feature's `image` crate.
+
+## One camera, one receive (owner 1.11.2026)
+
+"musi byt bud jedno alebo druhe a nie ze obdiva": a camera in `STRIH_JXS_CAMERAS` has no NDI receive, there is no backup
+receiver. `obs_jxs_inputs.py --bootstrap` (every OBS start) clears `NDI cam<N>`'s `ndi_source_name`, never on air;
+`--verify` FAILs a twin that still receives (`(jxs-one-input)`, verify item 49); `set-ndi-mapping.py` drops those
+cameras from its default map by the box facts, so no mapping, heal or rig-mode run re-arms them. Measured: the three
+idle receivers cost 4.3 ms of the 33 ms render budget (26.7 -> 22.4 ms, 1.11.2026).
+
+## The StopRecord frame (owner 2.11.2026)
+
+Recording on strih stays NVENC. Tearing it down at StopRecord costs the program one frame (`lagged=1`, `dropped_busy=1`):
+3 of 3 stops with NVENC, 0 of 3 with x264, not the graphics lock (holds of 0.01-3.9 ms did not cure it, that fix was
+reverted). It does not happen during production, so `jxs_link_continuity.py` accepts at most 1 `dropped_busy` / `not_taken`
+over the output's last two windows together (the stop mark comes ~2 s after StopRecord) and reports it as `stop_transient`. The counter stays in the block; everything else
+stays RED. The root stays open on the ticket.

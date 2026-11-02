@@ -125,7 +125,7 @@ STOP_MARGIN_S = 1.0  # a window must end this long before a StopStream (the VOD 
 CLIP_TIMEOUT_S, PROBE_TIMEOUT_S, YTDLP_TIMEOUT_S, URL_TIMEOUT_S = 600, 1800, 3600, 60
 # restreamer reports the VOD done at YouTube `uploaded` (0.29.57), which can come before the
 # 1080p + audio formats are listed: the fetch retries every YTDLP_RETRY_S until YTDLP_READY_S.
-YTDLP_RETRY_S, YTDLP_READY_S = 30, 600  # inside the 1500 s tool timeout
+YTDLP_RETRY_S, YTDLP_READY_S = 30, 600  # inside the 2400 s tool timeout
 
 
 def join_parts(parts):
@@ -215,7 +215,9 @@ def av_from_outputs(rec_j, vod_j, dur_s=AV_CLIP_S, scaled=(), heights=None):
         if name in scaled:
             src = f"{(heights or {}).get(name, '?')}p"
             audio = j.get("audio_markers_decoded")
-            if audio is not None and matched < audio - AV_SCALED_MARKER_SLACK:
+            # audio can decode a marker at either edge of the cut that no frame of the clip shows
+            fits = int(dur_s / AV_MARKER_PERIOD_S)
+            if audio is not None and matched < min(audio, fits) - AV_SCALED_MARKER_SLACK:
                 raise ValueError(f"the {AV_READ_HEIGHT}p read of the {src} {name} matched {matched} of the {audio} "
                                  f"audio markers it decoded (a scaled read is never re-read at {src}: A/V not "
                                  "measured)")

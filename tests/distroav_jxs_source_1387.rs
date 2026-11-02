@@ -87,7 +87,7 @@ int main(void)
 	EXPECT(cb_jxs_max_bpp(13) == 0u);
 	EXPECT(cb_jxs_max_bpp(-2) == 0u);
 	/* only a receiver setting reopens the receiver */
-	struct cb_jxs_config a = {7000, 5, 0};
+	struct cb_jxs_config a = {7000, 5, 0, 3};
 	struct cb_jxs_config b = a;
 	EXPECT(!cb_jxs_reopen_needed(a, b));
 	b.port = 7001;
@@ -96,6 +96,15 @@ int main(void)
 	EXPECT(cb_jxs_reopen_needed(a, b));
 	b = a; b.max_bpp = 6;
 	EXPECT(!cb_jxs_reopen_needed(a, b)); /* the cap goes into the next report, no reopen */
+	b = a; b.latency_ms = 1087;
+	EXPECT(!cb_jxs_reopen_needed(a, b)); /* the late bound goes into the next report too */
+	/* live 31.10.2026: a frame is LATE only past what this input's genlock FIFO holds, never
+	 * under 100 ms (a 1087 ms program input read 100 ms as late and stepped its sender down) */
+	EXPECT(cb_jxs_late_ms(3) == 100u);
+	EXPECT(cb_jxs_late_ms(100) == 100u);
+	EXPECT(cb_jxs_late_ms(101) == 101u);
+	EXPECT(cb_jxs_late_ms(1087) == 1087u);
+	EXPECT(cb_jxs_late_ms(2000) == 2000u);
 	/* bits per pixel x 100 from the window's payload: 1080p at 8 bpp = 2073600 bytes a frame */
 	EXPECT(cb_jxs_bpp_x100(30ull * 2073600u, 30, 1920, 1080) == 800u);
 	EXPECT(cb_jxs_bpp_x100(30ull * 1036800u, 30, 1920, 1080) == 400u);
@@ -225,9 +234,20 @@ fn the_genlock_whitelist_keys_apply_through_the_runtime_resolved_exports() {
     for key in ["\"genlock_fifo\"", "\"genlock_latency_ms_src\""] {
         assert!(s.contains(key) && ndi.contains(key), "{key}");
     }
-    // no burn on this source: the burn sweeps enumerate ndi_source inputs only, a burn left on here
-    // would escape every leak guard
-    assert!(!s.contains("\"genlock_burn\"") && !s.contains("set_genlock_burn"));
+    // live 31.10.2026: the measurement burn applies here like on an ndi_source (the sweeps
+    // enumerate both input kinds, obs_burn_filter.BURN_INPUT_KINDS), default off, applied live
+    assert!(s.contains("\"genlock_burn\"") && ndi.contains("\"genlock_burn\""));
+    assert!(s.contains("\"obs_source_set_genlock_burn\""));
+    // issue 1387: a JPEG XS camera (30 fps, N == 1) takes the NDI cameras' fixed grid release
+    // through the per-source opt-in, default ON (the camera behaviour), applied live
+    assert!(s.contains("#define PROP_GENLOCK_GRID \"genlock_grid\""));
+    assert!(s.contains("\"obs_source_set_genlock_grid\""));
+    let defaults = function_body(&s, "static void jxs_source_getdefaults(");
+    assert!(defaults.contains("obs_data_set_default_bool(settings, PROP_GENLOCK_GRID, true);"));
+    let update = function_body(&s, "static void jxs_source_update(");
+    assert!(
+        update.contains("g.set_grid(s->source, obs_data_get_bool(settings, PROP_GENLOCK_GRID));")
+    );
     let defaults = function_body(&s, "static void jxs_source_getdefaults(");
     assert!(defaults.contains("obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true);"));
     assert!(defaults.contains(
@@ -342,6 +362,18 @@ fn the_connected_flag_follows_the_frames_on_every_path_and_max_bpp_never_reopens
     }
     // a new max bpp goes through the report, never a reopen
     assert!(thread.contains("cbjxs_set_max_bpp(rx, cfg.max_bpp);"));
+    // the late bound follows the input's genlock latency: set at every open and on a change
+    assert_eq!(
+        thread
+            .matches("cbjxs_set_late_ms(rx, cb_jxs_late_ms(cfg.latency_ms));")
+            .count(),
+        2,
+        "set after the open and on a latency change"
+    );
+    let update = function_body(&s, "static void jxs_source_update(");
+    assert!(update.contains(
+        "cb_jxs_clamp_latency_ms(obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC))"
+    ));
     assert!(
         thread.contains("cbjxs_recv_buffer_bytes(rx)"),
         "the start line names the buffer"

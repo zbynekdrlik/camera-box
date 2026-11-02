@@ -142,7 +142,9 @@ dev1 and the VOD decode never finished inside the tool's 1500 s.
   `scale=-2:1080`, a scale of the same frames: the frame count is unchanged), a 1080p VOD as before.
   The A/V block names each read: `rec_read` "1080p of 2160p", `vod_read` "1080p".
 - **Guard:** a scaled read must pair every audio marker IT decoded (`audio_markers_decoded`, minus
-  `AV_SCALED_MARKER_SLACK` 1 at the clip's edge), else `ValueError` -> that window's A/V is UNKNOWN.
+  `AV_SCALED_MARKER_SLACK` 1 at the clip's edge), capped at the markers the cut's length fits
+  (`int(dur / 0.5)`: a 25.097 s cut decodes 50-52 and pairs its 50, E2E 41372661460 w05), else
+  `ValueError` -> that window's A/V is UNKNOWN.
   It is never re-read at the original size. A scale only loses VIDEO ticks, so the read's own audio
   count is the right bar. A theoretical `dur / 0.5` is the wrong one (review round 3): markers that
   straddle the cut are lost at both ends, e.g. the committed 40 s base-rec-B decoded 79 and paired 78,
@@ -264,3 +266,13 @@ dev1 and the VOD decode never finished inside the tool's 1500 s.
   QR uses EQUAL-GRAY module colours ((0,255,255) on (255,255,158)), a yellow-on-white QR still
   reads in gray. A synthetic dup/skip test needs enough frames for anchor pairs (a 5-frame toy
   window has none and is, correctly, an error).
+
+## The audio search (`ncc_best`, 2.11.2026)
+
+Each window is normalised by its OWN variance, never by the energy around one segment mean: a block on
+a slow offset (E2E 41367030032 w07, nearly all energy under 20 Hz) read r=0.58 at a false lag, its true
+position 0.97. A window with only an offset left reads 0 (`NCC_FLAT_FRACTION`). To check one flagged
+block, compare it at a FIXED lag: correlation, both levels and the residual in 20 ms steps.
+
+In a scratch script keep the script's own directory free of other `.py` files: python puts it first on
+`sys.path`, and an old scratch `bisect.py` ran on `import numpy` (2.11.2026, it started dev1 watchdogs).

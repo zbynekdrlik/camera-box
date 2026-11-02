@@ -389,6 +389,28 @@ camera_active_sweep_pairs() {
   printf '%s' "$out"
 }
 
+# camera_strih_input <camN> -> prints (stdout, no newline) the strih OBS input that carries this
+# camera's picture on the MEASURED path (issue 1387 slice 1b): `NDI camN` (the issue-753 1:1 NDI
+# input) unless camN is in CAMERA_STRIH_JXS_SET (the venue's JPEG XS cameras, set once by
+# scripts/lib/program-inputs.sh program_inputs_resolve from the box facts), then the JPEG XS input
+# through the ONE naming rule strih_jxs_input_name (scripts/lib/strih-box-facts.sh, loaded in a
+# subshell when the caller has not). An empty CAMERA_STRIH_JXS_SET (the PP venue, every caller that
+# never resolved) keeps every derived list byte-identical to the NDI names. A FACT lookup like
+# camera_strih_route: it never gates on CAMERA_ACTIVE_SET. The four CSV helpers below follow it.
+camera_strih_input() {
+  local cam="${1:-}" name
+  case " ${CAMERA_STRIH_JXS_SET:-} " in
+    *" ${cam} "*) ;;
+    *) printf 'NDI %s' "$cam"; return 0 ;;
+  esac
+  if declare -F strih_jxs_input_name >/dev/null; then
+    name="$(strih_jxs_input_name "${cam#cam}")" || return 1
+  else
+    name="$( . "$(dirname "${BASH_SOURCE[0]}")/lib/strih-box-facts.sh" && strih_jxs_input_name "${cam#cam}")" || return 1
+  fi
+  printf '%s' "$name"
+}
+
 # camera_active_ndi_sources_csv -> prints (stdout) "NDI cam1,NDI cam2,..." -- a comma-joined
 # strih NDI-input list, one per camera in CAMERA_ACTIVE_SET. Used as the frozen-camera-gate's
 # bash-level fallback default (scripts/recording-e2e.sh) when its own python-derived list comes
@@ -396,7 +418,7 @@ camera_active_sweep_pairs() {
 camera_active_ndi_sources_csv() {
   local cam out=""
   for cam in $CAMERA_ACTIVE_SET; do
-    out="${out:+$out,}NDI $cam"
+    out="${out:+$out,}$(camera_strih_input "$cam")"
   done
   printf '%s' "$out"
 }
@@ -409,7 +431,7 @@ camera_active_ndi_sources_csv() {
 camera_align_ndi_sources_csv() {
   local cam out=""
   for cam in $CAMERA_ALIGN_SET; do
-    out="${out:+$out,}NDI $cam"
+    out="${out:+$out,}$(camera_strih_input "$cam")"
   done
   printf '%s' "$out"
 }
@@ -428,7 +450,7 @@ camera_align_ndi_sources_excluding_csv() {
     case " ${excluded} " in
       *" ${cam} "*) continue ;;
     esac
-    out="${out:+$out,}NDI $cam"
+    out="${out:+$out,}$(camera_strih_input "$cam")"
   done
   printf '%s' "$out"
 }
@@ -463,7 +485,7 @@ camera_active_excluding() {
 camera_active_ndi_sources_excluding_csv() {
   local excluded="${1:-}" cam out=""
   for cam in $(camera_active_excluding "$excluded"); do
-    out="${out:+$out,}NDI $cam"
+    out="${out:+$out,}$(camera_strih_input "$cam")"
   done
   printf '%s' "$out"
 }

@@ -300,6 +300,8 @@ pub fn run_painter(
     // cores 0-2) so on the painter box (.62) generation can never steal from the
     // capture core. The non-capture cores are derived from /sys (never hardcoded).
     crate::affinity::pin_off_capture_core("painter");
+    // Issue 1387: a missed vsync slows the 60 Hz marker index, so nothing SCHED_OTHER may delay it.
+    crate::painter_priority::raise_paint_thread_fifo();
 
     let mut presenter: Box<dyn Presenter> = open_presenter(
         params.presenter,

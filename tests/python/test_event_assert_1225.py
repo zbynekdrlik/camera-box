@@ -47,6 +47,8 @@ def _clean_facts():
         "latency_calibrated_ms": 925,
         "ndi_mismatches": [],
         "artifacts_existing": [],
+        # issue 1387: the JPEG XS item (every link up)
+        "jxs_windows": {"strih": {"head": "13:30:10.559", "lines": ["13:30:06.594: [distroav] jxs-source 'JXS cam5 src': fps=30.00 frames=150 lost_slices=0"]}},
     }
 
 

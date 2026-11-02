@@ -159,6 +159,39 @@ NOT a duplicate script — set via env:
 cadence, offset from the #1052 stream instance). Dev1-side only; nothing deployed to strih. Smoke-test:
 `FROZEN_INPUT_ENUMERATE=1 FROZEN_INPUT_RECEIVER='strih|10.77.9.202' FROZEN_INPUT_SENDER=strih FROZEN_INPUT_ALERT_TAG='#1069' FROZEN_INPUT_ENUMERATE_CMD=<stub-prints-raw-log> FROZEN_INPUT_PROBE_CMD=<stub> scripts/frozen-input-alert-watchdog.sh --dry-run`.
 
+## The JPEG XS path follows the resolver (issue 1387 slice 3)
+
+On a JPEG XS venue the on-air inputs are `JXS PGM src` (stream) and `JXS camN src` (strih); the JPEG XS
+source writes the same `genlock-fifo audit '<input>'` lines, so the tap, the classify, the confirm, the
+SKIP gate and the `frozen-input-$RECEIVER_NAME-$source` dedup key are unchanged -- only WHICH inputs.
+
+- `resolved_required_sources` (the watchdog) runs the E2E's ONE resolver,
+  `scripts/lib/program-inputs.sh` `program_inputs_resolve` + `camera-set.sh` `camera_strih_input`, in its
+  command substitution's subshell (sourced at CALL time, so sourcing the watchdog in a test stays
+  side-effect-free). Local fact-file reads only. The venue's two hosts: the receiver's own address for its
+  role, the fleet default for the other (`FROZEN_INPUT_STRIH_HOST` / `FROZEN_INPUT_STREAM_HOST` override).
+- stream instance (static mode): the default source becomes the resolved stream program input; an
+  explicit `FROZEN_INPUT_SOURCES` still wins.
+- strih instance (enumerate mode): `frozen_input_watch_list` (frozen-input-health.sh, pure) puts every
+  declared `JXS camN src` FIRST, then the enumerated names. A declared input whose audit line is absent
+  is still watched, so it reaches the tap-broken WARN instead of silently never being watched. A box-down
+  pass (issue 1001) still watches nothing.
+- An NDI venue resolves nothing (both instances as before); a resolve the facts refuse is ONE WARNING
+  line and the NDI defaults stay.
+- Tests: `tests/python/test_frozen_input_jxs_1387.py` (the real watchdog, stubbed probe / enumeration /
+  notify, the committed fact files; an NDI venue = TEST-NET hosts).
+- **ONE read per pass, at nice 19** (issue 1387, owner 1.11.2026: no watchdog may risk a frame).
+  `main` calls `pass_log_fill` once, outside any command substitution, when a real read is needed
+  (no `FROZEN_INPUT_PROBE_CMD`, or enumerate mode without `FROZEN_INPUT_ENUMERATE_CMD`); the
+  enumeration and every `probe_received` extract from `PASS_LOG`. It is a bounded tail
+  (`read_receiver_log` = `strih_log_tail`, `nice -n 19 tail -n 800` of the newest log on a Linux box;
+  the Windows PowerShell read unchanged). One login per pass, was 1 + one per watched input (6 on the
+  JPEG XS strih). A failed read is EMPTY: every input UNKNOWN, the blind counters count it, no retry
+  per input. A box-down pass reads nothing. A direct `probe_received` call outside a pass (the issue
+  1258 / 1259 / 1360 harnesses) still reads by itself. Tests:
+  `tests/python/test_frozen_input_one_read_1387.py` (a PATH-stubbed sshpass/ssh that counts logins and
+  RUNS the Linux command against a fixture HOME).
+
 ### bash quoting traps hit while building this (both cost a live debug loop)
 
 - An apostrophe inside a `"${VAR:-default}"` default OPENS a single-quote context even within double

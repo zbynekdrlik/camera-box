@@ -1521,6 +1521,25 @@ When a refactor moves the last caller of a shared test helper (`run_block` in
 `cargo clippy --all-targets -D warnings` on CI rejects it (a `rustc -A warnings` run hides it).
 Delete a helper whose last caller went away.
 
+## Running the WHOLE tests/python suite locally: use pytest-xdist, and ignore the one dev1-only import error (issue 1387)
+
+A serial `python3 -m pytest tests/python` on dev1 reached 5 % in ~17 minutes (hours in total). dev1 has
+pytest-xdist 3.8: `python3 -m pytest -q -p no:cacheprovider -n 12 tests/python
+--ignore=tests/python/test_strih_tally_service_1417.py` runs it in minutes; the 106 files that read the
+provisioning scripts took 80 s with `-n 8`. `test_strih_tally_service_1417.py` imports `websockets`,
+which dev1 does not have (CI installs it), and a collection error stops the whole serial run before any
+test. Put the command in a script file and run `bash /abs/script.sh` from a worktree lane. Never
+`pkill -f <pattern>` a run from the same shell command: the pattern is in that shell's own command
+line, so it kills itself (exit 144).
+
+## A function that runs its own `=~` clobbers the caller's BASH_REMATCH (issue 1387)
+
+`if [[ ! "$e" =~ ^([0-9]+):([0-9]+)$ ]] || ! _port_ok "${BASH_REMATCH[2]}"; then ...; fi; n="${BASH_REMATCH[1]}"`
+aborted with `BASH_REMATCH[1]: unbound variable` under `set -u`: `_port_ok` runs its own `[[ =~ ]]`,
+which resets the global BASH_REMATCH. Split the value with parameter expansion first
+(`n="${e%%:*}"; port="${e#*:}"`) and only test the shape with `=~`, or copy the groups into locals
+before calling anything (`strih_box_jxs_facts_ok` in strih-box-facts.sh).
+
 ## A pytest must not catch an exception CLASS from a module another test file may swap in `sys.modules` (issue 1380)
 
 Several `tests/python` files load `scripts/obs_phase2.py` through `importlib` and then assign their

@@ -766,6 +766,8 @@ case "$DS_ROLE_VERDICT" in
   *)               bad "(dantesync-role) unknown verdict '${DS_ROLE_VERDICT}'" ;;
 esac
 
+# 6d) dantesync PTP NIC (issue 1439): this boot's newest PTP join must be on the NIC carrying STRIH_IP.
+DS_JOIN_V="$(strih_dantesync_join_verdict "$(strih_lx_ip)")"; case "$DS_JOIN_V" in ok:*) ok "(dantesync-nic) PTP joined on the rig NIC ${DS_JOIN_V#ok:}" ;; *) bad "(dantesync-nic) ${DS_JOIN_V} (ok = the NIC carrying $(strih_lx_ip); wrong:<joined>:<rig> = restart dantesync once the rig NIC is up, dantesync#131)" ;; esac
 # 6c) dantesync UNIT content (issue 1372), read-only: the installed unit is byte-identical to the one
 #     setup-strih step 2 emits for the role, no drop-in overrides it, and the running process runs its
 #     ExecStart (strih_dantesync_unit_verdict). Step 2 restarts only on a change (a date-master restart
@@ -773,7 +775,7 @@ esac
 DS_UNIT_PATH_V="/etc/systemd/system/dantesync.service"
 DS_ARGS_V="$(strih_lx_dantesync_args 2>/dev/null)" || DS_ARGS_V=""
 DS_UNIT_ARGV_V="$(strih_dantesync_running_argv 2>/dev/null || true)"
-if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" 2>/dev/null)"; then
+if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" "$(strih_lx_ip)" 2>/dev/null)"; then
   DS_UNIT_V="$(strih_dantesync_unit_verdict "$DS_UNIT_WANT" "$DS_UNIT_PATH_V" "${DS_UNIT_PATH_V}.d" "$DS_UNIT_ARGV_V" || true)"
 else
   DS_UNIT_V=no-unit
@@ -906,6 +908,7 @@ fi
 strih_nic_grade_report /sys "$(ip -o -4 addr show 2>/dev/null || true)" || bad "(nic) the rig-NIC grader printed no row"
 obs_audio_buffering_verify_row "$(strih_lx_audio_buffering_ms)" "$USER_HOME" "$LOG"   # 48) the FIXED OBS audio buffering == the box fact (issue 1425)
 strih_jxs_verify_row "$LOG"   # 49) every running JPEG XS source: lost_slices=0 over its last minute (issue 1387, scripts/lib/strih-jxs-verify.sh)
+strih_jxs_config_verify_row "$USER_HOME"   # 49) + the JPEG XS config vs the box facts: manifest, inputs, program output (issue 1387, strih-jxs-provision.sh)
 
 # 35) Downstream Keyer OBS plugin (issue 1361): setup-strih.sh step 4c installs the pinned upstream
 #     plugin into the /usr prefix OBS loads; FAIL unless the installed .so has the pinned sha256 (the

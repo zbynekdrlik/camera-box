@@ -240,6 +240,19 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Report-only (a WARNING, never the exit status). Source-only lib, no side effects at source time.
 # shellcheck source=scripts/lib/program-audio-mode.sh
 . "$RIG_MODE_DIR/lib/program-audio-mode.sh"
+# issue 1387: the JPEG XS facet of the EVENT contract (each link's newest window, a bounded log read).
+# Source-only lib, no side effects at source time.
+# shellcheck source=scripts/lib/event-jxs-facet.sh
+. "$RIG_MODE_DIR/lib/event-jxs-facet.sh"
+# issue 1387 (owner 1.11.2026): the operator picks the camera of a strih JPEG XS input in its Kamera list;
+# TEST and EVENT put the declared camera back next to the strih NDI mapping (the issue-399 parity), the
+# rc recorded and folded into the exit. Source-only lib, no side effects at source time.
+# shellcheck source=scripts/lib/jxs-mapping-enforce.sh
+. "$RIG_MODE_DIR/lib/jxs-mapping-enforce.sh"
+# issue 1387 slice 1b: the measured strih/stream inputs (NDI or JPEG XS) resolved from the box facts.
+# Source-only lib; the one resolve call sits after the pinned constants below.
+# shellcheck source=scripts/lib/program-inputs.sh
+. "$RIG_MODE_DIR/lib/program-inputs.sh"
 
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
@@ -620,6 +633,11 @@ REMOTE
 # Overridable; defaults mirror the recording-e2e BURN_TARGETS (the prod program inputs).
 STRIH_IP="${STRIH_IP:-10.77.9.202}"
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
+# issue 1387 slice 1b: on a JPEG XS venue (the box facts) the TEST burns follow the measured JPEG XS
+# inputs: this presets STRIH_PROG_SOURCE / STREAM_PROG_SOURCE (the defaults below then never fire).
+# A venue it cannot resolve keeps the NDI defaults with a WARNING (an EVENT switch must still run).
+program_inputs_resolve "$STRIH_IP" "$STREAM_IP" "$RIG_SOURCE_BOX" \
+  || echo "WARNING: rig-mode: the measured inputs did not resolve from the box facts -- the NDI defaults stay (issue 1387)" >&2
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-$RIG_SOURCE_STRIH_SOURCE}" # strih program input for the
                                                           # SOURCE camera (#246 burn target). #1135:
                                                           # DERIVED off the resolved source box
@@ -1430,6 +1448,10 @@ do_test() {
   echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct):"
   enforce_strih_ndi_mapping
   echo
+  echo "[obs] issue 1387: put the declared camera back on every strih JPEG XS input (the operator's Kamera picks; the NDI mapping's parity):"
+  local _jxsmap_rc=0
+  jxs_mapping_enforce test "$STRIH_IP" "$OBS_WS_PASSWORD" || _jxsmap_rc=$?
+  echo
   echo "[obs] #462 ensure imag-nb's PROGRAM shows the source camera ${RIG_SOURCE_BOX} (EPIC #466 Topology v2 — cam→imag proof):"
   set_imag_test_program
   echo
@@ -1463,10 +1485,14 @@ do_test() {
   echo "ACHIEVED (chain, #901): strih's live program scene confirmed NON-BLACK — the camera genuinely sees content, not just a live process."
   echo "                        mbc Dante transport confirmed bound + unmuted on stream."
   echo "                        measurement-audio arrival checked end to end (verdict printed above — PASS / non-blocking WARN / hard FAIL)."
+  if [ "${_jxsmap_rc:-0}" -ne 0 ]; then
+    echo "RESULT: TEST mode — the strih JPEG XS camera mapping enforce FAILED (issue 1387, rc=${_jxsmap_rc}). Every other step ran — see the [strih jxs-map] lines above." >&2
+  fi
   if [ "${_relay_rc:-0}" -ne 0 ]; then
     bkshading_relay_mode_result test "$_relay_rc"
     exit 1
   fi
+  [ "${_jxsmap_rc:-0}" -eq 0 ] || exit 1
   echo "RESULT: TEST mode — WHOLE CHAIN verified (cam emission + OBS program/burn/mapping + optical proof + Dante transport + measurement-audio arrival)."
 }
 
@@ -1661,9 +1687,11 @@ event_mode_assert() {
   # --- item 6: stream PGM latency == calibrated (av-sync-last.json), restore-or-fail ---------
   local calibrated_ms="" current_ms="" latency_out latency_detail=""
   calibrated_ms="$(jq -r '.applied_latency_ms // empty' "$HOME/.camera-box/av-sync-last.json" 2>/dev/null || true)"
+  # issue 1387: on the JPEG XS path the stream program pin is the box fact STRIH_JXS_PROGRAM_PIN_MS
+  program_path_ndi || calibrated_ms="${PROGRAM_INPUTS_STREAM_PIN_MS:-}"
   if [ -n "$calibrated_ms" ]; then
     latency_out="$(python3 "$here/obs_phase2.py" latency-check --host "$STREAM_IP" --password "$OBS_WS_PASSWORD" \
-      --source "NDI 2ME PGM" --calibrated-ms "$calibrated_ms" 2>/dev/null || true)"
+      --source "$STREAM_PROG_SOURCE" --calibrated-ms "$calibrated_ms" 2>/dev/null || true)"
     current_ms="$(printf '%s' "$latency_out" | grep -oP 'final=\K-?[0-9]+' || true)"
     latency_detail="aktualna=${current_ms:-neznama}ms, kalibrovana=${calibrated_ms}ms"
   else
@@ -1691,6 +1719,16 @@ event_mode_assert() {
   stream_program_scene="$(stream_program_scene_read "$here" "$STREAM_IP" "$OBS_WS_PASSWORD")"
   echo "    [stream program] '${stream_program_scene:-unreadable}' (report-only, issue 1380: EVENT never switches the stream program; the owner cuts to '${STREAM_PRODUCTION_SCENE_DEFAULT}' himself)"
 
+  # --- issue 1387: every JPEG XS link delivers (its newest 5 s window on strih + stream) ---------
+  # The SNV event morning (1.11.2026): moved cameras came back without JPEG XS and the camera scenes
+  # were black on air while every other item read clean. Bounded read (last 1 MiB of the OBS log);
+  # an unread box or a box without a window line fails closed.
+  local jxs_json
+  jxs_json="$(event_jxs_windows_json "${STRIH_LX_USER:-newlevel}" "${STRIH_LX_PW:-newlevel}" strih "$STRIH_IP" \
+    "$STREAM_USER" "$STREAM_PW" stream "$STREAM_IP" 2>/dev/null)" || jxs_json=""
+  [ -n "$jxs_json" ] || jxs_json="null"
+  echo "    [jpeg-xs] $jxs_json"
+
   # --- assemble the facts JSON + decide -------------------------------------------------------
   jq -n \
     --argjson fleet_paint_process_counts "$paint_json" \
@@ -1703,6 +1741,7 @@ event_mode_assert() {
     --arg latency_calibrated_ms "$calibrated_ms" \
     --argjson ndi_mismatches "$ndi_mismatches" \
     --argjson artifacts_existing "$artifacts_json" \
+    --argjson jxs_windows "$jxs_json" \
     --arg latency_detail "$latency_detail" \
     '{
       fleet_paint_process_counts: $fleet_paint_process_counts,
@@ -1715,6 +1754,7 @@ event_mode_assert() {
       latency_calibrated_ms: (if ($latency_calibrated_ms | length) > 0 then ($latency_calibrated_ms | tonumber) else null end),
       ndi_mismatches: $ndi_mismatches,
       artifacts_existing: $artifacts_existing,
+      jxs_windows: $jxs_windows,
       details: {latency_calibrated: $latency_detail}
     }' > "$facts_json"
 
@@ -1810,6 +1850,10 @@ do_event() {
     echo "WARNING issue 1410: strih NDI mapping enforce FAILED (rc=$_ndimap_rc, see the [strih ndi-map] lines above) — continuing, EVENT mode will still exit non-zero." >&2
   fi
   echo
+  echo "[obs] issue 1387: put the declared camera back on every strih JPEG XS input (the NDI mapping's parity):"
+  local _jxsmap_rc=0
+  jxs_mapping_enforce event "$STRIH_IP" "$OBS_WS_PASSWORD" || _jxsmap_rc=$?
+  echo
   print_genlock_relaunch_note event
   echo
   echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + unconditional HDMI preview restored."
@@ -1825,6 +1869,7 @@ do_event() {
   [ "$_stray_rc" -eq 0 ] || _obs_failed="kontrola zabudnutých nahrávok"
   [ "$_burn_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }vypnutie meracích QR (burn)"
   [ "$_ndimap_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }nastavenie NDI kamier na strihu"
+  [ "$_jxsmap_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }nastavenie JPEG XS kamier na strihu"
   [ -z "$_obs_failed" ] || event_mode_discord_note_add "${EVENT_ASSERT_DISCORD_MSG_PATH:-}" "⚠️ Prepnutie do EVENT: na OBS boxoch sa nepodarilo: ${_obs_failed}. Niektorý OBS box (strih, stream alebo imag) asi nebol dosiahnuteľný. Ostatné kroky prepnutia prebehli, výsledok kontroly je nižšie. Napíš Claudovi, nech to skontroluje." top
   echo "=================================================================================="
   echo
@@ -1837,7 +1882,7 @@ do_event() {
   # #868: fold the recorded cam-side restore failure (and, issue 1407, the relay step's; issue 1410,
   # the stray-recording guard's, the burn clear's and the mapping enforce's) into the final verdict —
   # deferring them past the burn-clear must never SWALLOW them. Every failure gets its own RESULT line.
-  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ] && [ "${_stray_rc:-0}" -eq 0 ] && [ "${_burn_rc:-0}" -eq 0 ] && [ "${_ndimap_rc:-0}" -eq 0 ]; then
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ] && [ "${_stray_rc:-0}" -eq 0 ] && [ "${_burn_rc:-0}" -eq 0 ] && [ "${_ndimap_rc:-0}" -eq 0 ] && [ "${_jxsmap_rc:-0}" -eq 0 ]; then
     echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
     exit 0
   fi
@@ -1849,6 +1894,9 @@ do_event() {
   fi
   if [ "${_ndimap_rc:-0}" -ne 0 ]; then
     echo "RESULT: EVENT mode — strih NDI mapping enforce FAILED (issue 1410, rc=${_ndimap_rc}). The strih camera inputs were not verified distinct — see the [strih ndi-map] lines above." >&2
+  fi
+  if [ "${_jxsmap_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — strih JPEG XS camera mapping enforce FAILED (issue 1387, rc=${_jxsmap_rc}). The strih JPEG XS inputs were not verified on their declared cameras — see the [strih jxs-map] lines above." >&2
   fi
   bkshading_relay_mode_result event "${_relay_rc:-0}"
   if [ "${_cam_restore_rc:-0}" -ne 0 ]; then

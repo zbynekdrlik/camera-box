@@ -234,6 +234,7 @@ fn the_header_declares_exactly_the_functions_the_library_exports() {
             "cbjxs_next_frame",
             "cbjxs_open",
             "cbjxs_recv_buffer_bytes",
+            "cbjxs_set_late_ms",
             "cbjxs_set_max_bpp",
             "cbjxs_take_error",
         ]
@@ -286,7 +287,7 @@ fn link_into_shared_object(dir: &Path, flags: &[&str]) -> PathBuf {
            cbjxs_frame f; cbjxs_stats s; char e[8];\n\
            int r = cbjxs_next_frame(rx, 0, &f) + cbjxs_get_stats(rx, &s) + (int)cbjxs_take_error(rx, e, sizeof e)\n\
                    + (int)cbjxs_local_port(rx) + (int)cbjxs_abi_version()\n\
-                   + cbjxs_set_max_bpp(rx, 6) + (int)cbjxs_recv_buffer_bytes(rx);\n\
+                   + cbjxs_set_max_bpp(rx, 6) + cbjxs_set_late_ms(rx, 1087) + (int)cbjxs_recv_buffer_bytes(rx);\n\
            cbjxs_close(rx);\n\
            /* issue 1387 slice 3: the sender's ABI rides in the same archive */\n\
            cbjxs_send_config c = {0}; cbjxs_send_picture p = {0}; cbjxs_send_stats st;\n\

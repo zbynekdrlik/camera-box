@@ -51,6 +51,8 @@ tail is the `gc (gci …).FullName -Tail N` form sent as `-EncodedCommand` (the 
 
 ## Transport rules baked in (keep them when extending)
 
+- Every Linux file read runs at `nice -n 19` (`tail` / `since` / `count` / `headtail`, issue 1387, owner
+  1.11.2026: no read may take CPU from a broadcast); the python twin's headtail follows byte for byte.
 - `sshpass -p PW timeout T ssh …` — `timeout` INSIDE sshpass, so a function/PATH-stubbed `sshpass`
   stays the outermost command (the ci-testing-gotchas stub-bypass rule) and the ssh itself is bounded.
 - `-o UserKnownHostsFile=/dev/null`: 10.77.9.202 was the Windows box before M4; a stale known_hosts

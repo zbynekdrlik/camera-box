@@ -36,3 +36,11 @@ credentials moved into a git-ignored `secrets.h`.
 Colour after PGM/PVW: red when program == id, else green when preview == id, else gray (one LED).
 Status blinks: blue = no WiFi, orange = no WebSocket. The server sends `TALLY-PVW` before
 `TALLY-PGM`, because the firmware stores the old program camera on every `TALLY-PGM`.
+
+## The PP light build (`TallyPP/TallyPP.ino`)
+
+The source of the firmware the Poprad lights run, as the owner supplied it on 30.10.2026, unchanged
+(the WiFi `SSID` / `PASS` are empty in git; fill them locally before a build, never commit them).
+It differs from `WsTally` in two places: it dials `tally.lan:9240` instead of `atemrpi.local`, and the
+WiFi values sit in `#define SSID` / `PASS` instead of `secrets.h`. Its parser reads `TALLY-PVW` /
+`TALLY-PGM` (the `...2` 2ME twins the relay also sends since 14.10.2026 are ignored by this build).

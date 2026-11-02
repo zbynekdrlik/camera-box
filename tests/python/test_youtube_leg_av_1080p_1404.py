@@ -230,3 +230,16 @@ def test_no_child_starts_once_the_tool_is_stopping(monkeypatch):
     monkeypatch.setattr(ylp, "_STOPPING", True)
     with pytest.raises(RuntimeError, match="stopping"):
         ylp.run_bounded(["true"], 5)
+
+
+def test_edge_markers_the_clip_has_no_frames_for_never_fail_a_scaled_read():
+    """E2E 41372661460 w05: a 25.097 s cut decoded 52 audio markers and paired 50, the most its frames
+    can hold (8 cuts of that window: 50-52 decoded, always 50 paired, the offset within 0.4 ms)."""
+    j = {"av_offset_ms": -52.0, "matched": 50, "audio_markers_decoded": 52, "mad_ms": 5.0}
+    ylv.av_from_outputs(j, j, 25.097, scaled=("recording",), heights={"recording": 2160})
+
+
+def test_a_lost_video_tick_still_fails_with_edge_markers_around_it():
+    j = {"av_offset_ms": -52.0, "matched": 48, "audio_markers_decoded": 52, "mad_ms": 5.0}
+    with pytest.raises(ValueError, match="matched 48 of the 52"):
+        ylv.av_from_outputs(j, j, 25.097, scaled=("recording",), heights={"recording": 2160})

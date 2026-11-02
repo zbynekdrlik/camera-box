@@ -68,7 +68,8 @@ except ImportError:
 # 'NDI camN'.
 # This is the REVERSE direction: given the raw input name this gate checks, find the scene
 # that wraps it, so it can be put on PREVIEW to warm the receiver before sampling.
-_INPUT_SCENE_RE = re.compile(r"^NDI cam(\d+)$")
+# issue 1387: the JPEG XS camera input `JXS camN src` sits in the same `Cam N` scene.
+_INPUT_SCENE_RE = re.compile(r"^(?:NDI cam(\d+)|JXS cam(\d+) src)$")
 
 
 def _scene_for_input(source_name: str) -> "str | None":
@@ -78,7 +79,7 @@ def _scene_for_input(source_name: str) -> "str | None":
     (e.g. a caller-supplied non-standard --sources value) — the warm-up step is then
     skipped for that source and it is sampled cold, same as pre-#747 behaviour."""
     m = _INPUT_SCENE_RE.match(source_name)
-    return f"Cam {m.group(1)}" if m else None
+    return f"Cam {m.group(1) or m.group(2)}" if m else None
 
 
 def _hash_png(data: bytes) -> str:
