@@ -27,6 +27,39 @@ STRIH_BOX_TODO=TODO_OWNER
 # Characters a fact value may never carry (see _strih_box_unsafe).
 STRIH_BOX_UNSAFE_CHARS='$`\"'"'"';|&<>*?!{}[]~#'
 
+# _strih_box_dante_devices_ok NAME VALUE LEG -> rc 0 for `none`, or for `name=arc:cmc:flows:rxfirst-rxlast`
+# devices (space-joined) on a box with a leg, every port 1024..65535 and no two devices sharing one
+# (issue 1485: each device binds its own ports on the leg's one address). rc 1 + a named line otherwise.
+_strih_box_dante_devices_ok() {
+  local name="$1" v="$2" leg="$3" d dev ports arc cmc flows rx first last p seen=" " rc=0 dg='[0123456789]'
+  [ "$v" != none ] || return 0
+  if [ "$leg" = none ]; then
+    echo "strih-box ${name}: STRIH_DANTE_DEVICES needs a leg on the audio VLAN (STRIH_PROGRAM_VBAN_LEG is none)" >&2; return 1
+  fi
+  for d in $v; do
+    dev="${d%%=*}"; ports="${d#*=}"
+    if [ "$d" = "$dev" ] || [[ ! "$dev" =~ ^[abcdefghijklmnopqrstuvwxyz][abcdefghijklmnopqrstuvwxyz0123456789-]*$ ]] \
+       || [[ ! "$ports" =~ ^${dg}{4,5}:${dg}{4,5}:${dg}{4,5}:${dg}{4,5}-${dg}{4,5}$ ]]; then
+      echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}' must be name=arc:cmc:flows:rxfirst-rxlast" >&2; rc=1; continue
+    fi
+    IFS=: read -r arc cmc flows rx <<<"$ports"
+    first="${rx%%-*}"; last="${rx##*-}"
+    for p in "$arc" "$cmc" "$flows" "$first" "$last"; do
+      if [ "$((10#$p))" -lt 1024 ] || [ "$((10#$p))" -gt 65535 ]; then
+        echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}': port '${p}' must be 1024..65535" >&2; rc=1; continue 2
+      fi
+    done
+    if [ "$((10#$first))" -gt "$((10#$last))" ]; then
+      echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}': the RX range runs backwards" >&2; rc=1; continue
+    fi
+    for p in "$arc" "$cmc" "$flows" $(seq "$((10#$first))" "$((10#$last))"); do
+      case "$seen" in *" ${p} "*) echo "strih-box ${name}: STRIH_DANTE_DEVICES: port ${p} is used twice" >&2; rc=1 ;; esac
+      seen="${seen}${p} "
+    done
+  done
+  return "$rc"
+}
+
 # strih_box_fact_keys -> every fact key, one per line (the fact-file contract; all are required).
 strih_box_fact_keys() {
   printf '%s\n' \
@@ -41,6 +74,7 @@ strih_box_fact_keys() {
     STRIH_PROGRAM_VBAN_STREAMS STRIH_PROGRAM_VBAN_PORT STRIH_PROGRAM_VBAN_RESERVE_MS \
     STRIH_PROGRAM_AUDIO_INPUT \
     STRIH_PROGRAM_VBAN_LEG STRIH_PROGRAM_VBAN_LEG_ADDR STRIH_PROGRAM_VBAN_SENDER \
+    STRIH_DANTE_DEVICES \
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
     STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC \
@@ -293,6 +327,7 @@ strih_box_validate() {
       echo "strih-box ${name}: STRIH_PROGRAM_VBAN_RESERVE_MS '${vr}' must be the fixed Receive Buffer in ms (${STRIH_BOX_VBAN_RESERVE_MS_MIN}..${STRIH_BOX_VBAN_RESERVE_MS_MAX})" >&2; bad=1
     fi
   fi
+  _strih_box_dante_devices_ok "$name" "${f[STRIH_DANTE_DEVICES]}" "${f[STRIH_PROGRAM_VBAN_LEG]}" || bad=1
   # issue 1439 (ROZHODNUTÉ 6360417876, owner 23.10.2026): the VBAN-only leg on the console's audio VLAN
   # (scripts/lib/strih-vban-leg.sh). STRIH_PROGRAM_VBAN_LEG = `mac:<MAC>` (a second NIC, its MAC lower-case
   # as sysfs prints it; stream-snv) | `vlan:<id>` (a tagged VLAN 1..4094 on the rig NIC; strih-snv, the
@@ -741,6 +776,9 @@ strih_lx_program_audio_input() { strih_box_fact STRIH_PROGRAM_AUDIO_INPUT; }
 strih_lx_program_vban_leg() { strih_box_fact STRIH_PROGRAM_VBAN_LEG; }
 strih_lx_program_vban_leg_addr() { strih_box_fact STRIH_PROGRAM_VBAN_LEG_ADDR; }
 strih_lx_program_vban_sender() { strih_box_fact STRIH_PROGRAM_VBAN_SENDER; }
+
+# issue 1485: the Dante devices on the leg (`none`, or `name=arc:cmc:flows:rxfirst-rxlast ...`, strih-dante-leg.sh).
+strih_lx_dante_devices() { strih_box_fact STRIH_DANTE_DEVICES; }
 
 # strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).
 strih_box_venue() { strih_box_fact STRIH_VENUE; }

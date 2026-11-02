@@ -650,6 +650,33 @@ VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, ne
   lacks the off-leg counter, so verify FAILs `(vban-leg) filter` there until then. On stream-snv the
   run touches no NM state; on strih-snv neither (the VLAN exists): no link reset on either.
 
+## The Dante variant of the leg (issue 1485, strih-snv only)
+
+Owner 2.11.2026: each application is its own Dante device; PP gets no Dante; VBAN stays. Fact
+`STRIH_DANTE_DEVICES` = `none` everywhere but strih-snv (`name=arc:cmc:flows:rxfirst-rxlast`, space-joined;
+the loader refuses malformed ports, a port used twice, devices without a leg). A box with `none` renders
+byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`.
+
+- **The address:** a real `/24` with `ipv4.route-table=70`: NetworkManager puts the connected route in table
+  70, so only sockets bound to the leg's address reach it (`from <addr> lookup 70`), and main stays free of
+  10.77.7.0/24. A plain /24 in main would pull the dantesync NTP replies to mbc and fohabl (source = the rig
+  address) onto the leg, into the output drop. The explicit `ipv4.routes` goes.
+- **Applied live** by `connection modify` + `device reapply`, like every profile change: no VLAN create, no
+  link change, a refused reapply fails by name (`test_the_live_32_moves_to_the_24_by_reapply_...`).
+- **The filter:** read from dstack's sockets: bound to the interface address, its ARC / flow / mDNS instance
+  CLIENT sockets on port 0, so a peer's reply is admitted by its SOURCE port. Input from the /24 to the
+  devices' ports + 5353, 8700, 8702, 8708; output from the leg's address to the /24 and 224.0.0.231, .233,
+  .251. IGMP both ways: without it a snooping switch ages the groups out.
+- **Traps:** `nft list` prints touching ports of an interval set merged (`4440-4441`) and a `skuid` as a
+  number, and the read-back compares text: the render merges them and resolves avahi's uid. No conntrack
+  (its hooks would see every NDI packet). avahi is dropped by uid, never configured (an avahi restart risks
+  the NDI announcement). UDP 319/320 and 31900 stay shut: dantesync is the only PTP owner.
+- **`rp_filter=2` on the leg:** an inbound multicast's reverse lookup has no `from` match and resolves
+  through the rig NIC.
+- **Known limit, unmeasured:** libndi sends its own mDNS from every interface; with 5353 open it can reach
+  the audio VLAN from the leg address (read it live, the steps in the 1485 lane return). Its NDI TCP stays
+  dropped.
+
 ## Verify
 
 - `cargo test --lib vban_receive_timeline` (unit tests + the bench), in the debug profile like CI,
