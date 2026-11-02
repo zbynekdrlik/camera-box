@@ -220,7 +220,7 @@ fn loader_loads_strih_lx_facts() {
         // issue 1462: the strih role has no stream Development scene.
         "STRIH_STREAM_DEV_SCENE=none",
         // issue 808: cam3's camera is the handheld with the Teradek, controlled by the handheld-1 SBC.
-        "STRIH_BKSHADING_RELAYS=3=sbc-relay@register:handheld-1",
+        "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading 3=sbc-relay@register:cam4-shading",
         // issue 1425: strih-snv drew 0 ms on its last 10 launches; the fact fixes it there.
         "STRIH_AUDIO_BUFFERING_MS=0",
         // issue 1387: cam2/3/5 on the JPEG XS link at their live ports, the 100 ms grid-age pin.
@@ -741,7 +741,7 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
             ),
             // issue 808 (owner 26.10.2026): a relay override must name one of the box's cameras.
             (
-                "STRIH_BKSHADING_RELAYS=3=sbc-relay@register:handheld-1",
+                "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading 3=sbc-relay@register:cam4-shading",
                 "STRIH_BKSHADING_RELAYS=none",
             ),
             (
