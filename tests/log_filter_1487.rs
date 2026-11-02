@@ -50,13 +50,11 @@ fn an_affinity_line_reaches_the_journal_at_both_levels() {
 }
 
 #[test]
-fn a_jpeg_xs_target_passes_too() {
-    for debug in [false, true] {
-        let text = logged_through_the_filter(debug, || {
-            tracing::warn!(target: "camera_box_jxs::jxs_send", "jxs line");
-        });
-        assert!(text.contains("jxs line"), "debug={debug}: {text:?}");
-    }
+fn the_jpeg_xs_crate_is_named_at_both_levels() {
+    // Read the directive, not a logged line: EnvFilter matches a target by string prefix, so
+    // `camera_box=` alone passes `camera_box_jxs::...` and a logged line could never fail here.
+    assert!(camera_box::log_filter::directives(false).contains("camera_box_jxs=info"));
+    assert!(camera_box::log_filter::directives(true).contains("camera_box_jxs=debug"));
 }
 
 #[test]
