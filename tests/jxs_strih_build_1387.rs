@@ -120,15 +120,40 @@ fn a_receiver_change_reruns_the_strih_build() {
     for p in [
         "'jxs/**'",
         "'vendor/svt-jpeg-xs/**'",
-        "'src/jxs_recv.rs'",
-        "'src/jxs_recv/**'",
-        "'src/jxs_link.rs'",
-        "'src/jxs_link/**'",
+        "'rig/**'",
         "'Cargo.toml'",
-        "'src/lib.rs'",
     ] {
         assert!(paths.contains(p), "trigger path {p}");
     }
+}
+
+/// Issue 1487: the crates the OBS build links never depend on the appliance, or OBS needs
+/// camera-box while camera-box deploys that OBS.
+#[test]
+fn the_crates_the_obs_build_links_never_depend_on_the_appliance() {
+    for manifest in [
+        "jxs/recv-ffi/Cargo.toml",
+        "jxs/send-ffi/Cargo.toml",
+        "jxs/link/Cargo.toml",
+        "jxs/sys/Cargo.toml",
+        "rig/core/Cargo.toml",
+    ] {
+        let text = read(manifest);
+        let dep = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("camera-box ="));
+        assert_eq!(dep, None, "{manifest} depends on the camera-box crate");
+    }
+}
+
+#[test]
+fn ci_runs_the_moved_unit_tests_a_root_run_never_reaches() {
+    let ci = read(".github/workflows/ci.yml");
+    assert!(ci.contains("run: cargo nextest run -p camera-box-jxs -p rig-core --all-features"));
+    assert!(
+        ci.contains("run: cargo clippy -p camera-box-jxs -p rig-core --all-targets --all-features")
+    );
+    assert!(ci.contains("cargo llvm-cov -p camera-box -p camera-box-jxs -p rig-core"));
 }
 
 #[test]
@@ -138,5 +163,6 @@ fn ci_lints_and_tests_the_ffi_crate() {
     assert!(ci.contains("run: cargo nextest run -p jxs-recv-ffi"));
     let root = read("Cargo.toml");
     // issue 1387 slice 3: the sender's C ABI crate is a member too (carried in the one archive)
-    assert!(root.contains("\"jxs/sys\", \"jxs/recv-ffi\", \"jxs/send-ffi\"]"));
+    assert!(root
+        .contains("\"jxs/sys\", \"jxs/link\", \"jxs/recv-ffi\", \"jxs/send-ffi\", \"rig/core\"]"));
 }

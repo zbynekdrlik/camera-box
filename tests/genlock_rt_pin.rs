@@ -3,7 +3,7 @@
 //! The libobs graphics thread drives the wall-clock-slaved genlock render tick
 //! (`genlock_next_deadline` -> `video_sleep`, obs-video.c). #484 pinned it onto imag-nb's reserved
 //! `nohz_full` cores under a LOW SCHED_FIFO priority so its wakeups are not jittered by kernel
-//! housekeeping — the analogue of camera-box's `src/affinity.rs` (#289) capture-thread pin.
+//! housekeeping — the analogue of camera-box's `rig/core/src/affinity.rs` (#289) capture-thread pin.
 //!
 //! Issue 1357 (live on strih-snv 23.9 and 27.9.2026): the pin fell back to a hardcoded `{10,11}` on a
 //! box with no isolated core, and every thread the graphics thread created inherited that mask (and,
@@ -118,7 +118,7 @@ fn render_tick_pin_is_warn_and_continue_never_aborts() {
         "{PIN_H}: #484 pin must WARN-and-CONTINUE — BOTH the affinity-pin failure branch and \
          the SCHED_FIFO failure branch must log `continuing SCHED_OTHER` (found {warn_count} \
          occurrence(s) inside genlock_pin_render_tick_thread), never abort/retry-loop/hang (the \
-         ticket's CRITICAL SAFETY requirement, mirroring the robust fallback in src/affinity.rs \
+         ticket's CRITICAL SAFETY requirement, mirroring the robust fallback in rig/core/src/affinity.rs \
          #289)."
     );
     // No hard-abort/exit/assert path anywhere INSIDE the pin function itself.

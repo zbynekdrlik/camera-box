@@ -15,7 +15,7 @@ mod session;
 pub use session::{open_pipelined, EncoderInput, EncoderOutput, Picture, MAX_IN_FLIGHT};
 
 /// Luma lines per slice. The camera-box wire format derives a frame's packet count from it
-/// (`crate::jxs_link::packets_per_frame` in camera-box: the header + one packet per slice).
+/// (`crate::jxs_link::packets_per_frame` in camera-box-jxs: the header + one packet per slice).
 pub const SLICE_HEIGHT_LINES: u32 = 16;
 
 /// `SvtJxsErrorNone`.

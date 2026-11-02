@@ -498,15 +498,9 @@ fn the_strih_build_hands_the_sender_header_to_distroav_and_checks_the_output_is_
     // the ONE archive carries the sender: its symbols are checked in the built archive
     assert!(wf.contains("nm -g --defined-only target/release/libjxs_recv_ffi.a"));
     assert!(wf.contains("cbjxs_send_open"));
-    for p in [
-        "'src/jxs_send.rs'",
-        "'src/jxs_send/**'",
-        "'src/affinity.rs'",
-        // live 31.10.2026: the sender's congestion control and auto bpp are crate-root modules
-        // the archive carries too; a change there must rebuild the strih bundle
-        "'src/jxs_congestion.rs'",
-        "'src/jxs_auto_bpp.rs'",
-    ] {
+    // the sender, its congestion control and auto bpp live in jxs/link, its core split in
+    // rig/core: a change there must rebuild the strih bundle
+    for p in ["'jxs/**'", "'rig/**'"] {
         assert!(wf.contains(p), "trigger path {p}");
     }
     let ci = read(".github/workflows/ci.yml");

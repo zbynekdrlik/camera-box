@@ -4,7 +4,7 @@
 //! The error and NULL paths of every call are pinned too.
 #![cfg(target_os = "linux")]
 
-use camera_box::jxs_link::{
+use camera_box_jxs::jxs_link::{
     build_slice_datagrams, psnr, split_gro, PacketHeader, ReceiverReport, DATAGRAM_LEN, REPORT_LEN,
 };
 use jxs_recv_ffi::*;

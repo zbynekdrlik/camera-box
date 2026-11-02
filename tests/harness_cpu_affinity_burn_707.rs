@@ -13,7 +13,7 @@
 //! (no painter). The gate was measuring a CPU environment the operator never runs.
 //!
 //! Fix: `scripts/lib/cpu-affinity-burn.sh` derives the SAME mask production has from the box's
-//! own `/sys/devices/system/cpu/isolated` at deploy time — the same source `src/affinity.rs`'s
+//! own `/sys/devices/system/cpu/isolated` at deploy time — the same source `rig/core/src/affinity.rs`'s
 //! `read_isolated_cores()` reads — never a hardcoded core number, so burn mode and production
 //! cannot drift apart again. Both launch sites embed it via the SAME shared helper, never two
 //! independent copies.

@@ -72,6 +72,13 @@ jobs:
       - name: Clippy (jxs-send-ffi)
         run: cargo clippy -p jxs-send-ffi --all-targets -- -D warnings
 
+      # Issue 1487: the JPEG XS link and the rig primitives are workspace members the root clippy
+      # only compiles as dependencies: lint their own code and tests, with and without the codec.
+      - name: Clippy (camera-box-jxs, rig-core)
+        run: cargo clippy -p camera-box-jxs -p rig-core --all-targets --all-features -- -D warnings
+      - name: Clippy (camera-box-jxs, no codec)
+        run: cargo clippy -p camera-box-jxs --all-targets -- -D warnings
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -154,6 +161,10 @@ jobs:
       - name: Run tests (jxs-send-ffi)
         run: cargo nextest run -p jxs-send-ffi
 
+      # Issue 1487: a root run compiles these crates but never runs their unit tests.
+      - name: Run tests (camera-box-jxs, rig-core)
+        run: cargo nextest run -p camera-box-jxs -p rig-core --all-features
+
       - name: Build benchmarks (compile check only)
         run: cargo bench --no-run
 
@@ -214,13 +225,14 @@ jobs:
         # threshold reflects testable logic. kms.rs's PURE decision functions (pick_mode,
         # copy_plan, copy_bgra_into, next_bo_index) are unit-tested, but its live DRM
         # `hw` glue cannot be, so the file follows the same exclusion as fb.rs.
-        # src/affinity.rs (#289): its PURE selection/parse functions are unit- AND
+        # rig/core/src/affinity.rs (#289): its PURE selection/parse functions are unit- AND
         # mutation-tested, but its sched_setaffinity / /proc-irq / /sys IO glue cannot
         # be — so the file follows the same whole-file exclusion as kms.rs (glue
         # excluded from coverage, pure functions still mutated in the mutants job).
+        # -p (issue 1487): the moved JPEG XS + rig unit tests count toward the total.
         # src/bin/jxs-recv-probe.rs (issue 1387): the probe's CLI + print loop; the pieces it runs
         # (jxs_link, jxs_recv) are library code covered by tests/jxs_loopback_1387.rs.
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader|colour_sample)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict|jxs-recv-probe)\.rs|src/affinity\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        run: cargo llvm-cov -p camera-box -p camera-box-jxs -p rig-core --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader|colour_sample)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict|jxs-recv-probe)\.rs|src/affinity\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
   mutants:
     name: Mutation Testing
@@ -306,7 +318,7 @@ jobs:
         # sched_setaffinity + /sys + /proc-irq IO — uncatchable by a unit test (no live core
         # topology / no writable /proc/irq in CI). The PURE logic they wrap IS mutated + covered:
         # parse_cpulist, select_capture_core, select_painter_cores, parse_capture_irqs,
-        # smp_affinity_mask_hex (the src/affinity.rs unit tests).
+        # smp_affinity_mask_hex (the rig/core/src/affinity.rs unit tests).
         # #364 colour-gate I/O glue (src/probe/colour_sample.rs ffmpeg colour pass + ffprobe;
         # build_node_colour_fail in recording-verdict): uncatchable by a unit test without a live
         # recording on disk (exercised by the on-rig recorded fixture), exactly like decode_for /

@@ -24,7 +24,7 @@ repository = "https://github.com/zbynekdrlik/camera-box"
 # WITHOUT --workspace, so they never build the hub. `intercom-vban` IS a path dependency of the
 # appliance (below), so the root build compiles it — that is intended (it carries the codec now).
 [workspace]
-members = ["bkshading/proto", "bkshading/relay", "bkshading/service", "intercom/vban", "intercom/hub", "jxs/sys", "jxs/recv-ffi", "jxs/send-ffi"]
+members = ["bkshading/proto", "bkshading/relay", "bkshading/service", "intercom/vban", "intercom/hub", "jxs/sys", "jxs/link", "jxs/recv-ffi", "jxs/send-ffi", "rig/core"]
 resolver = "2"
 
 # Single source of truth for the version across the appliance + the three bkshading
@@ -48,6 +48,12 @@ path = "src/main.rs"
 # codec + its tests live in ONE place shared with the strih-snv intercom hub. Pure (only `anyhow`,
 # already a root dep), cross-platform — adds NO new transitive deps to the appliance.
 intercom-vban = { path = "intercom/vban" }
+
+# Issue 1487: the JPEG XS link and the rig primitives it shares with the appliance are crates of
+# their own (src/lib.rs re-exports them at their old paths), so the C ABI crates the OBS build
+# links depend on neither this crate nor its Linux capture and audio libraries.
+camera-box-jxs = { path = "jxs/link" }
+rig-core = { path = "rig/core" }
 
 # Dynamic library loading (for NDI SDK at runtime)
 libloading = "0.8"
@@ -127,7 +133,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 probe = ["dep:crc", "dep:qrcode", "dep:rqrr", "dep:image", "dep:drm", "dep:lz4_flex"]
 # Issue 1387: the JPEG XS link's encoder/decoder (the cambox sender + the jxs-recv-probe bin).
 # Linux-only dependency, like drm above: on another target the feature enables nothing.
-jxs = ["dep:svt-jpegxs-sys"]
+jxs = ["dep:svt-jpegxs-sys", "camera-box-jxs/jxs"]
 
 [[bin]]
 name = "ndi-recv-probe"

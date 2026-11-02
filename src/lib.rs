@@ -10,7 +10,7 @@
 // downloaded to dev1. grab_record calls crate::capture::yuyv_to_gray8, so it is gated in
 // lock-step. vban (pure UDP) and the probe tree (which the verdict needs) stay cross-platform.
 #[cfg(target_os = "linux")]
-pub mod affinity;
+pub use rig_core::affinity;
 #[cfg(target_os = "linux")]
 pub mod capture;
 #[cfg(target_os = "linux")]
@@ -21,7 +21,7 @@ pub mod display;
 pub mod grab_record;
 #[cfg(target_os = "linux")]
 pub mod intercom;
-pub mod irq_offload;
+pub use rig_core::irq_offload;
 #[cfg(target_os = "linux")]
 pub mod ndi;
 // (#1113) genlock capture->emit pacing gate — the pure wall-clock decimation math extracted out of
@@ -435,10 +435,10 @@ pub mod genlock_n1_depth;
 
 // #1355 — ONE per-second genlock frame grid: the sender stamps, the receiver ts-align deadline
 // and the render tick all floor on the same per-second grid, so the receiver no longer walks
-// 10 ns/s (0.864 ms/day) against the senders. Crate-root + std-only (Tier-0 verifiable); the C
+// 10 ns/s (0.864 ms/day) against the senders. In rig-core, std-only (Tier-0 verifiable); the C
 // port `vendor/obs-studio/libobs/obs-genlock-grid.h` is held identical by the committed parity
 // gate in `tests/genlock_grid_parity_1355.rs`.
-pub mod genlock_grid;
+pub use rig_core::genlock_grid;
 
 // Issue 1357 — which cores the vendored genlock render tick may be pinned to: only the cores that
 // are both isolated and nohz_full, never a fallback pair. Crate-root + std-only (Tier-0); the C port
@@ -629,22 +629,12 @@ pub mod send_stall;
 // own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
 // are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
 pub mod send_stagger;
-// Issue 1387: the JPEG XS link's wire format + reassembly + pixel helpers (pure, every platform).
-pub mod jxs_link;
-// Issue 1387: the sender's automatic bpp controller (pure state machine, every platform).
-pub mod jxs_auto_bpp;
-// Issue 1387 item 2: the sender's delay-based congestion control (pure) and its bottleneck bench.
-pub mod jxs_congestion;
-#[cfg(test)]
-mod jxs_congestion_bench;
-// Issue 1387: the pure helpers of the jxs-encode-bench bin (synthetic content, percentiles).
-pub mod jxs_bench;
-// Issue 1387: the cambox JPEG XS sender (off unless CAMERA_BOX_JXS_TARGET is set) and the receive
-// side the jxs-recv-probe bin and the loopback tests use. The codec itself needs the `jxs` feature.
+// Issue 1387: the JPEG XS link, a crate of its own since issue 1487 (jxs/link): the pure wire
+// format, bpp and congestion control on every platform; the cambox sender (off unless
+// CAMERA_BOX_JXS_TARGET is set) and the receive side on Linux. The codec needs the `jxs` feature.
+pub use camera_box_jxs::{jxs_auto_bpp, jxs_bench, jxs_congestion, jxs_link};
 #[cfg(target_os = "linux")]
-pub mod jxs_recv;
-#[cfg(target_os = "linux")]
-pub mod jxs_send;
+pub use camera_box_jxs::{jxs_recv, jxs_send};
 // The send-stagger clamp must stay strictly below the buffered-dequeue fraction its idle-wait
 // add-back relies on (a genuinely buffered frame must still read as buffered after the sleep is
 // added back) — checked here against the REAL constant, so changing either one breaks the build.
