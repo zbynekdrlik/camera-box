@@ -1126,8 +1126,12 @@ mod tests {
         let frame = vec![1u8; 64 * 8 * 2];
         link.offer(&jf(&frame, 64, 8, tc(0), true));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // The thread is visible by name before its first line pins it, so the read waits for the
+        // pin; a thread that never pins itself still fails the assert below at the deadline.
         let mut seen = threads_named("jxs-connect");
-        while seen.is_empty() && std::time::Instant::now() < deadline {
+        while (seen.is_empty() || seen.iter().any(|cpus| cpus != &expected))
+            && std::time::Instant::now() < deadline
+        {
             std::thread::sleep(std::time::Duration::from_millis(10));
             seen = threads_named("jxs-connect");
         }
