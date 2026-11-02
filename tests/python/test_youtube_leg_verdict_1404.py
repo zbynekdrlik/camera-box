@@ -640,3 +640,42 @@ def test_cli_tool_error_and_a_crash_are_unknown(tmp_path):
     crash = subprocess.run([sys.executable, str(SCRIPT), "--vod", "x", "--recording", f"x.mp4@{T0}", "--markers", "m",
                             "--windows", f"W1:{T0}:{T0 + 5}", "--out", str(blocked)], capture_output=True, text=True)
     assert crash.returncode == 2
+
+
+def test_a_block_with_a_slow_offset_correlates_at_its_true_position():
+    """E2E 41367030032 w07: a block on a slow offset read r=0.582 at -38 ms, its true position 0.97.
+    Each window of the search is normalised by its own variance, not by the energy of its offset."""
+    from youtube_leg_audio import ncc_best
+
+    rng = np.random.default_rng(1387)
+    n, block, at = 7200, 4000, 1600
+    t = np.arange(n) / 16000.0
+    audio = 0.0015 * rng.standard_normal(n) + 0.01 * np.sin(2 * np.pi * 3.0 * t)
+    seg = audio.astype(np.float32)
+    ref = seg[at: at + block].copy()
+    k, r = ncc_best(ref, seg)
+    assert k == at
+    assert r > 0.999
+
+
+def test_an_offset_alone_never_matches_a_block():
+    """Constant samples have no variance: a VOD stuck on an offset must read no match, never a high r."""
+    from youtube_leg_audio import ncc_best
+
+    rng = np.random.default_rng(1387)
+    ref = (0.01 * rng.standard_normal(4000)).astype(np.float32)
+    seg = np.full(8000, 0.25, dtype=np.float32)
+    seg[:100] = 0.0
+    _, r = ncc_best(ref, seg)
+    assert r < 0.6
+
+
+def test_a_different_block_still_reads_low_with_an_offset_on_it():
+    """The fix must not turn an unrelated block into a match."""
+    from youtube_leg_audio import LOW_CORR, ncc_best
+
+    rng = np.random.default_rng(1388)
+    ref = (0.01 * rng.standard_normal(4000)).astype(np.float32)
+    seg = (0.01 * rng.standard_normal(8000) + 0.05).astype(np.float32)
+    _, r = ncc_best(ref, seg)
+    assert r < LOW_CORR
