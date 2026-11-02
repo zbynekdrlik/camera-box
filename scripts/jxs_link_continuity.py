@@ -154,7 +154,8 @@ def _place(sod, ref):
 
 # Owner 2.11.2026: the strih records with NVENC, and tearing that encoder down at StopRecord costs the program
 # one frame (measured 3 of 3, x264 0 of 3). It never happens during production, so it is accepted for now: at
-# most this many frames in the output's CLOSING window, reported as `stop_transient`, never anywhere else.
+# most this many frames in the output's last two windows together (the stop mark comes ~2 s after StopRecord, so
+# the frame can land in the window before the closing one), reported as `stop_transient`, never anywhere else.
 STOP_TRANSIENT_KEYS = ("dropped_busy", "not_taken")
 STOP_TRANSIENT_MAX = 1
 
@@ -253,7 +254,7 @@ def grade_link(role, kind, name, entries, times, start_off, stop_off, t_start, t
         failures.append(f"{res['zero_frame_windows']} window(s) with frames=0")
     excused = {}
     if kind != "source" and closing is not None:
-        vals = {k: _int(closing[2]["fields"].get(k)) or 0 for k in STOP_TRANSIENT_KEYS}
+        vals = {k: sum(_int(w[2]["fields"].get(k)) or 0 for w in counted[-2:]) for k in STOP_TRANSIENT_KEYS}
         if any(vals.values()) and max(vals.values()) <= STOP_TRANSIENT_MAX:
             excused = vals
             res["stop_transient"] = vals
