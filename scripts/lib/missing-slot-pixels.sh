@@ -121,11 +121,12 @@ missing_slot_pixels_stage2_args() {
 }
 
 # The strih-snv idle-priority prefix: byte-identical to recording-verdict-on-strih-snv.sh's
-# LOWPRIO_SNIPPET (nice 19, pinned to the E-cores when the box has them — issue 1354: a bulk decode
+# LOWPRIO_SNIPPET (rig-background.slice when the box has the runner, issue 1387; else nice 19 pinned to
+# the E-cores when the box has them — issue 1354: a bulk decode
 # on the P-cores relock-storms the live NDI receivers). A test pins the two copies equal. Pure.
 missing_slot_pixels_lowprio_snippet() {
   # shellcheck disable=SC2016  # expanded by the REMOTE shell, on purpose
-  printf '%s' 'LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi;'
+  printf '%s' 'LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi;'
 }
 
 # The REMOTE bash script for a Linux box: probe the size, then run the two-stage export at idle
