@@ -277,11 +277,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize logging
-    let filter = if args.debug {
-        EnvFilter::new("camera_box=debug,grafton_ndi=debug")
-    } else {
-        EnvFilter::new("camera_box=info")
-    };
+    let filter = EnvFilter::new(camera_box::log_filter::directives(args.debug));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     // #289 — ExecStartPre helper: route the USB capture IRQ(s) onto the isolated

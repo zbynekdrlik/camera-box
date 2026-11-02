@@ -629,6 +629,8 @@ pub mod send_stall;
 // own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
 // are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
 pub mod send_stagger;
+// Issue 1487: the camera-box binary's log filter names every crate that logs for it.
+pub mod log_filter;
 // Issue 1387: the JPEG XS link, a crate of its own since issue 1487 (jxs/link): the pure wire
 // format, bpp and congestion control on every platform; the cambox sender (off unless
 // CAMERA_BOX_JXS_TARGET is set) and the receive side on Linux. The codec needs the `jxs` feature.
