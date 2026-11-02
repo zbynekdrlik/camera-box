@@ -275,6 +275,11 @@ def test_grade_without_fbagent_needs_no_drop_in_and_an_idle_box_has_no_procs():
     assert r.returncode == 0, r.stdout
 
 
+def test_an_empty_slice_has_no_cgroup_directory_to_read():
+    r = grade(procs="", cgroup="")
+    assert r.returncode == 0, r.stdout
+
+
 def test_grade_fails_closed_on_an_unreadable_fence():
     r = grade(online="")
     assert r.returncode == 1 and "FENCE UNREADABLE" in r.stdout

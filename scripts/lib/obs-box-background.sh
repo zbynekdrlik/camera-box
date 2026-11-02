@@ -270,7 +270,9 @@ obs_box_background_grade() {
         *) bad="${bad} obs-state-unread" ;;
     esac
     [ -z "$smt" ] || bad="${bad} SMT-shared-with-OBS(${smt})"
-    if [ "$(obs_box_cpulist_expand "$cgroup_cpus" 2>/dev/null || true)" != "$want_list" ]; then
+    # systemd keeps no cgroup directory for an empty slice, so it reads only while a member runs.
+    if [ -n "${procs}${cgroup_cpus}" ] &&
+        [ "$(obs_box_cpulist_expand "$cgroup_cpus" 2>/dev/null || true)" != "$want_list" ]; then
         bad="${bad} cgroup-cpus(${cgroup_cpus:-unread})"
     fi
     printf '%s CPUs=%s fbagent=%s running=[%s] OBS live mask=[%s] io-scheduler=[%s]%s\n' \
