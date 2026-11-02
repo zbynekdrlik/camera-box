@@ -219,7 +219,7 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_HTTPS_PUBLIC=yes",
         // issue 1462: the strih role has no stream Development scene.
         "STRIH_STREAM_DEV_SCENE=none",
-        // issue 808: cam3's camera is the handheld with the Teradek, controlled by the handheld-1 SBC.
+        // issue 808: cam2 has its own shading board, cam3 is the travelling cam4-shading board.
         "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading 3=sbc-relay@register:cam4-shading",
         // issue 1425: strih-snv drew 0 ms on its last 10 launches; the fact fixes it there.
         "STRIH_AUDIO_BUFFERING_MS=0",
@@ -910,6 +910,11 @@ fn every_fact_dependent_output_follows_a_different_box() {
                 "STRIH_CG_SENDER=none",
             ),
             ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=1 3"),
+            // issue 808: a relay override must name one of the box's cameras.
+            (
+                "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading 3=",
+                "STRIH_BKSHADING_RELAYS=3=",
+            ),
             // issue 1387: a JPEG XS camera must be one of the box's cameras.
             (
                 "STRIH_JXS_CAMERAS=2:7002 3:7003 5:7000",
