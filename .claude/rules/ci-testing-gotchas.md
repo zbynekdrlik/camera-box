@@ -1886,3 +1886,17 @@ The CI lint `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` froze dev1 twi
 - **A comment line that starts with the word `shellcheck`** (`# shellcheck 0.10.0+ knows`,
   `#   shellcheck_pin_install DIR`) is parsed as a directive and fails SC1073 (an error). Reflow the
   comment so the word never starts it.
+
+## A new local in a lib can raise shellcheck warnings in ANOTHER file of the multi-file run (issue 1485)
+
+The CI lint lints every lib together, so variable names are shared across files. A new `local vban=...`
+made `STRIH_VBAN_LEG_PROFILE=vban-dante70` read as arithmetic (SC2100: `vban` minus `dante70`), and a new
+array `rx=()` clashed with a string `rx` in another lib (SC2178/SC2128). A single-file `shellcheck` run
+stays clean. Run the full pinned command (the issue-1395 section) after adding a variable to a lib, and
+rename the variable instead of disabling the warning.
+
+## Reading a pinned git dependency's other crates from a test: never `cargo metadata --offline` (issue 1487)
+
+`cargo metadata` resolves every target's packages, so it fails offline on one not in the local cache
+(`failed to download cc`). `tests/intercom_pin_1487.rs` takes the commit from Cargo.lock and reads
+`<cargo home>/git/checkouts/intercom-*/<first 7 of the commit>/`, which building the crate has created.
