@@ -156,6 +156,8 @@ def _place(sod, ref):
 # one frame (measured 3 of 3, x264 0 of 3). It never happens during production, so it is accepted for now: at
 # most this many frames in the output's last two windows together (the stop mark comes ~2 s after StopRecord, so
 # the frame can land in the window before the closing one), reported as `stop_transient`, never anywhere else.
+# One busy frame counts in BOTH keys (`cbjxs_send_frame` answers 0 for it, which is `not_taken`), so 1 + 1 is one
+# frame; two frames read 2 + 2, or 1 + 2 with an off-grid one, and fail.
 STOP_TRANSIENT_KEYS = ("dropped_busy", "not_taken")
 STOP_TRANSIENT_MAX = 1
 

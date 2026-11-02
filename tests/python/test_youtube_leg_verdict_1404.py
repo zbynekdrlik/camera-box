@@ -668,6 +668,8 @@ def test_an_offset_alone_never_matches_a_block():
     seg[:100] = 0.0
     _, r = ncc_best(ref, seg)
     assert r < 0.6
+    k, r = ncc_best(ref, seg[100:])  # every window lies inside the constant part
+    assert (k, r) == (0, 0.0)
 
 
 def test_a_different_block_still_reads_low_with_an_offset_on_it():
