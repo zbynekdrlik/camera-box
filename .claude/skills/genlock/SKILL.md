@@ -1177,14 +1177,14 @@ is now pinned by `genlock_pin_render_tick_thread()` — called from `obs_graphic
 `os_set_thread_name`, `#if defined(__linux__) && !defined(_WIN32)` guarded (Windows/macOS builds are
 unaffected; imag-nb is the only Linux OBS box):
 - **Affinity** → the kernel-reserved cores, DERIVED from `/sys/devices/system/cpu/nohz_full`
-  (robust, like `src/affinity.rs`), hardcoded `{10,11}` fallback tied to #483's `nohz_full=10,11`
+  (robust, like `rig/core/src/affinity.rs`), hardcoded `{10,11}` fallback tied to #483's `nohz_full=10,11`
   reservation, via `pthread_setaffinity_np(pthread_self(), ...)`.
 - **Scheduler** → `sched_setscheduler(0, SCHED_FIFO, &param)` with a **LOW** prio (`GENLOCK_RT_PRIORITY
   10`). `pid 0` = the calling THREAD on Linux, so ONLY the render-tick thread goes FIFO (NOT the
   ~106-thread process — that would hang the box).
 - **WARN-and-CONTINUE**: any failure logs `genlock: … — continuing SCHED_OTHER (#484)` at
   `LOG_WARNING` and runs on. NEVER abort/retry/hang (a high-prio runaway FIFO thread hangs a headless
-  box). Mirror of `src/affinity.rs` (#289).
+  box). Mirror of `rig/core/src/affinity.rs` (#289).
 - **rtprio grant dependency**: OBS runs as the unprivileged desktop user, so the SCHED_FIFO call
   needs `setup-imag.sh`'s `/etc/security/limits.d/95-imag-genlock-rtprio.conf` (`${DESKTOP_USER} -
   rtprio 20`, applied by PAM at next login). Without it the pin warn-degrades to SCHED_OTHER.

@@ -120,7 +120,7 @@ day) — exactly the date-walk issue 1355 removed from the receiver; in a sender
 `30 × 333_333 = 9_999_990`, so a sender stamping `k · interval_100ns` from 1970 walks **1 µs
 per second at 30 fps (4 µs at 60)** — a whole frame in about 0.4 days. The receiver's release
 deadline and render tick now floor on this same per-second grid
-(`vendor/obs-studio/libobs/obs-genlock-grid.h`, Rust authority `src/genlock_grid.rs`). Content
+(`vendor/obs-studio/libobs/obs-genlock-grid.h`, Rust authority `rig/core/src/genlock_grid.rs`). Content
 that arrives at a different rate (a 23.976 or 29.97 file) **MUST** be presented at the first
 boundary at or after its PTS (repeat or drop as needed) and **MUST NOT** be emitted at its
 free-running file rate.
@@ -196,7 +196,7 @@ dantesync's 5 s emergency cap it steps at once.
 DistroAV sender floors the wall clock at emit, so its stamps re-grid with the tick.
 
 *Reference implementation (camera-box):* `genlock_emit_gate` (`src/genlock_pacing.rs:79`) on the
-per-second grid of `src/genlock_grid.rs` (latch / resync `grid_next_boundary_ns`, advance
+per-second grid of `rig/core/src/genlock_grid.rs` (latch / resync `grid_next_boundary_ns`, advance
 `genlock_advance_boundary` `:165`, lag in grid slots `grid_steps_between` — since #1355, before it
 the gate paced on `now % interval` from 1970); catch-up bound `GENLOCK_MAX_CATCHUP_INTERVALS = 8`
 (`:62`); backward-step re-latch (`:92-100`, `genlock_latched_boundary` `:150`); starvation repeat
@@ -293,7 +293,7 @@ window cannot read as "flat" (`:47`).
 | §1 Clock | realtime + monotonic + one bracketed read per frame; offset resampled every 100 frames and in the frame the wall steps 2 ms or more | `src/main.rs:41,57,76`; `src/genlock_stamp.rs:94,112,142,169` |
 | §2 Create | `clock_video/clock_audio=false`, progressive | `src/ndi.rs:628-629,1075` |
 | §4 Timecode | FLOOR boundary, 100 ns epoch | `src/ndi.rs:78,1079` (doctrine `:62-78`); `src/genlock_stamp.rs:46`; `vendor/distroav/src/ndi-output.cpp:613` (doctrine `:34-60`) |
-| §5 Pacing | per-second grid gate, catch-up ≤ 8, resync, re-latch, repeat | `src/genlock_pacing.rs:62,79,92-100,150,165,262`; `src/genlock_grid.rs` |
+| §5 Pacing | per-second grid gate, catch-up ≤ 8, resync, re-latch, repeat | `src/genlock_pacing.rs:62,79,92-100,150,165,262`; `rig/core/src/genlock_grid.rs` |
 | §6 Audio | raw wall-clock timecode, no snap | `vendor/distroav/src/ndi-output.cpp:697` |
 | §8 Acceptance | `genlock-fifo audit` counters + verdict | `src/jitter_audit.rs:41-52`; `src/resolume_playback.rs:46,47,56,71-75,91` |
 | Receiver gate | `PROP_SYNC_NDI_SOURCE_TIMECODE` ×100 → ns | `vendor/distroav/src/ndi-source.cpp:723,1619-1626,1680-1687,1959-1960` |

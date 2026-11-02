@@ -226,7 +226,7 @@ is compiled unconditionally and the `dep:` prefix (optional-dep activation) is n
 
 When you add a Rust file whose PURE functions are unit-testable but which also has glue that CANNOT
 be (raw syscalls, `/proc`/`/sys` IO, FFI, live hardware), CI's two strict gates will fail unless you
-exclude the glue — follow how `kms.rs` / `painter.rs` are already handled (#289 `src/affinity.rs` did this):
+exclude the glue — follow how `kms.rs` / `painter.rs` are already handled (#289 `rig/core/src/affinity.rs` did this):
 
 1. **Coverage** (`ci.yml` "Generate coverage report"): add the file to `--ignore-filename-regex`
    (it's whole-FILE only — can't exclude individual functions). The pure functions' unit tests still

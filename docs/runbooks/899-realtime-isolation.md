@@ -32,12 +32,12 @@ The fleet's realtime setup was only half-built. Measured on cam1 (10.77.9.61, N1
    can't preempt it), but the comment documented a state the fleet has never been in. **This is
    STAGED step B** (below), unchanged by the STEP-1/STEP-2 kernel decision.
 3. **The xhci capture IRQ shared the grab core.** IRQ 125 → core 3. **FIXED live** — lane 1's
-   merged `src/affinity.rs::select_irq_target_cores` routes it OFF the grab core on a stock kernel;
+   merged `rig/core/src/affinity.rs::select_irq_target_cores` routes it OFF the grab core on a stock kernel;
    re-verified 2026-08-20 (`smp_affinity_list=0-2` on all three boxes).
 
 ## What this branch already does (code/config, no live change)
 
-- **Defect 3 fixed in code (merged, live).** `src/affinity.rs` routes the capture IRQ **off** the
+- **Defect 3 fixed in code (merged, live).** `rig/core/src/affinity.rs` routes the capture IRQ **off** the
   grab core on a stock kernel and only co-locates it on the isolated core on a real PREEMPT_RT
   kernel. This is RT-conditional and forward-compatible: it flips automatically once the fleet is
   on a full-RT kernel (STEP 2). On the lowlatency kernel (STEP 1, still not PREEMPT_RT) it keeps
