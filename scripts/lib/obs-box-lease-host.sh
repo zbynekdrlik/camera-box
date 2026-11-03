@@ -48,21 +48,24 @@ obs_box_lease_host_ip4_int() {
   printf '%s\n' $(((a << 24) | (b << 16) | (c << 8) | d))
 }
 
-# obs_box_lease_host_pick BOX_IP PREFIX < getent-output -> the first address (first field of each line)
-# inside BOX_IP/PREFIX, printed once; rc 1 when none (or BOX_IP / PREFIX unreadable).
+# obs_box_lease_host_pick BOX_IP PREFIX [CURRENT] < getent-output -> the address to write, as a normalised
+# dotted quad: CURRENT when it is among the answers inside BOX_IP/PREFIX (no flapping when dev1 announces
+# two rig addresses in a varying order), else the first such answer; rc 1 when none (or BOX_IP / PREFIX
+# unreadable). The box's own address is never picked.
 obs_box_lease_host_pick() {
-  local box="${1-}" prefix="${2-}" bi mask cand ci
+  local box="${1-}" prefix="${2-}" current="${3-}" bi mask cand ci cur="" first=""
   bi="$(obs_box_lease_host_ip4_int "$box")" || return 1
-  [[ "$prefix" =~ ^[0-9]+$ ]] && [ "$prefix" -ge 1 ] && [ "$prefix" -le 32 ] || return 1
+  [[ "$prefix" =~ ^[0123456789]+$ ]] && [ "$prefix" -ge 1 ] && [ "$prefix" -le 32 ] || return 1
   mask=$(((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF))
+  [ -z "$current" ] || cur="$(obs_box_lease_host_ip4_int "$current")" || cur=""
   while read -r cand _; do
     ci="$(obs_box_lease_host_ip4_int "$cand")" || continue
-    if [ $((ci & mask)) -eq $((bi & mask)) ] && [ "$ci" -ne "$bi" ]; then
-      printf '%s\n' "$cand"
-      return 0
-    fi
+    [ $((ci & mask)) -eq $((bi & mask)) ] && [ "$ci" -ne "$bi" ] || continue
+    [ -n "$first" ] || first="$ci"
+    if [ -n "$cur" ] && [ "$ci" -eq "$cur" ]; then first="$ci"; break; fi
   done
-  return 1
+  [ -n "$first" ] || return 1
+  printf '%s.%s.%s.%s\n' $((first >> 24 & 255)) $((first >> 16 & 255)) $((first >> 8 & 255)) $((first & 255))
 }
 
 # obs_box_lease_host_line IP -> the ONE managed /etc/hosts line (no newline).
@@ -88,24 +91,45 @@ obs_box_lease_host_render() {
 obs_box_lease_host_foreign() {
   LC_ALL=C awk -v marker="$OBS_BOX_LEASE_HOST_MARKER" -v host="$OBS_BOX_LEASE_HOST_NAME" '
     index($0, marker) { next }
-    { s = $0; sub(/#.*/, "", s); n = split(s, f, /[ \t]+/); for (i = 2; i <= n; i++) if (f[i] == host) { print; next } }'
+    { s = $0; sub(/\r$/, "", s); sub(/#.*/, "", s); n = split(s, f, /[ \t]+/); for (i = 2; i <= n; i++) if (f[i] == host) { print; next } }'
 }
 
 # obs_box_lease_host_refresh HOSTS BOX_IP PREFIX -> the timer pass (see the header). rc 0 = the line is
 # right (written or unchanged), rc 1 = nothing written (a resolution or write failure, logged).
 obs_box_lease_host_refresh() {
   local hosts="${1:?hosts file required}" box="${2:?box ip required}" prefix="${3:?prefix required}"
-  local answer ip have want tmp foreign
+  local answer ip have want tmp foreign current have_rest want_rest
+  case "$hosts" in
+    /*) ;;
+    *) echo "camera-box-lease-host: the hosts path '${hosts}' is not absolute -- nothing written" >&2; return 1 ;;
+  esac
+  if [ -L "$hosts" ]; then
+    echo "camera-box-lease-host: ${hosts} is a symlink -- refused, nothing written (a rename would replace the link)" >&2
+    return 1
+  fi
+  # A temp file a killed earlier pass left (systemd runs this oneshot one pass at a time).
+  rm -f -- "${hosts%/*}/.${hosts##*/}.lease-host."*
+  # `&& printf x` (never `;`): the x only joins a SUCCESSFUL read / render, so a failure reaches the `||`.
+  have="$(cat -- "$hosts" && printf x)" || { echo "camera-box-lease-host: cannot read ${hosts} -- nothing written" >&2; return 1; }
+  have="${have%x}"
+  current="$(printf '%s' "$have" | grep -F -- "$OBS_BOX_LEASE_HOST_MARKER" | { read -r a _ || true; printf '%s' "${a-}"; })" || current=""
   answer="$(timeout 10 getent ahostsv4 "$OBS_BOX_LEASE_HOST_MDNS" 2>/dev/null || true)"
-  if ! ip="$(printf '%s\n' "$answer" | obs_box_lease_host_pick "$box" "$prefix")"; then
+  if ! ip="$(printf '%s\n' "$answer" | obs_box_lease_host_pick "$box" "$prefix" "$current")"; then
     echo "camera-box-lease-host: ${OBS_BOX_LEASE_HOST_MDNS} gave no address in ${box}/${prefix} (answer: $(printf '%s' "$answer" | awk '{print $1}' | sort -u | tr '\n' ' ')) -- ${hosts} left as it is" >&2
     return 1
   fi
-  have="$(cat "$hosts"; printf x)" || { echo "camera-box-lease-host: cannot read ${hosts}" >&2; return 1; }
-  have="${have%x}"
-  want="$(printf '%s' "$have" | obs_box_lease_host_render "$ip"; printf x)"
+  want="$(printf '%s' "$have" | obs_box_lease_host_render "$ip" && printf x)" \
+    || { echo "camera-box-lease-host: rendering ${hosts} failed -- nothing written" >&2; return 1; }
   want="${want%x}"
-  foreign="$(printf '%s' "$have" | obs_box_lease_host_foreign)"
+  # Refuse any result that is not "the unmanaged lines unchanged + the one managed line".
+  have_rest="$(printf '%s' "$have" | grep -vF -- "$OBS_BOX_LEASE_HOST_MARKER" || true)"
+  want_rest="$(printf '%s' "$want" | grep -vF -- "$OBS_BOX_LEASE_HOST_MARKER" || true)"
+  if [ "$have_rest" != "$want_rest" ] \
+      || [ "$(printf '%s' "$want" | grep -cxF -- "$(obs_box_lease_host_line "$ip")" || true)" != 1 ]; then
+    echo "camera-box-lease-host: the rendered ${hosts} would change unmanaged lines or lack the one managed line -- refused, nothing written" >&2
+    return 1
+  fi
+  foreign="$(printf '%s' "$have" | obs_box_lease_host_foreign)" || foreign=""
   [ -z "$foreign" ] || echo "camera-box-lease-host: WARNING an unmanaged line names ${OBS_BOX_LEASE_HOST_NAME} and wins the lookup, remove it by hand: ${foreign}" >&2
   if [ "$have" = "$want" ]; then
     echo "camera-box-lease-host: ${OBS_BOX_LEASE_HOST_NAME} -> ${ip} (${OBS_BOX_LEASE_HOST_MDNS}), ${hosts} unchanged"
@@ -139,7 +163,8 @@ obs_box_lease_host_service_text() {
   printf '%s\n' '[Unit]' \
     "Description=camera-box issue 1474: the ${OBS_BOX_LEASE_HOST_NAME} rig-lease host line in /etc/hosts, from ${OBS_BOX_LEASE_HOST_MDNS}" \
     'After=network-online.target avahi-daemon.service' 'Wants=network-online.target' '' \
-    '[Service]' 'Type=oneshot' "ExecStart=/usr/local/sbin/${OBS_BOX_LEASE_HOST_UNIT}-refresh"
+    '[Service]' 'Type=oneshot' "ExecStart=/usr/local/sbin/${OBS_BOX_LEASE_HOST_UNIT}-refresh" \
+    'ProtectSystem=full' 'ReadWritePaths=/etc' 'ProtectHome=yes' 'PrivateTmp=yes' 'NoNewPrivileges=yes'
 }
 obs_box_lease_host_timer_text() {
   printf '%s\n' '[Unit]' \
@@ -201,8 +226,9 @@ obs_box_lease_host_grade() {
     bad "(lease-host-unit) differs or missing:${miss:- none}; timer ${state} -- re-run setup-strih.sh step 16l"
   fi
   box="$(strih_lx_ip 2>/dev/null || true)"
-  mdns="$(timeout 10 getent ahostsv4 "$OBS_BOX_LEASE_HOST_MDNS" 2>/dev/null | obs_box_lease_host_pick "$box" "$OBS_BOX_LEASE_HOST_PREFIX" || true)"
   have="$(timeout 10 getent hosts "$OBS_BOX_LEASE_HOST_NAME" 2>/dev/null | awk 'NR == 1 {print $1}' || true)"
+  # The same pick the refresh makes, preferring the address dev1 resolves to now.
+  mdns="$(timeout 10 getent ahostsv4 "$OBS_BOX_LEASE_HOST_MDNS" 2>/dev/null | obs_box_lease_host_pick "$box" "$OBS_BOX_LEASE_HOST_PREFIX" "$have" || true)"
   if [ -n "$have" ] && [ "$have" = "$mdns" ]; then
     ok "(lease-host) ${OBS_BOX_LEASE_HOST_NAME} -> ${have} = ${OBS_BOX_LEASE_HOST_MDNS}"
   else

@@ -217,14 +217,20 @@ literal was lost and dev1's rig address moves by DHCP. `scripts/lib/obs-box-leas
 - **setup-strih step 16l** (`obs_box_lease_host_install`, gate `obs_box_step_applies 16l-lease` =
   stream role AND venue snv; mDNS does not reach Poprad): libnss-mdns, the root
   `/usr/local/sbin/camera-box-lease-host-refresh` + `camera-box-lease-host.service` (oneshot,
-  After=network-online + avahi) + `.timer` (30 s after boot, every 5 min), write-if-changed,
-  daemon-reload on a unit change, `enable --now` the timer, one refresh (a failure only WARNs).
-- **The refresh:** `getent ahostsv4 dev1.local`, the first address inside the box's own
-  `STRIH_IP/23` (dev1 also announces tailscale + docker), EXACTLY one line
+  After=network-online + avahi, sandboxed: ProtectSystem=full + ReadWritePaths=/etc) + `.timer`
+  (30 s after boot, every 5 min), write-if-changed, daemon-reload on a unit change, `enable --now`
+  the timer, one refresh (a failure only WARNs).
+- **The refresh:** `getent ahostsv4 dev1.local`, an address inside the box's own `STRIH_IP/23`
+  (dev1 also announces tailscale + docker; the current one is kept while still announced, written
+  as a normalised dotted quad), EXACTLY one line
   `<ip>\tdev1\t# camera-box issue 1474: the rig lease host, refreshed from dev1.local` (the
   supervisor's stopgap byte for byte). Only lines carrying that marker are replaced or dropped; a
   change is a temp file next to /etc/hosts + rename (mode + owner kept), an unchanged file is not
-  touched. A failed resolution writes nothing and exits 1. An UNMANAGED `dev1` line is never edited,
+  touched. A failed resolution writes nothing and exits 1. **Every read / render keeps its exit code
+  (`cat ... && printf x`, never `; printf x`):** review round 1 reproduced a failed awk writing an
+  EMPTY /etc/hosts with rc 0. A render that changes an unmanaged line or lacks the managed line, a
+  symlinked or relative hosts path, and a failed write are all refused (rc 1, the temp file removed,
+  a killed pass's temp file swept on the next). An UNMANAGED `dev1` line is never edited,
   only named (it wins the lookup, so verify FAILs). The script embeds the pure functions by
   `declare -f` with the box IP baked, so setup, timer and verify run the same code.
 - **verify-strih** (`obs_box_lease_host_grade`, one call line, a NOTE outside the gate):
