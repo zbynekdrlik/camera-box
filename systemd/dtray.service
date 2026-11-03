@@ -1,0 +1,35 @@
+[Unit]
+# issue 1485 -- dstack's shared tray `dtray`: every dstack device of this PC (the intercom hub's Dante
+# device, the strih OBS's dante_input) as an icon in the kiosk tint2 systray. The program is the PINNED
+# dstack release's `dtray-<tag>-linux-x86_64` (scripts/dtray-release.pin), installed to /usr/local/bin/dtray
+# by setup-strih.sh step 16d (dtray_install, scripts/lib/dtray.sh). Started at login by the kiosk autostart
+# and after strih-obs by the strih-snv genlock deploy, never the XDG autostart; graded by verify-strih's
+# (dtray) + (dtray-devices) rows.
+Description=dtray -- the dstack devices in the kiosk systray (issue 1485)
+Documentation=https://github.com/zbynekdrlik/camera-box
+PartOf=graphical-session.target
+After=graphical-session.target
+# No binary (a failed fetch) = a clean condition skip, never a restart loop on a missing ExecStart.
+ConditionFileIsExecutable=/usr/local/bin/dtray
+# dtray exits 1 without a desktop: five failed starts in 5 min and the unit stays failed (no restart loop
+# on a box with no session); the next login's autostart start retries.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The kiosk's plain Xorg session (the strih-obs-start.sh display); GTK reads ~/.Xauthority.
+Environment=DISPLAY=:0
+ExecStart=/usr/local/bin/dtray
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dtray
+
+[Install]
+# openbox never reaches graphical-session.target: the kiosk openbox autostart STARTS this unit at every
+# login (the strih-obs.service pattern); the WantedBy only makes `enable` meaningful.
+WantedBy=graphical-session.target
