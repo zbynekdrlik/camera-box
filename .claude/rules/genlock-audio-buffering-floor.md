@@ -3,7 +3,6 @@ paths:
   - "vendor/obs-studio/libobs/obs-genlock-audio-buffering.h"
   - "vendor/obs-studio/libobs/obs-audio.c"
   - "vendor/obs-studio/libobs/obs.c"
-  - "src/genlock_audio_buffering.rs"
   - "tests/genlock_audio_buffering_parity_1367.rs"
   - "tests/genlock_audio_buffering_wiring_1367.rs"
   - "tests/genlock_audio_mix_guard_1381.rs"
@@ -34,7 +33,7 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
 | the box fact `STRIH_AUDIO_BUFFERING_MS` (0..960 ms, the ASCII digit set spelled out; a missing or bad value refuses by name) | `scripts/strih-boxes/<box>.env` (0 on all four boxes), `scripts/lib/strih-box-facts.sh`, accessor `strih_lx_audio_buffering_ms` |
 | the marker `~/.camera-box/genlock-audio-buffering-ms` of the OBS user (`<ms>` + newline, 0644, compare-then-write, never through a symlink, the dir via `strih_user_home_dir`) | setup-strih step 5 (one line), `obs_audio_buffering_install` in `scripts/lib/obs-audio-buffering.sh`; it never restarts OBS |
 | the read, once per audio reset (the genlock-min-latency marker pattern): ABSENT / INVALID / FIXED | obs.c `genlock_audio_buffering_read_box_ms`, BEFORE the plan block |
-| the pure parse (1..3 ASCII numerals + an optional newline, 0..960), the plan (`make_plan_box` / `plan_box`: floor = the value, `box_fixed`) and the freeze (`frozen_plan`: a fixed plan is frozen on every tick) | `obs-genlock-audio-buffering.h` <-> `src/genlock_audio_buffering.rs`, parity gate `tests/genlock_audio_buffering_parity_1367.rs` |
+| the pure parse (1..3 ASCII numerals + an optional newline, 0..960), the plan (`make_plan_box` / `plan_box`: floor = the value, `box_fixed`) and the freeze (`frozen_plan`: a fixed plan is frozen on every tick) | `obs-genlock-audio-buffering.h` <-> `vstack:rig/core/src/genlock_audio_buffering.rs`, parity gate `tests/genlock_audio_buffering_parity_1367.rs` |
 | the per-tick freeze takes `audio->genlock_buffering_box_fixed` | obs-audio.c `genlock_buffering_frozen_now(..., box_fixed)`, the call anchor in `tests/genlock_audio_buffering_freeze_wiring_1425.rs` + both windows-genlock pwsh steps |
 
 - **Behaviour under a FIXED plan:** the floor (the declared ticks) is raised on the first tick right
@@ -90,7 +89,7 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
 ## The floor is 0 (issue 1425 E2 slice 3, design 6220191978)
 
 - **What ships.** `GENLOCK_AUDIO_BUFFERING_FLOOR_MS 0u` (`obs-genlock-audio-buffering.h`) ↔ Rust
-  `FLOOR_MS = 0` (`src/genlock_audio_buffering.rs`). A launch starts at 0 ms like stock OBS, and its
+  `FLOOR_MS = 0` (`vstack:rig/core/src/genlock_audio_buffering.rs`). A launch starts at 0 ms like stock OBS, and its
   own startup race grows the buffering in the first seconds: a clean launch draws what stock OBS drew,
   **0, 64 or 85 ms** on stream (the history below; the lift's 21 / 42 ms launch is a model, not a
   measurement), or logs no growth line. The FLOOR action, `set_floor_audio_buffering` and the plan's
@@ -145,7 +144,7 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
 
 ## Tests
 
-- `src/genlock_audio_buffering.rs`: the rounding, the plan and override, the floor rule (on a 4-tick
+- `vstack:rig/core/src/genlock_audio_buffering.rs`: the rounding, the plan and override, the floor rule (on a 4-tick
   floor and on the shipped 0), the freeze; `the_floor_is_zero_ticks_at_both_rates_1425`.
 - `tests/genlock_audio_buffering_parity_1367.rs` compiles the header as-is against the Rust over
   vector spreads, lifts every define (the floor must read 0) and holds a launch's own draw (the floor
@@ -362,7 +361,7 @@ so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
   next minute's line (`+K since the last line` counts it). The counters and `#800` see it at once.
 
 **Tests.**
-- `src/genlock_audio_buffering.rs` unit tests + the 1367 parity gate (the action's `frozen`, the
+- `vstack:rig/core/src/genlock_audio_buffering.rs` unit tests + the 1367 parity gate (the action's `frozen`, the
   decision over its one input).
 - The 1381 lift (`tests/genlock_audio_mix_guard_1381.rs`; the harness stub has an encoder count
   `h_encoders`):

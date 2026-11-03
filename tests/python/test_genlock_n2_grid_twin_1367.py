@@ -4,9 +4,11 @@ Since D1 an N>=2 input (a 60 fps camera into the 30 fps strih canvas) presents
 `grid_floor(T - GENLOCK_N2_AGE_BASE_NS - pin, canvas / N)`, so its present age is a pure function of
 the pin: 66.7 ms at pins 1..16 ms, one source frame more per source interval of pin. The dev1
 consumers read `scripts/genlock_n2_grid.py` for it. Pinned to the Rust authority two ways:
-  * the constant is READ from src/genlock_n2_grid.rs (the av_soak_decision.py pattern, never retyped);
-  * the present-age table tests/fixtures/genlock_n2_present_age_1367.tsv is read HERE and by the Rust
-    test `present_age_table_shared_with_the_python_twin_1367` in src/genlock_n2_grid.rs.
+  * the constant is READ from the vendored C define (the av_soak_decision.py pattern, never retyped;
+    the E2E job has no cargo), held here and by the parity gate equal to
+    vstack:rig/core/src/genlock_n2_grid.rs;
+  * the present-age table vstack:rig/core/tests/fixtures/genlock_n2_present_age_1367.tsv is read HERE
+    and by the Rust test `present_age_table_shared_with_the_python_twin_1367` in that module.
 Which inputs run the grid is read from the raw audit lines (`n2_early=` on every line + N >= 2).
 """
 import json
@@ -22,8 +24,11 @@ if str(_SCRIPTS) not in sys.path:
 
 import genlock_audit_snapshot as gas  # noqa: E402
 import genlock_n2_grid as g  # noqa: E402
+import vstack_src  # noqa: E402
 
-TSV = _ROOT / "tests" / "fixtures" / "genlock_n2_present_age_1367.tsv"
+TSV = "rig/core/tests/fixtures/genlock_n2_present_age_1367.tsv"
+RUST = "rig/core/src/genlock_n2_grid.rs"
+_C_REL = pathlib.Path(g.AGE_BASE_SOURCE[0])
 D1_DIR = _ROOT / "tests" / "fixtures" / "genlock_n2_d1_audit_1367" / "recording-e2e-1367901"
 D1_LOG = D1_DIR / "qr-align-strih-1367901.log"
 D1_JSON = D1_DIR / "qr-align-jitter-1367901.json"
@@ -37,7 +42,7 @@ S = 1_790_640_000_000_000_000   # a whole second (the Rust tests' S)
 
 def _rows():
     out = []
-    for line in TSV.read_text(encoding="utf-8").splitlines():
+    for line in vstack_src.read(TSV).splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         f = line.split("\t")
@@ -46,21 +51,22 @@ def _rows():
 
 
 # --------------------------------------------------------------------------- the constant
-class TestAgeBaseFromTheRustSource:
-    def test_read_from_src_genlock_n2_grid_rs_never_retyped(self):
-        text = (_ROOT / "src" / "genlock_n2_grid.rs").read_text(encoding="utf-8")
+class TestAgeBaseFromTheSource:
+    def test_read_from_the_vendored_define_equal_to_the_pinned_rust_never_retyped(self):
+        text = vstack_src.read(RUST)
         assert g.parse_rust_u64_const(text, "GENLOCK_N2_AGE_BASE_NS") == 50_000_000
         assert g.load_age_base_ns() == 50_000_000
         # the twin keeps no literal copy of the value (the av_soak "never retyped" rule)
         src = (_SCRIPTS / "genlock_n2_grid.py").read_text(encoding="utf-8")
         assert "50_000_000" not in src and "50000000" not in src
 
-    def test_a_changed_rust_constant_moves_the_twin(self, tmp_path):
-        rs = (_ROOT / "src" / "genlock_n2_grid.rs").read_text(encoding="utf-8")
-        (tmp_path / "src").mkdir()
-        (tmp_path / "src" / "genlock_n2_grid.rs").write_text(
-            rs.replace("GENLOCK_N2_AGE_BASE_NS: u64 = 50_000_000;",
-                       "GENLOCK_N2_AGE_BASE_NS: u64 = 60_000_000;"), encoding="utf-8")
+    def test_a_changed_constant_moves_the_twin(self, tmp_path):
+        c = (_ROOT / _C_REL).read_text(encoding="utf-8")
+        assert "#define GENLOCK_N2_AGE_BASE_NS 50000000ULL" in c
+        (tmp_path / _C_REL).parent.mkdir(parents=True)
+        (tmp_path / _C_REL).write_text(
+            c.replace("#define GENLOCK_N2_AGE_BASE_NS 50000000ULL",
+                      "#define GENLOCK_N2_AGE_BASE_NS 60000000ULL"), encoding="utf-8")
         base = g.load_age_base_ns(str(tmp_path))
         assert base == 60_000_000
         # 60 + 3 = 63 ms -> still four 60 fps frames; 60 + 7 = 67 ms -> five
@@ -68,12 +74,17 @@ class TestAgeBaseFromTheRustSource:
         assert g.present_age_ns(7, I60, age_base_ns=base) == 83_333_333
 
     def test_a_missing_constant_fails_closed(self, tmp_path):
-        (tmp_path / "src").mkdir()
-        (tmp_path / "src" / "genlock_n2_grid.rs").write_text("// no constant here\n", encoding="utf-8")
+        (tmp_path / _C_REL).parent.mkdir(parents=True)
+        (tmp_path / _C_REL).write_text("/* no constant here */\n", encoding="utf-8")
         with pytest.raises(g.N2GridConstantError):
             g.load_age_base_ns(str(tmp_path))
         with pytest.raises(g.N2GridConstantError):
             g.load_age_base_ns(str(tmp_path / "absent"))
+
+    def test_the_define_parser_is_exact_name(self):
+        text = "#define GENLOCK_N2_AGE_BASE_NS_X 7ULL\n#define GENLOCK_N2_AGE_BASE_NS 1000ULL /* c */\n"
+        assert g.parse_c_u64_define(text, "GENLOCK_N2_AGE_BASE_NS") == 1000
+        assert g.parse_c_u64_define(" * #define GENLOCK_N2_AGE_BASE_NS 9\n", "GENLOCK_N2_AGE_BASE_NS") is None
 
     def test_the_parser_is_exact_name_and_u64(self):
         text = "pub const GENLOCK_N2_AGE_BASE_NS_X: u64 = 7;\npub const GENLOCK_N2_AGE_BASE_NS: u64 = 1_000;\n"
@@ -105,7 +116,7 @@ class TestPresentAgeTableSharedWithRust:
             assert got in (age, age + 1), (row, t, got)
 
 
-# ------------------------------------------------ the Rust test values, quoted (src/genlock_n2_grid.rs)
+# ------------------------------------------------ the Rust test values, quoted (the pinned module)
 class TestRustTestValues:
     def test_production_pin_targets_four_source_frames_back(self):
         # Rust production_pin_targets_four_source_frames_back: every 30 fps tick of a second targets a

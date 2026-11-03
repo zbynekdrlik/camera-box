@@ -62,7 +62,7 @@ line.
   at the same wall instant and survives the hold. This is a per-source PHASE hold, orthogonal to
   the ASRC servo's sample-clock RATE (ppm) discipline above — the two together are what makes the
   audio leg a first-class genlocked signal with the same evidence bar as video. The decision is
-  the pure `src/genlock_audio_pairing.rs` (`genlock_audio_delay_ns` = `latency_ms`), mirrored
+  the pure `vstack:rig/core/src/genlock_audio_pairing.rs` (`genlock_audio_delay_ns` = `latency_ms`), mirrored
   byte-for-byte in the C and pinned by `tests/genlock_audio_pairing_parity.rs`. Receiver
   observability: the `genlock-fifo audit` line and `obs_genlock_stats` (v2) carry
   `audio_enabled` / `audio_delay_ms` / `audio_pairing_offset_ms` (0 = paired); a program source

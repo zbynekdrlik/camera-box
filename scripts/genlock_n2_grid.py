@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Issue 1367 slice D1b -- the dev1 Python twin of the grid-exact N>=2 present age.
 
-WHAT: since D1 (src/genlock_n2_grid.rs, the C `genlock_release_tick_n2_grid` in obs-source.c) an
+WHAT: since D1 (vstack:rig/core/src/genlock_n2_grid.rs, the C `genlock_release_tick_n2_grid` in obs-source.c) an
 N>=2 genlock input (a 60 fps camera into the 30 fps strih canvas) presents, at render tick T, the
 stamp
 
@@ -16,11 +16,14 @@ fed by scripts/lib/qr-align.sh) read this twin instead for a CONFIRMED grid inpu
 audit head is one source frame older than the target, so the old estimate read about 86 ms at pin 3;
 `mean_head_skew_ms` stays only as the arrival-lag diagnostic.
 
-THE CONSTANT is never retyped here: `load_age_base_ns()` reads `GENLOCK_N2_AGE_BASE_NS` from
-src/genlock_n2_grid.rs at run time (the scripts/av_soak_decision.py pattern) and fails closed
-(`N2GridConstantError`) when it cannot. The per-second grid helpers mirror vstack:rig/core/src/genlock_grid.rs.
-tests/fixtures/genlock_n2_present_age_1367.tsv is the ONE present-age table read by BOTH the Rust
-test in src/genlock_n2_grid.rs and tests/python/test_genlock_n2_grid_twin_1367.py.
+THE CONSTANT is never retyped here: `load_age_base_ns()` reads the `#define GENLOCK_N2_AGE_BASE_NS`
+of vendor/obs-studio/libobs/obs-source.c at run time (the scripts/av_soak_decision.py pattern) and
+fails closed (`N2GridConstantError`) when it cannot. It is the C define, not the Rust authority,
+because this runs inside the full-path E2E job, which has no cargo and so no checkout of the pinned
+vstack tag; tests/genlock_n2_grid_parity_1367.rs holds the define equal to
+vstack:rig/core/src/genlock_n2_grid.rs. The per-second grid helpers mirror vstack:rig/core/src/genlock_grid.rs.
+vstack:rig/core/tests/fixtures/genlock_n2_present_age_1367.tsv is the ONE present-age table, read by
+BOTH the Rust test in that module and tests/python/test_genlock_n2_grid_twin_1367.py.
 
 CONFIRMED grid input (`grid_inputs_from_audit`): every `genlock-fifo audit` line of the input carries
 the `n2_early=` token (only a D1 build prints it) AND its rate multiple is within 0.25 of an integer
@@ -48,7 +51,7 @@ from genlock_audit_snapshot import parse_audit_line  # noqa: E402
 
 NS_PER_SECOND = 1_000_000_000
 # (file under the repo root, constant name) -- where the age base lives. Never retyped.
-AGE_BASE_SOURCE = ("src/genlock_n2_grid.rs", "GENLOCK_N2_AGE_BASE_NS")
+AGE_BASE_SOURCE = ("vendor/obs-studio/libobs/obs-source.c", "GENLOCK_N2_AGE_BASE_NS")
 
 _FPS_RE = re.compile(r"@\s*([0-9]+(?:\.[0-9]+)?)\s*fps")
 # A rate ratio further than this from its nearest integer is inconclusive, never a guessed multiple
@@ -70,7 +73,7 @@ _AGE_BASE_CACHE: dict = {}
 
 
 class N2GridConstantError(Exception):
-    """GENLOCK_N2_AGE_BASE_NS could not be read from its Rust source (fail closed)."""
+    """GENLOCK_N2_AGE_BASE_NS could not be read from its vendored C source (fail closed)."""
 
 
 # --- the constant -------------------------------------------------------------------------------
@@ -89,12 +92,19 @@ def parse_rust_u64_const(text, name):
         return None
 
 
+def parse_c_u64_define(text, name):
+    """`#define NAME <digits>[u][l][l]` -> int, or None when absent. Exact-name match."""
+    m = re.search(r"^\s*#\s*define\s+" + re.escape(name) + r"\s+([0-9]+)[uUlL]*\b",
+                  text or "", re.MULTILINE)
+    return int(m.group(1)) if m else None
+
+
 def default_repo_root():
     return os.path.normpath(os.path.join(_HERE, ".."))
 
 
 def load_age_base_ns(repo_root=None):
-    """GENLOCK_N2_AGE_BASE_NS read from src/genlock_n2_grid.rs. Raises N2GridConstantError when the
+    """GENLOCK_N2_AGE_BASE_NS read from the vendored C. Raises N2GridConstantError when the
     file is unreadable or the constant is missing / not positive. Cached per repo root."""
     root = os.path.normpath(repo_root or default_repo_root())
     if root in _AGE_BASE_CACHE:
@@ -106,9 +116,9 @@ def load_age_base_ns(repo_root=None):
             text = f.read()
     except OSError as e:
         raise N2GridConstantError(f"cannot read {path}: {e}") from e
-    val = parse_rust_u64_const(text, name)
+    val = parse_c_u64_define(text, name)
     if val is None or val <= 0:
-        raise N2GridConstantError(f"{name} not found as a positive `pub const {name}: u64` in {path}")
+        raise N2GridConstantError(f"{name} not found as a positive `#define {name}` in {path}")
     _AGE_BASE_CACHE[root] = val
     return val
 
@@ -155,7 +165,7 @@ def grid_floor_ns(t_ns, interval_ns):
     return (t_ns // interval_ns) * interval_ns
 
 
-# --- the D1 age function (mirror of src/genlock_n2_grid.rs) --------------------------------------
+# --- the D1 age function (mirror of vstack:rig/core/src/genlock_n2_grid.rs) --------------------------------------
 
 
 def source_interval_ns(canvas_interval_ns, n):

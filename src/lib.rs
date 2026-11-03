@@ -459,7 +459,7 @@ pub mod genlock_grid_bench;
 // restart. Crate-root + std-only (Tier-0); the C `genlock_n2_*` block in obs-source.c is held
 // identical by `tests/genlock_n2_grid_parity_1367.rs`, and the probe `ReleaseCadence` delegates
 // its N>=2 ticks here.
-pub mod genlock_n2_grid;
+pub use rig_core::genlock_n2_grid;
 
 // Issue 1367 slice D1 — the 60-into-30 two-clock bench of the grid-exact N>=2 conveyor: seven
 // cameras with the arrival lag measured on strih-snv 28.9.2026, random receiver restarts; every
@@ -503,7 +503,7 @@ pub use rig_core::genlock_wall_step;
 // the level servo's reach. Crate-root + std-only (Tier-0); the C twin
 // `vendor/obs-studio/libobs/obs-genlock-audio-buffering.h` is held identical by the committed
 // parity gate `tests/genlock_audio_buffering_parity_1367.rs`.
-pub mod genlock_audio_buffering;
+pub use rig_core::genlock_audio_buffering;
 
 // Issue 1372 — the two-clock WALL-STEP bench: the logged −51 ms fleet date step replayed against the
 // render tick + sender stamp, the LOCK indicator's qpc_drift verdict and the stream `mbc` ASRC (a
@@ -518,7 +518,7 @@ mod genlock_wall_step_bench;
 // reaches only a source that was releasing at the step. Crate-root + std-only (Tier-0); the C twin
 // `vendor/obs-studio/libobs/obs-genlock-fifo-relabel.h` is held identical by the committed parity
 // gate `tests/genlock_fifo_relabel_parity_1372.rs`.
-pub mod genlock_fifo_relabel;
+pub use rig_core::genlock_fifo_relabel;
 
 // Issue 1372 part B — the two-clock bench of the relabel: the measured +1543.16 ms and the quantized
 // +1600 ms step against the deep N==1 2ME PGM, the shallow cg feed and an N>=2 camera, the sender
@@ -562,20 +562,25 @@ pub mod vban_conceal;
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
-// committed parity gate `tests/genlock_lock_state_parity.rs`. Split by concern into
-// `src/genlock_lock_state/` (issue 1302); every item is re-exported at this path.
-pub mod genlock_lock_state;
+// committed parity gate `tests/genlock_lock_state_parity.rs`.
+pub use rig_core::genlock_lock_state;
 // Issue 1387: the in-OBS JPEG XS indicator decision (OFF / OK / DEGRADED / DOWN) + the Sources-dock
 // transport tag. The C port is vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp, parity-gated
 // by tests/genlock_jxs_state_parity_1387.rs.
-pub mod genlock_jxs_state;
+pub use rig_core::genlock_jxs_state;
 
 // #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (issue 1367: audio placed at
 // its NDI timecode + the video's MEASURED stamp→present delay through the live wall→mono offset;
-// the two-clock bench is its test-only child). Crate-root + std-only so it is Tier-0 verifiable; the C
+// the two-clock bench stays here as a test-only child of this re-export). Std-only; the C
 // mirror (`genlock_audio_*` in `vendor/obs-studio/libobs/obs-source.c`) is held identical by the
 // committed parity gate `tests/genlock_audio_pairing_parity.rs`.
-pub mod genlock_audio_pairing;
+#[path = "."] // no src/genlock_audio_pairing/ exists to step out of
+pub mod genlock_audio_pairing {
+    pub use rig_core::genlock_audio_pairing::*;
+    #[cfg(test)]
+    #[path = "genlock_audio_pairing_bench.rs"]
+    mod bench;
+}
 
 // Issue 1367 (design 5845361166) — the two-clock bench of the TIMECODE mode of the per-source ASRC: a
 // genlock source placed at its NDI timecode is judged by where each packet lands against its stamp,

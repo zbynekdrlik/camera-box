@@ -152,7 +152,7 @@ fn c_qpc_wall_step_rebase_matches_the_rust_authority_1372() {
     assert!(r(-51, 0) == -51 && r(33, 0) == 0 && r(67, 0) == 0 && r(-51, 1) == 0);
 }
 
-// ---- the Rust authority's own behaviour (moved here from src/genlock_lock_state.rs) ----
+// ---- the Rust authority's own behaviour (moved here from vstack:rig/core/src/genlock_lock_state.rs) ----
 
 #[test]
 fn the_logged_date_step_is_booked_1372() {

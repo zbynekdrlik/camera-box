@@ -191,7 +191,7 @@ Before changing what a release holds, work out the worst depth. Simulate the rel
 lag, where a frame arrives at its stamp: that is the deepest any queue gets. Sweep EVERY pin up to
 the 2000 ms maximum, and assert the depth before a push plus the 4-frame reserve stays under a model
 of the C cap. See `the_drop_cap_holds_the_grid_queue_and_its_burst_reserve_at_every_pin_1367` in
-`src/genlock_n2_grid.rs`. Its anti-tautology asserts that the old cap overruns the deep pins. Then
+`vstack:rig/core/src/genlock_n2_grid.rs`. Its anti-tautology asserts that the old cap overruns the deep pins. Then
 read `depth=` / `peak=` / `cap=` on a live deep input's audit line.
 
 ## Adding REMEMBERED STATE: enumerate the invalidation seams before writing the tests

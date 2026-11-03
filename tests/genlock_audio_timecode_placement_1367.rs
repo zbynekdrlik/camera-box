@@ -1,5 +1,5 @@
 //! Issue 1367 (Option 3) — a std-only static guard that the genlock AUDIO placement is WIRED, not
-//! just defined: the pure helpers (held to `src/genlock_audio_pairing.rs` by
+//! just defined: the pure helpers (held to `vstack:rig/core/src/genlock_audio_pairing.rs` by
 //! `tests/genlock_audio_pairing_parity.rs`) must actually be called at the three seams.
 //!
 //! 1. The render thread tracks the source's REAL stamp->present delay at the tick's SCHEDULED

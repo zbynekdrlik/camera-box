@@ -16,7 +16,6 @@ paths:
   - "vendor/distroav/src/genlock-emit-timecode.h"
   - "tests/distroav_jxs_output_1387.rs"
   - "vendor/distroav/src/jxs-state-table.h"
-  - "src/genlock_jxs_state.rs"
   - "vendor/obs-studio/frontend/widgets/GenlockJxs*"
   - "vendor/obs-studio/frontend/components/SourceTreeItem.*"
   - "tests/genlock_jxs_state_parity_1387.rs"
@@ -813,7 +812,7 @@ is on, and per source whether it comes over NDI or JPEG XS.
 
 ### The decision and the widget (frontend, every build)
 
-- **Authority** `src/genlock_jxs_state.rs`; **C port** `vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp`
+- **Authority** `vstack:rig/core/src/genlock_jxs_state.rs`; **C port** `vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp`
   (pure C, compiled whole as C11 AND C++17 by `tests/genlock_jxs_state_parity_1387.rs` over 8192 row
   vectors and 2025 count vectors, plus the names, the tags and the constants).
 - A row: DOWN with no frame for `JXS_DOWN_AGE_MS` (3000, the source's own not-connected bound) or none

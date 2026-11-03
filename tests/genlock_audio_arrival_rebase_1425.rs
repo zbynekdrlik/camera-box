@@ -9,7 +9,7 @@
 //! drift apart. OBS PLACED such a packet at its stamp once they were 70 ms apart (a 70 ms gap or
 //! overwrite of its own audio), and past 2 s dropped the whole buffer and re-latched `timing_adjust`;
 //! a 70 ms jump of the video-written `timing_adjust` placed it too. Once synced, nothing moves a source's
-//! placement at runtime (owner, 16.10.2026): the decision (`src/genlock_audio_pairing.rs`
+//! placement at runtime (owner, 16.10.2026): the decision (`vstack:rig/core/src/genlock_audio_pairing.rs`
 //! `audio_arrival_rebase`, its C port parity-gated by `tests/genlock_audio_asrc_basis_parity_1425.rs`)
 //! rebases the timeline instead, so the packet APPENDS. Every other source keeps OBS's own path: an
 //! unlocked one, a stopped one (the mixer cleared `audio_ts`), a listen-only one, one without a

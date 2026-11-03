@@ -1,7 +1,7 @@
 //! #1303 + issue 1367 — an EXECUTABLE C-vs-Rust parity gate for the receiver-side audio-pairing
 //! decisions.
 //!
-//! `src/genlock_audio_pairing.rs` is the Tier-0 authority; the contiguous `genlock_audio_*` /
+//! `vstack:rig/core/src/genlock_audio_pairing.rs` is the Tier-0 authority; the contiguous `genlock_audio_*` /
 //! `genlock_video_delay_*` `static inline` block in `vendor/obs-studio/libobs/obs-source.c` is the
 //! production port the audio ingest (`source_output_audio_data`), the render-thread video-delay
 //! tracker, the `genlock-fifo audit` audio facet and the LOCK indicator consume. The two are

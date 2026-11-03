@@ -1,6 +1,5 @@
 ---
 paths:
-  - "src/genlock_audio_pairing.rs"
   - "vendor/obs-studio/libobs/obs-audio.c"
   - "tests/audio_telemetry_800.rs"
   - "vendor/obs-studio/libobs/media-io/audio-io.c"
@@ -12,14 +11,11 @@ paths:
   - "src/genlock_forced_table_audit.rs"
   - "scripts/lib/genlock-forced-table-audit.sh"
   - "tests/genlock_forced_table_audit_1303.rs"
-  - "src/genlock_audio_step_hold.rs"
   - "tests/genlock_audio_step_hold_parity_1381.rs"
   - "tests/genlock_audio_step_hold_wiring_1381.rs"
   - "tests/genlock_audio_pairing_lift/mod.rs"
   - "tests/genlock_audio_relabel_ingest_1381.rs"
   - "tests/c/genlock_audio_relabel_ingest_1381_harness.c"
-  - "src/genlock_audio_pairing_step_tests.rs"
-  - "src/genlock_audio_pairing_pending_tests.rs"
   - "src/asrc_timecode_pending_bench.rs"
   - "tests/genlock_audio_relabel_pending_parity_1381.rs"
   - "src/asrc_stamp_bench.rs"
@@ -73,7 +69,7 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
 
 ## The pure decision + parity discipline
 
-`src/genlock_audio_pairing.rs` is the authority: the video-delay tracker
+`vstack:rig/core/src/genlock_audio_pairing.rs` is the authority: the video-delay tracker
 (`video_delay_sample_ns` / `_smooth_ns` / `_round_ms` / `_moved` / `video_delay_track`), the hold
 (`audio_hold_mode` / `audio_hold_ms` / `AudioHoldMode::token`), the placement
 (`audio_wall_to_mono_ns` / `audio_place_term_ns`; the level shift of a placement is
@@ -402,7 +398,7 @@ excess leaked into the smoothed error. The result was restore=1, ~151 ppm applie
 TS-smoothing re-placement every ~80 s for minutes. The 89.7 ms step kept the audio +81…87 ms off for
 over a minute.
 
-- **The hold** (`audio_step_hold` in `src/genlock_audio_step_hold.rs`, a path child re-exported by
+- **The hold** (`audio_step_hold` in `vstack:rig/core/src/genlock_audio_step_hold.rs`, a path child re-exported by
   `genlock_audio_pairing`; C port `genlock_audio_step_hold` in the contiguous pairing block, wrapper
   `genlock_audio_step_hold_source`). A timecode packet whose live offset jumps by more than
   `GENLOCK_WALL_STEP_MIN_NS` (2 ms, the render tick's own threshold, from
@@ -510,7 +506,7 @@ live offset jumps by −S on the same packet, so the intended landing moves only
 The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append decision.
 
 - **The decision.** `audio_relabel(stamp_jump, off_jump, packet, step_min)` in
-  `src/genlock_audio_step_hold.rs`, beside `audio_step_hold`. It is true when BOTH jumps exceed
+  `vstack:rig/core/src/genlock_audio_step_hold.rs`, beside `audio_step_hold`. It is true when BOTH jumps exceed
   `GENLOCK_WALL_STEP_MIN_NS` and they cancel to strictly under one packet. Without the threshold,
   every steady packet (both jumps about 0) would be a "relabel". A stamp leap has no offset jump, and
   a catch-up or a pause has no stamp jump, so neither is a relabel.
@@ -549,7 +545,7 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   only at +725 s). The ROZHODNUTÉ on that finding: every remainder is repaid at 1000 ppm on the
   placement slew.
 - **Tests.**
-  - The pure unit tests in `src/genlock_audio_pairing_step_tests.rs`.
+  - The pure unit tests in `vstack:rig/core/src/genlock_audio_pairing_step_tests.rs`.
   - The relabel lines of `genlock-audio-step-hold`, checked value for value in the lift harness
     (step, held, released, residual, holds, relabels); a sign flip or a zero residual fails.
   - `tests/genlock_audio_step_hold_parity_1381.rs::c_audio_relabel_matches_the_rust_authority_1381`:
@@ -661,7 +657,7 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
     overwritten, the offset repaid by the level loop (bench probe: −10 ms stays 23.3 ms off until
     +748 s, −20 ms is booked and settles in 11 s, −30 ms in 1 s).
 - **Tests.**
-  - The unit tests are in `src/genlock_audio_pairing_pending_tests.rs`.
+  - The unit tests are in `vstack:rig/core/src/genlock_audio_pairing_pending_tests.rs`.
   - The parity test is `c_audio_relabel_pending_matches_the_rust_authority_1381` in its own file,
     `tests/genlock_audio_relabel_pending_parity_1381.rs` (split out of the skew-hold parity file at
     review round 1, which was near 1000 lines). It runs scalar vectors plus a pending script
@@ -711,7 +707,7 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   design comment's premise (slots of 33 333 333 / 334 ns, a `>= packet − 1 ns` bound) was the
   receiver's ns grid. The lane measured it (design question 5902976714): that bound decided
   exactly like slice 2, 20/30 bench cases. The ROZHODNUTÉ set one NDI unit (100 ns): 30/30.
-- **The decision** (Rust `src/genlock_audio_step_hold.rs` ↔ C `obs-source.c`, parity-gated):
+- **The decision** (Rust `vstack:rig/core/src/genlock_audio_step_hold.rs` ↔ C `obs-source.c`, parity-gated):
   - `audio_relabel_pending` / `genlock_audio_relabel_pending`: FORWARD at least one packet −
     `AUDIO_RELABEL_FORWARD_TOLERANCE_NS` (100, `GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS` inside
     the lifted block), BACKWARD more than one packet (unchanged). The arrival bound is unchanged.
@@ -812,7 +808,7 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   1 µs step back). A skew hold's own timeout is over one packet by construction (the follow test
   runs first on the same packet).
 - **Tests.**
-  - Unit (`src/genlock_audio_pairing_pending_slice3_tests.rs`, a `#[path]` child of the pending
+  - Unit (`vstack:rig/core/src/genlock_audio_pairing_pending_slice3_tests.rs`, a `#[path]` child of the pending
     tests): the bound at − 66 / + 34 / − 100 / − 101 ns
     and exactly one packet; the arrival gap of a skipped slot; backward one packet;
     +35 / 40 / 50 / 60 / 66 ms at both grid jumps, resolved by this box's step with −r; the age
@@ -868,7 +864,7 @@ the packet"), the launch-random packet-vs-tick phase, so the A/V moved with ever
 issue-1367 timecode mode already judged a genlock source by its own stamp; only the predicate kept
 every other source out of it.
 
-- **The decision** (`src/genlock_audio_pairing.rs` ↔ the lifted C block, parity-gated):
+- **The decision** (`vstack:rig/core/src/genlock_audio_pairing.rs` ↔ the lifted C block, parity-gated):
   `audio_asrc_placement(mode, direct_ts, monitor_only, can_resample) -> AsrcBasis` (C
   `genlock_audio_asrc_placement`, `GENLOCK_AUDIO_ASRC_BASIS_ARRIVAL|TIMECODE|STAMP`). `Timecode` for
   the timecode hold; `Stamp` for mode `Off` with direct stamps; both need `!monitor_only &&
@@ -958,7 +954,7 @@ off. Past 2 s `handle_ts_jump` dropped the buffer and re-latched `timing_adjust`
 video-written `timing_adjust` (F3) placed the packet too. Owner rule (16.10.2026): once synced, nothing
 moves a placement at runtime.
 
-- **The decision** (`src/genlock_audio_pairing.rs` ↔ the lifted C block, parity-gated):
+- **The decision** (`vstack:rig/core/src/genlock_audio_pairing.rs` ↔ the lifted C block, parity-gated):
   `audio_arrival_rebase(basis, monitor_only, can_resample, level_captured, diff_ns)` = basis Arrival
   && mixed && a resampler && the arrival servo captured its depth && diff ≥ 70 ms
   (`AUDIO_TS_SMOOTHING_NS` ↔ `GENLOCK_AUDIO_TS_SMOOTHING_NS`, `_Static_assert`-ed to
@@ -1000,7 +996,7 @@ moves a placement at runtime.
   counted from its samples. The fix the
   review proposes (carry the drift as a per-source offset added with `timing_adjust`, so forced placements
   land on the continuation) is a change of the decided mechanism, so it was not made here.
-- **Tests:** unit `src/genlock_audio_pairing_arrival_tests.rs`; parity
+- **Tests:** unit `vstack:rig/core/src/genlock_audio_pairing_arrival_tests.rs`; parity
   `tests/genlock_audio_asrc_basis_parity_1425.rs` (`c_arrival_rebase_matches_the_rust_authority_1425`,
   70 ms −1/0/+1); the ingest lift `tests/genlock_audio_arrival_rebase_1425.rs` (the issue-1381 harness,
   built by the shared `tests/genlock_audio_ingest_lift/mod.rs`, its `main` replaced by
@@ -1035,7 +1031,7 @@ Full contract: `genlock-lock-indicator.md` + `genlock-lock-facet.md`.
 ## LOCK-indicator audio DEGRADE term (#1303 part 3b — DONE)
 
 Landed as an additive term in the parity-gated LOCK decision: `GenlockFacets` (Rust
-`src/genlock_lock_state/decision.rs` + the C `genlock_lock_facets_t` in `GenlockLockState.hpp`) gained a bool
+`vstack:rig/core/src/genlock_lock_state/decision.rs` + the C `genlock_lock_facets_t` in `GenlockLockState.hpp`) gained a bool
 `audio_unpaired`; `decide` / `genlock_decide_lock_state` gained a lowest-precedence DEGRADED branch
 mapping it to a new `LockReason::AudioPairing` (=9); the statusbar widget `OBSBasicStatusBar.cpp`
 aggregates the per-source pairing-offset breach (`st.version >= 2 && st.audio_enabled &&

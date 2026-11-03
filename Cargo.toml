@@ -46,9 +46,9 @@ intercom-vban = { git = "https://github.com/zbynekdrlik/intercom", tag = "v1.9.6
 # tag names one version of all of them. src/lib.rs re-exports them at their old paths. The tag must
 # equal scripts/vstack-release.pin (tests/vstack_pin_1487.rs). jxs-recv-ffi and jxs-send-ffi are not
 # dependencies here: they pull the codec in unconditionally, and a default build needs no cmake.
-camera-box-jxs = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.4" }
-rig-core = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.4" }
-qpsk-marker = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.4" }
+camera-box-jxs = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.6" }
+rig-core = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.6" }
+qpsk-marker = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.6" }
 
 # Dynamic library loading (for NDI SDK at runtime)
 libloading = "0.8"
@@ -106,7 +106,7 @@ drm = { version = "0.15", optional = true }
 # Issue 1387: the JPEG XS link's codec (SVT-JPEG-XS, vendored in vstack and built statically by its
 # jxs/sys/build.rs: cmake + nasm). Behind the `jxs` feature so a default build needs neither; CI's
 # deployed camera-box-linux-amd64 is built WITH it (ci.yml `build`).
-svt-jpegxs-sys = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.4", optional = true }
+svt-jpegxs-sys = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.6", optional = true }
 
 [dev-dependencies]
 # Property-based testing for format conversions
