@@ -88,9 +88,14 @@ if ! declare -F dantesync_install_tray >/dev/null; then
   # shellcheck source=scripts/lib/dantesync-install.sh
   . "$(dirname "${BASH_SOURCE[0]}")/dantesync-install.sh"
 fi
+# issue 1485: dstack's shared tray dtray (the pinned binary, its record, the device markers, its rows).
+if ! declare -F dtray_install >/dev/null; then
+  # shellcheck source=scripts/lib/dtray.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/dtray.sh"
+fi
 
 # The session apps, in start order (the kiosk autostart and the deploy start them in this order).
-STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer dsync-tray.service strih-display-watch.service)
+STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer dsync-tray.service strih-display-watch.service dtray.service)
 # issue 1429: libgtk-3-0t64 + libayatana-appindicator3-1 + libxdo3 = the dantesync tray's runtime.
 STRIH_SESSION_APP_PACKAGES=(python3-gi gir1.2-webkit2-4.1 python3-websocket libgtk-3-0t64 libayatana-appindicator3-1 libxdo3)
 STRIH_SESSION_APP_WANTS_TARGET=graphical-session.target
@@ -112,6 +117,8 @@ STRIH_COMPANION_SATELLITE_BIN=/opt/companion-satellite/companion-satellite
 STRIH_COMPANION_SATELLITE_UNIT=companion-satellite.service
 # issue 1429: the dantesync tray's unit (its binary: dantesync_install_tray_bin).
 STRIH_DANTESYNC_TRAY_UNIT=dsync-tray.service
+# issue 1485: dstack's tray (its binary: dtray_bin, scripts/lib/dtray.sh).
+STRIH_DTRAY_UNIT=dtray.service
 # The 4.10.2026 hand-made stopgaps (issue comments 5977460330 panel, 5979039607 Satellite): units
 # WantedBy=default.target, and the panel's ~/.local/bin copy of the app. Paths relative to the
 # operator's home; the wants dir holds the link of any entry enabled that way.
@@ -130,6 +137,7 @@ strih_session_app_script() {
     companion-satellite.service) printf '' ;;
     strih-satellite-watch.timer) printf 'strih_satellite_watch.py' ;;
     dsync-tray.service) printf '' ;;
+    dtray.service) printf '' ;;
     strih-display-watch.service) printf 'strih_display_watch.py' ;;
     strih-stream-monitor.service) printf 'strih_stream_monitor.py' ;;
     *) return 1 ;;
@@ -144,6 +152,7 @@ strih_session_app_item() {
     companion-satellite.service) printf 'companion-satellite' ;;
     strih-satellite-watch.timer) printf 'satellite-watch' ;;
     dsync-tray.service) printf 'dsync-tray' ;;
+    dtray.service) printf 'dtray' ;;
     strih-display-watch.service) printf 'display-watch' ;;
     strih-stream-monitor.service) printf 'stream-monitor' ;;
     *) return 1 ;;
@@ -163,6 +172,8 @@ strih_session_app_program() {
     printf '%s/%s' "$(strih_session_apps_bin_dir)" "$script"
   elif [ "${1-}" = "$STRIH_DANTESYNC_TRAY_UNIT" ]; then
     dantesync_install_tray_bin
+  elif [ "${1-}" = "$STRIH_DTRAY_UNIT" ]; then
+    dtray_bin
   else
     printf '%s' "${STRIH_SESSION_APPS_SATELLITE_BIN:-$STRIH_COMPANION_SATELLITE_BIN}"
   fi
@@ -173,6 +184,7 @@ strih_session_app_program() {
 strih_session_app_binary_installer() {
   case "${1-}" in
     dsync-tray.service) printf 'setup-strih.sh step 16d (it installs the dantesync tray from the pinned dantesync release, v%s+)' "$DANTESYNC_TRAY_FIRST_VERSION" ;;
+    dtray.service) printf 'setup-strih.sh step 16d (it installs dtray from the pinned dstack release, scripts/dtray-release.pin)' ;;
     *) printf 'setup-strih.sh step 16 (the Companion Satellite install)' ;;
   esac
 }
@@ -354,6 +366,16 @@ strih_session_apps_install() {
       }
       after="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
       [ "$before" = "$after" ] || w1=written
+    elif [ "$u" = "$STRIH_DTRAY_UNIT" ]; then
+      # issue 1485: the pinned dtray + the box's expected-device markers; a replaced binary restarts a running dtray
+      before="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
+      dtray_install "$home" || {
+        tray_failed=1
+        echo "  WARN: the dtray step failed (above) -- verify-strih (dtray) names what is missing; re-run setup-strih.sh step 16d"
+      }
+      dtray_devices_apply || echo "  WARN: the dtray device markers failed (above) -- verify-strih (dtray-devices) names what is missing"
+      after="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
+      [ "$before" = "$after" ] || w1=written
     fi
     uw=unchanged
     while IFS= read -r f; do
@@ -364,7 +386,7 @@ strih_session_apps_install() {
       changed+=("$u")
       if [ -n "$script" ]; then
         echo "  installed ${u} -> ${unitdir}/${u} (runs ${program}): program ${w1}, unit ${uw}"
-      elif [ "$u" = "$STRIH_DANTESYNC_TRAY_UNIT" ]; then
+      elif [ "$u" = "$STRIH_DANTESYNC_TRAY_UNIT" ] || [ "$u" = "$STRIH_DTRAY_UNIT" ]; then
         echo "  installed ${u} -> ${unitdir}/${u} (runs ${program}): binary ${w1}, unit ${uw}"
       else
         echo "  installed ${u} -> ${unitdir}/${u} (runs ${program}, installed by step 16): unit ${uw}"
@@ -673,6 +695,9 @@ strih_session_apps_grade_rows() {
     elif [ "$u" = "$STRIH_DANTESYNC_TRAY_UNIT" ]; then
       # issue 1429: the tray binary against the release record of the pin (absent / stale:<why> / ok)
       sstate="$(dantesync_install_tray_state || true)"
+    elif [ "$u" = "$STRIH_DTRAY_UNIT" ]; then
+      # issue 1485: dtray against its release record and the pin (absent / stale:<why> / ok)
+      sstate="$(dtray_state || true)"
     else
       sstate=absent; [ -x "$program" ] && sstate=ok  # the /opt binary step 16 installs: present, no checkout copy
     fi
@@ -749,6 +774,11 @@ strih_session_apps_grade_rows() {
   if _strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT"; then
     strih_stream_monitor_grade_rows "$repo" "$home" "$user"
   fi
+
+  # issue 1485: dtray's expected-device markers + `dtray --print` on a Dante box
+  if _strih_session_apps_has "$STRIH_DTRAY_UNIT"; then
+    dtray_devices_row
+  fi
   return 0
 }
 
@@ -773,6 +803,7 @@ strih_session_apps_row_count() {
   done
   _strih_session_apps_has "$STRIH_DISPLAY_WATCH_UNIT" && n=$((n + 1))  # issue 1424: + its X config row
   _strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT" && n=$((n + STRIH_STREAM_MONITOR_ROWS))
+  _strih_session_apps_has "$STRIH_DTRAY_UNIT" && n=$((n + 1))  # issue 1485: + (dtray-devices)
   printf '%s' "$n"
 }
 

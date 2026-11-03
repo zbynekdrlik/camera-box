@@ -132,3 +132,28 @@ fn the_pinned_manifest_is_the_releases_and_carries_the_pinned_versions() {
         assert!(rel[k].as_u64().unwrap_or(0) > 0, "{k}");
     }
 }
+
+/// Issue 1485: the dstack version the pinned release's dante_input runs (the dtray `--print` threshold
+/// reads it from the pin, `scripts/lib/dtray.sh`) is the one the commit's FFI Cargo.lock locks: the RELEASE
+/// TAG of its git source (`?tag=vX.Y.Z#`), the same kind of value as DTRAY_DEVICE_FIRST_DSTACK.
+#[test]
+fn the_pinned_dstack_version_is_the_releases_lock() {
+    let url = format!(
+        "https://raw.githubusercontent.com/zbynekdrlik/obs/{}/plugins/dante-input/ffi/Cargo.lock",
+        pin("OBS_RELEASE_COMMIT")
+    );
+    let lock = String::from_utf8(fetch(&url)).unwrap();
+    let have = lock
+        .split("[[package]]")
+        .find(|p| p.contains("\nname = \"dstack\"\n"))
+        .and_then(|p| p.lines().find_map(|l| l.strip_prefix("source = \"")))
+        .and_then(|src| src.split("?tag=").nth(1))
+        .and_then(|t| t.split('#').next())
+        .map(str::to_string)
+        .expect("the release's Cargo.lock locks dstack");
+    assert_eq!(
+        have,
+        pin("OBS_RELEASE_DSTACK_VERSION"),
+        "OBS_RELEASE_DSTACK_VERSION must be the release's locked dstack"
+    );
+}

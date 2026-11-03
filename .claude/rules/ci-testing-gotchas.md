@@ -1453,6 +1453,10 @@ Typed inline in a worktree lane, the isolation guard REFUSES that command ("runs
 `bash /abs/nonet.sh` as its own call. The run is the same, and a test that needed the network now
 fails instead of passing.
 
+**No pytest-xdist inside `unshare -n`** (issue 1485): `-n 4` there dies with `INTERNALERROR> KeyError:
+<WorkerController gw0>` and runs nothing (its workers need the network namespace's loopback). Run the
+no-network check serially on the files that matter; xdist stays for the normal full run.
+
 **`unshare -n` takes loopback down too** (issue 1404, the CG arm): a test that serves on
 `127.0.0.1` (the guard's `_Fake` HTTP server) fails there with `Network is unreachable`, which is not
 a rig leak. Run such files normally and the rig-sensitive ones under `unshare -n`, or serve a

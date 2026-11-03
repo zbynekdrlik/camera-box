@@ -44,7 +44,9 @@ obs project; camera-box moves the pin.
 
 ## Bumping the pin
 
-1. The tag, the commit, the two sha256 (`.sha256` of the tarball, `sha256sum BUNDLE_MANIFEST.json`) and
-   the manifest's `release.versions` obs-studio / distroav.
+1. The tag, the commit, the two sha256 (`.sha256` of the tarball, `sha256sum BUNDLE_MANIFEST.json`),
+   the manifest's `release.versions` obs-studio / distroav, and `OBS_RELEASE_DSTACK_VERSION` = the dstack
+   `plugins/dante-input/ffi/Cargo.lock` locks at the commit (issue 1485: dtray's `--print` threshold,
+   `scripts/lib/dtray.sh`).
 2. `cargo test --test obs_pin_1487` reads the release over HTTPS and fails until every value holds.
 3. Deploy: `scripts/deploy-genlock-fleet.sh --boxes strih-snv` (then stream-snv, the PP boxes when home).
