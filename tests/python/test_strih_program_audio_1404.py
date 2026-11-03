@@ -539,6 +539,10 @@ def test_the_installed_files_are_the_import_closure_plus_the_shim_sources():
     want = {f"scripts/{n}" for n in seen}
     want |= {str(pathlib.Path(p).resolve().relative_to(_ROOT)) for p in (pam._ROOT / s for s in pam.SOURCES)}
     want.add("scripts/build-qpsk-guard-shim.sh")
+    # issue 1404 (the CG arm): obs_fleet_table.py parses the fleet lib's declarations at run time
+    import obs_fleet_table as oft
+    want.add(str(oft.OBS_FLEET_SH.relative_to(_ROOT)))
+    assert "scripts/obs_fleet_table.py" in want and "scripts/program_audio_cg.py" in want
     assert set(_lib_value("STRIH_PROGRAM_AUDIO_FILES").split()) == want
 
 
