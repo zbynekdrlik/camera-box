@@ -107,6 +107,11 @@ class Box:
         if ecores is not None:
             (self.sys / "devices" / "cpu_atom").mkdir(parents=True)
             (self.sys / "devices" / "cpu_atom" / "cpus").write_text(ecores)
+        # issue 1485: the background-set fallback's inputs (strih-snv's: online 0-15, OBS mask 2-15, no
+        # Dante conf under the fake root), never the host's own
+        (tmp_path / "online").write_text("0-15\n")
+        (tmp_path / "isolated.conf").write_text("2-15\n")
+        (tmp_path / "rxroot" / "etc").mkdir(parents=True, exist_ok=True)
         self.state = tmp_path / "state"
         self.state.mkdir()
         (self.state / "installed").write_text("")
@@ -124,6 +129,9 @@ class Box:
             "FAKE_STATE": str(self.state),
             "STRIH_PROGRAM_AUDIO_PREFIX": str(self.prefix),
             "STRIH_PROGRAM_AUDIO_SYSFS": str(self.sys),
+            "OBS_BOX_ONLINE_CPUS": str(self.tmp / "online"),
+            "STRIH_PROGRAM_AUDIO_ISOLATED_CONF": str(self.tmp / "isolated.conf"),
+            "STRIH_DANTE_RX_PIN_ROOT": str(self.tmp / "rxroot"),
             "STRIH_PROGRAM_AUDIO_PYTHON": sys.executable,
             "STRIH_PROGRAM_AUDIO_CURL": str(self.bin / "curl"),
             "STRIH_PROGRAM_AUDIO_RETRY_SLEEP": "0",
@@ -212,13 +220,14 @@ def test_the_e_cores_follow_the_lowprio_contract(tmp_path, content, want):
         assert lp.stdout == f"nice -n 19 taskset -c {want}"
 
 
-def test_the_render_fills_or_drops_the_affinity_line(tmp_path):
+def test_the_render_fills_the_affinity_line_and_never_drops_it(tmp_path):
     box = Box(tmp_path)
     t = TEMPLATE.read_text(encoding="utf-8")
     r = box.run("strih_program_audio_unit_text", str(_ROOT), "12-15")
     assert r.returncode == 0 and r.stdout == t.replace("CPUAffinity=@E_CORES@", "CPUAffinity=12-15")
+    # issue 1485: an empty set is refused, never a unit that runs on every CPU
     r = box.run("strih_program_audio_unit_text", str(_ROOT), "")
-    assert r.returncode == 0 and r.stdout == t.replace("CPUAffinity=@E_CORES@\n", "")
+    assert r.returncode == 1 and r.stdout == ""
 
 
 def test_a_broken_template_refuses(tmp_path):
@@ -307,11 +316,13 @@ def test_changed_sources_rebuild_the_shim_and_restart_a_running_sampler(tmp_path
     assert [ln.split("|", 1)[0] for ln in rows] == ["OK", "OK", "NOTE"], rows
 
 
-def test_no_cpu_atom_installs_without_an_affinity_line(tmp_path):
+def test_no_cpu_atom_installs_the_background_set_never_every_cpu(tmp_path):
+    """issue 1485: the AMD strih-snv has no cpu_atom; the unit used to drop its affinity and run on 0-15,
+    the reserved Dante CPU 15 included."""
     box = Box(tmp_path, ecores=None)
     assert box.install().returncode == 0
     unit = (box.home / ".config/systemd/user" / UNIT).read_text()
-    assert not re.search(r"^CPUAffinity=", unit, re.M)
+    assert re.findall(r"^CPUAffinity=.*$", unit, re.M) == ["CPUAffinity=0-1"]
 
 
 def test_a_failing_apt_or_a_missing_source_fails_the_step(tmp_path):

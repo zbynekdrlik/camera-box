@@ -27,9 +27,11 @@
 #     - the decoder shim built AS THE OPERATOR with that build script into the default
 #       ~/.local/lib/camera-box/libqpsk-guard-shim.so, only when it is missing or was built from other
 #       sources (never loaded as root: the library lives in the operator's home);
-#     - the unit rendered from systemd/program-audio-sampler.strih-snv.service: CPUAffinity= = the box's
-#       own /sys/devices/cpu_atom/cpus (the E-cores, read the way strih_lx_lowprio_prefix reads them;
-#       no affinity line on a non-hybrid box), written to ~/.config/systemd/user only when it differs;
+#     - the unit rendered from systemd/program-audio-sampler.strih-snv.service: CPUAffinity= =
+#       strih_program_audio_cpus (issue 1485): the box's own /sys/devices/cpu_atom/cpus (the E-cores,
+#       read the way strih_lx_lowprio_prefix reads them), else the background set (online minus the OBS
+#       mask, strih-snv 0-1), never the reserved Dante CPU and never every CPU (no set = the step
+#       fails), written to ~/.config/systemd/user only when it differs;
 #     - `systemctl --user enable` + a daemon-reload when the unit file changed + a `try-restart` when
 #       anything changed. A stopped sampler is NEVER started here (enable-only): rig-mode.sh test starts
 #       it, rig-mode.sh event stops it (scripts/lib/program-audio-mode.sh).
@@ -52,6 +54,11 @@
 if ! declare -F strih_session_apps_put >/dev/null; then
   # shellcheck source=scripts/lib/strih-session-apps.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
+fi
+# issue 1485: the reserved Dante CPU (never the sampler's) + the cpulist / background-set helpers.
+if ! declare -F strih_dante_reserved_cpu_minus >/dev/null; then   # defined only by that lib
+  # shellcheck source=scripts/lib/strih-dante-reserved-cpu.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-reserved-cpu.sh"
 fi
 
 STRIH_PROGRAM_AUDIO_UNIT="program-audio-sampler.service"
@@ -122,17 +129,48 @@ strih_program_audio_ecores() {
   esac
 }
 
-# strih_program_audio_unit_text REPO ECORES -> the unit as installed: the template with its ONE
-# `CPUAffinity=@E_CORES@` line filled in, or dropped when ECORES is empty (a non-hybrid box runs on
-# every cpu). rc 1 + a stderr line when the template is missing or does not hold exactly one such line.
+# strih_program_audio_cpus [SYSFS_ROOT] -> the sampler's CPU list (issue 1485), never every CPU:
+#   - a hybrid box: its E-cores (strih_program_audio_ecores) without the reserved Dante CPU;
+#   - otherwise (no cpu_atom, as on the AMD strih-snv, or E-cores that are only the reserved CPU): the
+#     box's BACKGROUND set = online minus the OBS mask (obs_box_background_cpus, the set
+#     rig-background.slice uses; strih-snv 0-1), without the reserved CPU.
+# rc 1 + nothing + a stderr line when neither set can be derived (no OBS mask yet, an unreadable online
+# list): the install then fails by name instead of writing an every-CPU unit.
+# Seams: OBS_BOX_ONLINE_CPUS, STRIH_PROGRAM_AUDIO_ISOLATED_CONF (/etc/strih-isolated-cpus.conf), the
+# reserved CPU through strih_dante_reserved_cpu (STRIH_DANTE_RX_PIN_ROOT).
+strih_program_audio_cpus() {
+  local root="${1:-${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}}" res ecores online obs bg cpus
+  res="$(strih_dante_reserved_cpu)"
+  ecores="$(strih_program_audio_ecores "$root")"
+  if [ -n "$ecores" ] && cpus="$(strih_dante_reserved_cpu_minus "$ecores" "$res")"; then
+    printf '%s' "$cpus"
+    return 0
+  fi
+  online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
+  obs="$(head -n 1 "${STRIH_PROGRAM_AUDIO_ISOLATED_CONF:-/etc/strih-isolated-cpus.conf}" 2>/dev/null || true)"
+  if bg="$(obs_box_background_cpus "$online" "$obs")" && cpus="$(strih_dante_reserved_cpu_minus "$bg" "$res")"; then
+    printf '%s' "$cpus"
+    return 0
+  fi
+  echo "strih-program-audio: no CPU set for the sampler (no E-cores; online '${online}', OBS mask '${obs}' from ${STRIH_PROGRAM_AUDIO_ISOLATED_CONF:-/etc/strih-isolated-cpus.conf}) -- setup-strih step 11 writes the mask" >&2
+  return 1
+}
+
+# strih_program_audio_unit_text REPO CPUS -> the unit as installed: the template with its ONE
+# `CPUAffinity=@E_CORES@` line filled in with CPUS (strih_program_audio_cpus). rc 1 + a stderr line when
+# CPUS is not a cpu list (never a unit without an affinity, issue 1485), or the template is missing or
+# does not hold exactly one such line.
 strih_program_audio_unit_text() {
-  local repo="${1:?repo root required}" ecores="${2-}" tpl n
+  local repo="${1:?repo root required}" cpus="${2-}" tpl n
+  case "$cpus" in
+    ''|*[!0123456789,-]*|[,-]*|*[,-]) echo "strih-program-audio: '${cpus}' is not a CPU list for the sampler unit" >&2; return 1 ;;
+  esac
   tpl="${repo}/systemd/${STRIH_PROGRAM_AUDIO_UNIT_TEMPLATE}"
   [ -f "$tpl" ] || { echo "strih-program-audio: ${tpl} not found" >&2; return 1; }
   n="$(grep -c '^CPUAffinity=@E_CORES@$' "$tpl" || true)"
   [ "$n" = 1 ] || { echo "strih-program-audio: ${tpl} must hold exactly one CPUAffinity=@E_CORES@ line (found ${n})" >&2; return 1; }
-  awk -v cpus="$ecores" '
-    $0 == "CPUAffinity=@E_CORES@" { if (cpus != "") print "CPUAffinity=" cpus; next }
+  awk -v cpus="$cpus" '
+    $0 == "CPUAffinity=@E_CORES@" { print "CPUAffinity=" cpus; next }
     { print }
   ' "$tpl"
 }
@@ -188,7 +226,7 @@ strih_program_audio_missing_packages() {
 # or a shim that will not build; a `systemctl --user` call that cannot reach the user bus only WARNs.
 strih_program_audio_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local prefix unitdir rel w missing ecores tmp err shim pa_changed=0 unit_written=0
+  local prefix unitdir rel w missing cpus tmp err shim pa_changed=0 unit_written=0
   prefix="$(strih_program_audio_prefix)"
   unitdir="${home}/.config/systemd/user"
   for rel in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
@@ -230,10 +268,10 @@ strih_program_audio_install() {
     echo "  decoder shim current (built from the installed sources)"
   fi
 
-  ecores="$(strih_program_audio_ecores "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}")"
+  cpus="$(strih_program_audio_cpus "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}")" || return 1
   strih_user_home_dir "$home" "$user" "$unitdir" || { echo "strih-program-audio: cannot create ${unitdir}" >&2; return 1; }   # issue 1412: every level the user's
   tmp="$(mktemp)" || { echo "strih-program-audio: mktemp failed" >&2; return 1; }
-  if ! strih_program_audio_unit_text "$repo" "$ecores" > "$tmp"; then
+  if ! strih_program_audio_unit_text "$repo" "$cpus" > "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
@@ -243,7 +281,7 @@ strih_program_audio_install() {
     unit_written=1
     pa_changed=1
   fi
-  echo "  ${STRIH_PROGRAM_AUDIO_UNIT} ${w} (CPUAffinity=${ecores:-none: no cpu_atom, every cpu}; normal priority)"
+  echo "  ${STRIH_PROGRAM_AUDIO_UNIT} ${w} (CPUAffinity=${cpus}: the E-cores, else the background set, never the reserved Dante CPU; normal priority)"
   chown -R "${user}:${user}" "$unitdir" 2>/dev/null || echo "  WARN: could not chown ${unitdir} to ${user}"
 
   if ! err="$(strih_session_apps_user_systemctl "$user" enable "$STRIH_PROGRAM_AUDIO_UNIT" 2>&1)"; then
@@ -330,7 +368,7 @@ strih_program_audio_state() {
 # or `FAIL|text` (strih_program_audio_row_count of them). Always rc 0.
 strih_program_audio_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local prefix unitdir rel st bad_files="" tmp ustate enabled shim active endpoint host port answer marker i
+  local prefix unitdir rel st bad_files="" tmp ustate enabled shim active endpoint host port answer marker i cpus
   prefix="$(strih_program_audio_prefix)"
   unitdir="${home}/.config/systemd/user"
   for rel in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
@@ -338,7 +376,9 @@ strih_program_audio_grade_rows() {
     [ "$st" = ok ] || bad_files="${bad_files} ${rel}=${st}"
   done
   tmp="$(mktemp)"
-  if strih_program_audio_unit_text "$repo" "$(strih_program_audio_ecores "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}")" > "$tmp" 2>/dev/null; then
+  if ! cpus="$(strih_program_audio_cpus "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}" 2>/dev/null)"; then
+    ustate=no-cpu-set
+  elif strih_program_audio_unit_text "$repo" "$cpus" > "$tmp" 2>/dev/null; then
     ustate="$(strih_session_app_file_state "${unitdir}/${STRIH_PROGRAM_AUDIO_UNIT}" "$tmp")"
   else
     ustate=template-broken

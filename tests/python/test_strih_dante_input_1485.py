@@ -222,6 +222,15 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     root = tmp_path / "rxroot"
     (root / "etc").mkdir(parents=True, exist_ok=True)
     (root / "etc" / "strih-dante-rx-cpu.conf").write_text("reserved=15\nobs=2-14\nbase=2-15\n")
+    # the reserved-cpu rows (strih-dante-reserved-cpu.sh): both manager defaults as setup writes them
+    dropin = ("# issue 1485: written by camera-box setup-strih step 13 on a Dante-program box; every run rewrites it.\n"
+              "# CPU 15 is reserved for the strih OBS's dstack-engine + dstack-rx threads (/etc/strih-dante-rx-cpu.conf);\n"
+              "# every unit and forked process starts off it. Affinity only: the rx-pin helper still moves the two threads there.\n"
+              "[Manager]\nCPUAffinity=0-14\n")
+    for mgr in ("system", "user"):
+        (root / "etc" / "systemd" / ("%s.conf.d" % mgr)).mkdir(parents=True, exist_ok=True)
+        (root / "etc" / "systemd" / ("%s.conf.d" % mgr) / "50-strih-dante-reserved-cpu.conf").write_text(dropin)
+    (tmp_path / "rxonline").write_text("0-15\n")
     proc = fake_proc(tmp_path, threads={4242: ("obs", "2-14", 0), 4300: ("dstack-engine", "15", -10),
                                         4301: ("dstack-rx", "15", -10)})
     (tmp_path / "rxbin").mkdir(exist_ok=True)
@@ -229,6 +238,7 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     return _bash(body, "scn", "127.0.0.1", "unused", log,
                  env=dict({"STRIH_DANTE_INPUT_KIND_FILE": str(kf), "STRIH_DANTE_INPUT_TOML": str(dest),
                            "STRIH_DANTE_INPUT_WAIT_S": "0", "STRIH_DANTE_RX_PIN_ROOT": str(root),
+                           "OBS_BOX_ONLINE_CPUS": str(tmp_path / "rxonline"),
                            "STRIH_DANTE_RX_PIN_PROC": str(proc),
                            "PATH": "%s:%s" % (tmp_path / "rxbin", os.environ["PATH"])},
                           **({"STRIH_LX_USER": user} if user else {})))
@@ -240,6 +250,8 @@ def test_item9_passes_a_healthy_dante_source(tmp_path):
     assert "BAD" not in r.stdout, r.stdout
     assert "OK (program-dante) live: delivered_frames 4800 -> 999999" in r.stdout
     assert "OK (program-dante) rx-pin: dstack-rx tid 4301 on CPU 15 at nice -10" in r.stdout
+    assert "OK (program-dante) reserved-cpu: systemd + user managers default to CPUAffinity=0-14" in r.stdout
+    assert "OK (program-dante) reserved-cpu: of 3 tasks only OBS's" in r.stdout
 
 
 # Live on strih-snv 3.11.2026 the v0.2.0 source ran ~200 underruns/s and ~9 overruns/s with a clean

@@ -24,7 +24,8 @@
 #
 #   strih_dante_input_install USER HOME   setup-strih step 13 (after the leg: the iface is the leg's)
 #   strih_dante_input_grade LOG           verify-strih item 9's `(program-dante)` rows (ok/bad/note),
-#                                         the `rx-pin` rows included (strih-dante-rx-pin.sh)
+#                                         the `rx-pin` rows included (strih-dante-rx-pin.sh) and the
+#                                         `reserved-cpu` rows (strih-dante-reserved-cpu.sh)
 #   strih_program_audio_declared / strih_program_audio_grade SCN WS LOG   item 9's dispatcher: Dante,
 #                                         else the obs-vban grade (strih-program-vban.sh)
 #
@@ -34,6 +35,8 @@
 
 # shellcheck source=scripts/lib/strih-dante-rx-pin.sh
 . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-rx-pin.sh"   # the Dante threads' own CPU (issue 1485)
+# shellcheck source=scripts/lib/strih-dante-reserved-cpu.sh
+. "$(dirname "${BASH_SOURCE[0]}")/strih-dante-reserved-cpu.sh"   # nothing else on that CPU (issue 1485)
 
 STRIH_DANTE_INPUT_DEVICE="strih-obs"
 STRIH_DANTE_INPUT_SOURCE_KIND="dante_input"
@@ -152,6 +155,7 @@ strih_dante_input_install() {
       echo "  dante-input: no ${STRIH_DANTE_INPUT_DEVICE} Dante device on this box (STRIH_DANTE_DEVICES) -- no ${dest}"
     fi
     strih_dante_rx_pin_remove
+    strih_dante_reserved_cpu_remove
     return 0
   fi
   ports="$(strih_dante_input_ports "$(strih_lx_dante_devices)")" || return 1
@@ -162,6 +166,7 @@ strih_dante_input_install() {
   strih_dante_input_toml "$iface" "$ports" "$chans" | obs_box_write_if_changed "$dest" 0644 "${user}:${group}" "dante-input" || return 1
   echo "  dante-input: ${STRIH_DANTE_INPUT_DEVICE} on ${iface}, $(printf '%s\n' "$chans" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
   strih_dante_rx_pin_install "$user" || { echo "dante-input: the Dante threads' CPU reservation failed (above)" >&2; return 1; }
+  strih_dante_reserved_cpu_install || { echo "dante-input: the managers' default off the reserved CPU failed (above)" >&2; return 1; }
 }
 
 # strih_dante_input_field LINE KEY -> the value of KEY=<value> in a dante-input line.
@@ -250,6 +255,7 @@ strih_dante_input_grade() {
     stale*) bad "(program-dante) ${v#stale } -- no Dante audio reaches OBS (the FOH subscription, the leg filter, the clock)" ;;
     *) bad "(program-dante) ${v#bad }" ;;
   esac
+  strih_dante_reserved_cpu_grade
   strih_dante_rx_pin_grade
   return 0
 }

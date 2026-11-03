@@ -46,6 +46,16 @@ strih_dante_rx_pin_conf_path() { printf '%s/etc/strih-dante-rx-cpu.conf\n' "${ST
 strih_dante_rx_pin_helper_path() { printf '%s/usr/local/sbin/strih-dante-rx-pin\n' "${STRIH_DANTE_RX_PIN_ROOT:-}"; }
 strih_dante_rx_pin_sudoers_path() { printf '%s/etc/sudoers.d/strih-dante-rx-pin\n' "${STRIH_DANTE_RX_PIN_ROOT:-}"; }
 
+# strih_dante_reserved_cpu -> the conf's `reserved=` CPU when it is a number, else nothing. Always rc 0.
+# The one reader for every grade and install (strih-dante-reserved-cpu.sh, strih-program-audio.sh); the
+# root helper keeps its own copy (it runs standalone and takes no path from its caller).
+strih_dante_reserved_cpu() {
+  local v
+  v="$(sed -n 's/^reserved=//p' "$(strih_dante_rx_pin_conf_path)" 2>/dev/null | head -n 1 || true)"
+  case "$v" in '' | *[!0123456789]*) v="" ;; esac
+  printf '%s' "$v"
+}
+
 # strih_dante_rx_pin_plan ONLINE OBS -> `<cpu> <rest>`: the highest CPU online and in OBS, and OBS's mask
 # without it (compressed). rc 1 when a list is unreadable, no OBS CPU is online, or fewer than two OBS
 # CPUs would remain.
@@ -242,7 +252,7 @@ strih_dante_rx_pin_verdict() {
 # ok / bad). Read-only, runs as the desktop user. Always rc 0.
 strih_dante_rx_pin_grade() {
   local proc="${STRIH_DANTE_RX_PIN_PROC:-/proc}" res pid mask="" rows="" t comm stat line v
-  res="$(sed -n 's/^reserved=//p' "$(strih_dante_rx_pin_conf_path)" 2>/dev/null | head -n 1 || true)"
+  res="$(strih_dante_reserved_cpu)"
   pid="$(pgrep -n -x obs 2>/dev/null || true)"
   if [ -n "$pid" ]; then
     mask="$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' "${proc}/${pid}/status" 2>/dev/null || true)"
