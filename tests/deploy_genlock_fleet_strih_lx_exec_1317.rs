@@ -265,9 +265,45 @@ fn fake_intercom_release(dir: &Path) -> (PathBuf, PathBuf) {
     (pin, tb)
 }
 
+/// Issue 1487: a stand-in shading service release, already in its cache dir, + the pin that matches
+/// it, so the tree step never reaches GitHub. Returns (pin, cache).
+fn fake_shading_release(dir: &Path) -> (PathBuf, PathBuf) {
+    let asset = "bkshading-service-linux-amd64.tar.gz";
+    let d = dir.join("fake-shading/bkshading-service");
+    fs::create_dir_all(d.join("web")).unwrap();
+    let bin = d.join("bkshading");
+    fs::write(&bin, "#!/bin/sh\necho 'bkshading 9.9.4'\n").unwrap();
+    let mut mode = fs::metadata(&bin).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+    fs::set_permissions(&bin, mode).unwrap();
+    let cache = dir.join("fake-shading-cache");
+    fs::create_dir_all(cache.join("v9.9.4")).unwrap();
+    let tb = cache.join("v9.9.4").join(asset);
+    let st = Command::new("tar")
+        .arg("czf")
+        .arg(&tb)
+        .arg("-C")
+        .arg(dir.join("fake-shading"))
+        .arg("bkshading-service")
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let sum = Command::new("sha256sum").arg(&tb).output().unwrap();
+    let text = String::from_utf8(sum.stdout).unwrap();
+    let sha = text.split_whitespace().next().unwrap();
+    let pin = dir.join("fake-shading-pin");
+    fs::write(
+        &pin,
+        format!("SHADING_RELEASE_TAG=v9.9.4\nSHADING_SERVICE_LINUX_AMD64_SHA256={sha}\n"),
+    )
+    .unwrap();
+    (pin, cache)
+}
+
 fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
     let dir = tempfile::tempdir().expect("tempdir");
     let (intercom_pin, intercom_tarball) = fake_intercom_release(dir.path());
+    let (shading_pin, shading_cache) = fake_shading_release(dir.path());
     let bin = stub_bin(dir.path());
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
@@ -287,6 +323,8 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
         .env("STUB_LIBSHA", LIBSHA)
         .env("STRIH_INTERCOM_PIN_FILE", &intercom_pin)
         .env("STRIH_INTERCOM_TARBALL_SRC", &intercom_tarball)
+        .env("SHADING_RELEASE_PIN_FILE", &shading_pin)
+        .env("SHADING_RELEASE_CACHE", &shading_cache)
         .env("STRIH_LX_SETUP_POLLS", "3")
         .env("STRIH_LX_SETUP_POLL_SECS", "0")
         .env("STRIH_LX_VERIFY_POLLS", "3")

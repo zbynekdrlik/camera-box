@@ -23,9 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 SCRIPT = os.path.join(REPO, "scripts", "bkshading-provision-ndi.sh")
 LIB = os.path.join(REPO, "scripts", "lib", "bkshading-ndi-runtime.sh")
-NDI_PATHS_RS = os.path.join(
-    REPO, "bkshading", "service", "src", "preview", "ndi_paths.rs"
-)
+NDI_PATHS_RS = os.path.join(REPO, "tests", "fixtures", "shading_pinned", "ndi_paths.rs")
 
 WINDOWS_DLL = r"C:\Program Files\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll"
 WINDOWS_RUNTIME_DIR = r"C:\Program Files\NDI\NDI 6 Tools\Runtime"

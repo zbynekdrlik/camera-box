@@ -4,7 +4,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------------------------
-# WHY: the bkshading web panel (bkshading/service, binds 0.0.0.0:8770) is reachable only over plain
+# WHY: the bkshading web panel (shading:bkshading/service, binds 0.0.0.0:8770) is reachable only over plain
 # HTTP on strih.lan:8770. Chrome/Edge offer a full PWA install ONLY in a SECURE CONTEXT (HTTPS with
 # a trusted cert, or localhost), so from any other LAN PC there is no "Install app". Owner ruling
 # 17.9.2026: HTTPS, but over the LOCAL network — NEVER through the internet (the cloudflared tunnel

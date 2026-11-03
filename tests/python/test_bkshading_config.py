@@ -15,7 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-EXAMPLE = os.path.join(HERE, "..", "..", "bkshading", "service", "bkshading.example.toml")
+EXAMPLE = os.path.join(HERE, "..", "..", "scripts", "bkshading.example.toml")
 
 VALID_TRANSPORTS = {"cambox-relay", "sbc-relay", "ethernet-rest"}
 

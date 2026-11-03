@@ -18,7 +18,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 LIB = os.path.join(REPO, "scripts", "lib", "bkshading-sbc-runtime.sh")
-README = os.path.join(REPO, "bkshading", "README.md")
+README = os.path.join(REPO, ".claude", "rules", "bkshading-sbc.md")  # the operator docs since issue 1487
 HEAL_SCRIPT = os.path.join(REPO, "scripts", "bkshading-wifi-heal.sh")
 HEAL_SERVICE = os.path.join(REPO, "systemd", "bkshading-wifi-heal.service")
 HEAL_TIMER = os.path.join(REPO, "systemd", "bkshading-wifi-heal.timer")

@@ -882,37 +882,15 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step "16c" "bkshading shading-control service (issue 1353) -- CI artifact -> /opt/bkshading, seed config + unit, enable-only"
+step "16c" "bkshading shading-control service (issue 1353) -- the pinned shading release -> /opt/bkshading, seed config + unit, enable-only"
 if WHY="$(obs_box_step_applies 16c)"; then   # issue 1412: scripts/lib/obs-box-role.sh
-# issue 1353: the shading panel BACKEND (bkshading/service) ran only on the Windows strih PC; post-M4
-# the notebook is the strih, so it is provisioned here as a systemd unit fed the CI-built Linux
-# artifact. The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs), so the
-# unit needs only the self-contained binary; web/ is installed beside it (design) as a panel-source
-# copy. ENABLE-ONLY: the SUPERVISOR deploys the running service; the Windows service stays the
-# fallback until the owner accepts it.
-BKSH_ART="$(strih_bkshading_artifact_name)"
-# issue 1412: the ONE CI-artifact fetch (scripts/lib/strih-ci-artifact.sh): the pre-staged dir
-# STRIH_LX_BKSHADING_SRC (the step-4 STRIH_LX_BUNDLE_SRC precedent), else the GitHub artifact via GH_TOKEN.
-BKSH_SRC="$(strih_ci_artifact_fetch "$BKSH_ART" "${STRIH_LX_BKSHADING_SRC:-}")" \
-  || { BKSH_SRC=""; warn "  install /opt/bkshading/bkshading (+ web/) from the ${BKSH_ART} artifact before go-live"; }
-[ -z "$BKSH_SRC" ] || echo "  ${BKSH_ART} artifact: ${BKSH_SRC}"
-# Install the binary (+ web/ beside it) when a source resolved (robust to any nesting in the zip).
-if [ -n "$BKSH_SRC" ]; then
-  BKSH_BIN="$(find "$BKSH_SRC" -type f -name bkshading 2>/dev/null | head -1 || true)"
-  BKSH_WEB="$(find "$BKSH_SRC" -type d -name web 2>/dev/null | head -1 || true)"
-  [ -n "$BKSH_BIN" ] || fail "issue 1353: bkshading binary not found in the ${BKSH_ART} artifact"
-  install -d -m 0755 -o root -g root /opt/bkshading
-  install -m 0755 -o root -g root "$BKSH_BIN" /opt/bkshading/bkshading
-  if [ -n "$BKSH_WEB" ]; then
-    rm -rf /opt/bkshading/web
-    cp -a "$BKSH_WEB" /opt/bkshading/web
-    chown -R root:root /opt/bkshading/web
-    find /opt/bkshading/web -type d -exec chmod 0755 {} + 2>/dev/null || true
-    find /opt/bkshading/web -type f -exec chmod 0644 {} + 2>/dev/null || true
-  fi
-  echo "  installed bkshading service binary -> /opt/bkshading/bkshading (panel assets embedded; web/ copied beside it)"
-fi
-strih_ci_artifact_cleanup "$BKSH_SRC" "${STRIH_LX_BKSHADING_SRC:-}"   # the fetch's temp dir only
+# issue 1353: the shading panel BACKEND is a systemd unit here. Issue 1487: binary + web/ come from the
+# pinned shading release (scripts/shading-release.pin), the strih deploy stages it in its tree, a run
+# from a checkout fetches it; no fallback. ENABLE-ONLY: a running service keeps its old inode, restart
+# it after a pin bump.
+BKSH_DIR="$(shading_release_service "${HERE}/..")" || fail "the pinned shading release (above)"
+strih_bkshading_service_install "$BKSH_DIR" /opt/bkshading/bkshading || fail "bkshading service install from ${BKSH_DIR} failed (above)"
+echo "  installed bkshading service $(shading_pin_tag "${HERE}/..") -> /opt/bkshading/bkshading (web/ beside it)"
 # Seed the operator config ONLY IF absent (the projector.json / bkshading.example.toml precedent).
 install -d -m 0755 /etc/bkshading
 if [ ! -f /etc/bkshading/bkshading.toml ]; then
@@ -923,16 +901,12 @@ else
   echo "  /etc/bkshading/bkshading.toml already present -- leaving the operator's config"
 fi
 # Install the SYSTEM unit from the printer (source of truth) + ENABLE (NEVER start -- the supervisor
-# deploys the running service; the Windows service stays the fallback until the owner accepts).
+# deploys the running service).
 strih_bkshading_unit_text > /etc/systemd/system/bkshading-service.service \
   || fail "could not write /etc/systemd/system/bkshading-service.service"
 systemctl daemon-reload
 systemctl enable bkshading-service.service 2>/dev/null || warn "  could not enable bkshading-service.service"
-if [ -x /opt/bkshading/bkshading ]; then
-  echo "  bkshading-service.service installed + enabled (NOT started -- supervisor deploys the running service); binary present"
-else
-  warn "  bkshading-service.service installed + enabled but /opt/bkshading/bkshading is ABSENT -- install the CI ${BKSH_ART} binary before go-live"
-fi
+echo "  bkshading-service.service installed + enabled (NOT started -- supervisor deploys the running service)"
 
 else echo "  SKIP: ${WHY}"; fi
 

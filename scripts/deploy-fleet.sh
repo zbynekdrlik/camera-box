@@ -37,14 +37,13 @@
 #                                                 # CAMBOX_OFFLINE_ACK) is SKIPPED by name, never a
 #                                                 # failure. Not the home rig, not with CAMERA_SET or
 #                                                 # --frame-probe (the painter is the home rig's cam2).
-#   scripts/deploy-fleet.sh --binary ./dist/camera-box --relay-binary ./dist-relay/bkshading-relay
-#                                                 # issue 1452: the bkshading RELAY comes along on every
-#                                                 # box that has one, from the SAME CI run (with --run
-#                                                 # or the resolved run: the run's bkshading-linux-amd64,
-#                                                 # no flag needed). Swapped by bkshading-deploy-relay.sh
+#   (every form)                                  # issue 1452 + 1487: the bkshading RELAY comes along: the
+#                                                 # relay of the pinned shading release (scripts/shading-release.pin),
+#                                                 # verified before any box is touched. A box already on the
+#                                                 # pin is left alone. Swapped by bkshading-deploy-relay.sh
 #                                                 # itself; a box without a relay reads "not installed";
 #                                                 # a relay failure is named in FAILED. --no-relay =
-#                                                 # camera-box only (the E2E [0/8] parity align). The last
+#                                                 # camera-box only (the [0/8] parity align). The last
 #                                                 # line names every box's camera-box + relay version.
 #
 # Env:
@@ -74,15 +73,15 @@ USER_CAMERA_SET="${CAMERA_SET:-}"
 # shellcheck source=scripts/lib/frame-probe-deploy.sh
 . "$HERE/lib/frame-probe-deploy.sh"   # frame_probe_restore_enable_decision() — the #1138 #892 enable-state-preserving painter deploy decision
 # shellcheck source=scripts/lib/ci-run-resolve.sh
-. "$HERE/lib/ci-run-resolve.sh"   # ci_run_latest_success() -- the ONE head-anchored CI run resolver, shared with bkshading-deploy-relay.sh (issue 808, #1394)
+. "$HERE/lib/ci-run-resolve.sh"   # ci_run_latest_success() -- the ONE head-anchored CI run resolver (issue 808, #1394)
 # shellcheck source=scripts/lib/cam2-painter-deadman.sh
 . "$HERE/lib/cam2-painter-deadman.sh"  # cam2_painter_deadman_arm_cmds() — the #1351 re-arm of the TRANSIENT deadman timer (a stopped systemd-run unit is GC'd, so `systemctl start` cannot revive it)
 # shellcheck source=scripts/lib/ro-window.sh
 . "$HERE/lib/ro-window.sh"  # ro_window_close_cmds / ro_window_holders — the ONE verified ro close of every rw window (issue 1407)
 # shellcheck source=scripts/lib/bkshading-relay-version.sh
 . "$HERE/lib/bkshading-relay-version.sh"  # issue 1452: the box's camera-box + relay versions, read in one ssh call
-# shellcheck source=scripts/lib/bkshading-deploy-runtime.sh
-. "$HERE/lib/bkshading-deploy-runtime.sh"  # issue 1452: the relay artifact + binary names (one source of truth)
+# shellcheck source=scripts/lib/shading-release.sh
+. "$HERE/lib/shading-release.sh"  # issue 1487: the pinned shading release, the relay it deploys
 # The deadman re-fire window used when RESTORING a prior-armed deadman after the swap (#1351). The
 # canonical value is 5 min (#1072); overridable, matching cam2-painter-deadman.sh's own convention.
 CAM2_PAINTER_DEADMAN_MINUTES="${CAM2_PAINTER_DEADMAN_MINUTES:-5}"
@@ -101,8 +100,7 @@ BINARY=""
 FRAME_PROBE_BIN=""
 # issue 1413: --venue <name> = another venue's camboxes (see the usage above).
 VENUE=""
-# issue 1452: the bkshading relay of the SAME CI run (--relay-binary, or downloaded from RUN_ID);
-# --no-relay = camera-box only.
+# issue 1487: the bkshading relay of the pinned shading release; --no-relay = camera-box only.
 RELAY_BIN=""
 NO_RELAY=0
 
@@ -112,7 +110,6 @@ while [ $# -gt 0 ]; do
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
     --frame-probe) FRAME_PROBE_BIN="${2:?--frame-probe needs a path}"; shift 2 ;;
     --venue)  VENUE="${2:?--venue needs a venue name}"; shift 2 ;;
-    --relay-binary) RELAY_BIN="${2:?--relay-binary needs a path}"; shift 2 ;;
     --no-relay) NO_RELAY=1; shift ;;
     -h|--help) sed -n '2,/^set -euo pipefail$/{/^set -euo pipefail$/!p}' "$0"; exit 0 ;;
     *) echo "deploy-fleet: unknown arg '$1'" >&2; exit 2 ;;
@@ -120,10 +117,6 @@ while [ $# -gt 0 ]; do
 done
 
 command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get install sshpass)"; exit 1; }
-if [ "$NO_RELAY" = 1 ] && [ -n "$RELAY_BIN" ]; then
-  err "--no-relay and --relay-binary contradict each other"; exit 2
-fi
-
 # --- issue 1413: --venue derives the set from the venue's strih fact file ------------------------
 # The cameras and their dev1 addresses come from the dantesync fleet's venue camera rows (the ONE
 # place the venue fact STRIH_CAMERA_DEV1_NET is resolved, scripts/lib/dantesync-fleet.sh); a `reach`
@@ -392,9 +385,8 @@ relay_step() {  # $1=cam $2=ip
   if [ "$NO_RELAY" = 1 ]; then
     VERSION_ROWS+=("$cam camera-box=$cbv relay=$rlv (not deployed: --no-relay)"); return 0
   fi
-  if [ -z "$RELAY_BIN" ]; then
-    err "[$cam] its bkshading relay ($rlv) is not upgraded: --binary was given without --relay-binary"
-    FAILED+=("$cam-relay(no relay binary: pass --relay-binary <bkshading-relay of the same CI run>, or --no-relay)")
+  if [ "$rlv" = "$RELAY_VER" ]; then
+    info "[$cam] bkshading relay already on the pin ($RELAY_VER)"
     VERSION_ROWS+=("$cam camera-box=$cbv relay=$rlv"); return 0
   fi
   info "[$cam] bkshading relay $rlv -> $RELAY_VER (scripts/bkshading-deploy-relay.sh)"
@@ -537,32 +529,14 @@ NEW_VER="$("$BINARY" --version 2>/dev/null | awk '{print $NF}')"
 BINARY_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
 [ -n "$BINARY_SHA" ] || { err "could not hash the binary $BINARY"; exit 1; }
 
-# --- issue 1452: the bkshading relay of the SAME build ------------------------------------
-# The relay comes from the run camera-box came from: --relay-binary next to --binary, or the run's
-# own bkshading-linux-amd64 artifact. It must print camera-box's version (one workspace version),
-# else it is not the same build and nothing is touched. --binary without --relay-binary leaves
-# RELAY_BIN empty: a box with a relay then FAILS by name (never a silent old relay).
+# --- issue 1487: the bkshading relay of the pinned shading release ------------------------
+# Fetched and proved before any box is touched: no verified relay = nothing deployed (--no-relay
+# deploys camera-box alone). Its version is the pin's, unrelated to camera-box's.
 RELAY_VER=""
 if [ "$NO_RELAY" = 0 ]; then
-  if [ -z "$RELAY_BIN" ] && [ -n "$RUN_ID" ]; then
-    relay_artifact="$(bkshading_deploy_artifact_name)"
-    info "Downloading the relay artifact '$relay_artifact' from the same run $RUN_ID..."
-    [ -n "$DIST" ] || DIST="$(mktemp -d)"  # --binary together with --run downloaded no camera-box
-    if ! gh run download "$RUN_ID" --repo "$REPO" -n "$relay_artifact" --dir "$DIST/relay"; then
-      err "run $RUN_ID carries no '$relay_artifact' -- nothing deployed (pass --no-relay to deploy camera-box alone)"
-      exit 1
-    fi
-    RELAY_BIN="$DIST/relay/$(bkshading_deploy_relay_artifact_bin)"
-  fi
-  if [ -n "$RELAY_BIN" ]; then
-    [ -f "$RELAY_BIN" ] || { err "--relay-binary '$RELAY_BIN' not found"; exit 1; }
-    chmod +x "$RELAY_BIN"
-    RELAY_VER="$("$RELAY_BIN" --version 2>/dev/null | awk '{print $NF}')"
-    if [ "$RELAY_VER" != "$NEW_VER" ]; then
-      err "the relay binary reads '${RELAY_VER:-<no version>}' but camera-box reads $NEW_VER -- not from the same build; nothing deployed"
-      exit 2
-    fi
-  fi
+  RELAY_BIN="$(shading_release_relay "$HERE/.." amd64)" \
+    || { err "no verified relay of the pinned shading release (above) -- nothing deployed (pass --no-relay to deploy camera-box alone)"; exit 1; }
+  RELAY_VER="$(shading_pin_version "$HERE/..")"
 fi
 log "Deploying camera-box $NEW_VER to: $SET"
 echo ""
@@ -721,7 +695,7 @@ if [ -n "$FRAME_PROBE_BIN" ]; then
   PENDING_START=""
 fi
 
-# --- issue 1452: the bkshading relay of the same build, on every box that answered ---------
+# --- issue 1452: the pinned bkshading relay, on every box that answered ---------
 relay_phase
 
 # The per-box versions, appended to the final summary line.

@@ -193,7 +193,8 @@
 #        lists no IP (each listed one is named) and no networks.discovery and parses as JSON; a
 #        camera-box.service.d/ndi-discovery.conf drop-in, when present, points NDI_CONFIG_DIR at /etc/ndi
 #        (setup-device.sh STEP 7 and `ndi-discovery.sh --cambox-apply` remove both).
-#   (ao) bkshading relay provisioned (issue 808) -- HARD FAIL: the relay binary is executable, the
+#   (ao) bkshading relay provisioned (issue 808) -- HARD FAIL: the relay binary is executable and on
+#        the shading pin (issue 1487), the
 #        installed bkshading-relay.service BYTE-matches the repo unit, /etc/bkshading/relay.env carries
 #        CAMERA_BOX_CAPTURE_FPS=<int> + the issue-1431 registration (BKSHADING_REGISTER_URL =
 #        http://strih.lan:8770/api/relays/register, BKSHADING_RELAY_ID = this camN), gphoto2 is installed,
@@ -2263,7 +2264,7 @@ case "$RELAY_MODE" in
 esac
 RELAY_EXPECTED="$(bkshading_relay_expected_enable_state "$CAMERA_NAME" "$RELAY_MODE" "$RELAY_SRC_BOX" "$RELAY_PAINTER_BOX")"
 RELAY_ID_WANT="$(bkshading_relay_id_for_device "$CAMERA_NAME" || true)"
-RELAY_PROV_VERDICT="$(bkshading_relay_provision_verdict "$RELAY_PROV_BLOCK" "$RELAY_EXPECTED" "$RELAY_ID_WANT")"
+RELAY_PROV_VERDICT="$(bkshading_relay_provision_verdict "$RELAY_PROV_BLOCK" "$RELAY_EXPECTED" "$RELAY_ID_WANT" "$(bkshading_relay_pin_version)")"
 if [ "$aorc" -ne 0 ]; then
   fail "could not read the bkshading relay provisioning state over SSH (rc=$aorc, issue 808)"
 elif [ "$RELAY_PROV_VERDICT" = ok ]; then

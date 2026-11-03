@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
-# scripts/lib/bkshading-deploy-runtime.sh — pure decisions for deploying the CI-built bkshading
-# RELAY binary to a cambox/SBC (issue 808 M3; unblocks the live rig verify of everything merged).
-#
-# The bkshading CI `bkshading` job release-builds + uploads the relay/service binaries as the
-# `bkshading-linux-amd64` artifact; this lib is the single source of truth for that artifact NAME +
-# the relay bin filename inside it + the ENABLE-ONLY invariant + the byte-verify decision, consumed
-# by both scripts/bkshading-deploy-relay.sh and the python cross-check test so the CI upload, the
-# deploy script, and this helper cannot silently drift.
+# scripts/lib/bkshading-deploy-runtime.sh — pure decisions for deploying the bkshading RELAY binary
+# to a cambox/SBC (issue 808 M3): the ENABLE-ONLY invariant + the byte-verify decision + the relay and
+# root state decisions. The binary itself is the pinned shading release, scripts/lib/shading-release.sh.
 #
 # Source-only: defines pure functions, performs NO side effects, and deliberately does NOT
 # `set -euo pipefail` (that would leak into the sourcing shell — the sourced-harness set-e leak in
@@ -16,32 +11,6 @@
 
 # shellcheck source=scripts/lib/ro-root.sh
 . "$(dirname "${BASH_SOURCE[0]}")/ro-root.sh"  # ro_root_mount_mode -- the ONE first-token root reading (issue 808)
-
-# The CI artifact name the `bkshading` job uploads the relay/service into (KEEP IN SYNC with
-# .github/workflows/ci.yml `Upload bkshading binaries`; the python test cross-checks both).
-bkshading_deploy_artifact_name() { printf '%s\n' bkshading-linux-amd64; }
-
-# The aarch64 relay-only artifact the `bkshading` job cross-builds + uploads for the SBC/handheld
-# (issue 808 SBC milestone; a zero-class arm64 SBC is ARM and cannot run the amd64 binary). ONE source of
-# truth for the arm64 artifact name — the CI upload, the deploy `--arch arm64` path, and the python
-# cross-check all read this. Relay-ONLY (the service runs on the strih PC, never on a handheld SBC),
-# hence the distinct `bkshading-relay-linux-arm64` name vs the amd64 `bkshading-linux-amd64` (relay
-# + service).
-bkshading_deploy_arm64_artifact_name() { printf '%s\n' bkshading-relay-linux-arm64; }
-
-# Select the artifact name for a target arch. `amd64` (default) -> the relay+service amd64 artifact
-# (cambox deploy, unchanged); `arm64` -> the relay-only aarch64 artifact (SBC/handheld deploy). An
-# unknown arch echoes nothing (the caller validates + fails loud).
-bkshading_deploy_artifact_name_for_arch() {
-  case "${1:-amd64}" in
-    amd64) bkshading_deploy_artifact_name ;;
-    arm64) bkshading_deploy_arm64_artifact_name ;;
-    *) : ;;
-  esac
-}
-
-# The relay binary file name INSIDE that artifact (matches bkshading/relay's [[bin]] name).
-bkshading_deploy_relay_artifact_bin() { printf '%s\n' bkshading-relay; }
 
 # ENABLE-ONLY discipline (.claude/rules/provisioning-scripts.md + .claude/rules/bkshading.md): a
 # relay binary deploy NEVER start/restart/`enable --now`s the service — reboot (or the supervisor's

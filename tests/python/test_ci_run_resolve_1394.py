@@ -32,7 +32,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 RESOLVE_LIB = os.path.join(REPO, "scripts", "lib", "ci-run-resolve.sh")
 SETUP = os.path.join(REPO, "scripts", "setup-device.sh")
-DEPLOY_SERVICE = os.path.join(REPO, "scripts", "bkshading-deploy-service.sh")
 GH_REPO = "zbynekdrlik/camera-box"
 ART = "camera-box-linux-amd64"
 
@@ -474,24 +473,3 @@ def test_setup_device_lookup_lines_resolve_the_head_through_a_fake_gh():
 # =============================================================================================
 # bkshading-deploy-service.sh (the strih service deploy) uses the same lib (review round 1)
 # =============================================================================================
-SERVICE_CALL_RE = re.compile(
-    r'^\s*RUN_ID="\$\(CI_RUN_RESOLVE_GH="\$GH" ci_run_latest_success "\$REPO" "\$BRANCH" ci\.yml "\$ARTIFACT"\)"'
-    r' \|\| RUN_ID=""\s*$')
-
-
-def test_deploy_service_resolves_its_run_through_the_lib():
-    code = _noncomment(_read(DEPLOY_SERVICE))
-    assert '. "$HERE/lib/ci-run-resolve.sh"' in code, "bkshading-deploy-service.sh must source the resolver lib"
-    assert "gh run list" not in code and '"$GH" run list' not in code, "no inline run listing left"
-    assert "--status success" not in code
-    lines = [ln for ln in code.splitlines() if SERVICE_CALL_RE.match(ln)]
-    assert len(lines) == 1, lines
-    with tempfile.TemporaryDirectory() as tmp:
-        fake = FakeGh(tmp, HEAD, [STALE_LISTING], [[HEAD_RUN]], {36687519583: ["bkshading-windows-amd64"]})
-        env = dict(os.environ)
-        env.pop("CI_RUN_RESOLVE_GH", None)
-        env["CI_RUN_RESOLVE_SLEEP"] = fake.sleep
-        snippet = ('. "%s"\nGH=%s\nREPO=%s\nBRANCH=main\nARTIFACT=bkshading-windows-amd64\n%s\n'
-                   'printf "%%s" "$RUN_ID"\n' % (RESOLVE_LIB, fake.path, GH_REPO, lines[0].strip()))
-        r = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, env=env)
-        assert r.returncode == 0 and r.stdout == "36687519583", (r.stdout, r.stderr)

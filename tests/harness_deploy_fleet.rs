@@ -260,6 +260,7 @@ bash -c "$cmd"
 
     let out = Command::new("bash")
         .arg(&script)
+        .arg("--no-relay") // issue 1487: the relay is the pinned release, tested beside it
         .arg("--binary")
         .arg(&fakebin)
         .env("PATH", &path_env)

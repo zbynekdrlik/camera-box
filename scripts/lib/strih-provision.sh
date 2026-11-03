@@ -68,15 +68,15 @@ if ! declare -F strih_cambox_log_sink_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-cambox-log-sink.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-cambox-log-sink.sh"
 fi
-# issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2) and the ONE CI-artifact
-# fetch (step 16c's bkshading service).
+# issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2); issue 1487: the pinned
+# shading release (step 16c's bkshading service).
 if ! declare -F dantesync_install >/dev/null; then
   # shellcheck source=scripts/lib/dantesync-install.sh
   . "$(dirname "${BASH_SOURCE[0]}")/dantesync-install.sh"
 fi
-if ! declare -F strih_ci_artifact_fetch >/dev/null; then
-  # shellcheck source=scripts/lib/strih-ci-artifact.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/strih-ci-artifact.sh"
+if ! declare -F shading_release_service >/dev/null; then
+  # shellcheck source=scripts/lib/shading-release.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/shading-release.sh"
 fi
 # issue 1470: the A/V-sync dock on the stream role (setup-strih step 16g's layout seed, verify-strih item 47).
 if ! declare -F obs_box_avsync_dock_seed >/dev/null; then
@@ -1542,16 +1542,10 @@ strih_companion_status_verdict() {
 }
 
 # --- issue 1353: bkshading SERVICE (shading panel backend) provisioning on strih-snv ----------------
-# The shading-control panel backend (bkshading/service) ran only on the Windows strih PC; post-M4 the
-# notebook is the strih, so it is provisioned here as a systemd unit fed the CI-built Linux artifact.
-# The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs include_str!), so the
-# unit needs only the self-contained binary; web/ ships beside it per the design as a panel-source copy.
-
-# strih_bkshading_artifact_name -> the CI artifact NAME the ci.yml Linux job uploads and setup-strih
-# fetches. SINGLE SOURCE OF TRUTH (KEEP IN SYNC with .github/workflows/ci.yml's
-# `Upload bkshading service (linux, panel)` step) -- the strih sibling of the Windows
-# `bkshading-windows-amd64` canon in scripts/lib/bkshading-deploy-service-runtime.sh.
-strih_bkshading_artifact_name() { printf '%s\n' bkshading-service-linux-amd64; }
+# The shading-control panel backend ran only on the Windows strih PC; post-M4 the
+# notebook is the strih, so it is provisioned here as a systemd unit fed the pinned shading release
+# (issue 1487). The panel web assets are EMBEDDED in the binary, so the unit needs only the binary;
+# web/ ships beside it as a copy (the shading contract).
 
 # strih_bkshading_unit_text -> the systemd SYSTEM unit for the bkshading panel service on strih-snv.
 # User=newlevel (the operator session owns libndi/PipeWire parity for the M2 live NDI preview),
@@ -1581,7 +1575,7 @@ EOF
 }
 
 # strih_bkshading_config_text [BIND] [RELAYS] [CAMERAS] -> the operator config seed for
-# /etc/bkshading/bkshading.toml. BIND defaults to the service's own default_bind (bkshading/service/src/config.rs
+# /etc/bkshading/bkshading.toml. BIND defaults to the service's own default bind (the shading contract
 # "0.0.0.0:8770"). The box's OWN venue cameras first (CAMERAS, default the loaded fact STRIH_CAMERAS;
 # owner 26.10.2026: strih-snv 2 3 5, strih-pp 1 4 6 7), then every other camera as a `visiting` block: issue 1431
 # makes strih.lan the ONE switch, every cambox relay registers itself as camN with the strih behind it, and the

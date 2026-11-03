@@ -78,7 +78,7 @@ fail() {
 . "$HERE/lib/bkshading-relay-provision.sh"  # bkshading_relay_provision_install / _expected_enable_state /
                                             # _binary_plan / _fetch_binary (issue 808) -- the ONE relay install
                                             # body, shared with bkshading-provision-relay.sh; it sources the
-                                            # relay CI artifact names + the ONE run resolver itself.
+                                            # the pinned shading release.
                                             # verify-device.sh (ao) grades the result.
 # shellcheck source=scripts/lib/ci-run-resolve.sh
 . "$HERE/lib/ci-run-resolve.sh"  # ci_run_latest_success -- the ONE head-anchored CI run resolver (#1394),
@@ -505,8 +505,8 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         --relay-binary)
-            # issue 808: the CI-built bkshading-relay (bkshading-linux-amd64 artifact) as a local path or
-            # URL -- symmetric with --binary / --probe-binary for a gh-less box.
+            # issue 808: the bkshading-relay of the pinned shading release, staged as a local path or a
+            # URL for a box without network to GitHub; its sha256 must equal the pin (issue 1487).
             RELAY_BINARY_ARG="${2:?--relay-binary needs a URL or local path}"
             shift 2
             ;;
@@ -535,7 +535,7 @@ DEVICE_NAME_ARG="${1:-}"
 if [ -z "$DEVICE_NAME_ARG" ]; then
     echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
     echo "       (also: --probe-binary <url|path> for cam2's frame-probe #1066 D5, --run <ci.yml run id>;"
-    echo "        --relay-binary <url|path> = the CI bkshading-relay for a gh-less box, --rig-mode test|event"
+    echo "        --relay-binary <url|path> = the pinned bkshading-relay for a box without network, --rig-mode test|event"
     echo "        (default test: the relay on the source box + cam2 is installed DISABLED, issue 808/1311);"
     echo "        --yes|-y = non-interactive, no confirmation prompt)"
     echo ""
@@ -1867,8 +1867,8 @@ echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_SINK_IP}:${REMOTE_LOG_N
 # gphoto2 -- because only the separate bkshading-provision-relay.sh installed it, so the shading
 # panel silently lost those cameras. Every cambox now gets it HERE, through the ONE provisioning lib
 # (scripts/lib/bkshading-relay-provision.sh, the same body bkshading-provision-relay.sh runs):
-# gphoto2 + the unit + the env derived from the camera-box drop-ins (STEP 7 wrote them) + the CI
-# relay binary from the SAME ci.yml run as camera-box (the bkshading-linux-amd64 artifact).
+# gphoto2 + the unit + the env derived from the camera-box drop-ins (STEP 7 wrote them) + the relay
+# binary of the pinned shading release (issue 1487, scripts/shading-release.pin).
 # ENABLE-only, never a live start (.claude/rules/provisioning-scripts.md). The enable-state follows
 # the rig mode (--rig-mode, default test): TEST = the relay roster (the source box + cam2, the SAME
 # two boxes rig-mode.sh stops+disables, issue 1311) installed DISABLED, every other box enabled;
@@ -1885,14 +1885,11 @@ if [ "$RELAY_ENABLE_STATE" = unknown ]; then
     RELAY_ENABLE_STATE=disabled
     RELAY_PROBLEM="could not resolve the rig source box (camera_source_box) for the TEST relay roster -- installed DISABLED"
 fi
-RELAY_GH=no
-if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then RELAY_GH=yes; fi
-# The binary is the bkshading-linux-amd64 CI artifact: --relay-binary (a dev1-staged path/URL), else
-# the SAME ci.yml run STEP 3 took camera-box from, else the newest run carrying it (gh boxes only).
-RELAY_PLAN="$(bkshading_relay_provision_binary_plan "$RELAY_BINARY_ARG" "${RUN_ID:-${CI_RUN_ID_ARG:-}}" "$RELAY_GH")"
+# The binary: --relay-binary (a dev1-staged path/URL), else the pinned release; only the pinned bytes pass.
+RELAY_PLAN="$(bkshading_relay_provision_binary_plan "$RELAY_BINARY_ARG")"
 RELAY_DL_DIR="$(mktemp -d)"
 RELAY_BIN_SRC=""
-if RELAY_FETCH_OUT="$(bkshading_relay_provision_fetch_binary "$RELAY_PLAN" "$RELAY_DL_DIR" "$GITHUB_REPO" "$CI_BRANCH")"; then
+if RELAY_FETCH_OUT="$(bkshading_relay_provision_fetch_binary "$RELAY_PLAN" "$RELAY_DL_DIR")"; then
     RELAY_BIN_SRC="$RELAY_FETCH_OUT"
 else
     RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }$RELAY_FETCH_OUT"

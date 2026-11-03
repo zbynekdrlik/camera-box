@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
-# scripts/bkshading-deploy-service.sh — deploy the CI-built bkshading SERVICE to strih (see header below).
+# scripts/bkshading-deploy-service.sh — deploy the pinned bkshading SERVICE to a Windows box (see header below).
 set -euo pipefail
 # ---------------------------------------------------------------------------------------------
-# Deploy the CI-built bkshading SERVICE (bkshading.exe) to the strih Windows PC + install its
-# persistent Task Scheduler keep-alive task (issue 808 service-deploy sub-step).
-#
-# WHY: everything merged (M1 service, M2 NDI preview, WS push, cloudflared remote) ships to the strih
-# PC, and the `bkshading-windows` CI job already release-builds + uploads the deployable binary as the
-# `bkshading-windows-amd64` artifact (target/release/bkshading.exe). But NO tool consumed it — the
-# service reached strih only by a MANUAL stage (C:\stage-bkshading, issue #1157).
-# `bkshading-deploy-relay.sh` deploys only the RELAY to a Linux CAMBOX (a different binary/OS/
-# lifecycle). This is the missing repeatable path: CI artifact -> strih staging -> config -> a
-# persistent Task Scheduler keep-alive task -> verify :8770.
+# Deploy the bkshading SERVICE (bkshading.exe) of the pinned shading release (issue 1487,
+# scripts/shading-release.pin) to a Windows box + install its persistent Task Scheduler keep-alive
+# task (issue 808 service-deploy sub-step): verified release asset -> staging -> config -> a
+# persistent Task Scheduler keep-alive task -> verify :8770. The relay's sibling is
+# `bkshading-deploy-relay.sh`.
 #
 # Ships to the box + registers (the values themselves come from the lib — this note documents them
 # so the .sh header, the lib, and the installer ps1 stay legible together): the service exe
@@ -22,39 +17,33 @@ set -euo pipefail
 # Transport = the strih-recordings-retention.sh emission style: `scp -O` the payload, then run the
 # installer via `powershell -NoProfile -ExecutionPolicy Bypass -File <remote.ps1>` — NEVER a nested
 # `powershell -Command` over ssh (which fails silently on this rig, .claude/rules/rig-state-inspection.md).
-# Pure invariants (artifact/exe/install-dir/config/task-name/port/keepalive) live in
-# scripts/lib/bkshading-deploy-service-runtime.sh so the CI upload, this orchestrator, and the on-box
-# installer cannot drift.
+# Pure invariants (exe/install-dir/config/task-name/port/keepalive) live in
+# scripts/lib/bkshading-deploy-service-runtime.sh so this orchestrator and the on-box installer cannot
+# drift.
 #
-# DRY-RUN by default (prints the plan, touches NOTHING remote — no gh/ssh/scp). --execute performs the
+# DRY-RUN by default (prints the plan, touches NOTHING remote — no ssh/scp). --execute performs the
 # real deploy. Per approval-scope.md a deploy + its service start are the standing-approved WORK; this
 # script does NOT gate on "is it off-air" (the operator who runs --execute guards live timing). It
 # never reboots the host. The LIVE --execute run against strih is the supervisor's rig step.
 #
 # Usage:  scripts/bkshading-deploy-service.sh [--host <ip>] [--user <name>]
-#             [--binary <bkshading.exe> | --run <ci.yml run id>] [--config-seed <path>]
+#             [--binary <bkshading.exe>] [--config-seed <path>]
 #             [--install-dir <C:\dir>] [--keepalive-minutes <N>] [--execute]
 #   --host <ip>            the Windows box to install on (REQUIRED -- issue 1317 part 3). The Windows
 #                          strih PC this defaulted to is RETIRED; the service runs on the Linux strih-snv
 #                          now, provisioned by setup-strih.sh step 16c as a systemd unit (issue 1353),
 #                          so a linux-genlock fleet address is refused by the fleet class gate.
 #   --user <name>          ssh user (default newlevel); also the C:\Users\<name> staging home.
-#   --binary <path>        deploy an already-downloaded CI service exe (skips gh download).
-#   --run <id>             pin a ci.yml run id to download the bkshading-windows-amd64 artifact from.
+#   --binary <path>        an already-fetched service exe; its sha256 must equal the pin.
 #   --config-seed <path>   the config seed shipped as bkshading.example.toml (default: the repo's
-#                          bkshading/service/bkshading.example.toml). Seeded on the box ONLY IF the
+#                          scripts/bkshading.example.toml). Seeded on the box ONLY IF the
 #                          operator config is absent — a redeploy never clobbers a tuned config.
 #   --install-dir <dir>    on-box stable install dir (default from the lib, C:\bkshading).
 #   --keepalive-minutes N  keep-alive task repetition cadence (default from the lib).
 #   --execute              perform the real deploy (scp + run installer). Default = DRY-RUN.
 #   -h | --help            show this header.
-# With neither --run nor --binary, the ci.yml run of the $BRANCH head is used (--execute only), via
-# the shared head-anchored resolver scripts/lib/ci-run-resolve.sh (#1394): a loud fallback to the
-# newest older successful run while the head's run is in flight or failed, a refusal on a stale
-# runs listing (pass --run <id>).
-#
-# Env: STRIH_SSH_PW (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main).
-#      Test overrides (inject fakes): BKSHADING_SVC_GH, BKSHADING_SVC_SSH, BKSHADING_SVC_SCP,
+# Env: STRIH_SSH_PW (default newlevel).
+#      Test overrides (inject fakes): BKSHADING_SVC_SSH, BKSHADING_SVC_SCP,
 #      BKSHADING_SVC_SSHPASS_PREFIX.
 #
 # Exit codes: 0 = ok (plan printed, or deploy done); 1 = a step failed; 2 = bad args.
@@ -65,10 +54,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-deploy-service-runtime.sh
 . "$HERE/lib/bkshading-deploy-service-runtime.sh"
-# shellcheck source=scripts/lib/ci-run-resolve.sh
-. "$HERE/lib/ci-run-resolve.sh" # ci_run_latest_success -- the ONE head-anchored CI run resolver (#1394)
+# shellcheck source=scripts/lib/shading-release.sh
+. "$HERE/lib/shading-release.sh" # the pinned shading release (issue 1487)
 
-ARTIFACT="${ARTIFACT:-$(bkshading_service_artifact_name)}"
+ASSET="$SHADING_ASSET_SERVICE_WINDOWS"
 EXE_NAME="$(bkshading_service_exe_name)"
 INSTALL_DIR="$(bkshading_service_install_dir)"
 INSTALLER_PS1="$(bkshading_service_installer_ps1_name)"
@@ -77,18 +66,14 @@ TASK_NAME="$(bkshading_service_task_name)"
 PORT="$(bkshading_service_port)"
 KEEPALIVE_MIN="$(bkshading_service_keepalive_minutes)"
 
-REPO="${REPO:-zbynekdrlik/camera-box}"
-BRANCH="${BRANCH:-main}"
 HOST=""                            # REQUIRED --host (issue 1317: no Windows strih default)
 USER_NAME="newlevel"
 SSH_PASS="${STRIH_SSH_PW:-newlevel}"
-RUN_ID=""
 BINARY=""
-CONFIG_SEED="$HERE/../bkshading/service/bkshading.example.toml"
+CONFIG_SEED="$HERE/bkshading.example.toml"
 EXECUTE=0
 
 # Overridable command surfaces (real defaults; the test injects fakes + an empty sshpass prefix).
-GH="${BKSHADING_SVC_GH:-gh}"
 SSH_BIN="${BKSHADING_SVC_SSH:-ssh}"
 SCP_BIN="${BKSHADING_SVC_SCP:-scp}"
 if [ -n "${BKSHADING_SVC_SSHPASS_PREFIX+set}" ]; then
@@ -104,7 +89,6 @@ while [ "$#" -gt 0 ]; do
     --host) require_val "$#" --host; HOST="$2"; shift 2 ;;
     --user) require_val "$#" --user; USER_NAME="$2"; shift 2 ;;
     --binary) require_val "$#" --binary; BINARY="$2"; shift 2 ;;
-    --run) require_val "$#" --run; RUN_ID="$2"; shift 2 ;;
     --config-seed) require_val "$#" --config-seed; CONFIG_SEED="$2"; shift 2 ;;
     --install-dir) require_val "$#" --install-dir; INSTALL_DIR="$2"; shift 2 ;;
     --keepalive-minutes) require_val "$#" --keepalive-minutes; KEEPALIVE_MIN="$2"; shift 2 ;;
@@ -126,11 +110,6 @@ if [ -z "$HOST" ]; then
 fi
 if ! obs_fleet_refuse_linux_target "$HOST" "bkshading-deploy-service.sh"; then
   echo "       on strih-snv the bkshading service is provisioned by setup-strih.sh step 16c (systemd unit bkshading-service.service, issue 1353)" >&2
-  exit 2
-fi
-
-if [ -n "$RUN_ID" ] && [ -n "$BINARY" ]; then
-  echo "ERROR: --run and --binary are mutually exclusive" >&2
   exit 2
 fi
 
@@ -164,7 +143,7 @@ installer_cmd() {  # $1 = "-Execute" or ""
 # --- DRY-RUN: print the plan, touch NOTHING remote ---
 if [ "$EXECUTE" -eq 0 ]; then
   BIN_DESC="$BINARY"
-  [ -n "$BIN_DESC" ] || BIN_DESC="(will download $ARTIFACT from ci.yml run ${RUN_ID:-<the $BRANCH head run, resolved on --execute>})"
+  [ -n "$BIN_DESC" ] || BIN_DESC="($ASSET of the pinned shading $(shading_pin_tag "$HERE/.."), fetched on --execute)"
   cat <<PLAN
 DRY-RUN — bkshading service deploy plan (touches nothing; re-run with --execute to deploy):
   host           : $HOST  (user $USER_NAME)
@@ -186,22 +165,12 @@ if [ "${SSHPASS_PREFIX[0]:-}" = "sshpass" ]; then
   command -v sshpass >/dev/null 2>&1 || { echo "ERROR: sshpass required (apt-get install sshpass)" >&2; exit 1; }
 fi
 
-# Resolve the service exe (a pre-downloaded --binary, or the CI artifact).
+# The service exe: the pinned release, or a --binary carrying exactly its bytes.
 if [ -z "$BINARY" ]; then
-  if [ -z "$RUN_ID" ]; then
-    # #1394: the ONE shared resolver -- the branch head's own ci.yml run, a loud fallback, or a loud
-    # refusal of a stale runs listing (never the old one-shot `--status success --limit 1` pick).
-    RUN_ID="$(CI_RUN_RESOLVE_GH="$GH" ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
-    [ -n "$RUN_ID" ] || { echo "ERROR: no usable ci.yml run on $BRANCH carries $ARTIFACT (the ci-run-resolve line above names why)" >&2; exit 1; }
-  fi
-  DIST="$(mktemp -d)"
-  # shellcheck disable=SC2064  # expand DIST now so the trap has the concrete path.
-  trap "rm -rf '$DIST'" EXIT
-  echo "Downloading $ARTIFACT from ci.yml run $RUN_ID ($REPO) ..."
-  "$GH" run download "$RUN_ID" --repo "$REPO" -n "$ARTIFACT" --dir "$DIST"
-  BINARY="$DIST/$EXE_NAME"
+  BINARY="$(shading_release_fetch "$HERE/.." "$ASSET")" || { echo "ERROR: no verified service exe of the pinned shading release (above)" >&2; exit 1; }
 fi
 [ -f "$BINARY" ] || { echo "ERROR: service binary not found: $BINARY" >&2; exit 1; }
+shading_release_file_ok "$HERE/.." "$ASSET" "$BINARY" || exit 1
 [ -f "$CONFIG_SEED" ] || { echo "ERROR: config seed not found: $CONFIG_SEED" >&2; exit 1; }
 [ -f "$LOCAL_PS1" ] || { echo "ERROR: installer ps1 not found: $LOCAL_PS1" >&2; exit 1; }
 

@@ -9,7 +9,7 @@ camera over USB-PTP. The thin bash transport (`scripts/lib/camera-test-settings.
 over ssh and hands the raw text here; THIS module holds every decision:
 
   * which gphoto2 config keys are read/enforced -- the SAME names the relay transport uses
-    (`bkshading/relay/src/transport.rs` `CORE_CONFIG_KEYS`, `bkshading/proto/src/read.rs`
+    (`shading:bkshading/relay/src/transport.rs` `CORE_CONFIG_KEYS`, `shading:bkshading/proto/src/read.rs`
     `plan_writes`; a Tier-0 test pins that every key here is one of the relay's);
   * the checked-in baseline (`scripts/camera-test-baseline.json`) -- load + validate;
   * parse the combined multi `--get-config` output (one END-terminated block per key, the relay's

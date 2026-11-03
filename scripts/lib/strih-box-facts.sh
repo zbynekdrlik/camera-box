@@ -831,11 +831,11 @@ strih_lx_audio_buffering_ms() { strih_box_fact STRIH_AUDIO_BUFFERING_MS; }
 
 # strih_box_bkshading_relays_ok VALUE [PREFIX] -> 0 iff VALUE is `none` or space-separated
 # `N=<transport>@<host>:<port>` entries: N one of 1..7 and of the box's STRIH_CAMERAS (owner ruling 5977504457 + owner 26.10.2026),
-# no N twice, transport cambox-relay | sbc-relay | ethernet-rest (bkshading/service/src/config.rs; never
+# no N twice, transport cambox-relay | sbc-relay | ethernet-rest (shading:bkshading/service/src/config.rs; never
 # Bluetooth), host a host name / address that starts with a letter or digit, port 1..65535. Each problem is
 # one stderr line starting with PREFIX. The ONE grammar of the fact: the loader and the seed both call it.
 # _strih_box_relay_id ID -> 0 when ID is a relay registration id: 1-64 of [A-Za-z0-9._-] (the set the
-# bkshading service accepts, bkshading/service/src/registry.rs valid_relay_id). Spelled out, never a range.
+# bkshading service accepts, shading:bkshading/service/src/registry.rs valid_relay_id). Spelled out, never a range.
 _strih_box_relay_id() {
   local LC_ALL=C lower='abcdefghijklmnopqrstuvwxyz' upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ' digit='0123456789'
   [ "${#1}" -ge 1 ] && [ "${#1}" -le 64 ] && [[ "$1" =~ ^[${lower}${upper}${digit}._-]+$ ]]
