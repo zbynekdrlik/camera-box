@@ -493,3 +493,29 @@ def test_the_correlation_never_calls_blas(monkeypatch):
         monkeypatch.setattr(np, name, no_blas)
     cg = music_like()
     assert pcc.judge(frames(program_with(cg)), frames(cg)).kind == pcc.PRESENT
+
+
+def test_a_ring_push_that_raises_keeps_the_loud_level_and_reads_foreign_also_away(monkeypatch):
+    """Review round 2: a failed ring write dropped the block's level too, so while the CG box was
+    AWAY (the not-receivable rule not graded) a loud CG read silent and the window passed. The
+    level is kept; the source's correlation is UNDECIDED; the window is FOREIGN."""
+    m = _monitor(CGOBS, np.zeros((int(SECS * SR), 2), np.float32))   # silent until the pushes fail
+
+    def bad_push(*_a, **_k):
+        raise ValueError("odd shape")
+
+    monkeypatch.setattr(m.ring, "push", bad_push)
+    loud = (np.stack([music_like(seed=9)] * 2, axis=1) * 0.3).astype(np.float32)
+    m.receiver.blocks = [_Block(TS0 + 10 * UNITS + i * 213_333, loud[i * FRAME:(i + 1) * FRAME])
+                         for i in range(20)]
+    for _ in range(20):
+        m.poll_once()
+
+    class _Away:
+        home = False
+
+    st = pcg.CgArm("resolume-snv", [m], _Away()).state(now=100.0, program=_program_ring(program_with(None)))
+    r = st.readings[0]
+    assert pa.is_number(r.level_dbfs) and r.level_dbfs > -30.0
+    assert r.correlation.kind == pcc.UNDECIDED and "odd shape" in r.correlation.why
+    assert pcg.overlay("MEASUREMENT", None, st)[0] == "FOREIGN"

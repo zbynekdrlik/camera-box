@@ -328,3 +328,23 @@ def test_a_sender_that_never_answers_backs_the_recreate_off(clock):
     clock["t"] += RECREATE_S + 1.0
     r.capture(500)
     assert len(_Rx.made) == n + 1
+
+
+def test_an_empty_resolution_never_drops_a_pinned_url(clock):
+    """Review round 2: an avahi timeout reads as no record (None); while a url is pinned that is no
+    new information, so the receiver is never re-created by name (libndi could take the VLAN
+    address again)."""
+    r = _pinned(clock, ["10.77.9.201:5962", None])
+    t = clock["t"]
+    for step in range(0, 200):
+        clock["t"] = t + 1.0 + step * 0.5
+        r.capture(500)
+    assert all(x.url == "10.77.9.201:5962" for x in _Rx.made)
+    assert r.url == "10.77.9.201:5962"
+
+
+def test_the_sampler_unit_keeps_blas_single_threaded():
+    unit = (_ROOT / "systemd" / "program-audio-sampler.strih-snv.service").read_text(encoding="utf-8")
+    env = [ln for ln in unit.splitlines() if ln.startswith("Environment=")]
+    assert any("OPENBLAS_NUM_THREADS=1" in ln and "OMP_NUM_THREADS=1" in ln for ln in env), env
+    assert unit.index("Environment=") < unit.index("EnvironmentFile=")
