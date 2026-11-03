@@ -667,8 +667,8 @@ else
   # issue 1345 (owner accepted 25.9.2026): the MiniFuse PLAYBACK period (1024 x 3, headroom 256 -- the
   # buzz fix) and the graph's min-quantum floor 1024 (the robotic-cameraman fix). Compared, rewritten only
   # on a difference, logged; both apply at the next WirePlumber/PipeWire start (the reboot after setup).
-  strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
-  strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
+  obs_box_write_if_changed_rendered "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period" strih_wireplumber_minifuse_output_period_conf || fail "MiniFuse output period: not installed (above)"
+  obs_box_write_if_changed_rendered "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024" strih_pipewire_quantum_conf || fail "graph quantum 1024: not installed (above)"
   echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session)"
 fi
 # Linger the operator so its user@.service + PipeWire come up at boot before any login: a headless start

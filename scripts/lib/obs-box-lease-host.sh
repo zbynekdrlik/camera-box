@@ -193,9 +193,9 @@ obs_box_lease_host_install() {
   fi
   script="$(obs_box_lease_host_script_text)" || { echo "obs-box-lease-host: cannot render the refresh script (no box IP)" >&2; return 1; }
   before="$({ cat "$LH_SERVICE" "$LH_TIMER" 2>/dev/null || true; } | sha256sum)"
-  printf '%s\n' "$script" | obs_box_write_if_changed "$LH_SCRIPT" 0755 "$owner" "lease host refresh"
-  obs_box_lease_host_service_text | obs_box_write_if_changed "$LH_SERVICE" 0644 "$owner" "lease host unit"
-  obs_box_lease_host_timer_text | obs_box_write_if_changed "$LH_TIMER" 0644 "$owner" "lease host timer"
+  printf '%s\n' "$script" | obs_box_write_if_changed "$LH_SCRIPT" 0755 "$owner" "lease host refresh" || return 1
+  obs_box_write_if_changed_rendered "$LH_SERVICE" 0644 "$owner" "lease host unit" obs_box_lease_host_service_text || return 1
+  obs_box_write_if_changed_rendered "$LH_TIMER" 0644 "$owner" "lease host timer" obs_box_lease_host_timer_text || return 1
   after="$({ cat "$LH_SERVICE" "$LH_TIMER" 2>/dev/null || true; } | sha256sum)"
   if [ "$before" != "$after" ]; then systemctl daemon-reload || { echo "obs-box-lease-host: daemon-reload failed" >&2; return 1; }; fi
   systemctl enable --now "${OBS_BOX_LEASE_HOST_UNIT}.timer" \

@@ -193,10 +193,10 @@ strih_dante_rx_pin_install() {
   fi
   rm -f "$tmp"
   install -d -m 0755 "$(dirname "$(strih_dante_rx_pin_helper_path)")" "$(dirname "$(strih_dante_rx_pin_sudoers_path)")" || return 1
-  strih_dante_rx_pin_conf_text "$cpu" "$rest" "$base" "${sib:-unread}" \
-    | obs_box_write_if_changed "$(strih_dante_rx_pin_conf_path)" 0644 "$owner" "dante-rx-pin conf" || return 1
-  strih_dante_rx_pin_helper_text | obs_box_write_if_changed "$(strih_dante_rx_pin_helper_path)" 0755 "$owner" "dante-rx-pin helper" || return 1
-  strih_dante_rx_pin_sudoers_text "$user" | obs_box_write_if_changed "$(strih_dante_rx_pin_sudoers_path)" 0440 "$owner" "dante-rx-pin sudoers" || return 1
+  obs_box_write_if_changed_rendered "$(strih_dante_rx_pin_conf_path)" 0644 "$owner" "dante-rx-pin conf" \
+    strih_dante_rx_pin_conf_text "$cpu" "$rest" "$base" "${sib:-unread}" || return 1
+  obs_box_write_if_changed_rendered "$(strih_dante_rx_pin_helper_path)" 0755 "$owner" "dante-rx-pin helper" strih_dante_rx_pin_helper_text || return 1
+  obs_box_write_if_changed_rendered "$(strih_dante_rx_pin_sudoers_path)" 0440 "$owner" "dante-rx-pin sudoers" strih_dante_rx_pin_sudoers_text "$user" || return 1
   echo "  dante-rx-pin: CPU ${cpu} reserved for ${STRIH_DANTE_RX_PIN_THREADS// / + } at nice ${STRIH_DANTE_RX_PIN_NICE}; OBS on ${rest} (from ${base}); SMT siblings of CPU ${cpu}: ${sib:-unread} (the sibling stays OBS's) -- applied at OBS's next start"
 }
 

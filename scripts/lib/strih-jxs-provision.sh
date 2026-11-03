@@ -201,7 +201,7 @@ strih_jxs_provision() {
       # converge to what verify grades: a venue with no program declares the link off
       out="$(strih_jxs_output_render "$file" none 0 disable)" || { echo "strih-jxs: cannot render ${file}" >&2; return 1; }
       printf '%s\n' "$out" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" \
-        "JPEG XS program output (disabled: the venue declares no STRIH_JXS_PROGRAM_PORT)"
+        "JPEG XS program output (disabled: the venue declares no STRIH_JXS_PROGRAM_PORT)" || return 1
     else
       echo "  JPEG XS program output: the venue's stream box declares no STRIH_JXS_PROGRAM_PORT -- nothing enabled, ${file} left as it is"
     fi
@@ -219,7 +219,7 @@ strih_jxs_provision() {
     out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID" "" "$cores")" || rc=$?
   fi
   [ "$rc" = 0 ] && [ -n "$out" ] || { echo "strih-jxs: cannot render ${file} (rc ${rc}: 4 = not a regular file)" >&2; return 1; }
-  printf '%s\n' "$out" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" "JPEG XS program output (-> ${target})"
+  printf '%s\n' "$out" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" "JPEG XS program output (-> ${target})" || return 1
 }
 
 # _strih_jxs_output_state FILE -> enabled | disabled | absent | unreadable (a symlink or anything that is
