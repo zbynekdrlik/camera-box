@@ -184,7 +184,7 @@ START = ("12:00:00.000: dante-input start: config=/home/newlevel/.camera-box/dan
          "ports=Some(4440)/Some(8800)/Some(4455) rx_port_base=Some(47200) subscriptions=2 state_file=x")
 
 
-def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True):
+def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=None):
     log = tmp_path / "obs.log"
     log.write_text("\n".join(log_lines) + "\n")
     kf = tmp_path / "kind"
@@ -193,7 +193,7 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True):
     if toml:
         dest.write_text('name = "strih-obs"\n[[subscribe]]\n')
     # the "live window": a sleep stand-in that appends one more status line
-    nxt = _status("12:00:20.000", 999999)
+    nxt = nxt or _status("12:00:20.000", 999999)
     sleep_fn = ('sleep() { printf "%%s\\n" %s >> %s; }' % (json.dumps(nxt), json.dumps(str(log)))) if grow else 'sleep() { :; }'
     body = ('ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; note() { echo "NOTE $*"; }; %s; '
             'strih_box_load strih-snv >/dev/null; strih_dante_input_grade "$1" "$2" "$4"') % sleep_fn
@@ -207,6 +207,22 @@ def test_item9_passes_a_healthy_dante_source(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "BAD" not in r.stdout, r.stdout
     assert "OK (program-dante) live: delivered_frames 4800 -> 999999" in r.stdout
+
+
+# Live on strih-snv 3.11.2026 the v0.2.0 source ran ~200 underruns/s and ~9 overruns/s with a clean
+# network, and item 9 passed it: a counter that grows over the live window is a loss NOW.
+@pytest.mark.parametrize("key", ["rx_loss", "rx_gaps", "rx_late", "socket_drops", "underruns", "overruns"])
+def test_item9_fails_a_counter_that_grows_over_the_live_window(tmp_path, key):
+    r = _grade(tmp_path, [START, _status("12:00:10.000", 4800, **{key: "18024"})],
+               nxt=_status("12:00:20.000", 999999, **{key: "28036"}))
+    assert ("BAD (program-dante) live: %s +10012" % key) in r.stdout, r.stdout
+
+
+def test_item9_keeps_a_counter_flat_over_the_window_as_history(tmp_path):
+    r = _grade(tmp_path, [START, _status("12:00:10.000", 4800, rx_late="27")],
+               nxt=_status("12:00:20.000", 999999, rx_late="27"))
+    assert "BAD" not in r.stdout, r.stdout
+    assert "OK (program-dante) live: delivered_frames 4800 -> 999999" in r.stdout and "rx_late=27" in r.stdout
 
 
 def test_item9_fails_each_fault_by_name(tmp_path):
