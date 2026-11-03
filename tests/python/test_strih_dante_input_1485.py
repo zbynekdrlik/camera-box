@@ -300,6 +300,21 @@ def test_item9_fails_a_free_clock_and_a_halved_false_start(tmp_path):
     assert "clock=free" in r.stdout and "holdover=1" in r.stdout
 
 
+# obs v0.4.1 (dstack v0.6.8, dstack #90): the 2:1 halving became the `Rated` sinc converter and the
+# start line says converts=true instead of halved=true; the status fields are unchanged.
+def test_item9_passes_a_v041_converts_true_start(tmp_path):
+    start = START.replace("halved=true", "converts=true")
+    r = _grade(tmp_path, [start, _status("12:00:10.000", 4800)])
+    assert "BAD" not in r.stdout, r.stdout
+    assert "OK (program-dante) started: device_rate=96000 converts=true" in r.stdout, r.stdout
+
+
+def test_item9_fails_a_converts_false_start(tmp_path):
+    start = START.replace("halved=true", "converts=false")
+    r = _grade(tmp_path, [start, _status("12:00:10.000", 4800)])
+    assert "wants 96000 / true" in r.stdout, r.stdout
+
+
 def test_item9_fails_a_stalled_device(tmp_path):
     r = _grade(tmp_path, [START, _status("12:00:10.000", 4800)], grow=False)
     assert "BAD (program-dante) delivered_frames did not advance" in r.stdout, r.stdout
