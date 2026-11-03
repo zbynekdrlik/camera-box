@@ -171,12 +171,18 @@ strih_dante_input_status_verdict() {
   [ "$(strih_dante_input_field "$l2" clock)" = media ] || bad="${bad}clock=$(strih_dante_input_field "$l2" clock) (not on the dsync media clock); "
   [ "$(strih_dante_input_field "$l2" holdover)" = 0 ] || bad="${bad}holdover=$(strih_dante_input_field "$l2" holdover); "
   [ "$(strih_dante_input_field "$l2" gm)" != none ] || bad="${bad}gm=none (no grandmaster); "
+  local grew=""
   for k in rx_loss rx_gaps rx_late socket_drops underruns overruns; do
     a="$(strih_dante_input_field "$l2" "$k")"
     [[ "$a" =~ ^[0123456789]+$ ]] || { bad="${bad}${k} unreadable; "; continue; }
     [ "$a" = 0 ] || out="${out}${k}=${a} "
+    # A counter that grows over the live window is a loss now (zero audio loss); its total since the
+    # start alone is history, named but not graded.
+    b="$(strih_dante_input_field "$l1" "$k")"
+    if [ "$l1" != "$l2" ] && [[ "$b" =~ ^[0123456789]+$ ]] && [ "$a" -gt "$b" ]; then grew="${grew}${k} +$((a - b)) "; fi
   done
   if [ -n "$bad" ]; then echo "bad ${bad%; }"; return 0; fi
+  if [ -n "$grew" ]; then echo "bad live: ${grew% } over the window -- audio lost while OBS runs"; return 0; fi
   a="$(strih_dante_input_field "$l1" delivered_frames)"; b="$(strih_dante_input_field "$l2" delivered_frames)"
   if [ "$l1" = "$l2" ] || ! [[ "$a" =~ ^[0123456789]+$ && "$b" =~ ^[0123456789]+$ ]] || [ "$b" -le "$a" ]; then
     echo "stale delivered_frames did not advance over the window (${a:-?} -> ${b:-?})"; return 0
