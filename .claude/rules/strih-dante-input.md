@@ -112,4 +112,9 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     thread is missing, runs on anything but exactly that CPU, or has nice > -10; no conf / no running OBS
     FAIL too.
   - Another box: step 13 removes our conf, helper and sudoers line if present, silent when absent.
+  - **The strih JPEG XS program encoder too (3.11.2026):** `jxs_cores` empty = every ONLINE CPU (vstack's
+    `affinity::online_cores`, an explicit sched_setaffinity, so the OBS mask does not bound it): its
+    `jxs-feed` / `jxs-send` threads ran on CPU 15. Setup step 6 now writes the OBS mask without the reserved
+    CPU into an EMPTY `jxs_cores` of `jxs-output.json` (`strih_jxs_output_default_cores`, the rx-pin plan);
+    an operator value is kept. The output reads the file at its next start (or Stop/StartOutput over WS).
 - Clocks + latency: `.claude/rules/audio-clock-map.md` (Dante on strih-snv).
