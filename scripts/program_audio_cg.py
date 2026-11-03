@@ -281,16 +281,17 @@ class CgSourceMonitor:
         if block is None or block.sample_rate <= 0 or block.samples.shape[0] == 0:
             return
         level = block_level_dbfs(block.samples)
+        push_error = None
         try:
             self.ring.push(getattr(block, "timestamp", pa.NDI_TIMESTAMP_UNDEFINED), block.samples,
                            block.sample_rate)
         except Exception as exc:  # noqa: BLE001 -- never kill the capture thread (review round 1)
-            with self._lock:
-                self._error = f"ring push failed: {exc!r}"
-            return
+            push_error = f"ring push failed: {exc!r}"
         t = self._mono()
         with self._lock:
-            self._error = None
+            # The level is kept whatever the ring did (review round 2): a loud block is CG audio heard,
+            # FOREIGN home or away; the error makes its correlation UNDECIDED (CgArm.state).
+            self._error = push_error
             self._last_audio = t
             self._levels.append((t, level))
             self._trim(t)
@@ -434,7 +435,8 @@ class CgArm:
         for m in self.monitors:
             r = m.reading(now)
             if prog is not None and _loud(r):
-                r = r._replace(correlation=_correlate(prog, m))
+                r = r._replace(correlation=(pcc.Correlation(pcc.UNDECIDED, why=f"the CG source: {r.error}")
+                                            if r.error else _correlate(prog, m)))
             readings.append(r)
         return CgState(self.box, self.home_probe.home, tuple(readings))
 

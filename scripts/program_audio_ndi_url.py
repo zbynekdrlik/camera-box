@@ -178,6 +178,10 @@ class PinnedReceiver:
                                         else self._repin_after_s):
             self._last_resolve = now
             url = self._resolve_safely()
+            if url is None and self.url is not None:
+                # an avahi timeout / an empty browse is no new information: never drop a pinned url
+                # for a by-name receiver libndi may put on the VLAN address again (review round 2)
+                url = self.url
         wait = max(RECREATE_BACKOFF_S, self._recreate_after_s) if backed_off else self._recreate_after_s
         first_try_at_new_url = url != self.url and not self._fruitless
         if now - self._last_create < (self._repin_after_s if first_try_at_new_url else wait):
