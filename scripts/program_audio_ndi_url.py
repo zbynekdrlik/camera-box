@@ -14,7 +14,10 @@ So the sampler names the address itself: `pick_url` takes the source's avahi rec
 routing table reaches on-link (`ip -4 -o route get` without ` via `); with none it returns None and
 the receiver is created by name as before. `PinnedReceiver` creates the receiver with that URL (the
 name kept) and re-resolves while it has had no connection for REPIN_AFTER_S (a sender restarted on
-another port, or no on-link record at the start), every REPIN_AFTER_S at most. Only the capture thread
+another port, or no on-link record at the start), every REPIN_AFTER_S at most; still without a
+connection after RECREATE_AFTER_S at the SAME url, it re-creates the receiver there anyway (live
+3.11.2026 16:51: a cg-obs connection that dropped came back in SYN-SENT to the VLAN address and the
+SDK never left it), at most every RECREATE_AFTER_S, each re-create logged. Only the capture thread
 calls capture() (and so re-creates the receiver); connections() from the consumer thread takes the
 same lock, so a receiver is never destroyed under either call.
 """
@@ -29,6 +32,7 @@ from typing import Callable, NamedTuple
 
 PIN_ENV = "PROGRAM_AUDIO_NDI_PIN"   # "0" = create every receiver by name only (tests, a rollback)
 REPIN_AFTER_S = 15.0
+RECREATE_AFTER_S = 60.0  # no connection this long at the SAME url: re-create the receiver anyway
 AVAHI_TIMEOUT_S = 5.0
 ROUTE_TIMEOUT_S = 2.0
 NDI_SERVICE = "_ndi._tcp"
@@ -116,6 +120,7 @@ class PinnedReceiver:
     def __init__(self, source: str, make: Callable[[str, str | None], object], *,
                  resolve: Callable[[str], str | None] | None = None,
                  mono: Callable[[], float] = time.monotonic, repin_after_s: float = REPIN_AFTER_S,
+                 recreate_after_s: float = RECREATE_AFTER_S,
                  log: Callable[[str], None] = lambda _m: None):
         self.source_name = source
         self._make = make
@@ -123,12 +128,14 @@ class PinnedReceiver:
         self._mono = mono
         self._repin_after_s = repin_after_s
         self._log = log
+        self._recreate_after_s = max(recreate_after_s, repin_after_s)
         self._lock = threading.Lock()
         self.url = self._resolve_safely()
         self._recv = make(source, self.url)
         self._log_url("created")
         self._since_unconnected: float | None = None
         self._last_resolve = mono()
+        self._last_create = self._last_resolve
 
     def _resolve_safely(self) -> str | None:
         try:
@@ -154,13 +161,16 @@ class PinnedReceiver:
         if self._since_unconnected is None:
             self._since_unconnected = now
             return
-        if now - self._since_unconnected < self._repin_after_s or now - self._last_resolve < self._repin_after_s:
-            return
-        self._last_resolve = now
-        url = self._resolve_safely()
-        if url == self.url:
-            return
         unconnected_s = now - self._since_unconnected
+        if unconnected_s < self._repin_after_s:
+            return
+        url = self.url
+        if now - self._last_resolve >= self._repin_after_s:  # avahi + ip at most every REPIN_AFTER_S
+            self._last_resolve = now
+            url = self._resolve_safely()
+        if url == self.url and (unconnected_s < self._recreate_after_s
+                                or now - self._last_create < self._recreate_after_s):
+            return
         try:
             new = self._make(self.source_name, url)
         except (OSError, RuntimeError) as exc:  # keep the old receiver; the next try in REPIN_AFTER_S
@@ -170,6 +180,7 @@ class PinnedReceiver:
             old, self._recv, self.url = self._recv, new, url
         old.close()
         self._since_unconnected = None
+        self._last_create = now
         self._log_url(f"re-created after {unconnected_s:.0f} s without a connection")
 
     def connections(self) -> int:
