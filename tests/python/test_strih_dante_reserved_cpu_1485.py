@@ -173,7 +173,7 @@ def test_a_dante_box_writes_both_manager_defaults_off_the_reserved_cpu(tmp_path)
     obs = [l.split("=", 1)[1] for l in conf.splitlines() if l.startswith("obs=")][0]
     assert obs == "2-14"
     assert "systemd + user managers default to CPUs 0-14 (CPU 15 only for the two dstack threads)" in r.stdout
-    assert "applies at the next boot" in r.stdout
+    assert "at the latest the next boot; running processes keep their masks until they restart" in r.stdout
     # re-run: nothing rewritten, and setup never re-executes a manager or moves a live process
     _, r = _install(tmp_path)
     assert r.returncode == 0 and r.stdout.count("dante-reserved-cpu: ") >= 3
@@ -202,9 +202,11 @@ def test_another_box_removes_only_our_drop_ins(tmp_path):
 
 
 def test_a_narrowed_mask_can_still_be_widened():
-    """The manager default is affinity, not a cpuset: sched_setaffinity is bounded by the cgroup cpuset and
-    the online CPUs only, never by the mask a process inherited. So the rx-pin helper's taskset of the two
-    dstack threads onto the reserved CPU still succeeds under a manager default that excludes it."""
+    """A kernel fact the design rests on, pinned on the runner (not a regression test of the lib: it passes
+    with or without this change). The manager default is affinity, not a cpuset: sched_setaffinity is
+    bounded by the cgroup cpuset and the online CPUs only, never by the mask a process inherited. So the
+    rx-pin helper's taskset of the two dstack threads onto the reserved CPU still succeeds under a manager
+    default that excludes it."""
     allowed = sorted(os.sched_getaffinity(0))
     assert len(allowed) >= 2, "needs two CPUs to prove it (this runner has %s)" % allowed
     code = ("import os, sys\n"
@@ -220,15 +222,21 @@ def test_a_narrowed_mask_can_still_be_widened():
 
 # --- verify item 9's reserved-cpu rows --------------------------------------------------------------
 
-def _task(proc, pid, tid, comm, cpus, flags=0):
+def _task(proc, pid, tid, comm, cpus, flags=0, stat=True):
     t = proc / str(pid) / "task" / str(tid)
     t.mkdir(parents=True, exist_ok=True)
     (t / "status").write_text("Name:\t%s\nCpus_allowed_list:\t%s\n" % (comm, cpus))
-    fields = ["S", "1", "1", "1", "0", "-1", str(flags)] + ["0"] * 45
-    (t / "stat").write_text("%d (%s) %s\n" % (tid, comm, " ".join(fields)))
+    if stat:
+        fields = ["S", "1", "1", "1", "0", "-1", str(flags)] + ["0"] * 45
+        (t / "stat").write_text("%d (%s) %s\n" % (tid, comm, " ".join(fields)))
 
 
-def _grade(tmp, extra=(), dropins=True, obs_pid=OBS_PID):
+GRADE = 'ok() { echo "OK $*"; }; note() { echo "NOTE $*"; }; bad() { echo "BAD $*"; }; strih_dante_reserved_cpu_grade'
+
+
+def _grade(tmp, extra=(), dropins=True, obs_pid=OBS_PID, boot_before_dropins=None):
+    """boot_before_dropins: None = no readable boot time (the fake /proc has no `stat`); True = the box
+    booted before the drop-ins were written (a deploy before its reboot); False = booted after them."""
     env = _box(tmp)
     root = Path(env["STRIH_DANTE_RX_PIN_ROOT"])
     if dropins:
@@ -236,18 +244,23 @@ def _grade(tmp, extra=(), dropins=True, obs_pid=OBS_PID):
         for rel in (SYSTEM_DROPIN, USER_DROPIN):
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text(text)
+            os.utime(root / rel, (1_700_000_000, 1_700_000_000))
     proc = fake_proc(tmp, threads={4242: ("obs", "2-14", 0), 4300: ("dstack-engine", "15", -10),
                                    4301: ("dstack-rx", "15", -10), 4302: ("ndi:io", "2-14", 0)})
+    if boot_before_dropins is not None:
+        btime = 1_700_000_000 + (-3600 if boot_before_dropins else 3600)
+        (proc / "stat").write_text("cpu  1 2 3 4\nintr 5\nbtime %d\nprocesses 9\n" % btime)
     _task(proc, 1, 1, "systemd", "0-14")
     _task(proc, 2, 2, "kthreadd", "0-15", PF_KTHREAD)
     _task(proc, 40, 40, "ksoftirqd/15", "15", PF_KTHREAD)
-    for pid, comm, cpus in extra:
-        _task(proc, pid, pid, comm, cpus)
+    for e in extra:
+        pid, comm, cpus = e[:3]
+        _task(proc, pid, pid, comm, cpus, **(e[3] if len(e) > 3 else {}))
     b = tmp / "bin"
     b.mkdir(exist_ok=True)
     pgrep_stub(b, obs_pid)
     env.update({"STRIH_DANTE_RX_PIN_PROC": str(proc), "PATH": "%s:%s" % (b, os.environ["PATH"])})
-    return _bash(LIB, 'ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; strih_dante_reserved_cpu_grade', env=env)
+    return _bash(LIB, GRADE, env=env)
 
 
 def test_grade_passes_a_box_where_only_the_dstack_threads_reach_the_reserved_cpu(tmp_path):
@@ -285,17 +298,68 @@ def test_grade_bounds_the_named_offenders(tmp_path):
 def test_grade_fails_missing_drop_ins_no_conf_and_an_unreadable_proc(tmp_path):
     r = _grade(tmp_path / "a", dropins=False)
     assert "BAD (program-dante) reserved-cpu: missing or different:" in r.stdout
-    r = _bash(LIB, 'ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; strih_dante_reserved_cpu_grade',
-              env=_box(tmp_path / "b", reserved=None))
+    r = _bash(LIB, GRADE, env=_box(tmp_path / "b", reserved=None))
     assert "BAD (program-dante) reserved-cpu: dante-reserved-cpu: no reserved CPU" in r.stdout, r.stdout
     env = _box(tmp_path / "c")
     env["STRIH_DANTE_RX_PIN_PROC"] = str(tmp_path / "c" / "nothing")
-    r = _bash(LIB, 'ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; strih_dante_reserved_cpu_grade', env=env)
+    r = _bash(LIB, GRADE, env=env)
     assert "BAD (program-dante) reserved-cpu: no task readable under" in r.stdout, r.stdout
 
 
+def test_offenders_before_the_reboot_are_a_note_and_after_it_a_fail(tmp_path):
+    """A deploy writes the drop-ins while every running process still has 0-15: until the box reboots the
+    scan is a named NOTE (verify, and the genlock deploy's acceptance on it, must not fail on it); a boot
+    after the drop-ins makes the same offenders a FAIL. Missing drop-ins are never pending."""
+    extra = [(901, "bkshading", "0-15")]
+    r = _grade(tmp_path / "pending", extra=extra, boot_before_dropins=True)
+    assert "NOTE (program-dante) reserved-cpu: reboot pending -- the manager default was written after this " \
+           "boot; until then 1 of 8 tasks may run on the reserved CPU 15: bkshading x1" in r.stdout, r.stdout
+    assert "BAD" not in r.stdout, r.stdout
+    r = _grade(tmp_path / "booted", extra=extra, boot_before_dropins=False)
+    assert "BAD (program-dante) reserved-cpu: 1 of 8 tasks may run on the reserved CPU 15: bkshading x1" in r.stdout
+    r = _grade(tmp_path / "nofiles", extra=extra, dropins=False, boot_before_dropins=True)
+    assert "BAD (program-dante) reserved-cpu: 1 of 8 tasks" in r.stdout and "NOTE" not in r.stdout, r.stdout
+
+
+def test_a_task_that_exited_mid_scan_is_never_an_offender(tmp_path):
+    # its status was read, its stat is gone (the task exited): neither named nor counted as a kernel thread
+    r = _grade(tmp_path, extra=[(960, "short-lived", "0-15", {"stat": False})])
+    assert "BAD" not in r.stdout and "short-lived" not in r.stdout, r.stdout
+
+
+def test_hostile_process_names_are_only_text(tmp_path):
+    """Any local user sets a process name and verify runs as root: a name is counted by string length,
+    never read inside an arithmetic subscript."""
+    marker = tmp_path / "INJECTED"
+    names = ["$(touch %s)" % marker, "a]b[0", "`touch %s`" % marker, "x[$(id)]"]
+    extra = [(970 + i, n, "0-15") for i, n in enumerate(names)] + [(980, names[1], "0-15")]
+    r = _grade(tmp_path, extra=extra)
+    assert r.returncode == 0, r.stderr
+    assert not marker.exists()
+    assert "a]b[0 x2" in r.stdout, r.stdout
+    assert "5 of 12 tasks may run on the reserved CPU 15" in r.stdout
+
+
+def test_the_fork_free_cpulist_check_agrees_with_the_expander():
+    """_strih_dante_cpulist_has (no fork per task) against obs_box_cpulist_expand over the same vectors; an
+    unparsable list holds every CPU (fail closed), where the expander refuses it."""
+    vectors = ["5", "0-15", "2,4-6", "0-1,12-15", "15", "0", "3-3", "08-09"]
+    for v in vectors:
+        exp = _bash(LIB, 'obs_box_cpulist_expand "$1"', v)
+        assert exp.returncode == 0, v
+        want = set(int(x) for x in exp.stdout.split())
+        for cpu in range(0, 17):
+            r = _bash(LIB, '_strih_dante_cpulist_has "$1" "$2" && echo yes || echo no', v, cpu)
+            assert (r.stdout.strip() == "yes") == (cpu in want), (v, cpu, r.stdout)
+    for v in ("x", "1-", "-3", "1-2-3", ""):
+        assert _bash(LIB, 'obs_box_cpulist_expand "$1"', v).returncode == 1, v
+        r = _bash(LIB, '_strih_dante_cpulist_has "$1" 15 && echo yes || echo no', v)
+        assert r.stdout.strip() == ("no" if v == "" else "yes"), (v, r.stdout)
+
+
 def test_grade_reads_the_live_proc_without_a_fork_per_task():
-    """Bounded on a real /proc (dev1 / the runner): the scan finishes well under the verify budget."""
+    """The one test that reads the HOST's real /proc (read-only; dev1 / the runner): the scan finishes
+    well under the verify budget. Everything else runs on a fake /proc."""
     import time
     t0 = time.monotonic()
     r = _bash(LIB, 'strih_dante_reserved_cpu_offenders /proc 0 ""')

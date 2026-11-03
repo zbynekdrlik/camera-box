@@ -88,16 +88,23 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     - **Affinity, not a bound:** `sched_setaffinity` is limited by the cgroup cpuset and the online CPUs
       only, never by a parent's or the manager's mask, so the helper's `taskset -p -c 15` still works
       (pinned by a test that widens a narrowed mask) and OBS's `taskset -c 2-14` is a subset.
-    - **It applies when a manager starts (the next boot).** Setup never daemon-reexecs and never moves a
-      live process; after a deploy the supervisor reboots or moves the running ones (`taskset -a -p -c
-      0-14 <pid>`).
+    - **A manager takes it when it re-reads its configuration, at the latest at the next boot** (PID 1
+      may already on a daemon-reload; not verified on a box, so nothing relies on it). Every process
+      started after that inherits it; running processes keep their masks until they restart. Setup never
+      daemon-reexecs and never moves a live process; after a deploy the supervisor reboots strih-snv (or
+      moves the running ones: `taskset -a -p -c 0-14 <pid>`), then reads `grep Cpus_allowed_list
+      /proc/1/status` and verify item 9.
     - **The sampler is placed off it too** (`strih_program_audio_cpus`, `program-audio-guard.md`).
     - **verify item 9's `(program-dante) reserved-cpu` rows** (`strih_dante_reserved_cpu_grade`, before
       the rx-pin rows): the two drop-ins byte-identical to the render, and a /proc scan (bash builtins,
       no fork per task) that FAILs every task allowed on the reserved CPU except OBS's two dstack threads
       and kernel threads (PF_KTHREAD), named by comm with a count (first 8, then `(+N more)`). Another
-      process's own `dstack-*` threads (the hub's) are offenders. A box provisioned before this FAILs
-      the second row until it reboots.
+      process's own `dstack-*` threads (the hub's) are offenders. While the drop-ins are NEWER than the
+      boot (`btime` in /proc/stat vs the system drop-in's mtime: a deploy before its reboot) the same
+      list is a NOTE `reboot pending`, so step 17 and the genlock deploy's acceptance verify do not fail
+      on it; after any later boot it is a FAIL. Missing or different drop-ins are never pending. A task
+      that exits between its `status` and its `stat` read is skipped; a process name is counted as text
+      (any user sets it, verify runs as root), never inside an arithmetic subscript.
     - Another box: step 13 removes our two drop-ins (header-checked), never a foreign file.
     - A thread the two dstack threads create later inherits their mask and nice.
   - **verify item 9's `(program-dante) rx-pin` rows** (`strih_dante_rx_pin_grade`, in the lib; verify-strih

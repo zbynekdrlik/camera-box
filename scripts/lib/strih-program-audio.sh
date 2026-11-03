@@ -226,7 +226,7 @@ strih_program_audio_missing_packages() {
 # or a shim that will not build; a `systemctl --user` call that cannot reach the user bus only WARNs.
 strih_program_audio_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local prefix unitdir rel w missing ecores tmp err shim pa_changed=0 unit_written=0
+  local prefix unitdir rel w missing cpus tmp err shim pa_changed=0 unit_written=0
   prefix="$(strih_program_audio_prefix)"
   unitdir="${home}/.config/systemd/user"
   for rel in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
@@ -268,10 +268,10 @@ strih_program_audio_install() {
     echo "  decoder shim current (built from the installed sources)"
   fi
 
-  ecores="$(strih_program_audio_cpus "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}")" || return 1
+  cpus="$(strih_program_audio_cpus "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}")" || return 1
   strih_user_home_dir "$home" "$user" "$unitdir" || { echo "strih-program-audio: cannot create ${unitdir}" >&2; return 1; }   # issue 1412: every level the user's
   tmp="$(mktemp)" || { echo "strih-program-audio: mktemp failed" >&2; return 1; }
-  if ! strih_program_audio_unit_text "$repo" "$ecores" > "$tmp"; then
+  if ! strih_program_audio_unit_text "$repo" "$cpus" > "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
@@ -281,7 +281,7 @@ strih_program_audio_install() {
     unit_written=1
     pa_changed=1
   fi
-  echo "  ${STRIH_PROGRAM_AUDIO_UNIT} ${w} (CPUAffinity=${ecores}: the E-cores, else the background set, never the reserved Dante CPU; normal priority)"
+  echo "  ${STRIH_PROGRAM_AUDIO_UNIT} ${w} (CPUAffinity=${cpus}: the E-cores, else the background set, never the reserved Dante CPU; normal priority)"
   chown -R "${user}:${user}" "$unitdir" 2>/dev/null || echo "  WARN: could not chown ${unitdir} to ${user}"
 
   if ! err="$(strih_session_apps_user_systemctl "$user" enable "$STRIH_PROGRAM_AUDIO_UNIT" 2>&1)"; then
