@@ -404,7 +404,7 @@ def test_grade_row_ok(tmp_path):
     assert F.row(rows, "dsync-tray") == (
         "OK|(dsync-tray) %s: unit matches the checkout, %s installed, enabled, started by the kiosk "
         "autostart, active, its process runs %s and started after the unit was installed" % (TRAY, b, b))
-    assert len(rows) == len(F.UNITS) + 5  # issue 1424: + the display watch's last pass + its X config row
+    assert len(rows) == len(F.UNITS) + 6  # issue 1424: + the display watch's last pass + its X config row; issue 1485: + (dtray-devices)
 
 
 def test_grade_row_note_while_the_pin_has_no_linux_tray(tmp_path):
