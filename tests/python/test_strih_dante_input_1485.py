@@ -12,7 +12,12 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+import sys
+
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from strih_dante_rx_pin_fakes_1485 import fake_proc, pgrep_stub, stub  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
@@ -21,7 +26,8 @@ CONT_LIB = SCRIPTS / "lib" / "program-audio-continuity.sh"
 BOXES = SCRIPTS / "strih-boxes"
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_NIC_IFACE", "STRIH_BOXES_DIR", "OBS_FLEET", "GH_TOKEN",
          "STRIH_DANTE_INPUT_SITE_FILE", "STRIH_DANTE_INPUT_TOML", "STRIH_DANTE_INPUT_IFACE", "STRIH_DANTE_INPUT_KIND_FILE",
-         "STRIH", "STREAM")
+         "STRIH", "STREAM", "STRIH_DANTE_RX_PIN_ROOT", "STRIH_DANTE_RX_PIN_OWNER", "STRIH_DANTE_RX_PIN_PROC",
+         "STRIH_DANTE_RX_PIN_SYSFS", "OBS_BOX_ONLINE_CPUS")
 
 
 def _load(name, path):
@@ -148,9 +154,19 @@ def test_a_malformed_site_file_is_refused_by_name(tmp_path, site, why):
 def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
     dest = tmp_path / "home" / ".camera-box" / "dante-input.toml"
     site = tmp_path / "site.conf"
-    env = {"STRIH_DANTE_INPUT_TOML": str(dest), "STRIH_DANTE_INPUT_IFACE": "enp7s0.70",
-           "STRIH_DANTE_INPUT_SITE_FILE": str(site)}
     user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+    group = subprocess.run(["id", "-gn"], capture_output=True, text=True).stdout.strip()
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    (root / "etc" / "strih-isolated-cpus.conf").write_text("2-15\n")
+    (tmp_path / "online").write_text("0-15\n")
+    (tmp_path / "bin").mkdir()
+    stub(tmp_path / "bin", "visudo", "exit 0\n")
+    env = {"STRIH_DANTE_INPUT_TOML": str(dest), "STRIH_DANTE_INPUT_IFACE": "enp7s0.70",
+           "STRIH_DANTE_INPUT_SITE_FILE": str(site), "STRIH_DANTE_RX_PIN_ROOT": str(root),
+           "STRIH_DANTE_RX_PIN_OWNER": "%s:%s" % (user, group), "OBS_BOX_ONLINE_CPUS": str(tmp_path / "online"),
+           "PATH": "%s:%s" % (tmp_path / "bin", os.environ["PATH"])}
+    rx_conf = root / "etc" / "strih-dante-rx-cpu.conf"
     body = ('. scripts/lib/obs-box-baseline.sh; fail() { echo "FAIL $*" >&2; exit 1; }; strih_box_load strih-snv >/dev/null; '
             'strih_dante_input_install "$1" "$2"')
     r = _bash(body, user, tmp_path / "home", env=env)
@@ -160,11 +176,14 @@ def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
     assert r.returncode == 0, r.stderr
     assert tomllib.loads(dest.read_text())["iface"] == "enp7s0.70"
     assert "written" in r.stdout
+    assert "reserved=15\nobs=2-14\n" in rx_conf.read_text(), "the Dante threads' CPU comes with the device"
     r = _bash(body, user, tmp_path / "home", env=env)
     assert "unchanged" in r.stdout
     # a box without the device removes OUR file, never an operator's own
     r = _bash('strih_box_load strih-pp >/dev/null; strih_dante_input_install "$1" "$2"', user, tmp_path / "home", env=env)
     assert r.returncode == 0 and not dest.exists(), r.stdout + r.stderr
+    assert not rx_conf.exists() and not (root / "usr" / "local" / "sbin" / "strih-dante-rx-pin").exists()
+    assert not (root / "etc" / "sudoers.d" / "strih-dante-rx-pin").exists()
     dest.write_text("name = \"mine\"\n")
     r = _bash('strih_box_load strih-pp >/dev/null; strih_dante_input_install "$1" "$2"', user, tmp_path / "home", env=env)
     assert dest.exists() and "not ours" in r.stderr
@@ -198,9 +217,20 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     sleep_fn = ('sleep() { printf "%%s\\n" %s >> %s; }' % (json.dumps(nxt), json.dumps(str(log)))) if grow else 'sleep() { :; }'
     body = ('ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; note() { echo "NOTE $*"; }; %s; '
             'strih_box_load strih-snv >/dev/null; strih_dante_input_grade "$1" "$2" "$4"') % sleep_fn
+    # the rx-pin rows (strih-dante-rx-pin.sh) over a pinned fake OBS
+    root = tmp_path / "rxroot"
+    (root / "etc").mkdir(parents=True, exist_ok=True)
+    (root / "etc" / "strih-dante-rx-cpu.conf").write_text("reserved=15\nobs=2-14\nbase=2-15\n")
+    proc = fake_proc(tmp_path, threads={4242: ("obs", "2-14", 0), 4300: ("dstack-engine", "15", -10),
+                                        4301: ("dstack-rx", "15", -10)})
+    (tmp_path / "rxbin").mkdir(exist_ok=True)
+    pgrep_stub(tmp_path / "rxbin")
     return _bash(body, "scn", "127.0.0.1", "unused", log,
                  env=dict({"STRIH_DANTE_INPUT_KIND_FILE": str(kf), "STRIH_DANTE_INPUT_TOML": str(dest),
-                           "STRIH_DANTE_INPUT_WAIT_S": "0"}, **({"STRIH_LX_USER": user} if user else {})))
+                           "STRIH_DANTE_INPUT_WAIT_S": "0", "STRIH_DANTE_RX_PIN_ROOT": str(root),
+                           "STRIH_DANTE_RX_PIN_PROC": str(proc),
+                           "PATH": "%s:%s" % (tmp_path / "rxbin", os.environ["PATH"])},
+                          **({"STRIH_LX_USER": user} if user else {})))
 
 
 def test_item9_passes_a_healthy_dante_source(tmp_path):
@@ -208,6 +238,7 @@ def test_item9_passes_a_healthy_dante_source(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "BAD" not in r.stdout, r.stdout
     assert "OK (program-dante) live: delivered_frames 4800 -> 999999" in r.stdout
+    assert "OK (program-dante) rx-pin: dstack-rx tid 4301 on CPU 15 at nice -10" in r.stdout
 
 
 # Live on strih-snv 3.11.2026 the v0.2.0 source ran ~200 underruns/s and ~9 overruns/s with a clean
