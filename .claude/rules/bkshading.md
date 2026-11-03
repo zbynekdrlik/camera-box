@@ -1,6 +1,5 @@
 ---
 paths:
-  - "bkshading/**"
   - "scripts/bkshading-*"
   - "scripts/lib/bkshading-*"
   - "scripts/lib/ci-run-resolve.sh"
@@ -8,6 +7,9 @@ paths:
 ---
 
 # bkshading — remote camera shading control (issue 808)
+
+The code, its tests and the rules about them live in `zbynekdrlik/shading` since issue 1487; here is the
+deploy, provisioning and rig side. The release camera-box runs: `.claude/rules/shading-pinned-release.md`.
 
 A multiplatform Rust **service** (`bkshading`, runs on the strih PC — Windows first, Linux later)
 that aggregates per-camera **relays** into ONE operator web panel; and a cambox/SBC **relay**
@@ -19,7 +21,7 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
 ## Non-negotiables (owner decisions)
 - **Transports are USB-relay / SBC-relay / ethernet-REST ONLY — NEVER Bluetooth.** The BLE path
   from the dev2 MVP is dead; do not reintroduce it.
-- Camera list is config-driven (`bkshading/service/bkshading.example.toml`): a camera is a record
+- Camera list is config-driven (`shading:bkshading/service/bkshading.example.toml`): a camera is a record
   (id, transport, address, optional `ndi_preview`). **A camera with no `ndi_preview` renders a
   params-only block** (no preview). M2 delivers the LIVE preview (JPEG over HTTP; see M2 section).
 - **The panel lists the box's OWN venue cameras (`STRIH_CAMERAS`; owner 26.10.2026: "ale v pp urcite
@@ -62,198 +64,9 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
   `libgphoto2` FFI binding — the trait keeps FFI as a future 2nd impl). Rationale: no build-time C
   dep → clean ARM cross-build for the zero-class arm64 SBC handheld relay.
 
-## How the crates sit in the workspace WITHOUT disturbing the appliance
-The repo root `Cargo.toml` is a **single package** (the camera-box appliance). The bkshading crates
-are added as SEPARATE workspace members:
-- Root `Cargo.toml` gained `[workspace] members = ["bkshading/proto","bkshading/relay","bkshading/service"]`
-  + `resolver = "2"` (pins the SAME feature resolution the root edition-2021 package used standalone).
-- **The appliance build is untouched because every existing CI job runs cargo at the ROOT WITHOUT
-  `--workspace`** — so `cargo test`/`clippy`/`nextest`/`llvm-cov`/`mutants` still select ONLY the
-  root package. `cargo fmt --all` DOES cover the new members (so they must be fmt-clean).
-- The members get their OWN CI jobs: `bkshading` (Linux clippy/test/build) + `bkshading-windows`
-  (windows-latest `cargo check` — the service ships to the strih PC, Windows first). Both are in the
-  `notify-on-failure` needs list.
-- Deps stay OUT of the appliance tree: axum/tokio/reqwest(rustls, no openssl)/toml live only in the
-  member manifests, so the appliance's minimal deps + probe feature-gating are never touched.
-
-## Crate versions — ONE workspace source of truth (issue 1154)
-All four crates (appliance + the 3 members) inherit ONE version from root
-`[workspace.package] version = "X"` via `version.workspace = true`; NO crate hard-codes its own.
-A single edit of that ONE line bumps every crate's `CARGO_PKG_VERSION` (relay/service read it as
-`const VERSION`, which feeds the panel DOM / `/api/version` / `RelayState.version` — the
-version-on-dashboard surface). Before #1154 the members hard-coded their version and silently
-drifted after each root-only bump (root `.518` vs members `.516` live).
-- The three `^version = "X"` readers (`camera-box-version-gate.sh:169` incl. its origin/main pin,
-  `recording-e2e.sh:903` sed, `rig-status.py` `_read_version`) STILL work UNTOUCHED: each anchors
-  on the FIRST column-0 `version = "X"` line, now the `[workspace.package]` one (same value), which
-  sits before all dependency lines. `version.workspace = true` never matches that anchor (no quote
-  after `=`), and the new comment lines start with `#`.
-- **Bump discipline is now: edit the single `[workspace.package].version` line at the root.**
-- GOTCHA when bumping via sed: a blanket `sed 's/^version = "OLD"$/.../'` will ALSO rewrite the
-  `[workspace.package]` literal (it is the ONLY column-0 `version = "X"` line now). Target that
-  one line specifically (e.g. `sed '/^\[workspace.package\]$/{n;s/.../}'`).
-- The `"1.7.0-dev.516"` literals in `service/tests/service.rs` + `relay/tests/relay.rs` are INERT
-  test inputs (a version string passed INTO `CameraSession::new(...)`/a fixture and echoed back),
-  decoupled from `env!` — they do NOT track the crate version and do NOT break CI.
-- Invariant test: `tests/python/test_bkshading_versions_1154.py` (tomllib structural — runs in the
-  `python-tests` CI job, no toolchain; a skip-if-no-cargo `cargo metadata` check proves resolved
-  value-level uniformity where cargo exists).
-
-## Verifying a NEW crate
-1. Python static tests under `tests/python/test_bkshading_*.py` (stdlib only: `os`/`re`/`tomllib`) —
-   validate the web-UI structure + config schema. They are picked up automatically by the existing
-   `python-tests` CI job (pytest discovers `test_*` in `tests/python`).
-   NOTE: a python static webui test CANNOT catch a CSS/JS runtime bug — the M1 review found an
-   author `.block-preview{display:flex}` beating the UA `[hidden]` rule (params-only block still
-   showed its preview); that needs a real Playwright E2E against a running service (M2).
-2. axum 0.7 routes are `:id`, not `{id}`. clippy `-D warnings` traps (a never-read struct field
-   fails `dead_code`; and since Rust 1.98, `chunks_exact(N)` with a CONSTANT N is a clippy-deny lint — use index math or
-   `slice::as_chunks::<N>().0`; the main crate was fixed in dev `052da4c5d`;
-   `Option::map_or(<bool literal>, |x| …)` trips `unnecessary_map_or` (clippy `style`, stable
-   1.84) — use `is_none_or`/`is_some_and` instead, issue 1157; a two-comparison bound check
-   `x > a && x <= b` (e.g. a sanity-cap on an env value) trips `manual_range_contains` (clippy
-   `style`) — use `(a+1..=b).contains(&x)` / `(a..=b).contains(&x)`, issue 1229). These clippy traps bite HARDEST
-   in the `#[cfg(feature = "ndi")]` code (`ndi_source.rs`): it compiles ONLY under
-   `--features ndi`, so a `-D warnings` lint there is invisible to a default-feature check.
-   Hand-audit feature-gated code against this list before pushing.
-
-## M1 done / M2+ deferred
-Done: the 3 crates + workspace/CI wiring, the 4+4 responsive web panel skeleton (version in the DOM,
-version-on-dashboard), config-driven camera list, relay read+write logic unit-tested with a fake
-runner; ONE workspace-inherited crate version across all four crates (#1154). M2 DONE: live NDI preview (below). SBC/handheld provisioning DONE (below). ALSO DONE since: WS push of the aggregate
-(`/ws` watch pump); cloudflare password-protected remote (NOT tailscale — owner decision); relay
-provisioning incl. `gphoto2` runtime + the CAMERA_BOX_CAPTURE_FPS env (LIVE on cam2 since
-2026-08-22, camera not yet cabled); CI artifacts + `bkshading-deploy-relay.sh`; the reconnect-safe
-process-shared NDI runtime (below). Still deferred: automating the E2E camera pre-run shutter
-checklist (meaningful once the camera is physically cabled to the relay box).
-
-
-## M2 — live camera preview (issue 808, `bkshading/service/src/preview/**`)
-Owner architecture: the cambox publishes ONE NDI stream (strih OBS + this service both consume it);
-the service subscribes to the NDI **low-bandwidth** variant, decimates to ~3 fps, JPEG-encodes, and
-serves the latest frame at `GET /api/cameras/<id>/preview.jpg`; the web UI fetches it a few
-times a second while the feed is live (next bullet list). Structure: a `PreviewSource` trait behind which the **default stub** (test pattern,
-CI-safe, no libndi) and a `#[cfg(feature="ndi")]` real receiver live; pure CI-tested stages
-(`frame`/`pattern`/`decimate`/`encode`/`convert`/`store`) + runtime glue (`source`/`worker` — one OS
-thread per camera, NOT tokio, since NDI capture is a blocking FFI call). Feature `ndi` is OFF by
-default + UNVERIFIED against a live source (follow-up #1157: verify + provision libndi on the strih
-service). Delivery is JPEG-over-HTTP, NOT presenter's gstreamer→webrtcsink (WHEP) — WebRTC is too
-heavy + CI-unverifiable for a ~3 fps shading preview; only the minimal "NDI recv → per-frame" idea
-was reused.
-- **The appliance ALREADY has the NDI recv pattern at `src/ndi.rs`** (`NdiReceiver::connect` +
-  `capture_frame`, `recv_create_v3` with a `bandwidth` field, `recv_capture_v3`,
-  `recv_free_video_v2`). The real preview receiver mirrors it VERBATIM (safest for an untestable
-  path), only swapping bandwidth `HIGHEST`(100) → `LOWEST`(0). Do NOT depend on the appliance root
-  crate from a member (pulls the whole heavy appliance tree) — copy the minimal recv FFI instead.
-- **jpeg-encoder 0.7**: `Encoder::new(w, quality) -> Encoder` (NOT a Result); `encode(self, &[u8],
-  width: u16, height: u16, ColorType::Rgb) -> Result` (consumes self). Pure Rust, default `std`
-  only (no simd/C) → cross-compiles to Windows/ARM.
-- **FFI init E0505 trap**: inline `*lib.get::<Fn>(...)?` calls INSIDE a struct literal keep their
-  Symbol temporaries alive to the END of the statement, so moving the `Library` into the last field
-  (`_library: lib`) fails with E0505 (borrowed). Deref-copy each fn pointer into its OWN `let` FIRST
-  (each `?` temp ends at its statement — fn pointers are Copy), THEN build the struct moving `lib`
-  last. (`src/ndi.rs` dodges it by binding Symbols to `let`s; the inline form does not.)
-- **FFI `#[repr(C)]` dead_code**: a private field never read (e.g. `p_url_address`, most of the
-  recv video-frame struct) trips `dead_code` under `-D warnings` — annotate the struct
-  `#[allow(dead_code)]` (the appliance made its fields `pub` instead, which is also exempt).
-- The feature-gated path gets its OWN CI step: `cargo clippy -p bkshading --features ndi
-  --all-targets -- -D warnings` (libloading is a RUNTIME load, so it compiles without libndi).
-- Decimation runs on a MONOTONIC `Instant` (not wall clock — immune to an NTP backward step); the
-  store's `updated_ms` stays wall clock (`store::wall_clock_ms`), the clock freshness is judged on.
-
-### A preview is shown only while its frame is FRESH — 204, `previewLive`, no frozen frame (issue 808, 3.10.2026)
-The panel used to reload an `<img>` at 3 Hz against an endpoint that answered `503` until a frame
-existed: with cam1 powered off after a production, Chromium logged a console error every ~1.6 s.
-And the store kept the LAST frame forever (nobody clears it when the NDI feed ends), so a stopped
-feed stayed on screen frozen as if live.
-- **Freshness is a READ decision, never a store clear.** `PreviewFrame::is_fresh(now_ms,
-  max_age_ms)` / `PreviewStore::get_fresh` / `is_live`; the raw frame stays for diagnostics.
-- **The bound** is `PreviewConfig::max_frame_age_ms()` = max(`PREVIEW_MAX_AGE_FLOOR_MS` 3000,
-  `PREVIEW_MAX_AGE_FRAME_PERIODS` 5 × the decimator period, 2 × `capture_timeout_ms`). At the
-  defaults the 3 s floor wins. A backward wall-clock step reads as age 0 (live), never an underflow.
-- **The endpoint never answers 4xx/5xx for a known camera.** The pure `http::preview_response`:
-  - a fresh frame → `200 image/jpeg`;
-  - no frame, a stale frame, or a camera without `ndi_preview` → `204 No Content`;
-  - an unknown camera id → `404`, the only error status.
-  Every known-camera answer is `no-store`. Chromium logs every 4xx/5xx resource load as a console
-  error (the E2E gotcha below), so a non-error "no picture" status is the only console-clean shape.
-- **`CameraView.preview_live` (`previewLive`, serde default false) gates the panel.** The pump and
-  `/api/cameras` read it from the store after the relay polls. `camera_view(cam, state,
-  preview_live)` stays pure and never reports a params-only camera live. The issue-1337 immediate
-  per-camera push carries the current view's flag over, since the relay does not know the preview.
-- **The panel loader** (`web/app.js` `refreshPreviews` / `loadPreview` / `showPreviewPlaceholder`):
-  - fetch only while `previewLive` AND the panel has contact (`isConnected`);
-  - `fetch(no-store)` → blob → object URL, revoking the previous one; one request in flight per block;
-  - a 204 / a failed fetch / a push that turns the feed off → the placeholder, with the `<img>` src
-    attribute REMOVED (fires no error event) and the URL revoked.
-  - one `AbortController` per block: a fetch is aborted after `PREVIEW_FETCH_TIMEOUT_MS` (2 s) and
-    whenever the block drops to its placeholder (an aborted fetch logs nothing in Chromium), and a
-    frame that arrives after contact was lost is not painted. A fetch that only TIMED OUT, on a
-    feed still live with contact, keeps a frame painted less than `PREVIEW_KEEP_ON_TIMEOUT_MS` (3 s)
-    ago (stamped with the monotonic `performance.now()`), so one slow request never flashes "obraz
-    sa zastavil", and the freeze stays bounded. `panel.spec.js` pins both: a route that holds the
-    first request 8 s (a second must arrive within 6 s, polled every 100 ms -- the default
-    `expect.poll` intervals stop before the deadline), and a stall after a frame (the frame survives
-    the first timeout, the stopped placeholder follows).
-  The placeholder says "NDI preview — čakám…" before any frame and "NDI preview — obraz sa
-  zastavil, čakám…" after a live feed stopped. Never point an `<img>` straight at a polled
-  endpoint that can answer 4xx/5xx again.
-- **A live/stale flip is logged once.** `monitor::preview_transitions` (the issue-1309
-  `reach_transitions` model) gives the pump one info line per preview camera that went stale or
-  came back, and one for a camera first seen without a frame. A stopped feed leaves the worker on
-  quiet capture timeouts, so without it nothing reaches the service log.
-
-### M2 follow-up — cross-platform libndi discovery + provisioning (issue 1157)
-The M2 receiver copied `src/ndi.rs`'s `NdiLib::load()` VERBATIM, which is Linux-only (`libndi.so*`
-+ `/usr/lib/ndi` etc.). But the SERVICE ships to the strih PC (Windows first), where the NDI
-runtime is `Processing.NDI.Lib.x64.dll` at `C:\Program Files\NDI\NDI 6 Tools\Runtime\` (documented
-in-repo at `scripts/bundle-state-server.py::DEFAULT_NDI_RUNTIME_DLL`) — so `--features ndi` could
-never load on its own ship target.
-- **Discovery is now a PURE, default-feature module** `bkshading/service/src/preview/ndi_paths.rs`
-  (unit-tested WITHOUT libndi, mirroring the `convert.rs` split): `NdiOs {Linux,Windows,Macos}`
-  as an INPUT (not `cfg!`) so every OS's candidate set is tested on the Linux runner. The
-  `NdiLib::load_uncached()` loader (reached only via the process-shared `NdiLib::shared()`)
-  now consumes `ndi_search_candidates(current_ndi_os(), |k| std::env::var(k).ok())` (env dirs →
-  per-OS well-known dirs → bare-name dynamic-linker fallback) instead of a hard-coded Linux list.
-  Tests live in `service/tests/preview.rs` (run in the default-feature `bkshading` CI test).
-- **CI compiles + verifies the feature on BOTH ship targets.** Since issue 1157 made `ndi` the
-  DEFAULT service build (below), the PLAIN default-feature steps carry the real-ndi coverage: the
-  `bkshading` job's `cargo clippy/test -p bkshading` compile+run the ndi path on Linux, and
-  `bkshading-windows`'s `cargo check -p bkshading` compiles it on the strih Windows target. The two
-  previously-explicit `--features ndi` clippy/test steps were REPURPOSED to `--no-default-features`
-  so the stub (libndi-free) path stays proven and can't bit-rot; the RELEASE/deploy builds keep
-  `--features ndi` written explicitly (it now equals the default, kept for intent/deploy-shape
-  clarity + to satisfy `test_bkshading_deploy_relay_808.py`). `test_bkshading_ndi_default_1157.py`
-  pins the default-includes-ndi decision + the `--no-default-features` CI coverage (tomllib + yaml,
-  no cargo).
-- **Provisioning/verify:** `scripts/bkshading-provision-ndi.sh` (+ source-only pure helper
-  `scripts/lib/bkshading-ndi-runtime.sh`) — idempotent, fail-loud, enable-only. Linux `--check`
-  verifies discovery / `--install` delegates to `vendor/distroav/CI/libndi-get.sh`; Windows reports
-  the documented DLL path. `tests/python/test_bkshading_ndi_provision_1157.py` cross-checks the shell
-  dirs/names + the Windows DLL AGAINST `ndi_paths.rs` so the two lists cannot drift.
-- **STILL the rig-verify half (supervisor, live):** run the strih service `--features ndi` against a
-  live cambox NDI source + confirm the 4+4 preview updates, and confirm the 1 remaining M2 SDK
-  deferral (full FourCC coverage of the real low-bandwidth stream). The refcounting one —
-  per-source init/destroy across a reconnect — is RESOLVED IN CODE (issue 808, 2026-08-23):
-  `preview/shared_runtime.rs` is a pure default-feature keep-alive slot (`SharedRuntime<T>`,
-  const-init static; load-once for the process lifetime, failed load never cached) and
-  `ndi_source.rs` acquires the runtime ONLY through `NdiLib::shared()` — a per-connect load
-  would let one camera's reconnect run the process-GLOBAL `NDIlib_destroy()` under every other
-  live receiver (the worker drops its source before every backoff). Deliberately keep-alive, NOT
-  a destroy-on-last-drop Weak pool: with a single preview camera the worker's drop-before-backoff
-  would otherwise cycle full SDK destroy→init every ~2 s while the feed is down. Structural pins +
-  behavior tests live in `service/tests/preview.rs` (default features).
-  The 3rd — the color-format meaning vs the installed header — is
-  RESOLVED (#808 SBC lane): value 0 is `BGRX_BGRA` per `Processing.NDI.Recv.h`, so the misnamed
   constant was renamed `COLOR_FORMAT_UYVY_BGRA` → `COLOR_FORMAT_BGRX_BGRA` (behaviour unchanged; the
   same harmless mislabel still stands in the main display path `src/ndi.rs`, a separate subsystem).
-  Task 4 (make `--features ndi` the default build, or keep opt-in) is RESOLVED — owner decision
-  2026-08-24 (issue 1157 comment 5393834171, možnosť 1; features-default-on rule): **`ndi` is now
-  the DEFAULT bkshading service build** (`bkshading/service/Cargo.toml` `[features] default =
-  ["ndi"]`). The appliance crate is byte-untouched (separate workspace member; appliance CI runs
-  cargo at the root without `--workspace`/`-p bkshading`). libloading stays an optional dep
-  activated by the default feature — a RUNTIME dynamic load, so the default build still compiles on
-  CI with no libndi. **Graceful degrade on a libndi-less host:** with ndi default,
+  `ndi` is the DEFAULT service build (owner decision 2026-08-24). **Graceful degrade on a libndi-less host:** with ndi default,
   `source::build_default_source` always builds the real `NdiPreviewSource` (never a stub fallback);
   a missing runtime bails from `ndi_source::load_uncached()` with a platform-neutral message
   (`"NDI runtime not found (install the NDI SDK / NDI Tools, or set NDI_RUNTIME_DIR_V6); ..."`),
@@ -261,170 +74,6 @@ never load on its own ship target.
   retries forever — fail-loud, non-crashing, no silent stub. **libndi provisioning on the strih
   service host + the live end-to-end verify against a cambox NDI source remain the supervisor's rig
   steps.**
-
-
-## Camera fps ↔ box grab-mode sync (issue 809)
-The camera FRAME-RATE get/set ALREADY EXISTS from M1 — do NOT add a new message pair. It flows
-through the general shading path: `ShadingParams.fps100` (PROJECT fps = d006, already x100) +
-`sensor_fps100` (OFF-SPEED fps = d007 x100) on the GET side, and `SetRequest.fps` →
-`read::plan_writes` → gphoto2 `d006 = fps*100` (a listed choice only) on the SET side; the relay
-reads d006/d007 in `read_state`, `RelayState.fps_supported` reports whether d006 is exposed and
-`CameraCaps.fps_choices` carries its choice list. The d006/d007 meaning was swapped until issue 1402
-(next subsection). #809 added only the grab-mode SYNC LAYER on top of that (duplicating the get/set
-would break the one-source-of-truth the owner flagged in the MVP):
-- proto: `FpsSync {Unknown,Synced,Mismatch}` + pure `FpsSync::classify(camera_fps100, grab_fps)`
-  (kebab-case wire: `"unknown"/"synced"/"mismatch"`); `CameraView` gains `grab_fps` + `fps_sync`.
-- service: `CameraConfig.grab_fps: Option<i64>` (per-camera box grab mode, `60` for cam1); the
-  aggregator computes `fps_sync` in the pure `camera_view` (CI-tested in `service/tests/service.rs`).
-- web panel: shows the grab fps, a mismatch warning, and an EXPLICIT per-camera "align to grab"
-  button that issues the existing `SetRequest.fps`. NEVER an auto-write — a camera-side format
-  change can interrupt recording (owner constraint); the button lives only in the click handler,
-  never in `updateBlock` (which runs every poll). Test `test_app_js_align_button_...` pins that.
-  Since issue 1402 the button is offered only when `CameraView.fpsAlignSettable` is set (below).
-- The sync compares the PROJECT fps (d006), NOT the off-speed fps (d007): d006 is exactly what the
-  align write changes and what the camera's HDMI output follows; `sensor_fps100` stays an off-speed
-  diagnostic.
-- `grab_fps` is a plain integer for now (the rig is integer-genlock 60). A fractional NTSC grab
-  (59.94/29.97) would classify Mismatch against an integer and needs a new representation — deferred
-  scope, not a bug. Deriving grab from the box's live capture_fps (vs a static config field) is the
-  follow-up.
-
-### d006 = the PROJECT fps, d007 = the OFF-SPEED fps, on every BMPCC in the fleet (issue 1402, 4.10.2026)
-The owner saw cam3 (the Pocket 6K on handheld-1) show `fps 50.00` and the issue-809 warning
-`kamera 50.00 ≠ grab 60` with the "Zosúladiť s grab (60)" button, while the camera ran 60. The MVP
-mapping had the two frame-rate properties swapped. Live `gphoto2 --get-config d006 --get-config d007`
-on both bodies:
-
-| body | d006 (MENU, x100) | d007 (RANGE 5..60, plain) |
-|---|---|---|
-| Pocket 6K, handheld-1 (cam3 block) | Current 6000 | Current 50 |
-| Pocket 4K, cam1 | Current 6000 | Current 60 |
-
-Both list the same d006 choices `8, 2398, 2400, 2500, 2997, 3000, 5000, 5994`. `8` is a non-rate
-entry, and **the current `6000` is NOT a choice**. The swap stayed invisible while both properties
-read the same rate. The old fps-test fixtures (d006 `2500`, d007 `25`) read the same either way
-round, so the proto `mapping.rs` fixtures and the relay `FakeRunner` now carry DIFFERENT currents
-(project 25.00, off-speed 50). `relay/tests/burst_1337.rs` keeps 2500/25: no fps test reads it.
-
-- **The ONE shared mapping (`bkshading/proto`), per the main's design 5979166692:**
-  - `fps100` = d006 Current. It drives the shutter angle <-> denominator conversion and the
-    issue-809 comparison. No d006 → `None`, never the off-speed rate; the conversion then runs at
-    `DEFAULT_FPS100` for that cycle.
-  - `sensorFps100` = d007 Current x100, a diagnostic only.
-  - `caps.fpsChoices` = the d006 list verbatim (`parse_fps100_choices`, the `8` kept).
-  - `caps.fpsMin`/`fpsMax` stay the off-speed d007 RANGE bounds.
-  - `RawConfigs.project_fps` holds the d006 block and `sensor_fps` the d007 block. `read_raw`
-    destructures them from `CORE_CONFIG_KEYS` order.
-- **`fps_settable(choices, wanted_fps100)`** (`mapping.rs`) = d006 present AND `wanted` is EXACTLY a
-  listed choice. It is the one rule behind both the relay's write and the service's offer.
-- **The `fps` write sets d006 to exactly `fps*100`, only for a listed choice.** Anything else, `60`
-  included, makes `plan_writes` refuse the WHOLE request with the named `FpsNotSettable` error
-  (`fps-not-settable: fps 60 (6000 x100) is not one of the camera's d006 project-fps choices [8,
-  2398, …] …`) before anything is planned. It is never rounded to a neighbour (`5994`) and never
-  redirected to d007.
-  - The relay answers it **422** (`http::set_error_status`); a gphoto2 failure stays 502. The
-    service logs the relay body and answers the panel 502.
-  - A refused SET inside an open write-burst keeps the burst plan; one that would have OPENED the
-    burst drops the basis read for it.
-  - It never drops other clients' queued SETs (only a real camera error aborts the FIFO).
-- **The project fps goes first; the shutter angle converts at the rate the camera then runs**
-  (review rounds 1-2). `plan_writes` plans d006 BEFORE every other value. `d002` is the shutter
-  ANGLE, so a `shutter` in the same request converts at the new rate and arrives while the camera
-  already runs it. An accepted `fps` write also updates the write-burst plan's `fps100` for the
-  rest of the burst. Whether a BMPCC keeps the angle or the speed across a rate change is NOT
-  verified; with d006 first it does not matter.
-- **The panel offers "Zosúladiť s grab" only when `CameraView.fpsAlignSettable`** (`fpsAlignSettable`,
-  serde default false). The service sets it from the same `fps_settable` with `grab*100` and the
-  relay's `caps.fpsChoices`. With the camera at 6000 and the grab at 60 there is no mismatch, so no
-  button. A camera at 50.00 against a 60 grab warns but gets no button, because 6000 is not a
-  choice: the 60 project rate is set on the camera itself, by design (approach 3 of the design, a
-  raw unlisted write, is refused until a bench test proves it). An older relay without `fpsChoices`
-  never gets the button.
-- **Tests** (both real choice lists, the 6000-not-listed case, the `8` entry, and every integer fps
-  0..=240 → only 24/25/30/50 written):
-  - `proto/tests/fps_d006_1402.rs`;
-  - the 1402 cases in `relay/tests/relay.rs` and `service/tests/service.rs`;
-  - the panel Playwright test `the align-to-grab button is offered only for a grab the camera lists`;
-  - `test_app_js_align_button_offered_only_for_a_listed_grab_1402`.
-- **The E2E test-camera step follows the same mapping** (issue 1402 follow-up, design 5991648511):
-  `scripts/camera_test_settings.py` (issue 1371) reads `d006` (x100) as its project fps, for the
-  shutter `1/N s` LOG line only (never set), and no longer reads `d007`. A production-exposure
-  snapshot saved before the switch carries a whole-fps `context.d007`, read only when `d006` is
-  absent (LEGACY). Detail: `.claude/rules/camera-test-settings.md`.
-- **Deploy + read-back (supervisor; any order is safe):**
-  - Why any order is safe: a new relay refuses a `60` write from an old panel (422), and a new
-    service offers no button to an old relay (no `fpsChoices`).
-  - Every relay deploy is rig-busy gated and restores the relay's previous state.
-  1. **handheld-1 (cam3 block)**: `scripts/bkshading-deploy-relay.sh --host <handheld-1> --arch arm64`
-     (the arm64 SBC path, `bkshading-sbc.md`). Read back
-     `curl -s http://handheld-1.lan:8771/api/state`: `params.fps100 = 6000`,
-     `params.sensorFps100 = 5000`, `caps.fpsChoices = [8,2398,2400,2500,2997,3000,5000,5994]`.
-  2. **cam1, cam2 cambox relays**: `scripts/bkshading-deploy-relay.sh --host <cam>`, only outside a
-     production and NEVER while an E2E holds the rig lease (read
-     `http://10.77.9.200:8890/rig-lease.json` first; no relay touch while it is held). In rig TEST mode
-     the relay on the source box and cam2 is stopped+disabled (issue 1311), and the deploy keeps it
-     stopped. Read cam1 back when its relay runs (EVENT mode, outside a production):
-     `params.fps100 = 6000`, `params.sensorFps100 = 6000`.
-  3. **The service on strih-snv**: the issue-1353 path (the `bkshading-service-linux-amd64` artifact,
-     `setup-strih.sh` step 16c or the binary placed by hand, `systemctl restart bkshading-service`).
-     Then check `/api/version` and the panel DOM version. The cam3 block shows `fps 60.00`, no
-     `kamera … ≠ grab` warning and no "Zosúladiť s grab" button.
-
-
-## Relay focus-distance exposure + the honest focus/exposure-MODE constraint (issue 1238)
-The relay's `/api/state` now reports the camera's **manual focus DISTANCE** as
-`ShadingParams.focus_distance: Option<i64>` (camelCase `focusDistance`), read from gphoto2
-`d003` (`FOCUS_DISTANCE_KEY` in `transport.rs`), parsed by the existing pure `current_i64` in
-`read.rs::params_and_caps`. It rides the SAME issue-1229 coalesced/min-interval-floored read
-cycle as the seven shading keys (one extra `--get-config` per throttled read — never a
-per-request read, never a second cadence) and is read **best-effort** (`get_config(...).
-unwrap_or_default()`): unlike the core exposure trio (iso/f-number/d002 use `?`), a missing
-`d003` degrades to `None` and must NOT suppress the essential shading state. READ-ONLY by
-design — never in `SetRequest`/`plan_writes` (a focus write during a take is unsafe). Wire
-compat: `#[serde(default)]` (missing → `None`) + no `deny_unknown_fields` (an older reader
-ignores the new key), so relay/service/panel interoperate across versions with no other edit.
-
-- **The BMPCC PTP space exposes NO focus-MODE (AF/MF) selector and NO auto/manual
-  exposure-MODE (program) selector — this is a hardware fact, not a gap in our code.** Verified
-  against the authoritative TalOrg BMPCC-over-PTP control-point list
-  (https://www.tal.org/tutorials/blackmagic-pocket-cinema-camera-usb-control-over-ptp) + the MVP
-  `mapping.rs` "Verified PTP facts". The documented properties are `iso`, `f-number`, and
-  `d001`(unknown RANGE 30–5000), `d002`(shutter angle), **`d003`(manual focus DISTANCE)**,
-  `d004`(WB Kelvin), `d005`(tint), `d006`(PROJECT fps x100, MENU), `d007`(OFF-SPEED fps,
-  RANGE 5..60) — this list, taken from the MVP mapping, had d006/d007 swapped until issue 1402
-  corrected it from live reads of both bodies,
-  `d008`(unknown MENU 2/0), `d009`(unknown ro 0), `d00a`(unknown ro 0). The standard PTP
-  `focusmode`(0x500A)/`expprogram`(0x500E) are absent. So `d003` distance is the ONLY honest
-  focus signal — its presence confirms manual focus control is reachable, and a value that is
-  STABLE across reads is a no-AF-hunt proxy; there is no honest way to report a focus/exposure
-  MODE flag. **Cache caveat for the consumer (issue 1229):** two `/api/state` samples within the
-  relay's `min_read_interval_ms` floor (default 10 s) return the SAME cached snapshot and
-  `RelayState` has no read-timestamp/cycle id, so a stability-based no-hunt check MUST space its
-  samples further apart than the floor (or add a `readAtMs`/cycle field to `RelayState` first) —
-  a naive "changed between two quick polls?" check would always read "stable".
-- **Do NOT fabricate a `focusMode`/`exposureMode` field.** An explicit absent field with this
-  documented meaning beats a permanently-`null` field reading a key the BMPCC does not implement,
-  and asserting `d008 = exposure mode` (or any undiscovered d-code) without the live camera is the
-  fabrication the LOUD-UNKNOWN doctrine bans.
-- **Rig-discovery follow-up (supervisor step, needs the live-cabled BMPCC):** `d001`/`d008`/
-  `d009`/`d00a` are undiscovered and MIGHT hold a mode flag. To identify one: `gphoto2
-  --get-config d001` (…d008/d009/d00a) while toggling the camera's Auto Exposure / focus menu and
-  observing which value changes. If a mode d-code is found, add it exactly like `focus_distance`
-  (a new `RawConfigs` field + `FOCUS_DISTANCE_KEY`-style const + a `ShadingParams` field, read
-  best-effort). Until then, no mode field exists — by design.
-- **Consumer wiring landed (issue 1238, follow-up lane).** The issue-1237 `[0/8]` preflight
-  (`scripts/lib/bkshading-preflight.sh`) now reads `params.focusDistance` via
-  `bkshading_preflight_state_focus_distance` and, when the relay reports a value this cycle,
-  prints ONE new informational REPORT-ONLY line (`bkshading_preflight_focus_distance_message`,
-  `d003=<value>`) — never phrased as satisfying the #220 "FOCUS: MANUAL" checklist item, since
-  presence only confirms manual focus control is reachable (the stability-across-reads no-hunt
-  proxy above still needs samples spaced beyond the issue-1229 read floor; the preflight's single
-  `curl` per E2E run does not attempt that). Absent/null `focusDistance` prints nothing new — the
-  behavior from before this ticket is preserved exactly. The honest
-  `bkshading_preflight_focus_note_message` NOTE (FOCUS-MODE / auto-manual EXPOSURE-MODE are
-  hardware-unexposed) is printed UNCONDITIONALLY either way — a present distance never makes the
-  MODE knowable. Live BMPCC verification of the printed `d003=` value against the physical lens
-  ring is a supervisor rig step (needs the camera cabled to a relay box), not a code-lane task.
 
 
 ## SBC / handheld provisioning → `.claude/rules/bkshading-sbc.md`
@@ -442,13 +91,12 @@ below). `bkshading-deploy-service.sh` therefore has NO default `--host` (it used
 now strih-snv's address) and refuses a linux-genlock fleet address via `obs_fleet_refuse_linux_target`,
 naming `setup-strih.sh` step 16c. It stays usable for an explicit Windows box.
 
-The `bkshading-windows` CI job release-builds + uploads the deployable service as
-`bkshading-windows-amd64` (`target/release/bkshading.exe`). The repeatable deploy of THAT onto strih
+The service exe is the pinned release's `bkshading-service-windows-amd64.exe`. The repeatable deploy of THAT onto strih
 is `scripts/bkshading-deploy-service.sh` (dev1 orchestrator) + `scripts/bkshading-install-service.ps1`
 (on-box installer) + the pure-invariant lib `scripts/lib/bkshading-deploy-service-runtime.sh` — the
-ONE source of truth for the artifact name, exe, install dir (`C:\bkshading`), config filename, task
-name (`bkshading-service`), port (`8770` == `config.rs` `default_bind`), and keep-alive cadence, so
-CI / the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_service_808.py` cross-checks).
+ONE source of truth for the exe, install dir (`C:\bkshading`), config filename, task
+name (`bkshading-service`), port (`8770`, the shading contract), and keep-alive cadence, so
+the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_service_808.py` cross-checks).
 
 - **Transport = the recordings-retention style:** `scp -O` the exe + config seed + installer to the
   box, then run the installer via `powershell -NoProfile -ExecutionPolicy Bypass -File` — NEVER a
@@ -484,21 +132,15 @@ CI / the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_servic
 
 Post-M4 the notebook IS the strih, so the service is PROVISIONED (not "deployed" ad-hoc) as a systemd
 unit — the `setup-strih.sh` / `verify-strih.sh` / `strih-provision.sh` machinery, not a bespoke
-orchestrator. The `bkshading` **Linux** CI job (`.github/workflows/ci.yml`, "bkshading service + relay
-(issue 808)") uploads `bkshading-service-linux-amd64` (the service binary + `bkshading/service/web/`,
-staged into one flat dir), the artifact NAME single-sourced in `scripts/lib/strih-provision.sh`
-**`strih_bkshading_artifact_name`** (the strih sibling of the Windows `bkshading-windows-amd64` canon).
-Pieces: three pure printers (`strih_bkshading_artifact_name` / `strih_bkshading_unit_text` /
+orchestrator. The service comes from the pinned release (`shading_release_service`, `shading-pinned-release.md`).
+Pieces: two pure printers (`strih_bkshading_unit_text` /
 `strih_bkshading_config_text`), the committed `systemd/bkshading-service.service` (byte-identical to
 the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL_STEPS stays 17), and
 `verify-strih.sh` item 31. Tests: `tests/strih_provision_pure_functions.rs` (source-and-call + anchors).
 
-- **The panel web assets are EMBEDDED in the binary** (`bkshading/service/src/http.rs`:
-  `include_str!("../web/index.html")`, `include_bytes!("../web/icon-192.png")`, …), so the service is
-  SELF-CONTAINED — the unit + verify depend only on the binary + its `:8770` listener + `/api/version`,
-  never a filesystem `web/`. This is why the Windows canon ships `bkshading.exe` ALONE. The Linux
-  artifact + install still carry `web/` beside the binary (design wording) as a panel-source copy, but
-  do NOT assume it is required at runtime, and do not add a unit dependency on it.
+- **The panel web assets are EMBEDDED in the binary**, so the service is SELF-CONTAINED: the unit +
+  verify depend only on the binary + its `:8770` listener + `/api/version`, never a filesystem `web/`.
+  The release's `web/` is installed beside it as a copy; do not add a unit dependency on it.
 - **NO cambox relay repoint is needed to migrate the service to another strih.** The SERVICE still
   connects OUT to each relay on :8771. Since issue 1431 the cambox relay also ANNOUNCES itself to
   `strih.lan` (its relay.env carries `CAMERA_BOX_CAPTURE_FPS`, `BKSHADING_REGISTER_URL` and
@@ -507,7 +149,7 @@ the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL
   nothing on the boxes.
 - **Config seeded ONLY IF absent** (`[ ! -f /etc/bkshading/bkshading.toml ]`, the `projector.json`
   precedent) from `strih_bkshading_config_text` (pinned from the canonical
-  `bkshading/service/bkshading.example.toml` — the schema the Windows config was itself seeded from,
+  `shading:bkshading/service/bkshading.example.toml` — the schema the Windows config was itself seeded from,
   since a live read of `C:\bkshading\bkshading.toml` needs the Windows PC ON). No secret in the config.
 - **`systemctl enable` ONLY — never start from the installer** (the SUPERVISOR deploys the running
   service; the Windows service is the fallback until the owner accepts). So **`verify-strih.sh` must
@@ -517,7 +159,7 @@ the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL
   `:8770` owner (via `ss -tlnp`) must be the `bkshading` binary AND `/api/version` must answer.
 - **GOTCHA — `/api/state` is the RELAY's endpoint, not the SERVICE's** (live 23.9.2026): the relay
   (cambox `:8771`) and the intercom hub (`:8790`) serve `GET /api/state`; the service router
-  (`bkshading/service/src/http.rs`) serves `/api/version`, `/api/cameras`, the panel assets and `/ws`,
+  (`shading:bkshading/service/src/http.rs`) serves `/api/version`, `/api/cameras`, the panel assets and `/ws`,
   so `:8770/api/state` is 404. verify item 31 first probed `/api/state` and graded a healthy running
   service FAIL "silent"; `tests/strih_provision_pure_functions.rs` now parses the router and requires
   the probed path to be one of its routes. Any new service health probe: pick a route from the router.
@@ -527,13 +169,6 @@ the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL
   service graded unhealthy (it fails SAFE, never false-green, but the active-health check becomes
   unpassable). The parse MUST capture-group: `sed -E 's/.*\("([^"]+)".*/\1/'`. It is a pure fn so it
   has a regression test; any similar `users:((...))` owner parse needs the capture group.
-- **Artifact fetch in step 16c:** a pre-staged dir override `STRIH_LX_BKSHADING_SRC` (the step-4
-  `STRIH_LX_BUNDLE_SRC` precedent) is tried first, else `GH_TOKEN` fetches the artifact via the GitHub
-  **artifacts API** (list `?name=<art>` → `archive_download_url` → curl the zip → `python3 zipfile`
-  extract); a token WITHOUT `actions:read` → empty URL → warn (supervisor pre-stages or places the
-  binary). The install is robust to any zip nesting (`find -type f -name bkshading` / `-type d -name
-  web`). The bundle-state step-9 curl+`GH_TOKEN` is the raw-FILE precedent; a CI artifact needs the
-  artifacts API, not the raw endpoint.
 - **UNVERIFIED (supervisor rig steps):** the LIVE `setup-strih.sh` run on strih-snv (10.77.9.202) +
   `verify-strih.sh` green + STARTING the service (`systemctl start bkshading-service`) + the owner's
   panel acceptance on `http://strih.lan:8770/` (development = one camera on cam1) with the PC off.
@@ -659,121 +294,6 @@ business running (and polling the shared bus) while measurements run.
   service, not a development-time one.
 
 
-## Relay polling is BUS-FRIENDLY — a min-interval floor, never gphoto2-per-poll (issue 1229, P0)
-
-**The relay MUST NOT shell out to `gphoto2` on every `GET /api/state`.** Root cause of the #1229
-production freeze: `read_state()` used to do one `gphoto2 --auto-detect` + seven `--get-config` =
-**8 fresh USB-PTP sessions (open/enumerate/close) per poll**, and the service pump
-(`service/src/main.rs`, `LIVE_PUSH_INTERVAL_MS = 2000`) polls every relay's `/api/state` every 2 s
-UNCONDITIONALLY. On cam1 the BMPCC (PTP) and the ezcap CAM LINK 4K grabber hang on the SAME
-4-port xHCI SuperSpeed bus, so that per-poll PTP traffic disturbed the grabber's isochronous UVC
-stream — capture 60→55 fps within 6 s of relay start, then the #663 capture-rate self-heal
-USB-reset every 600 s cooldown = ~10 s frozen picture, ~6× live during production 30.8.
-
-**The doctrine (the chosen fix — approach 1 of the ticket, and the owner's "kadencia ≥10 s idle"
-half):** `CameraSession` serves `/api/state` from a `read_cache` gated by a **min-interval floor**
-(`DEFAULT_MIN_READ_INTERVAL_MS = 10_000`, env `BKSHADING_RELAY_MIN_READ_INTERVAL_MS` TUNES it but
-can never disable it — 0/negative/junk falls back to the default; features-default-on). Key points:
-- The floor caps the READ RATE regardless of how hard the service polls: a poll within the floor of
-  the last real read is served from cache with ZERO gphoto2 / ZERO USB traffic. So even with a
-  panel open (service pumping every 2 s) the shared bus sees **at most one PTP session per floor**.
-- **The cache `Mutex` is held ACROSS the blocking read on purpose** — a burst of concurrent
-  `/api/state` requests coalesces to ONE real read (the others get the cache). Serializing gphoto2
-  access to the single USB camera is itself correct: concurrent gphoto2 processes on one device
-  would contend on the very bus this protects.
-- **Writes (`apply`/`SetRequest`) stay per-invocation** (user-initiated + rare) and INVALIDATE the
-  cache on success, so the next poll reflects the change instead of a stale cache for up to a floor.
-- **Testability seam:** pure `read_is_fresh(read_at_ms, now_ms, floor_ms)` + a `MonoClock` trait
-  (`InstantClock` prod, `FakeClock` in `tests/relay.rs`) let the floor be tested via the
-  fake runner with an injected clock (count gphoto2 spawns under a burst / after floor-expiry /
-  after a write) — no real sleeps, no camera.
-- **REJECTED alternative — a persistent `gphoto2 --shell` session** (approach 2): it only cuts
-  per-read RÉŽIU (re-enumeration), NOT the FREQUENCY of control traffic (the actual root), and
-  brings its own failure class (shell wedge, camera-unplug holding a dead session, fragile
-  stdin/stdout parsing needing detect+restart). The `Gphoto2Runner` trait seam keeps it as a
-  possible future 2nd impl, but the floor solves the root far more simply/safely.
-- **Cross-ref issue 1228 (relay `Restart=` lifecycle) — STILL BLOCKED even after this floor merged
-  (status 2026-08-30):** this fix does NOT touch the systemd unit. The floor IS merged + live-verified
-  on cam1 (17-30 min, 0× capture-rate self-heal, 0× USB reset), but issue 1229's OWN live-verify comment
-  found a documented residual — occasional capture dips (54.5-58.5 fps, well below the 60.0 baseline
-  but NOT enough to re-trip self-heal) still correlate with individual gphoto2 PTP transactions
-  colliding with the grabber's isochronous stream on the shared xHCI bus. **SUPERSEDED 2026-09-03
-  (owner ruling, webterm):** the PHYSICAL USB2 step is IMPOSSIBLE — the cam1 mini PC has a SINGLE
-  xHCI controller (see the "Coalesce the read into ONE multi `--get-config` USB session" subsection
-  below), so #1229 became a CODE lane and the residual is now attacked by coalescing the per-read
-  gphoto2 sessions (9 → 3), not by re-cabling. **1228 unblocks only once 1229 actually closes** (or
-  the owner explicitly says otherwise) — do NOT add `Restart=on-failure` just because a floor/coalesce
-  merged; re-check `gh issue view 1229` state/labels before touching the unit.
-- **Complementary idle lever (owner's "poll len on-demand keď je panel otvorený" half, NOT done
-  here):** the service could poll relays only while a WS/panel client is connected, for TRUE-zero
-  idle. It lives in a different crate (service, ships to Windows/strih) with WS-lifecycle
-  subtleties (stale-on-reconnect, immediate-refresh) → a separate focused PR + rig-verify. The
-  floor already bounds the worst case (1 read/floor even with a panel open — the case that matters
-  during live shading), so it is deferred, not dropped; file it with evidence if live-verify shows
-  the residual idle burst still disturbs capture.
-
-### Coalesce the read into ONE multi `--get-config` USB session — the residual per-read footprint fix (issue 1229 CODE lane, 2026-09-03)
-
-**Owner ruling 2026-09-03 (webterm): the PHYSICAL USB2 step is IMPOSSIBLE and the ticket is a CODE
-lane.** The cam1 mini PC has a SINGLE xHCI controller (confirmed live `lsusb -t`: Bus 002, one
-4-port SuperSpeed root hub, carrying the grabber's isochronous UVC stream AND the BMPCC PTP camera
-AND a `uas` mass-storage SSD together), so moving the BMPCC cable to "another port" isolates
-nothing — every USB device on the box shares the one controller. Disabling shading on cam1 is also
-rejected (owner wants shading working WHILE grabbing). So the residual (documented above: freezes
-GONE with the floor — 0× self-heal live — but ~5 % of 5 s windows still dip <58.5 fps, min ~51.8,
-each dip correlating with a gphoto2 read) is closed by a CODE reduction of the per-read footprint,
-NOT a physical or lifecycle change.
-
-- **The fix: a batched `Gphoto2Runner::get_config_many(&[&str])` on top of the floor.** A real read
-  used to fire NINE separate `gphoto2` processes (1 `--auto-detect` + 8 `--get-config`), each a
-  full USB open/enumerate/close cycle — and re-enumeration (interface claim + PTP OpenSession) is
-  the part that most disturbs the grabber's isochronous stream. `Gphoto2Cli::get_config_many` now
-  reads the SEVEN core shading keys (`CORE_CONFIG_KEYS`) in ONE `gphoto2 --get-config k1
-  --get-config k2 …` process (ONE USB session for all seven), splitting the combined stdout back
-  into per-key blocks by `END`-line boundaries (`split_config_blocks`, positional map, fail-safe
-  `None` on a block/key count mismatch → the read degrades to offline, never a mis-assigned block).
-  `read_raw()` is now detect (1) + core batch (1) + best-effort `d003` kept SEPARATE (1) = **3 USB
-  sessions per read, down from 9.** DEFAULT-ON (no toggle — features-default-on); the floor still
-  caps the read RATE, this cuts the per-read enumeration COUNT.
-- **`d003` stays its own call, NEVER folded into the batch** — a camera that does not answer `d003`
-  would abort a batched core read (gphoto2 errors the whole invocation), wrongly degrading the
-  essential shading state to offline. Best-effort `d003` alone can fail harmlessly (→ `None`).
-- **Tests:** the batch/session count is proven by a `SessionCountingRunner` (one read ≤ 3 sessions;
-  RED at 9 on the pre-fix path), `split_config_blocks`/`build_get_config_many_args` are pure and
-  unit-tested, and a `CoalescingFakeRunner` (join stdout → split, mirroring the
-  real `Gphoto2Cli`) proves a coalesced read yields byte-identical state to the per-key path.
-- **The `--auto-detect` runs once, not per cycle (issue 1371, 14.10.2026).** It enumerates EVERY
-  USB device on the box, and on cam5 (BMPCC + Cam Link on bus 4) the per-cycle sweep pushed the
-  camera-box capture phase tracker into a re-seed ~45 % of the time (relay stopped ~14 %).
-  `CameraSession::camera_for_read` keeps the detected model; `forget_detected` drops it when a read
-  fails, so the next cycle detects again. A steady read is 2 sessions (core batch + d003/summary),
-  3 at the first read and after a failure. The floor tests count the core `get_config_many` batch
-  as their read-cycle proxy (the detect no longer marks every cycle).
-- **Reads go through ONE persistent, PACED `gphoto2 --shell` (issue 1371, 14.10.2026).** cam5 measured:
-  usbmon showed one CLI read cycle = ~250 BMPCC transfers in two 4-6 ms bursts (`gphoto2 --debug`:
-  Open session, Device info, Storage IDs, Object handles = the card listing, 7x property desc, Close
-  session); during each burst the Cam Link on the same root port fell +3..+16 ms behind, its frame
-  timestamps stepped late and camera-box re-seeded its capture phase ~7x/min. One shell reading one
-  key every 120 ms brought it to the no-relay baseline (~2/min). `uvcvideo hwtimestamps=1` did NOT
-  help (no usable device clock on the Cam Link). So `read_raw` sends `PACED_READ_KEYS` (the 7 core
-  keys + `5007` + `d003`) through `Gphoto2Shell::get_config` (reads to `END`; a `***` line =
-  `Ok(None)`, best-effort for `5007`/`d003`, an error for a core key), `READ_PACING_MS` (100) apart;
-  a cycle takes ~1 s, under the service's 1.5 s poll timeout. `5007` is the raw F-Number MENU
-  (`Current: 400` = f/4.00), `RawConfigs.fnumber_raw`, preferred over the `--summary` raw, so the
-  summary dump is gone from the paced path. The shell lives in `BurstSession.shell`, opened by the
-  first read, shared with write bursts, NOT closed at the burst idle-close. Any shell error / wedge
-  kills it and THAT cycle reads over the CLI (`read_raw_cli`, unchanged); the next cycle opens a
-  fresh one. With no gphoto2 binary configured (the fake-runner tests) every read is the CLI path.
-  Tests: `bkshading/relay/tests/paced_read_1371.rs` (a fake `gphoto2 --shell` script). The E2E
-  test-camera step refuses while the relay is active, so the held session never meets it.
-- **What is NOT reduced (deferred, not dropped):** the residual "one 3-session read/floor can still occasionally clip the
-  isochronous stream" is bounded far lower but not provably zero on a single shared controller — the
-  final clean-watch A/B (relay-on steady vs off) is a supervisor live-verify step (blocked in this
-  lane by an in-progress E2E, which itself pauses the relay). If that watch still shows dips, the
-  next levers are the service-side on-demand poll (idle lever above) and inter-call pacing — both
-  strictly after coalesce, which removes the most sessions for the least risk.
-
-
 ## A manual interim `systemctl stop bkshading-relay` is NEVER auto-restored — not even by `Restart=on-failure` (issue 1228 TERM-origin finding)
 
 **Root cause of the 29.8.-30.8. cam1 incident (relay found dead a full day after it was stopped):**
@@ -813,7 +333,7 @@ on the rig.
 
 **Why this "SIGTERM is always clean" fact applies cleanly to `bkshading-relay` specifically —
 verified against its own source, not just systemd theory (issue 1228 review-fix follow-up):**
-`bkshading/relay/src/main.rs` only installs `tokio::signal::ctrl_c()` (SIGINT / Ctrl-C) for graceful
+`shading:bkshading/relay/src/main.rs` only installs `tokio::signal::ctrl_c()` (SIGINT / Ctrl-C) for graceful
 shutdown — it registers **no SIGTERM handler at all**. So a SIGTERM (from `systemctl stop`, the
 deploy flow, or a stray external `kill -TERM`) is never intercepted; it kills the process via the
 raw OS default, which is exactly the `code=killed, signal=TERM` shape the 29.8 incident's journal
@@ -837,7 +357,7 @@ from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It i
 (always `return 0`, WARN never abort — owner M3 decision).
 
 - **What is measurable from `/api/state`, and what is NOT.** `RelayState`/`ShadingParams`
-  (`bkshading/proto/src/wire.rs`) + the relay read plan (`relay/src/transport.rs` reads only
+  (`shading:bkshading/proto/src/wire.rs`) + the relay read plan (`relay/src/transport.rs` reads only
   `iso, f-number, d002, d004/d005, d006/d007`) expose SHUTTER (`params.shutter`, a DENOMINATOR —
   500 == 1/500s, LARGER = faster), ISO/gain (`params.iso`), and APERTURE (`params.apertureAv`).
   There is **NO focus-mode field and NO auto/manual exposure-MODE field.** So the shutter check
@@ -938,10 +458,9 @@ the root stayed read-WRITE (cam6/cam7).
   disabled + records it, verify fails). The painter box comes from `bkshading_relay_roster_painter_box`.
   A re-provision in TEST only DISABLES a running relay, never stops it: a stop is itself a PTP power
   change, and `rig-mode.sh test` owns the relay lifecycle.
-- **The relay binary on a gh-less cambox:** `setup-device.sh --relay-binary <path|url>` (the
-  `--probe-binary` idiom; `bkshading_relay_provision_binary_plan` decides, the lib's
-  `bkshading_relay_provision_fetch_binary` carries it out). With gh + GH_TOKEN it downloads
-  `bkshading-linux-amd64` from the SAME ci.yml run STEP 3 used, else the newest one carrying it.
+- **The relay binary on a cambox:** the pinned shading release, by `curl` from the box, or
+  `setup-device.sh --relay-binary <path|url>` carrying the same bytes (the `--probe-binary` idiom;
+  `bkshading_relay_provision_binary_plan` decides, `bkshading_relay_provision_fetch_binary` carries it out).
   No source = a RECORDED `RELAY_PROBLEM` (the unit/env/gphoto2 still go in), and STEP 19 refuses
   Setup Complete — never an abort before the ro fstab.
 - **verify-device `(ao)`** grades binary + byte-matching unit + env + gphoto2 + the mode's
@@ -1037,76 +556,7 @@ the root stayed read-WRITE (cam6/cam7).
     those tests now pin the lib call and the ABSENCE of `--status success`. The `no successful CI run
     found on branch` fail wording stays (`setup_device_provisioner_hardening.rs` pins it).
 
-## Panel +/- step buttons — aperture is a CHOICE step, K/tint are linear (issue 1304)
-
-The operator panel's three sliders (clona/biely bod/tint) each gained a `-`/`+` step button pair
-(`data-role="<role>-dec"/"-inc"`, `.step-btn` in a `.slider-row`), for precise stepping where a
-drag is imprecise. The three step semantics DIFFER and are not interchangeable:
-- **Aperture = ONE f-number CHOICE, not a fixed norm delta.** The panel needs the choice COUNT to
-  compute the step, which the M1 `CameraCaps` did not carry. Added an ADDITIVE
-  `CameraCaps.fnumber_choices: Vec<f64>` (camelCase `fNumberChoices`, `#[serde(default)]`), filled
-  by `read.rs::params_and_caps` from the SAME `parse_choices(&raw.fnumber)` RADIO list via
-  `parse_fnumber` — so the panel's `idx = round(norm*(n-1))`, `idx' = clamp(idx±1, 0, n-1)`,
-  `apertureNorm = idx'/(n-1)` round-trips EXACTLY through the relay's `norm_to_choice_index`
-  (round-half-up) over the identical list. **`Eq` was dropped from `CameraCaps`** — `Vec<f64>` has
-  no total order; only `PartialEq` was ever used (the `RelayState` whole-state `assert_eq!` tests
-  need only `PartialEq`), and nothing bounds `CameraCaps: Eq`. When the relay sends no choices
-  (older relay → empty `Vec` via serde default), the panel DISABLES the aperture ± with a title —
-  never a fabricated step.
-- **Biely bod = ±100 K, tint = ±1**, clamped to the slider's own min/max; the button `disabled`s
-  at a bound. `refreshStepDisabled(el)` (called each poll AND after each step) drives the disabled
-  state; the choices are stored on the block dataset (`el.dataset.fnumberChoices`), the SAME
-  pattern as issue 809's `grabFps`.
-- **One tap = one PUT, NO auto-repeat on hold** — the issue 1229 USB-PTP shared-bus doctrine (one
-  write = one gphoto2 session). The step handlers (`stepAperture`/`stepLinear`) are plain CLICK
-  handlers with NO `setInterval`/`setTimeout` — pinned by `test_app_js_step_handlers_have_no_repeat_timer_1304`.
-- **Server-truth preserved:** each tap reads the slider's CURRENT (last server) value, steps it,
-  sets the slider locally so a quick second tap builds on it, and sends the ABSOLUTE value; labels
-  re-sync from the next WS push. The existing `interacting` pointerdown/up guard + `guard()`
-  wrapper are respected exactly like the slider `change` handlers.
-- **Playwright E2E** (`bkshading/service/tests/e2e/`, wired into the `bkshading` CI job): the
-  JUST-BUILT service runs against a stdlib stub relay (`bkshading/service/tests/stub_relay.py`,
-  serving `/api/state` with `fNumberChoices` + recording PUT `/api/params` bodies). Playwright's
-  `webServer` array manages BOTH the stub and the service; the spec clicks +/- on clona/K/tint and
-  asserts the forwarded absolute PUT bodies + a clean console. Chromium only, one spec (small CI
-  budget). `npm install` (no committed lockfile), then `npx playwright
-  install --with-deps chromium`.
-
-
-## Installable web app (PWA) — manifest + no-cache SW + embedded icons (issue 1305)
-
-The panel is installable as a windowed web app (own icon in the Windows dock, no browser chrome):
-- **Static assets in `bkshading/service/web/`:** `manifest.webmanifest` (name/short_name, `lang
-  "sk"`, `start_url`/`scope` `/`, `display "standalone"`, dark `#14171c` bg/theme, icons 192+512
-  with BOTH `purpose "any"` and `"maskable"` entries), `sw.js`, `icon-192.png`/`icon-512.png`,
-  `favicon.svg`. `index.html` links `rel="manifest"`, `meta theme-color`, `rel="icon"` (svg+png),
-  `apple-touch-icon`; `app.js` registers the SW guarded on `"serviceWorker" in navigator`
-  (insecure-origin LAN page → API undefined → no-op, clean console; `.catch(()=>{})` swallows any
-  error).
-- **The SW does NO caching — server-truth.** `sw.js` is install/activate + a pure `fetch(event.
-  request)` passthrough; it exists ONLY to meet the browser's PWA-install requirement. NEVER add
-  the Cache Storage API (a cache would risk a stale UI/state) — pinned by the python + Rust tests
-  asserting `caches` is absent.
-- **Icons are generated deterministically by a committed stdlib script** `web/gen-icons.py`
-  (zlib/struct PNG writer + the SVG, NO Pillow, no new dependency) — an aperture/lens glyph inside
-  the central ~60% so the icons are maskable-safe. Re-run it after a palette/glyph change; output
-  is byte-deterministic. The PNGs are committed (small: ~2 KB / ~5.5 KB) and EMBEDDED via
-  `include_bytes!`/`include_str!` in `http.rs` (self-contained binary, same model as the HTML/JS).
-- **Routes in `http.rs`:** `/manifest.webmanifest` (`application/manifest+json`), `/sw.js`
-  (`text/javascript; charset=utf-8` + a `Service-Worker-Allowed: /` header so the SW controls the
-  whole origin), `/icon-192.png` + `/icon-512.png` (`image/png`), `/favicon.svg` (`image/svg+xml`).
-  Each is served via a pure `*_asset()` helper + a `*_CONTENT_TYPE` const (mirrors `rendered_index`),
-  so the service route tests pin the payload + content-type WITHOUT standing up an HTTP server
-  (the codebase has no tower dev-dep).
-- **Secure-context fact (for the owner):** Chrome/Edge offer a PWA install ONLY on HTTPS or
-  `localhost`. So: (a) on the strih PC itself, `http://localhost:8770` gives the FULL install; (b)
-  on another PC over plain-HTTP LAN (`http://strih.lan:8770`) the browser gives no install prompt —
-  use Edge "Apps → Install this site as an app" / Chrome "Cast, save and share → Install page as
-  app" to create a windowed shortcut (icon + name come from this change) — this stays a FALLBACK;
-  (c) a full PWA from any LAN device = the **LAN HTTPS front** (below), the PRIMARY path. Do NOT
-  add self-signed HTTPS to the service (an untrusted cert is still an insecure context).
-
-### LAN HTTPS front — PRIMARY full-PWA path (issue 808, owner ruling 17.9.2026)
+## LAN HTTPS front — PRIMARY full-PWA path (issue 808, owner ruling 17.9.2026)
 
 The owner ruled 17.9.2026: HTTPS **áno, ale cez lokálnu sieť, nie cez internet** — a trusted-cert
 HTTPS origin, but traffic stays on the LAN, never through the internet. So the full PWA install
@@ -1148,38 +598,6 @@ resolves to dev1's PRIVATE LAN IP** — never the cloudflared tunnel.
   alternative, but the LAN HTTPS front above is the canonical path.
 
 
-## Clona `f/—`: off-grid aperture from `gphoto2 --summary` (issue 1306)
-
-The panel showed `f/—` for clona (dead slider) on BOTH online cameras. Root cause: libgphoto2's
-`_get_FNumber` sets the `f-number` RADIO `Current:` ONLY when the raw value exactly matches an
-enumerated choice; both lenses sit open BELOW the camera's first enumerated stop (cam1 f/4.0 vs enum
-from f/4.5, cam2 f/2.0 vs enum from f/2.6), so `gphoto2 --get-config f-number` prints
-`Current: (null)` → `parse_fnumber` fails → `aperture_av`/`aperture_norm` = `None`. The ONLY honest
-current-aperture signal is the `gphoto2 --summary` line `F-Number(0x5007) … value: f/4 (400)`
-(raw = PTP F-Number x100).
-
-- **`--summary` folds into the EXISTING best-effort `d003` session — never a new USB session.**
-  `Gphoto2Runner::get_focus_and_summary` runs `gphoto2 --get-config d003 --summary` (ONE process),
-  and `split_focus_and_summary` splits the stdout at the FIRST `END` line (block = d003, remainder =
-  summary). Per-read session count stays 3 (detect + core batch + this) — the issue 1229 doctrine.
-  The default trait impl (test fakes) reads d003 alone with an empty summary; the real `Gphoto2Cli`
-  overrides it. `RawConfigs` gained a `summary` field (empty → the pre-1306 RADIO-`Current:` path).
-- **`params_and_caps`:** when `Current:` is missing/`(null)`, `aperture_av = fnumber_to_av(raw/100)`
-  and `aperture_norm` = the NEAREST enumerated choice (`nearest_choice_norm`); an exact `Current:`
-  still maps to its exact position. Pure parser `parse_summary_fnumber_raw` (fail-safe → `None`).
-- **Junk-choice filter is in the ONE canonical list.** `parse_fnumber_labels` now also drops any
-  choice below `MIN_VALID_FNUMBER` (0.5) — the gphoto2 placeholders `f/0`/`f/0.2` — so the grid used
-  for read-norm, write (`plan_writes`), AND `CameraCaps.fNumberChoices` is consistent and a near-0
-  step can never write `f/0`. Threshold 0.5 keeps a genuine `f/0.95` lens.
-- **Consequence for the #1304 +/- step (off-grid state):** the recovered `aperture_norm` is 0, so
-  `refreshStepDisabled` disables "−" (idx 0) while "+" moves to the first/next enumerated choice —
-  the camera exposes no smaller f-number than its first enumerated stop over PTP. No panel change
-  was needed; the existing bound-disable logic produces this by construction.
-- **Tests:** the proto+relay tests pin the pure aperture selection + parsers (cam1 →
-  `av=2·log2(4)`, norm 0, `[4.5,4.8,5.6]`; cam2 → `av=2·log2(2)`, norm 0, `[2.6,2.8,3.2]`; the
-  clean-list `f/5.2` case still norm 2/3).
-
-
 ## Relay + service LOGGING is on by default, and gphoto2 shell-outs are BOUNDED (issue 1309, 15.9.2026)
 
 The 2026-09-13/15 half-dead-cambox class lands right after bkshading-relay activity, and each time
@@ -1190,7 +608,7 @@ strih service logged NOTHING for a `PUT /api/params` while spamming `WARN relay 
 aperture SETs = two gphoto2 shell-outs. The fix makes the whole chain reconstructible + bounded:
 
 - **The relay logs EVERY gphoto2 command at info through ONE centralised seam** `Gphoto2Cli::run`
-  (`bkshading/relay/src/transport.rs`): kind (detect/read/set), param + value, the exact argv, rc,
+  (`shading:bkshading/relay/src/transport.rs`): kind (detect/read/set), param + value, the exact argv, rc,
   duration_ms, and on failure the stderr tail — one structured line per command. Startup logs the
   camera-detect result; `note_online_transition` logs one line per camera online/offline FLIP. The
   `Gphoto2Runner` TRAIT is deliberately untouched (the logging + timeout live only in the real
@@ -1224,198 +642,3 @@ aperture SETs = two gphoto2 shell-outs. The fix makes the whole chain reconstruc
 
 `scripts/bkshading-deploy-service.sh --execute` copies the exe, registers the `bkshading-service` keep-alive task and starts the service from the ssh session; Windows OpenSSH tears that process down at disconnect (the same job-object physics as OBS-over-ssh, issue 859), so 60 s later there is no process and no `:8770` listener while the script printed `OK … Listening`. Recovery = `schtasks /run /tn bkshading-service` over ssh (session-agnostic; the task launches the exe detached) → `keep-alive: bkshading service was not running - relaunched`; verify from dev1 with `curl :8770/api/version`. The relay on a cambox is unaffected (systemd unit). Followup for the script: start via the task, verify from a SECOND connection.
 
-
-## Immediate control responsiveness — write-burst session + optimistic panel (issue 1337, 17.9.2026)
-
-Owner complaint during live shading: every panel click had a ~1-3 s response and the confirmation
-number lagged 2-3 s, and the clona (aperture) would not move from the first click. Root cause: the
-relay ran a full `read_raw()` (3 gphoto2 spawns) BEFORE every write + one `--set-config` spawn per
-param (~4 processes/click ≈ 1 s); the service `forward_set` shared the 1.5 s poll `reqwest` client
-so a ~1 s write timed out mid-apply (no confirmation → the owner re-clicked); the panel dropped the
-whole push while `interacting` and had no optimistic echo; and the aperture step read the off-grid
-slider norm (0) instead of the real f-number. Fixed across THREE layers, each unit-tested:
-
-### Layer 1 — relay write-burst session (`bkshading/relay/src/burst.rs` + `transport.rs`)
-- A persistent `gphoto2 --shell` child (`Gphoto2Shell`) is used ONLY inside a WRITE BURST: opened on
-  the first set, kept warm across a burst of clicks, closed after `WRITE_SESSION_IDLE_MS` (5 s) idle.
-  Inside a burst each write is planned from the f-number choices read ONCE at burst open (NO
-  pre-write read), and applied through the shell — so a click moves the camera in ~150 ms (an
-  aperture click then also settles its 0x5007 read-back, issue 1452 below).
-- **It is a best-effort OPTIMISATION with a hard CLI FALLBACK.** Any shell error, or no completion
-  within `WRITE_SESSION_WEDGE_MS` (3 s), KILLS the child and falls the write back to a per-invocation
-  CLI `--set-config` (bounded by the existing 8 s `GPHOTO2_TIMEOUT`). So correctness NEVER depends on
-  the shell — a broken/slow shell just always uses the CLI path (still pre-read-free). This is why
-  re-introducing the shell here is safe even though issue 1229 REJECTED it for READS: the kill
-  boundary + CLI fallback are the whole safety story, and the read path is untouched (still
-  per-invocation CLI, floored — the issue-1229 quiet-bus doctrine resumes the moment the burst closes).
-- **The `--shell` command grammar (`set-config key=value`) + prompt shape are UNVERIFIED against a
-  live camera** — a lane has no gphoto2/camera. The fallback makes that acceptable; the
-  supervisor's rig acceptance (below) confirms/tunes the shell speedup. The PURE pieces (the
-  `burst_step` state machine, `burst_idle_expired`, the shell-line classifiers, `project_shading`,
-  the FIFO `SetQueue`) ARE tested (`tests/burst_1337.rs` incl. a fake `gphoto2 --shell` script).
-- **Wedge watchdog:** the shell read is bounded by `WRITE_SESSION_WEDGE_MS` via a reader-thread +
-  `recv_timeout` (the `wedge-watchdog-pattern.md` idea — a bounded kill boundary, never an unbounded
-  block); the camera lock is never held across an unbounded wait.
-- **`SetQueue` is FIFO, not latest-wins coalesce (issue 1309 → 1337):** 20 rapid clicks become 20
-  in-order camera moves (the shell makes that fast), still single-flight (never a second parallel
-  gphoto2). `read_state` serves cache while the shell owns the camera and does ONE authoritative read
-  at burst idle-close; ALL camera access stays serialized (read-cache lock + the new burst lock, lock
-  order read_cache→burst, `submit` never nests read_cache under burst → no deadlock).
-- `PUT /api/params` now returns `{"applied":n,"state":{...}}` — the projected resulting state (pure
-  `project_shading`) so the service can push an immediate confirmation.
-
-### Layer 2 — service dedicated write client + immediate WS push (`aggregator.rs` + `http.rs`)
-- `forward_set` uses a DEDICATED write client (1 s connect, 10 s total) — the 1.5 s poll client
-  timed out mid-write. After a successful write the service pushes an IMMEDIATE per-camera
-  confirmation over the WS (pure `aggregate_with_camera_update` — rebuilds ONLY the target camera's
-  view, no fleet re-poll), instead of waiting up to 2 s for the pump tick. The publish handle is
-  shared (`Arc<watch::Sender>`) between the pump and `set_params`.
-
-### Layer 3 — optimistic panel + step-from-real-value (`web/app.js`)
-- A click shows its new value immediately as `.pending` (accent + italic), reconciled by the next
-  push. `render()` no longer drops the whole push while interacting (that hid every confirmation
-  during a click sequence — the number lag); a dragged slider stays protected by the
-  `document.activeElement` check in `updateBlock` (never a whole-push drop).
-- **ISO + uzávierka share the aperture-style `−`/index-slider/`+` stepper (addendum #1337, owner:
-  "selektory na iso ako samostatné tlačidlá je blbosť, daj to ako ostatné" + "uzávierka tiež").**
-  The rows of per-value choice buttons (`renderButtonGroup`, `.btn-group`) are GONE — one control
-  per parameter, no second way to set it. `ISO_STEPPER`/`SHUTTER_STEPPER` configs drive a shared
-  `stepEnum(el, id, cfg, dir)`: it steps ONE enumerated choice from the camera's REAL current value
-  (`dataset.isoVal`/`dataset.shutterVal`) via the SAME `stepChoice` (both `iso_choices` and
-  `shutter_choices_for_fps` are ASCENDING `Vec<i64>`, so the ascending semantics apply directly),
-  then PUTs the ABSOLUTE value (`{iso: v}` / `{shutter: v}`) — NOT a norm (that stays aperture-only).
-  The slider is an INDEX (`0..n-1`) over `caps.isoChoices`/`caps.shutterChoices`; `updateBlock`
-  positions it via `nearestIndex` (off-grid tolerant) and reconciles the optimistic `.pending` echo.
-  Removing the button rebuild retired the write-only `interacting` flag (sliders were already
-  `activeElement`-guarded). Pinned by `test_bkshading_webui.py` (steppers present, no `btn-group`,
-  `stepEnum` uses `stepChoice`, absolute PUT) + the panel Playwright E2E (ISO 400→800, shutter
-  50→60 off-grid onto the grid).
-- Aperture stepping uses a JS `stepChoice` MIRROR of the proto `mapping::step_choice`, stepping from
-  the camera's REAL current f-number (`dataset.apertureFnum` from `apertureAv`) — an off-grid lens
-  (cam1 f/4.0 below the first stop 4.5; cam3 f/3.36) moves ONTO the grid on the first tap instead of
-  the pre-fix idx-0 nearest-snap +1. `step_choice` is the pure Rust spec, JS-mirror-pinned by a node
-  parity check + `test_bkshading_webui.py`.
-
-### Standing rules that DID NOT change
-- **One tap = one PUT, no auto-repeat on hold** (the issue-1229 USB-PTP shared-bus doctrine).
-- **The relay is stopped+disabled in `rig-mode.sh test`, started in `event`** (issue 1311) — the
-  burst only runs while the relay is live (EVENT mode), so development runs pay no relay bus traffic.
-- **NEVER deploy OR restart a cambox relay during production** (the rig-busy-gated deploy + the
-  rig-idle-only restart, above). Deploy ORDER for this change: the SERVICE lands on strih anytime
-  (owner 17.9.: shading during a live show is allowed), the RELAY lands on the camboxes only OUTSIDE
-  production and its restart is a separate rig-idle supervisor step.
-
-### Rig acceptance (supervisor, relay half OUTSIDE production, EVENT mode)
-Deploy service → strih (anytime) + relay → camboxes (outside production only), start the relay, then:
-set `duration_ms` ≤ 150 ms per set in a burst (relay log); click → confirmed number ≤ 1 s; 20 rapid
-clicks = 20 moves (since issue 1452 an APERTURE click that ends a run also settles its 0x5007
-read-back, ~0.9-2 s, so for aperture judge the run, not each click: see the 1452 section); cam1
-grabber `Streaming: sent/captured` flat during a 60 s burst (issue-1229 metric); no `gphoto2` process 5 s after the burst (`pgrep gphoto2` empty). The `--shell` speedup
-itself is UNVERIFIED in code lanes — if the shell path never completes it silently uses the CLI
-(still pre-read-free, ~1 set/spawn), which the rig step confirms/tunes.
-
-## Aperture writes converge onto the request; a moved iris is never "ignored" (issue 1452, 19.10.2026)
-
-Live on three bodies (issue 1452 comments 6262112518 / 6262566110): cam6 (Pocket 6K, fw 8.1) moves
-its iris on a 0x5007 write but lands ONE listed step PAST the request (f/4.0 -> f/4.5 -> f/4.8);
-cam5 (Pocket 4K, fw 9.8) asked for its lowest listed value lands the lens's own wide-open stop
-outside its list; cam7 (Pocket 6K, fw 8.6) ACKs and ignores every write. Values between listed ones
-are refused on every body (`Invalid Device Prop Format`), so the owner's fine 1/8-stop grid is not
-reachable over USB-PTP.
-
-- **Pure decisions in `bkshading/proto/src/aperture.rs`** (std-only):
-  `aperture_correction` (overshoot past the request in the direction of the write -> ONE listed
-  step back; landed on the request, no move, undershoot, off the list, unknown start, or a list end
-  -> none), `aperture_settle` (two equal reads away from the start, or the read bound),
-  `aperture_moved` (ANY settled landing away from the start, raw values, so an off-list landing
-  counts and a write corrected back onto its start still moved), `not_applied_after_aperture_motion`
-  (a moved write drops `apertureNorm`), `fnumber_raw_from_block` (the ONE 0x5007 parser, read.rs
-  uses it too).
-- **Relay half in `transport` child modules** (`transport/aperture_converge.rs`,
-  `transport/burst_apply.rs`): a child reaches the private `BurstSession` without widening it.
-  transport.rs is over its size budget, so new burst logic goes into a child, never into
-  transport.rs. After a burst SET that wrote `f-number`, the relay reads 0x5007 through the burst's
-  OPEN shell every `APERTURE_SETTLE_POLL_MS` (300) up to `APERTURE_SETTLE_MAX_READS` (5), makes at
-  most ONE correcting write, settles again. A single click to the listed value the iris already
-  holds is not read back (a run's last click always is, below). A write that fell back to the CLI
-  has no read-back (no new gphoto2 process per read, issue 1229) and is reported as before.
-- **A run of queued aperture clicks settles ONCE, at its last click.** The FIFO drain answers the
-  first click's PUT only after the whole run, and the service write client gives up at 10 s, so a
-  click with another aperture click already queued behind it (`SetQueue::has_pending_aperture`,
-  peeked under the burst lock: order burst -> set_queue, as `submit`) skips its read-back and leaves
-  its "before" in `BurstSession.aperture_run_start` and its request in `aperture_run_last_request`.
-  The run's last click (`ApertureStart.run_last_request`) is ALWAYS read back, even when it asks for
-  the run's starting value; it judges the overshoot direction from the run's previous request (where
-  the iris was heading), its settle needs two equal reads (no measured pre-write position inside a
-  run), and its landings are compared with the run's start for the moved/ignored report. Known
-  limits: the queue peek cannot see that a queued aperture SET will be refused (a combined
-  `{apertureNorm, fps}` with an unlisted fps — the panel never sends one), which leaves the run
-  unmeasured and flagged as before; each queued write still pays the 300 ms shell quiet gap, so
-  ~30 queued clicks still reach the 10 s write-client limit (unchanged by this ticket); a run whose
-  last click repeats the previous request (a repeated absolute Stream Deck press) has no direction
-  to judge an overshoot by, so it is not corrected (the report stays honest: moved, real value).
-- **A status read never waits on a settle.** One settle costs the 300 ms write quiet gap plus 2-5
-  shell reads 300 ms apart: ~0.9 s on a moving body, ~1.8-2 s on cam7 (the full bound), ~2 s with
-  a correction — past the service's 1.5 s poll timeout (the panel would show the relay offline).
-  `read_state` therefore try-locks the burst; on `WouldBlock` it answers `busy_burst_state`: the
-  `CameraSession.live_projection` the drain publishes (`publish_projection`: the projection, else
-  the burst-open state) after the open read, after the writes, after the settle, on every error
-  path, cleared at idle-close; else the last cached read; else offline (only on the very first
-  burst after a relay start, before any read filled the cache). It is a leaf lock. Any NEW long step
-  inside the burst drain must publish before it starts.
-- **Report:** `BurstSession.aperture_raw` (seeded from the burst-open read via
-  `read::current_fnumber_x100`, then each settled landing) is the next write's "before";
-  `aperture_moved` of the LAST aperture write is taken at the idle-close. A moved write is not in
-  `notApplied`; the projection shows the settled landing (`aperture::landed_aperture`) and the
-  idle-close read carries the camera's own value. No wire field was added (`apertureLanded` in the
-  design was optional: the params already carry the real value).
-- **Tests:** `proto/tests/aperture_converge_1452.rs` (the decision table, the one-step bound swept
-  over every position) and `relay/tests/aperture_converge_1452.rs` (a STATEFUL fake `gphoto2 --shell`
-  whose 0x5007 moves like cam6 / cam7 / an up-and-down overshooter / a shell that dies on the
-  read-back, driven through the real `CameraSession` burst; `with_aperture_settle_poll_ms` shortens
-  the poll; one test spawns the write on a thread and times a concurrent `read_state`, another
-  queues a second click behind the first and expects one settle for the run).
-- **Open with the main (not decided in the lane):** no correction when the overshoot lands on the
-  first/last listed value (the design's table); an off-list START (cam1 at f/4.0 below its 4.5
-  grid) has no index, so it is never corrected (a raw-value direction would cover it); a correction
-  that overshoots back onto the START reports "moved" with the iris where it began (synthetic so
-  far: cam6 lands exactly on downward writes).
-- **Live acceptance (supervisor, outside production, rig-busy gated):** deploy the relay to
-  cam5/cam6/cam7 (`scripts/bkshading-deploy-relay.sh`), then on cam6 4.0 -> request 4.5: lands 4.5
-  (relay log `aperture write overshot; one correcting step back`), or shows 4.8 without the red
-  flag; cam7 still flagged; a SET of the value the iris already holds (Stream Deck absolute) does
-  not move it (the no-read-back skip assumes so); during a 3-click aperture run the panel stays
-  online and the run settles once, on the LAST request (not paused at an earlier click's landing:
-  the run's settle has no start value to wait away from); a quick + then - run back to the start
-  value ends on it. The 300 ms poll is unverified against a real iris's travel
-  time: if a real overshoot reads as "not moved", raise the poll, never the read count first.
-
-## Panel Playwright E2E gotchas — the PWA service worker defeats `page.route`, and 4xx/5xx fixtures are console errors (issue 1343, 18.9.2026)
-
-- **`sw.js` (issue 1305) is a passthrough SW that `clients.claim()`s the page on activate. From that
-  moment the page's fetches run THROUGH the SW and Playwright's `page.route()` no longer intercepts
-  them** — an offline test that routes `/api/*` sees its first poll intercepted and every later poll
-  answered by the real service (CI run 35388393361: the banner never showed, the fixture got
-  overwritten). `panel.spec.js` neutralises the registration in a `test.beforeEach` init script
-  (`navigator.serviceWorker.register` → a never-settling promise, silent). NOT Playwright's
-  `serviceWorkers: "block"` — it logs a "Service Worker registration blocked by Playwright" console
-  WARNING that trips the zero-console gate.
-- **Chromium logs EVERY 4xx/5xx resource load as a console error** ("Failed to load resource: the
-  server responded with a status of 503"), exactly like `route.abort()`'s `net::ERR_FAILED`. An
-  "unreachable service" fixture that must keep the console clean answers `200` with a NON-JSON body;
-  the poll's `r.json()` throw takes the same offline path as a real failure.
-- Reproduce a panel E2E locally with ZERO builds: `python3 -m http.server 8799 --directory
-  bkshading/service/web` + the Playwright MCP `browser_run_code_unsafe` with the test's own init
-  script + route (the banner logic, routes and console gate all run without the Rust service).
-  Or run the spec itself: `npm install @playwright/test@1.58.2` in a scratch dir (its chromium
-  revision 1208 is already cached on dev1), copy `panel.spec.js` + `fixtures/` there, and give it a
-  config whose only webServer is that static server; set `PREVIEW_SVC_BASE_URL` for the preview
-  tests. Run the same spec against the pre-fix `web/` (exported from git) to see it RED.
-- **The preview tests use a SECOND service instance** (issue 808): `e2e-preview-config.toml` on
-  `:8782`, one camera WITH `ndi_preview` whose feed is absent (CI's `--features ndi` build loads no
-  libndi). The issue-1304 tests keep their one params-only camera on `:8780`. A second camera in the
-  shared config would make their unscoped `[data-role="aperture-inc"]` locators match two blocks
-  (strict-mode violation). The preview spec addresses `:8782` by absolute URL.
-- **A JPEG fixture trips the staging secret scanner** (`block-sensitive-staging.sh` reads its bytes
-  as a high-entropy blob), whether inlined as base64 or committed as a binary file. It is not a
-  secret: stage it with `# airuleset:secret-ok <what it is>` on the `git add`.

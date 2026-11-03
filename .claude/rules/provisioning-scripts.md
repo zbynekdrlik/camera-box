@@ -450,8 +450,8 @@ ro-root-safe config, would pass a box whose service can never actually run).
 
 - `setup-device.sh` `[bkshading-relay]` (rw window, before STEP 18) installs the relay through the ONE
   lib `scripts/lib/bkshading-relay-provision.sh`. The enable-state follows `--rig-mode` (default
-  `test`: the source box + cam2 installed DISABLED). A gh-less box needs `--relay-binary <path|url>`
-  next to `--binary`; without a binary source the step RECORDS `RELAY_PROBLEM` and STEP 19 refuses
+  `test`: the source box + cam2 installed DISABLED). The binary is the pinned shading release;
+  a box that cannot reach it needs `--relay-binary <path|url>` (the pinned bytes); without one the step RECORDS `RELAY_PROBLEM` and STEP 19 refuses
   Setup Complete. Full detail: `.claude/rules/bkshading.md`.
 - `verify-device.sh` `(ao)` grades it. **Never add a check between `(an)` and `(q)`:**
   `tests/python/test_ndi_discovery_1342.py` slices the `(an)` block up to `(q)` and EXECUTES it

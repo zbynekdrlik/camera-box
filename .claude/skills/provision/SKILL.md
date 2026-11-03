@@ -31,10 +31,10 @@ Elgato 4K S).
 4. ACCEPT        scripts/verify-device.sh NAME         (from dev1, over SSH — the gate)
 ```
 
-**The bkshading shading relay is part of step 3 (issue 808, 25.9.2026).** A gh-less box needs the
-CI relay staged next to camera-box: `gh run download <run> -n bkshading-linux-amd64 --dir /tmp`,
-scp `bkshading-relay` to the box, then `setup-device.sh --binary /tmp/camera-box --relay-binary
-/tmp/bkshading-relay [--rig-mode test|event] NAME`. Without it STEP 19 refuses Setup Complete.
+**The bkshading shading relay is part of step 3 (issue 808, 25.9.2026).** The box fetches the relay of the pinned shading
+release (scripts/shading-release.pin) with curl. A box without that network: scp the release asset
+`bkshading-relay-linux-amd64` to the box, then `setup-device.sh --binary /tmp/camera-box --relay-binary
+/tmp/bkshading-relay-linux-amd64 [--rig-mode test|event] NAME`. Without it STEP 19 refuses Setup Complete.
 `--rig-mode` defaults to `test` (source box + cam2 relay installed disabled). verify-device `(ao)`
 grades it; pass `CAMERA_BOX_RIG_MODE=test|event` (the SAME env setup-device reads) or let it read cam2's painter state.
 

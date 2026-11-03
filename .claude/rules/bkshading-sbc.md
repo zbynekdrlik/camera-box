@@ -99,7 +99,7 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
 - **The SBC is never part of `deploy-fleet.sh`** (issue 1452: the fleet upgrade carries the relay
   of every CAMBOX it touches; the handheld is not in any `CAMERA_SET`). Its relay is deployed by hand.
 - **Deploy uses `bkshading-deploy-relay.sh --arch arm64`.** `--arch arm64` fetches the
-  `bkshading-relay-linux-arm64` artifact. The remount follows the TARGET's own root
+  `bkshading-relay-linux-arm64` asset of the pinned shading release. The remount follows the TARGET's own root
   (`bkshading_deploy_root_opts_cmd` = `findmnt -no OPTIONS /` with a `/proc/mounts` fallback, decided
   by the pure `bkshading_deploy_root_remount_action`):
   - `ro` → the `remount,rw → swap → remount,ro` cycle (every cambox, a read-only SBC);
@@ -351,11 +351,11 @@ PP event 28.10.: handheld-1 came back on WiFi with DHCP 10.77.8.78 while strih-p
 the fact `4=sbc-relay@10.77.8.70:8771`, so cam4 shading was dead until a hand edit. Owner: "to sa malo
 pripajat na shading bridge a nie bridge na shading pc".
 - **Relay:** `--register-url` / `BKSHADING_REGISTER_URL` (+ `--relay-id`, default the hostname)
-  POSTs `{id, port}` every 10 s (`bkshading/relay/src/register.rs`, plain HTTP over a tokio
+  POSTs `{id, port}` every 10 s (`shading:bkshading/relay/src/register.rs`, plain HTTP over a tokio
   `TcpStream`, no client crate, so the arm64 build stays dependency-light). A failure is logged once
   per change and retried; it never stops the relay API. Cambox relays run without the flag.
 - **Service:** `POST /api/relays/register` keeps the PEER address of the request + the announced
-  port (`bkshading/service/src/registry.rs`); a camera with `address = "register:<id>"` is reached
+  port (`shading:bkshading/service/src/registry.rs`); a camera with `address = "register:<id>"` is reached
   through it while it is fresh (35 s), else it reads unreachable, never a guessed address. A bad id
   or port 0 answers 400. `main.rs` serves with `into_make_service_with_connect_info::<SocketAddr>()`.
 - **Provisioning:** the SBC writes `/etc/bkshading/relay.env` with ONLY

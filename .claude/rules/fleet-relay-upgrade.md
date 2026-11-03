@@ -12,15 +12,14 @@ paths:
 Owner, 29.10.2026: "nechapem ako tam moze byt nejaka stara verzia ved vcera pred eventom som ziadal
 aby sa spravili upgrady!". `deploy-fleet.sh` updated camera-box and the cam2 painter, never the
 relay: every cambox ran an old relay (dev.755-810) at the 28.10 event and cam7's shading did not set
-values. Now ONE fleet upgrade brings camera-box AND the relay to the same CI run.
+values. Now ONE fleet upgrade brings camera-box AND the pinned relay (issue 1487,
+`.claude/rules/shading-pinned-release.md`).
 
 ## What `deploy-fleet.sh` does with the relay
 
-- **Source = the camera-box run.** `--run <id>` / the resolved run: the run's own
-  `bkshading-linux-amd64` (`bkshading_deploy_artifact_name`), downloaded into `$DIST/relay`; a run
-  without it refuses before any box ("pass --no-relay"). `--binary` takes `--relay-binary <path>`
-  next to it (ci.yml downloads the same run's artifact to `dist-relay/`). The relay must print
-  camera-box's version (one workspace version), else exit 2 before any box: not the same build.
+- **Source = the shading pin.** `shading_release_relay` before any box is touched, whatever the
+  camera-box source (`--run`, `--binary`). No verified relay = nothing deployed; `--no-relay` deploys
+  camera-box alone and needs no release.
 - **The swap is `scripts/bkshading-deploy-relay.sh --host <ip> --binary <relay>`, per box, as a
   subprocess.** Never a copy of it: it owns the rig-lease preflight, the rig-busy guard, the relay
   stop + previous-state restore, the staged copy + atomic rename, the byte-verify and the verified ro
@@ -34,8 +33,7 @@ values. Now ONE fleet upgrade brings camera-box AND the relay to the same CI run
     FAILED `camN-relay(not deployed: the root is not verified read-only)`: nothing more is written
     to a writable root. It is read, never inferred from a FAILED label (review round 1: the cam2
     painter's failed close is recorded as `cam2-painter(root-…)`, which a `cam2(root-` match missed);
-  - `--binary` without `--relay-binary` on a box WITH a relay = FAILED
-    `camN-relay(no relay binary: …)`, never a silently old relay;
+  - a box already on the pin is left alone (no relay stop, no remount);
   - a relay failure is a FAILED entry, the next box still runs, the exit folds it (the issue-868
     pattern): `camN-relay(rig lease held by another run: not upgraded)` (rc 6),
     `camN-relay(deploy-failed rc N)`, `camN-relay(version=X)` (read back after the deploy).
