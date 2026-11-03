@@ -216,7 +216,7 @@ read_linux_node_journal() {
   sshpass -p "${CLOCK_GUARD_SSH_PASS}" ssh \
     -o StrictHostKeyChecking=no -o BatchMode=no -o "ConnectTimeout=${GATE_SSH_TIMEOUT}" \
     "${CLOCK_GUARD_SSH_USER}@${ip}" \
-    'journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null || true
+    'journalctl -u dsync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null || true
 }
 
 # read_linux_node_http_status NAME IP -> that Linux camera's LIVE DanteSync status JSON, fetched

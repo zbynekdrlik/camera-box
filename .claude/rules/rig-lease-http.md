@@ -324,7 +324,7 @@ served identically and stays available for any OTHER consumer that does have a t
 
 **8890.** Port 8898 is already claimed on dev1 by dev1's OWN `dantesync` daemon (dev1 is a
 clock-sync fleet participant like every other box, per `.claude/rules/dantesync-version-reading.md`
-— `dantesync --version` is on dev1's own PATH), which serves the SAME `/status` HTTP endpoint every
+— `dsync --version` is on dev1's own PATH), which serves the SAME `/status` HTTP endpoint every
 fleet box does (see `.claude/rules/dantesync-clock-offset-gate.md`); live-verified while writing
 this: `curl http://127.0.0.1:8898/status` on dev1 returns a real dantesync JSON status blob
 (`mode: LOCK`, `gm_source_ip: 10.77.9.184`), and `ss -ltnp` shows `0.0.0.0:8898 LISTEN`. Port 8899

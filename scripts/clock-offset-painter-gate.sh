@@ -88,7 +88,7 @@ Default guard: ${PAINTER_OFFSET_GUARD_US} us (200 ms) — 1/5 of the verdict's 1
 (DEFAULT_TRANSITION_GUARD_NS), giving 5x margin before a boundary's true painter-time switch could
 escape the ±guard discard zone. Default painter: ${PAINTER_GATE_TARGET}.
 
-dev1 is read locally (journalctl -u dantesync); the painter is read over SSH. For offline/unit
+dev1 is read locally (journalctl -u dsync); the painter is read over SSH. For offline/unit
 runs, feed pre-captured journald text via DEV1_DANTE_JOURNAL / PAINTER_DANTE_JOURNAL (file paths).
 Skip the whole gate with SKIP_CLOCK_OFFSET_ASSERT=1.
 
@@ -112,7 +112,7 @@ read_dev1_journal() {
   fi
   # -o short-iso (+ a wider -n 400 window) so freshest_offset_us can prove this box's offset
   # reading is current (#550/#595), not a stale multi-hour-old boot-STEP line.
-  journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null || true
+  journalctl -u dsync --no-pager -n 400 -o short-iso 2>/dev/null || true
 }
 
 # read_painter_journal IP -> the painter's latest DanteSync journald lines over SSH, or "" if
@@ -129,7 +129,7 @@ read_painter_journal() {
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${PAINTER_GATE_SSH_TIMEOUT}" \
     "${CLOCK_GUARD_SSH_USER}@${ip}" \
-    'journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null || true
+    'journalctl -u dsync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null || true
 }
 
 main() {

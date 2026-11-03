@@ -214,7 +214,7 @@ def test_close_failed_predicate_reads_the_shared_fail_line(box):
     rc = build(f'. "{_RO_WINDOW}"\nif ro_window_close_failed "$1"; then echo yes; else echo no; fi', proc.stderr)
     assert rc.strip() == "yes"
     rc = build(f'. "{_RO_WINDOW}"\nif ro_window_close_failed "$1"; then echo yes; else echo no; fi',
-               "SELF-HEAL: restored previous dantesync binary")
+               "SELF-HEAL: restored previous dsync binary")
     assert rc.strip() == "no"
 
 

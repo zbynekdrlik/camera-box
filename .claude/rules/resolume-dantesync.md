@@ -19,7 +19,7 @@ drift; the on-box config flip + the dantesync failover FEATURE are NOT in this r
 
 ## The problem (supervisor read-back 2026-09-12)
 
-`C:\ProgramData\dantesync\config.json` = `{"http_status":{"enabled":true,"port":8898},"ntp_server":
+`C:\ProgramData\dsync\config.json` = `{"http_status":{"enabled":true,"port":8898},"ntp_server":
 "strih.lan","ntp_server_mode":{"enabled":false,...}}` with **no `system.phase_slew` key**.
 `:8898/status` → `mode=NANO is_locked=true gm_source_ip=10.77.9.138 ntp_failed=true
 ntp_sample_count=0 accumulated_phase_us=-14020 phase_slew_enabled=false`.
@@ -71,7 +71,7 @@ confirm identity first (`getent hosts resolume.lan` + its OBS profile, `rig-stat
 §2). All on-box steps run through the `win-resolume` MCP Shell — NOT ssh, NOT from a code lane.
 
 1. **Read the current config on-box** (win-resolume MCP Shell):
-   `Get-Content 'C:\ProgramData\dantesync\config.json' -Raw`
+   `Get-Content 'C:\ProgramData\dsync\config.json' -Raw`
 2. **Generate the APPLY program on dev1** from that text (phase_slew only; ntp_server unchanged):
    `printf '%s' '<the config text from step 1>' | python3 scripts/dantesync_config_patch.py --emit-apply`
    (add `--ntp-server <host>` ONLY once dantesync#111 lands and the owner has decided the target.)

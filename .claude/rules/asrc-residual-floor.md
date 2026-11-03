@@ -47,7 +47,7 @@ absorbing. Two facts about reading `<X>` (established live 2026-09-03, dantesync
   (or `ptp.exe` missing from 319/320) = re-check the port ownership first.
 
 **Reading recipe (read-only, production-safe):** stream OBS log `Select-String "asrc: source 'mbc'"`
-(last N lines) + `C:\ProgramData\dantesync\dantesync.log` `Select-String "\[PHASE-SLEW\]"` (the
+(last N lines) + `C:\ProgramData\dsync\dantesync.log` `Select-String "\[PHASE-SLEW\]"` (the
 `f_phase=` DC) + `Get-NetUDPEndpoint -LocalPort 319,320`. Compare the two ppm magnitudes; a MISMATCH
 between them (or a value far outside ±10) is the thing worth chasing, not the non-zero itself.
 
@@ -72,7 +72,7 @@ The 13.9. reboot left stream's `asrc: source 'mbc' estimated=` at −17.48 / −
 looks exactly like the pre-1.8.53 DVS/PTP port-collision signature. It was NOT: the cross-check above
 held — dantesync's own `[PHASE-SLEW] … f_phase=+7.1…+16.6 ppm (I=+12.8…+16.6) f_ptp=−7…+1.3 ppm [TRK]`
 sat at the same magnitude with the opposite sign, and `Get-NetUDPEndpoint -LocalPort 319,320` showed
-only `dantesync.exe`. So read the value as `estimated ≈ −f_phase` (the integrator's absorbed DC
+only `dsync.exe`. So read the value as `estimated ≈ −f_phase` (the integrator's absorbed DC
 moves with the grandmaster's oscillator state after every reboot/relock) and compare magnitudes,
 never against the literal "+8". The A/V gate stayed green through it (15.9.: residual medians −26.9 /
 −12.0 / −49.8 ms at pins 927/927/905, all inside ±90; stream `audio_ts_lag_ms` in its 107 ms low

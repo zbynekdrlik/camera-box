@@ -255,7 +255,7 @@ def _applied(boxes, box):
 
 def test_the_stream_role_runs_the_monitor_between_the_keeper_and_the_tray(boxes):
     a = _applied(boxes, "stream-pp")
-    assert a["UNITS"] == ("strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service "
+    assert a["UNITS"] == ("strih-browser-keeper.service strih-stream-monitor.service dsync-tray.service "
                           "strih-display-watch.service")
     assert a["ROWS"] == "10", ("four unit rows + the keeper's last pass + the display watch's last pass and "
                                "X config row (issue 1424) + the monitor's three rows")

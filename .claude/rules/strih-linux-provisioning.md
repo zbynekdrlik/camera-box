@@ -215,7 +215,7 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
 - **`obs_box_role_apply`** (after the box load, before the source-guard, in BOTH scripts): a stream
   box runs three session apps, `strih-browser-keeper.service`, `strih-stream-monitor.service` (the
   headphones play the real outgoing stream, issue 1436, `.claude/rules/stream-headphone-monitor.md`) and
-  `dantesync-tray.service` (issue 1429); a non-snv venue sets
+  `dsync-tray.service` (issue 1429); a non-snv venue sets
   `NDI_DISCOVERY_SENDER_HOSTS` to the STRIH_IP of that venue's fact files (C collation order), which
   `ndi_discovery_fleet_hosts` lists instead of the SNV fleet, so step 4b / item 34 write and expect
   `10.77.8.204,10.77.8.202` on both PP boxes. The PP OBS_FLEET rows are names reached over NAT from
@@ -327,7 +327,7 @@ parallel-run guard against a second `STRIH-SNV (...)` sender is removed.
   cam boxes take NTP from it, so `setup-strih.sh` step 2 provisions dantesync with a ROLE
   (the box fact `STRIH_DANTESYNC_ROLE`, strih-snv = **`server`**; issue 1361 retired the per-run
   `STRIH_LX_DANTESYNC_ROLE` knob): `strih_dantesync_unit_text ROLE [ARGS]` renders
-  the bare NTP-master ExecStart for `server` (folding the live hand `dantesync.service.d/10-ntp-master.conf`
+  the bare NTP-master ExecStart for `server` (folding the live hand `dsync.service.d/10-ntp-master.conf`
   drop-in INTO the unit, and removing any stale drop-in), or `--ntp-server <host>` for the historical
   `client` role. The self-check is now the role-aware `strih_lx_dantesync_role_ok ROLE ARGS`
   (fail-closed on an AMBIGUOUS shape — server WITH args, client with a master/empty arg, an unknown
@@ -346,8 +346,8 @@ parallel-run guard against a second `STRIH-SNV (...)` sender is removed.
 `date_correction_mode=daily`). Its fleet line drifts ~0.7 s a day against NTP (the Dante GM runs ~8 ppm
 off UTC) and is meant to be stepped only in the nightly 02:00Z window. **A restart of the master
 re-derives the date AT ONCE, every follower joins, and the whole rig steps mid-day.** Every strih-snv
-genlock deploy runs setup-strih, and step 2 used to rewrite the unit, remove `/var/run/dantesync.lock`
-and `systemctl restart dantesync` on EVERY run. On 29.9.2026 00:35Z that took the fleet through a
+genlock deploy runs setup-strih, and step 2 used to rewrite the unit, remove `/var/run/dsync.lock`
+and `systemctl restart dsync` on EVERY run. On 29.9.2026 00:35Z that took the fleet through a
 0.67 s date step, and cg OBS program audio stayed broken until a relaunch (finding 5881495922).
 
 **The decision (design 5881503623, Approach 1).** `strih_dantesync_restart_decision UNIT_CHANGED
@@ -355,10 +355,10 @@ BINARY_CHANGED ACTIVE BINARY_PRESENT` (pure, `scripts/lib/strih-provision.sh`) p
 
 | Token | When | Step 2 does |
 |---|---|---|
-| `absent` | no `/usr/local/bin/dantesync` | the unit is written + reloaded if it changed, no (re)start (a running daemon is never touched), WARN |
+| `absent` | no `/usr/local/bin/dsync` | the unit is written + reloaded if it changed, no (re)start (a running daemon is never touched), WARN |
 | `start` | not active | removes the stale lock when no process holds it, then `systemctl start` |
 | `restart` | active AND the unit changed (its text, a removed drop-in, or the running process does not run its ExecStart) or the binary changed | `systemctl restart` on the reloaded unit, logged `RESTARTED (<why>)` |
-| `keep` | active, nothing changed (the redeploy default) | nothing; logs `dantesync.service: kept running (unit unchanged) -- no restart, the fleet date is untouched` |
+| `keep` | active, nothing changed (the redeploy default) | nothing; logs `dsync.service: kept running (unit unchanged) -- no restart, the fleet date is untouched` |
 
 Anything but four 0/1 values prints nothing and returns 2: a caller that could not read a state never
 guesses a restart of the date master.
@@ -372,7 +372,7 @@ setup-strih writes, reloads or restarts dantesync.
 - `unit_changed` is any of:
   - the text differs from the installed file (`strih_dantesync_unit_matches`, byte-exact: the file
     must hold exactly `printf '%s\n' "$UNIT_TEXT"`);
-  - a `dantesync.service.d/*.conf` drop-in existed and was removed (`strih_dantesync_dropins_present`;
+  - a `dsync.service.d/*.conf` drop-in existed and was removed (`strih_dantesync_dropins_present`;
     an empty drop-in dir is not a change);
   - the RUNNING process does not run the unit's ExecStart: `strih_dantesync_running_argv` reads
     `/proc/<MainPID>/cmdline` (dantesync execs in place, no fork, no argv rewrite) and compares it
@@ -391,14 +391,14 @@ setup-strih writes, reloads or restarts dantesync.
   never grades it.
 - **An operator-masked unit** (a `/dev/null` symlink, `strih_dantesync_unit_masked`) is left alone:
   never replaced, enabled or started (a rename would silently unmask it); verify 6c names it `masked`.
-- A temp unit a killed run left behind (`.dantesync.service.XXXXXX`) is swept; nothing else in the
+- A temp unit a killed run left behind (`.dsync.service.XXXXXX`) is swept; nothing else in the
   unit dir is touched.
 - **Fail closed.** A matcher read error (cmp rc 2) or a missing `strih_dantesync_restart_decision`
   touches nothing and returns 1 (setup-strih then FAILs step 2). An unreadable running command line
   keeps the daemon running with a WARN. An unreadable state is never read as a change, because a
   change means a restart of the date master.
 - **keep touches nothing.** `systemctl enable` reloads the whole manager, so it runs only when
-  `systemctl is-enabled -q dantesync` says the unit is not enabled yet.
+  `systemctl is-enabled -q dsync` says the unit is not enabled yet.
 - `binary_changed` is always 0: setup-strih installs the pinned binary only when NONE exists (a fresh
   box, issue 1412 G5, before the unit is written) and never touches an existing one; the box keeps no
   checksum marker. A new binary on a running box arrives only through `dantesync-fleet-upgrade.sh`,
@@ -416,7 +416,7 @@ setup-strih writes, reloads or restarts dantesync.
 **Known limit:** the running-process check sees only the command line. A run killed between the
 write/reload and the restart of a change to ANOTHER unit field (`RestartSec=`, `After=` ...) leaves the
 process on the old settings; those fields only matter at its next (re)start. Checked read-only on
-dev1's own dantesync: MainPID cmdline = unit ExecStart = `/usr/local/bin/dantesync`.
+dev1's own dantesync: MainPID cmdline = unit ExecStart = `/usr/local/bin/dsync`.
 
 **A unit change still restarts it, and still steps the date.** That is rare and deliberate, and the
 restart line names it. **Schedule any dantesync unit change (a role change, an ExecStart edit, a
@@ -424,7 +424,7 @@ removed hand drop-in) for the nightly window**, never a daytime deploy. The foll
 keeping the fleet line across a master restart) is a dantesync ticket, not this repo's.
 
 **verify-strih item 6c `(dantesync-unit)`** grades, read-only, through `strih_dantesync_unit_verdict`
-(`ok` | `masked` | `differs` | `dropin` | `not-applied` | `unreadable`): `/etc/systemd/system/dantesync.service`
+(`ok` | `masked` | `differs` | `dropin` | `not-applied` | `unreadable`): `/etc/systemd/system/dsync.service`
 is byte-identical to the provisioned unit for the box's role, no drop-in overrides it, and the running
 process runs its ExecStart (no readable process = not graded there; items 6/6b grade liveness). A drift
 is caught THERE, never by a blind restart on the next deploy; a kept-running daemon on a matching unit
@@ -449,7 +449,7 @@ lettered `step` line + one lib call in setup-strih), and an edit to an existing 
 
 **Before the first strih-snv deploy of this change, read the master's command line** (read-only, on the
 box): `tr '\0' ' ' < /proc/$(systemctl show -p MainPID --value dantesync)/cmdline | sed 's/ *$//'` must
-read `/usr/local/bin/dantesync` (the server unit's ExecStart), or run verify-strih item 6c. A mismatch is now
+read `/usr/local/bin/dsync` (the server unit's ExecStart), or run verify-strih item 6c. A mismatch is now
 a restart trigger by design, so a `not-applied` master is deployed in the nightly window only.
 
 **Live acceptance on the next strih-snv genlock deploy:** `ActiveEnterTimestamp` of dantesync on strih-snv
@@ -770,10 +770,10 @@ Bringing the 26.04 notebook up by hand (18.9.2026) surfaced six provisioning ste
 fresh box reaches a green baseline like imag-nb from a single `setup-strih.sh` run):
 
 1. **dantesync installed as a SERVICE (step 2).** step 2 used to only VALIDATE the client args, so
-   the box had NO timesync. It now writes `/etc/systemd/system/dantesync.service` via the pure
+   the box had NO timesync. It now writes `/etc/systemd/system/dsync.service` via the pure
    `strih_dantesync_unit_text` (the EXACT cambox shape: `Type=simple`, `Restart=always`,
-   `RestartSec=5`, `ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan`,
-   `WantedBy=multi-user.target`), `daemon-reload`, clears a stale `/var/run/dantesync.lock`, enables
+   `RestartSec=5`, `ExecStart=/usr/local/bin/dsync --ntp-server strih.lan`,
+   `WantedBy=multi-user.target`), `daemon-reload`, clears a stale `/var/run/dsync.lock`, enables
    and (if the binary is present) restarts it. **Issue 1372 changed this:** the write, the reload, the
    lock removal and the (re)start now happen only on a real change -- see the date-master section
    above. `strih_dantesync_unit_text` **fail-closes** on an ambiguous role/args invocation (the
@@ -804,7 +804,7 @@ fresh box reaches a green baseline like imag-nb from a single `setup-strih.sh` r
    list `scripts/lib/bundle-state-files.sh`) under `/opt/camera-box` (the setup-imag step-28
    pattern, via `curl`+`GH_TOKEN`)
    BEFORE enabling `strih-bundle-state-server.service`, so the unit's `ExecStart` imports resolve.
-6. **verify-strih.sh two false FAILs.** (a) item 6 read `/etc/dantesync/config.json` — a
+6. **verify-strih.sh two false FAILs.** (a) item 6 read `/etc/dsync/config.json` — a
    Windows/imag artifact a flag-based Linux client never creates; it now asserts the dantesync UNIT
    is `active` + a FRESH in-bound offset via the SHARED `dantesync_offset_verdict` /
    `ptp_locked_from_journal` (the cambox verify-device `(d)` shape, sourced from

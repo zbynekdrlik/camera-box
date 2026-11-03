@@ -22,8 +22,8 @@
 #     scripts/strih_satellite_watch.py every 30 s: restarts the Satellite when its own REST shows a
 #     sustained fault (not connected while the Companion port answers / no surface while the Stream Deck
 #     is on USB), never while Companion is down.
-#   * dantesync-tray.service -> the dantesync tray (/usr/local/bin/dantesync-tray, the pinned dantesync
-#     release's `dantesync-tray-linux-amd64`, first in v1.18.0) -- the clock state as an icon in the tint2
+#   * dsync-tray.service -> the dantesync tray (/usr/local/bin/dsync-tray, the pinned dantesync
+#     release's `dsync-tray-linux-amd64`, first in v1.18.0) -- the clock state as an icon in the tint2
 #     systray, like on the Windows boxes (issue 1429, owner 14.10.2026; design comment 6176755827). Every
 #     Linux workstation runs it, the stream role too. Step 16d installs the binary through
 #     dantesync_install_tray (scripts/lib/dantesync-install.sh); the unit carries
@@ -55,7 +55,7 @@
 #     --user enable`, and a `try-restart` of the entries whose files changed -- a stopped unit is never
 #     started (enable-only, the kiosk pattern), a running one is moved onto the new files.
 #   * strih_session_apps_grade_rows / _report -- verify-strih items 37 (keeper), 38 (panel), 39
-#     (Satellite) + 40 (its watch) + the (dantesync-tray) row: each entry installed byte-identical to the
+#     (Satellite) + 40 (its watch) + the (dsync-tray) row: each entry installed byte-identical to the
 #     checkout with its program,
 #     enabled, started by the kiosk autostart, active, and its main process running the installed program
 #     and started after the files were written (for the watch timer: its last run); the keeper's and the
@@ -90,7 +90,7 @@ if ! declare -F dantesync_install_tray >/dev/null; then
 fi
 
 # The session apps, in start order (the kiosk autostart and the deploy start them in this order).
-STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer dantesync-tray.service strih-display-watch.service)
+STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer dsync-tray.service strih-display-watch.service)
 # issue 1429: libgtk-3-0t64 + libayatana-appindicator3-1 + libxdo3 = the dantesync tray's runtime.
 STRIH_SESSION_APP_PACKAGES=(python3-gi gir1.2-webkit2-4.1 python3-websocket libgtk-3-0t64 libayatana-appindicator3-1 libxdo3)
 STRIH_SESSION_APP_WANTS_TARGET=graphical-session.target
@@ -111,7 +111,7 @@ STRIH_COMPANION_SATELLITE_BIN=/opt/companion-satellite/companion-satellite
 # shellcheck disable=SC2034  # consumed cross-file by verify-strih.sh's (companion) item
 STRIH_COMPANION_SATELLITE_UNIT=companion-satellite.service
 # issue 1429: the dantesync tray's unit (its binary: dantesync_install_tray_bin).
-STRIH_DANTESYNC_TRAY_UNIT=dantesync-tray.service
+STRIH_DANTESYNC_TRAY_UNIT=dsync-tray.service
 # The 4.10.2026 hand-made stopgaps (issue comments 5977460330 panel, 5979039607 Satellite): units
 # WantedBy=default.target, and the panel's ~/.local/bin copy of the app. Paths relative to the
 # operator's home; the wants dir holds the link of any entry enabled that way.
@@ -129,7 +129,7 @@ strih_session_app_script() {
     bkshading-panel-app.service) printf 'bkshading_panel_app.py' ;;
     companion-satellite.service) printf '' ;;
     strih-satellite-watch.timer) printf 'strih_satellite_watch.py' ;;
-    dantesync-tray.service) printf '' ;;
+    dsync-tray.service) printf '' ;;
     strih-display-watch.service) printf 'strih_display_watch.py' ;;
     strih-stream-monitor.service) printf 'strih_stream_monitor.py' ;;
     *) return 1 ;;
@@ -143,7 +143,7 @@ strih_session_app_item() {
     bkshading-panel-app.service) printf 'shading-app' ;;
     companion-satellite.service) printf 'companion-satellite' ;;
     strih-satellite-watch.timer) printf 'satellite-watch' ;;
-    dantesync-tray.service) printf 'dantesync-tray' ;;
+    dsync-tray.service) printf 'dsync-tray' ;;
     strih-display-watch.service) printf 'display-watch' ;;
     strih-stream-monitor.service) printf 'stream-monitor' ;;
     *) return 1 ;;
@@ -172,7 +172,7 @@ strih_session_app_program() {
 # by the install WARN and the verify remedy).
 strih_session_app_binary_installer() {
   case "${1-}" in
-    dantesync-tray.service) printf 'setup-strih.sh step 16d (it installs the dantesync tray from the pinned dantesync release, v%s+)' "$DANTESYNC_TRAY_FIRST_VERSION" ;;
+    dsync-tray.service) printf 'setup-strih.sh step 16d (it installs the dantesync tray from the pinned dantesync release, v%s+)' "$DANTESYNC_TRAY_FIRST_VERSION" ;;
     *) printf 'setup-strih.sh step 16 (the Companion Satellite install)' ;;
   esac
 }
@@ -281,12 +281,27 @@ strih_session_apps_runtime_dir() {
 
 # --- setup-strih step 16d ----------------------------------------------------------------------------
 
+# strih_session_apps_retire_legacy_tray USER_HOME -> issue 1487: the dantesync tray goes with the rename:
+# its process, user unit, enable link, binary and release record. Nothing to remove = nothing done. The
+# new unit is written next, so the daemon-reload of that write covers this removal. Always rc 0.
+strih_session_apps_retire_legacy_tray() {
+  local home="${1:?user home required}" unitdir bindir
+  unitdir="${home}/.config/systemd/user"
+  bindir="$(strih_session_apps_bin_dir)"
+  [ -e "${unitdir}/dantesync-tray.service" ] || [ -e "${bindir}/dantesync-tray" ] || return 0
+  pkill -x dantesync-tray 2>/dev/null || true
+  rm -f "${unitdir}/dantesync-tray.service" "${unitdir}/graphical-session.target.wants/dantesync-tray.service" \
+    "${bindir}/dantesync-tray" || true
+  rm -rf "${STRIH_SESSION_APPS_LEGACY_TRAY_SHARE:-/usr/local/share/dantesync-tray}" || true
+  echo "  removed the dantesync tray (its process, unit, binary and release record)"
+}
+
 # strih_session_apps_install REPO USER_HOME DESKTOP_USER -> install every session app (see the header).
 # rc 1 + a stderr line on a missing source file, a package that will not install, a failed import
 # preflight or a failed file install; a `systemctl --user enable` that cannot reach the user bus (a box
 # provisioned with nobody logged in) only WARNs -- the autostart starts the units regardless. A missing
 # /opt Satellite binary only WARNs too (step 16 installs it and fails loud itself), and so does a dantesync
-# tray that could not be fetched (dantesync_install_tray names why; verify-strih's (dantesync-tray) row
+# tray that could not be fetched (dantesync_install_tray names why; verify-strih's (dsync-tray) row
 # FAILs it): a GitHub outage must not stop the other session apps, in a deploy that already stopped OBS.
 strih_session_apps_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
@@ -322,6 +337,7 @@ strih_session_apps_install() {
   strih_user_home_dir "$home" "$user" "$unitdir" || { echo "strih-session-apps: cannot create ${unitdir}" >&2; return 1; }   # issue 1412: every level the user's
   changed=()
   unit_written=0
+  strih_session_apps_retire_legacy_tray "$home"
   for u in "${STRIH_SESSION_APP_UNITS[@]}"; do
     script="$(strih_session_app_script "$u")" || return 1
     program="$(strih_session_app_program "$u")" || return 1
@@ -334,7 +350,7 @@ strih_session_apps_install() {
       before="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
       dantesync_install_tray || {
         tray_failed=1
-        echo "  WARN: the dantesync tray step failed (above) -- verify-strih (dantesync-tray) names what is missing; re-run setup-strih.sh step 16d"
+        echo "  WARN: the dantesync tray step failed (above) -- verify-strih (dsync-tray) names what is missing; re-run setup-strih.sh step 16d"
       }
       after="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
       [ "$before" = "$after" ] || w1=written

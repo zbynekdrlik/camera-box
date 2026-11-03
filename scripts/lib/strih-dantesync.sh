@@ -11,7 +11,7 @@
 #
 # WHY: strih-snv is the fleet's dantesync date master in daily mode. Its fleet line drifts ~0.7 s a day
 # against NTP and is stepped only in the nightly 02:00Z window. Step 2 used to rewrite the unit,
-# remove /var/run/dantesync.lock and restart the dantesync unit on EVERY run, and every strih-snv
+# remove /var/run/dsync.lock and restart the dantesync unit on EVERY run, and every strih-snv
 # genlock deploy runs setup-strih -- so a deploy stepped the whole rig's date mid-day (29.9.2026
 # 00:35Z: a 0.67 s fleet step, cg OBS program audio broken until a relaunch).
 #
@@ -44,7 +44,7 @@
 #     * the lock is removed ONLY on `start` and only when no process holds it (`flock -n`). It is an
 #       flock: a stale file never blocks a start, and removing the file of a RUNNING dantesync (one
 #       outside the unit) would let a second instance lock a new inode;
-#     * a temp unit a killed run left behind (.dantesync.service.XXXXXX) is swept;
+#     * a temp unit a killed run left behind (.dsync.service.XXXXXX) is swept;
 #     * one log line names the decision.
 #   binary_changed is always 0: setup-strih never installs the binary and the box keeps no checksum
 #   marker -- a new binary arrives only through dantesync-fleet-upgrade.sh, which restarts the daemon
@@ -89,7 +89,7 @@ strih_dantesync_exec_start() {
 # dantesync execs in place (no fork, no argv rewrite), so this is the ExecStart it was started with.
 strih_dantesync_running_argv() {
   local proc="${STRIH_DANTESYNC_PROC:-/proc}" pid argv
-  pid="$(systemctl show -p MainPID --value dantesync 2>/dev/null || true)"
+  pid="$(systemctl show -p MainPID --value dsync 2>/dev/null || true)"
   case "$pid" in '' | 0 | *[!0-9]*) return 1 ;; esac
   [ -r "$proc/$pid/cmdline" ] || return 1
   argv="$(tr '\0' ' ' < "$proc/$pid/cmdline")" || return 1
@@ -107,7 +107,7 @@ strih_dantesync_running_argv() {
 # ONE bounded journal read (the newest match of this boot), never the whole journal. Always rc 0.
 strih_dantesync_join_verdict() {
   local ip="${1-}" line joined rig="" ifl rest
-  line="$(journalctl -u dantesync -b --no-pager -o cat -g 'Joined Multicast Groups on' -n 1 2>/dev/null || true)"
+  line="$(journalctl -u dsync -b --no-pager -o cat -g 'Joined Multicast Groups on' -n 1 2>/dev/null || true)"
   joined="${line##*Joined Multicast Groups on }"
   joined="${joined%% *}"
   if [ -n "$ip" ]; then
@@ -165,10 +165,10 @@ strih_dantesync_unit_verdict() {
 
 strih_dantesync_install() {
   local unit_text="${1-}" role="${2-}"
-  local unit="${STRIH_DANTESYNC_UNIT:-/etc/systemd/system/dantesync.service}"
+  local unit="${STRIH_DANTESYNC_UNIT:-/etc/systemd/system/dsync.service}"
   local dropin_dir="${STRIH_DANTESYNC_DROPIN_DIR:-${unit}.d}"
-  local lock="${STRIH_DANTESYNC_LOCK:-/var/run/dantesync.lock}"
-  local bin="${STRIH_DANTESYNC_BIN:-/usr/local/bin/dantesync}"
+  local lock="${STRIH_DANTESYNC_LOCK:-/var/run/dsync.lock}"
+  local bin="${STRIH_DANTESYNC_BIN:-/usr/local/bin/dsync}"
   local text_changed=0 dropin_found=0 not_applied=0 unit_changed=0 binary_changed=0 active=0 present=0
   local decision reason="" tail need_reload rc=0 tmp argv udir
   [ -n "$unit_text" ] || { echo "strih_dantesync_install: empty unit text" >&2; return 1; }
@@ -179,12 +179,12 @@ strih_dantesync_install() {
   udir="$(dirname "$unit")"
   # An operator mask is a deliberate state: never replace the /dev/null link, enable or start it.
   if strih_dantesync_unit_masked "$unit"; then
-    warn "  dantesync.service is masked by an operator (${unit} -> /dev/null) -- nothing touched"
+    warn "  dsync.service is masked by an operator (${unit} -> /dev/null) -- nothing touched"
     return 0
   fi
 
   # --- read everything first ---------------------------------------------------------------------
-  need_reload="$(systemctl show -p NeedDaemonReload --value dantesync 2>/dev/null || true)"
+  need_reload="$(systemctl show -p NeedDaemonReload --value dsync 2>/dev/null || true)"
   strih_dantesync_unit_matches "$unit_text" "$unit" || rc=$?
   case "$rc" in
     0) ;;
@@ -203,7 +203,7 @@ strih_dantesync_install() {
     dropin_found=1
     reason="${reason:+$reason + }drop-in removed"
   fi
-  if systemctl is-active --quiet dantesync; then active=1; fi
+  if systemctl is-active --quiet dsync; then active=1; fi
   if [ -x "$bin" ]; then present=1; fi
   # The unit on disk may match while the process still runs an OLD ExecStart (a run killed after the
   # write or the reload). Only the process tells; an unreadable one is kept, never guessed.
@@ -221,14 +221,14 @@ strih_dantesync_install() {
 
   # --- act ---------------------------------------------------------------------------------------
   # A temp unit a killed run left behind (the exact mktemp pattern below only; systemd ignores it).
-  rm -f -- "$udir"/.dantesync.service.?????? 2>/dev/null || true
+  rm -f -- "$udir"/.dsync.service.?????? 2>/dev/null || true
   if [ "$dropin_found" = 1 ]; then
     rm -f "$dropin_dir"/*.conf || { echo "cannot remove the dantesync drop-ins in $dropin_dir" >&2; return 1; }
   fi
   rmdir "$dropin_dir" 2>/dev/null || true
   if [ "$text_changed" = 1 ]; then
     # temp + rename in the unit's own dir: systemd never reads a half-written unit.
-    tmp="$(mktemp "$udir/.dantesync.service.XXXXXX")" \
+    tmp="$(mktemp "$udir/.dsync.service.XXXXXX")" \
       || { echo "cannot create a temp file next to $unit" >&2; return 1; }
     if ! { printf '%s\n' "$unit_text" > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$unit"; }; then
       rm -f "$tmp"
@@ -244,13 +244,13 @@ strih_dantesync_install() {
     [ "$unit_changed" = 1 ] || echo "  systemd daemon-reload (a unit-file change was pending in the manager) -- no restart"
   fi
   # `systemctl enable` reloads the manager: only when not enabled yet, so keep has no side effects.
-  systemctl is-enabled -q dantesync 2>/dev/null || systemctl enable dantesync 2>/dev/null || true
+  systemctl is-enabled -q dsync 2>/dev/null || systemctl enable dsync 2>/dev/null || true
   decision="$(strih_dantesync_restart_decision "$unit_changed" "$binary_changed" "$active" "$present")" \
     || { echo "strih_dantesync_restart_decision refused its inputs" >&2; return 1; }
 
   case "$decision" in
     keep)
-      echo "  dantesync.service: kept running (unit unchanged) -- no restart, the fleet date is untouched"
+      echo "  dsync.service: kept running (unit unchanged) -- no restart, the fleet date is untouched"
       ;;
     restart)
       if [ "$role" = server ]; then
@@ -258,9 +258,9 @@ strih_dantesync_install() {
       else
         tail="this box re-syncs its date now"
       fi
-      echo "  dantesync.service: RESTARTED (${reason:-changed}) -- ${tail}"
-      systemctl restart dantesync 2>/dev/null \
-        || warn "  dantesync.service failed to restart -- check journalctl -u dantesync"
+      echo "  dsync.service: RESTARTED (${reason:-changed}) -- ${tail}"
+      systemctl restart dsync 2>/dev/null \
+        || warn "  dsync.service failed to restart -- check journalctl -u dsync"
       ;;
     start)
       if [ ! -e "$lock" ]; then
@@ -270,12 +270,12 @@ strih_dantesync_install() {
       else
         warn "  a process holds ${lock} (a dantesync outside the unit?), or flock could not probe it -- the lock is kept"
       fi
-      echo "  dantesync.service: started (was not active${reason:+; $reason})"
-      systemctl start dantesync 2>/dev/null \
-        || warn "  dantesync.service failed to start -- check journalctl -u dantesync"
+      echo "  dsync.service: started (was not active${reason:+; $reason})"
+      systemctl start dsync 2>/dev/null \
+        || warn "  dsync.service failed to start -- check journalctl -u dsync"
       ;;
     absent)
-      warn "  dantesync.service unit in place + enabled but NOT started (binary absent) -- install ${bin} then: systemctl start dantesync"
+      warn "  dsync.service unit in place + enabled but NOT started (binary absent) -- install ${bin} then: systemctl start dsync"
       ;;
   esac
 }

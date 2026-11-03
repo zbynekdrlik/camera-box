@@ -4862,14 +4862,14 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
     );
 }
 
-/// A realistic imag-nb `journalctl -u dantesync` snippet with the DanteSync PTP LOCK markers
+/// A realistic imag-nb `journalctl -u dsync` snippet with the DanteSync PTP LOCK markers
 /// (the SAME markers `scripts/setup-imag.sh`'s own provisioning-time restart check keys on,
 /// setup-imag.sh:230). #489.
 const DANTESYNC_LOG_LOCKED_FIXTURE: &str = "\
 Jul 05 10:15:20 imag-nb dantesync[1234]: [PTP] LOCK Drift 14 ns/s offset -412ns\n\
 Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns\n";
 
-/// A realistic imag-nb `journalctl -u dantesync` snippet running but WITHOUT ever reporting a
+/// A realistic imag-nb `journalctl -u dsync` snippet running but WITHOUT ever reporting a
 /// PTP/NTP lock (e.g. grandmaster unreachable, clock never disciplined) — the genuine #489 DRIFT
 /// case: the service IS up (non-empty journal) but the clock basis genlock depends on never
 /// locked.

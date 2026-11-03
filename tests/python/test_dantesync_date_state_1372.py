@@ -67,10 +67,10 @@ def _emit(tmp_path, fn, *args):
 def test_linux_rollback_of_a_master_below_1_15_deletes_the_date_state_between_stop_and_start(tmp_path):
     cmd = _emit(tmp_path, "dantesync_linux_rollback_cmd", "ntp-master", "1.14.0")
     rw = _at(cmd, "if [ \"$ro_root\" = 1 ]; then mount -o remount,rw /; fi")
-    stop = _at(cmd, "systemctl stop dantesync", rw)
-    restore = _at(cmd, 'cp -a "/usr/local/bin/dantesync.bak" /usr/local/bin/dantesync', stop)
-    rm = _at(cmd, 'rm -f "/etc/dantesync/date-offset.json"', restore)
-    start = _at(cmd, "systemctl restart dantesync", rm)
+    stop = _at(cmd, "systemctl stop dsync", rw)
+    restore = _at(cmd, 'cp -a "/usr/local/bin/dsync.bak" /usr/local/bin/dsync', stop)
+    rm = _at(cmd, 'rm -f "/etc/dsync/date-offset.json"', restore)
+    start = _at(cmd, "systemctl restart dsync", rm)
     assert rw < stop < restore < rm < start, cmd
     assert cmd.count(_DATE_LINE) == 1 and cmd.count("date-offset.json removed") == 1, cmd
 
@@ -85,12 +85,12 @@ def test_linux_rollback_keeps_the_date_state_otherwise_and_is_the_plain_program(
 
 def test_windows_rollback_of_a_master_below_1_15_deletes_the_date_state_between_stop_and_start(tmp_path):
     ps = _emit(tmp_path, "dantesync_windows_rollback_ps", "ntp-master", "1.14.0")
-    assert "$dateState = 'C:\\ProgramData\\DanteSync\\date-offset.json'" in ps, ps
-    stop = _at(ps, "Stop-Service dantesync")
-    wait = _at(ps, "Wait-Process -Name dantesync", stop)
+    assert "$dateState = 'C:\\ProgramData\\dsync\\date-offset.json'" in ps, ps
+    stop = _at(ps, "Stop-Service dsync")
+    wait = _at(ps, "Wait-Process -Name dsync", stop)
     restore = _at(ps, "Copy-Item -Force $bak $exe", wait)
     rm = _at(ps, "Remove-Item -LiteralPath $dateState -Force -ErrorAction SilentlyContinue", restore)
-    start = _at(ps, "Start-Service dantesync", rm)
+    start = _at(ps, "Start-Service dsync", rm)
     assert stop < wait < restore < rm < start, ps
     assert ps.count(_DATE_LINE) == 1, ps
     # a Remove-Item that throws (e.g. a path it would have to prompt for) must never skip the start
@@ -147,7 +147,7 @@ def _run_linux_rollback(tmp_path, role, version, state="file", ro=False):
     probe = (f'if [ -e "{st}" ]; then s=present; else s=absent; fi\n'
              f'echo "$(basename "$0") $* state=$s" >> "{log}"\n')
     for tool, reply in (("systemctl", ""), ("mount", ""), ("findmnt", "ro,relatime" if ro else "rw,relatime"),
-                        ("dantesync", f"dantesync {version}")):
+                        ("dsync", f"dsync {version}")):
         p = stub / tool
         p.write_text("#!/bin/bash\n" + probe + (f'echo "{reply}"\n' if reply else ""))
         p.chmod(0o755)
@@ -174,10 +174,10 @@ def test_the_emitted_linux_rollback_removes_the_date_state_after_the_stop_inside
     # issue 1407: the window closes (verified) BEFORE the restart, never at EXIT after it.
     assert calls == [
         "mount -o remount,rw / state=present",
-        "systemctl stop dantesync state=present",
+        "systemctl stop dsync state=present",
         "mount -o remount,ro / state=absent",
-        "systemctl restart dantesync state=absent",
-        "dantesync --version state=absent",
+        "systemctl restart dsync state=absent",
+        "dsync --version state=absent",
     ], calls
 
 
@@ -187,14 +187,14 @@ def test_a_date_state_that_cannot_be_removed_is_named_and_the_master_still_start
     assert st.exists()
     assert any(ln.startswith(_DATE_WARNING) for ln in run.stdout.splitlines()), run.stdout
     assert _DATE_LINE not in run.stdout
-    assert "systemctl restart dantesync state=present" in calls, calls
+    assert "systemctl restart dsync state=present" in calls, calls
 
 
 def test_an_absent_date_state_is_named_never_claimed_removed(tmp_path):
     run, calls, _, _ = _run_linux_rollback(tmp_path, "ntp-master", "1.14.0", state="absent")
     assert run.returncode == 0, run.stdout + run.stderr
     assert _DATE_ABSENT_LINE in run.stdout.splitlines() and _DATE_LINE not in run.stdout, run.stdout
-    assert "systemctl restart dantesync state=absent" in calls, calls
+    assert "systemctl restart dsync state=absent" in calls, calls
 
 
 @pytest.mark.parametrize("role,version", [("slave", "1.14.0"), ("ntp-master", "1.15.0")])
@@ -202,7 +202,7 @@ def test_the_emitted_linux_rollback_keeps_the_date_state_of_a_slave_or_a_1_15_re
     run, calls, st, _ = _run_linux_rollback(tmp_path, role, version)
     assert run.returncode == 0, run.stdout + run.stderr
     assert st.is_file() and "date-offset" not in run.stdout, run.stdout
-    assert "systemctl restart dantesync state=present" in calls, calls
+    assert "systemctl restart dsync state=present" in calls, calls
 
 
 def _pwsh():
@@ -230,7 +230,7 @@ def test_the_emitted_windows_rollback_runs_and_always_starts_the_service(tmp_pat
     real, on tmp paths. `& $exe --version` is replaced (a tmp file cannot run); the Rust anchors pin
     that line. A non-empty directory makes Remove-Item THROW in a non-interactive session even with
     -ErrorAction SilentlyContinue, so "stuck" proves the service is still started."""
-    exe, bak, st = tmp_path / "dantesync.exe", tmp_path / "dantesync.exe.bak", tmp_path / "date-offset.json"
+    exe, bak, st = tmp_path / "dsync.exe", tmp_path / "dsync.exe.bak", tmp_path / "date-offset.json"
     exe.write_text("the 1.15.0 exe\n")
     bak.write_text("the pre-upgrade exe\n")
     if state == "file":
@@ -253,6 +253,7 @@ def test_the_emitted_windows_rollback_runs_and_always_starts_the_service(tmp_pat
         "    $s = if (Test-Path -LiteralPath $script:state) { 'present' } else { 'absent' }\n"
         "    $script:calls.Add($what + ' state=' + $s)\n"
         "}\n"
+        "function Get-Service { [CmdletBinding()] param($Name) }\n"
         "function Stop-Service { [CmdletBinding()] param([Parameter(Position = 0)]$Name) Note ('Stop-Service ' + $Name) }\n"
         "function Start-Service { [CmdletBinding()] param([Parameter(Position = 0)]$Name) Note ('Start-Service ' + $Name) }\n"
         "function Wait-Process { [CmdletBinding()] param($Name, $Timeout, $Id) Note ('Wait-Process ' + $Name) }\n"
@@ -266,9 +267,9 @@ def test_the_emitted_windows_rollback_runs_and_always_starts_the_service(tmp_pat
     assert run.returncode == 0, run.stdout + run.stderr
     assert bak.read_text() == exe.read_text() == "the pre-upgrade exe\n"
     calls = [ln[len("CALL "):] for ln in out if ln.startswith("CALL ")]
-    assert calls[0] == ("Stop-Service dantesync state=present" if state != "absent"
-                        else "Stop-Service dantesync state=absent"), calls
-    assert calls[-1] == f"Start-Service dantesync state={want_state}", calls
+    assert calls[0] == ("Stop-Service dsync state=present" if state != "absent"
+                        else "Stop-Service dsync state=absent"), calls
+    assert calls[-1] == f"Start-Service dsync state={want_state}", calls
     assert "version read" in out, run.stdout
     date_lines = [ln for ln in out if "date-offset.json" in ln]
     if want_line is None:
@@ -305,8 +306,8 @@ def test_the_rollback_lib_holds_the_rule_and_the_programs():
         assert f"{fn}() {{" in lib and f"{fn}() {{" not in upgrade, fn
     assert '. "$HERE/lib/dantesync-rollback.sh"' in upgrade
     # the same persisted paths dantesync 1.15.0 uses (src/main.rs DATE_STATE_PATH)
-    assert "DANTESYNC_LINUX_DATE_STATE='/etc/dantesync/date-offset.json'" in lib
-    assert "DANTESYNC_WIN_DATE_STATE='C:\\ProgramData\\DanteSync\\date-offset.json'" in lib
+    assert "DANTESYNC_LINUX_DATE_STATE='/etc/dsync/date-offset.json'" in lib
+    assert "DANTESYNC_WIN_DATE_STATE='C:\\ProgramData\\dsync\\date-offset.json'" in lib
     # the comparison is the script's own version helper, never a second semver
     assert "dantesync_upgrade_status" in lib and "sort -V" not in lib
 
@@ -353,11 +354,11 @@ def test_date_role_is_the_ntp_master_the_way_verify_names_it(tmp_path):
 def test_linux_forced_downgrade_of_the_master_deletes_the_date_state_after_a_good_start(tmp_path):
     cmd = _emit(tmp_path, "dantesync_linux_upgrade_cmd", "1.14.0", "ntp-master")
     rw = _at(cmd, "if [ \"$ro_root\" = 1 ]; then mount -o remount,rw /; fi")
-    stop = _at(cmd, "\nsystemctl stop dantesync\n", rw)
-    swap = _at(cmd, 'install -m 0755 "$tmp/dantesync" /usr/local/bin/dantesync', stop)
-    start = _at(cmd, "\nsystemctl restart dantesync\n", swap)
-    version = _at(cmd, "\ndantesync --version\n", start)
-    rm = _at(cmd, 'rm -f "/etc/dantesync/date-offset.json"', version)
+    stop = _at(cmd, "\n  systemctl stop dsync\n", rw)
+    swap = _at(cmd, 'install -m 0755 "$tmp/dsync" /usr/local/bin/dsync', stop)
+    start = _at(cmd, "\nsystemctl restart dsync\n", swap)
+    version = _at(cmd, "\ndsync --version\n", start)
+    rm = _at(cmd, 'rm -f "/etc/dsync/date-offset.json"', version)
     assert rw < stop < swap < start < version < rm, cmd
     assert "systemctl" not in cmd[rm:], "the delete is the last step, after every self-heal path"
     assert cmd.count(_DATE_LINE) == 1, cmd
@@ -366,7 +367,7 @@ def test_linux_forced_downgrade_of_the_master_deletes_the_date_state_after_a_goo
 def test_windows_forced_downgrade_of_the_master_deletes_the_date_state_after_a_good_start(tmp_path):
     ps = _emit(tmp_path, "dantesync_windows_upgrade_ps", "1.14.0", "ntp-master")
     swap = _at(ps, "Copy-Item -Force $tmp $exe")
-    start = _at(ps, "    Start-Service dantesync\n} catch {", swap)
+    start = _at(ps, "    Start-Service dsync\n} catch {", swap)
     rethrow = _at(ps, "    throw\n}", start)
     rm = _at(ps, "Remove-Item -LiteralPath $dateState -Force -ErrorAction SilentlyContinue", rethrow)
     purge = _at(ps, 'cmd /c "schtasks /Delete', rm)
@@ -400,7 +401,7 @@ def _run_linux_downgrade(tmp_path, role, fail_start=False):
     staged = tmp_path / "staged"
     staged.write_text("the 1.14.0 binary\n")
     sha = subprocess.run(["sha256sum", str(staged)], capture_output=True, text=True).stdout.split()[0]
-    (tmp_path / "staged.sha256").write_text(f"{sha}  dantesync-linux-amd64\n")
+    (tmp_path / "staged.sha256").write_text(f"{sha}  dsync-linux-amd64\n")
     st = etc / "date-offset.json"
     st.write_text('{"version":1}\n')
     log, fail = tmp_path / "calls.log", tmp_path / "fail-start"
@@ -410,7 +411,7 @@ def _run_linux_downgrade(tmp_path, role, fail_start=False):
              f'echo "$(basename "$0") $* state=$s" >> "{log}"\n')
     stubs = {
         "systemctl": f'if [ "$1" = restart ] && [ -f "{fail}" ]; then rm -f "{fail}"; exit 1; fi\n',
-        "mount": "", "findmnt": 'echo "ro,relatime"\n', "dantesync": 'echo "dantesync 1.14.0"\n',
+        "mount": "", "findmnt": 'echo "ro,relatime"\n', "dsync": 'echo "dsync 1.14.0"\n',
     }
     for tool, extra in stubs.items():
         p = stub / tool
@@ -441,10 +442,10 @@ def test_the_emitted_linux_downgrade_of_the_master_deletes_after_the_start_insid
     # good start opens its own window and closes it verified too.
     assert calls == [
         "mount -o remount,rw / state=present",
-        "systemctl stop dantesync state=present",
+        "systemctl stop dsync state=present",
         "mount -o remount,ro / state=present",
-        "systemctl restart dantesync state=present",
-        "dantesync --version state=present",
+        "systemctl restart dsync state=present",
+        "dsync --version state=present",
         "mount -o remount,rw / state=present",
         "mount -o remount,ro / state=absent",
     ], calls
@@ -455,13 +456,13 @@ def test_a_failed_start_of_the_downgrade_self_heals_with_the_saved_date_intact(t
     its saved date -- a missing file would boot-step the fleet during the day."""
     run, calls, st, bindir = _run_linux_downgrade(tmp_path, "ntp-master", fail_start=True)
     assert run.returncode != 0, run.stdout + run.stderr
-    assert "SELF-HEAL: restored previous dantesync binary" in run.stderr, run.stderr
+    assert "SELF-HEAL: restored previous dsync binary" in run.stderr, run.stderr
     assert st.is_file(), "the 1.15 binary came back without its saved fleet date"
     assert (bindir / "dantesync").read_text() == "the 1.15.0 binary\n"
     assert "date-offset" not in run.stdout, run.stdout
     # issue 1407: the self-heal reopens the window for the .bak, closes it verified, then restarts.
     assert calls[-3:] == ["mount -o remount,rw / state=present", "mount -o remount,ro / state=present",
-                          "systemctl restart dantesync state=present"], calls
+                          "systemctl restart dsync state=present"], calls
 
 
 def test_the_emitted_linux_downgrade_of_a_slave_keeps_the_date_state(tmp_path):
@@ -469,8 +470,8 @@ def test_the_emitted_linux_downgrade_of_a_slave_keeps_the_date_state(tmp_path):
     assert run.returncode == 0, run.stdout + run.stderr
     assert st.is_file() and "date-offset" not in run.stdout, run.stdout
     # issue 1407: the verified close precedes the restart; nothing reopens the window afterwards.
-    assert calls[-3:] == ["mount -o remount,ro / state=present", "systemctl restart dantesync state=present",
-                          "dantesync --version state=present"], calls
+    assert calls[-3:] == ["mount -o remount,ro / state=present", "systemctl restart dsync state=present",
+                          "dsync --version state=present"], calls
 
 
 @pytest.mark.parametrize("role,fail_start,want_line,want_state,want_exe", [
@@ -485,7 +486,7 @@ def test_the_emitted_windows_downgrade_runs_and_deletes_only_after_a_good_start(
     installed (its arm notes a warning and never throws); Test-Path / Remove-Item / Copy-Item /
     Get-FileHash are real, on tmp paths. A failed Start-Service makes the program's own catch put
     the 1.15 exe back and rethrow, before the delete."""
-    exe, bak = tmp_path / "dantesync.exe", tmp_path / "dantesync.exe.bak"
+    exe, bak = tmp_path / "dsync.exe", tmp_path / "dsync.exe.bak"
     st, rel, temp = tmp_path / "date-offset.json", tmp_path / "release.exe", tmp_path / "temp"
     temp.mkdir()
     exe.write_text("the 1.15.0 exe\n")
@@ -514,6 +515,7 @@ def test_the_emitted_windows_downgrade_runs_and_deletes_only_after_a_good_start(
         "    if ($OutFile -like '*.sha256') {\n"
         "        Set-Content -NoNewline -LiteralPath $OutFile -Value ((Get-FileHash -Algorithm SHA256 -LiteralPath $script:rel).Hash + '  x.exe')\n"
         "    } else { Copy-Item -Force -LiteralPath $script:rel -Destination $OutFile } }\n"
+        "function Get-Service { [CmdletBinding()] param($Name) }\n"
         "function Stop-Service { [CmdletBinding()] param([Parameter(Position = 0)]$Name) Note ('Stop-Service ' + $Name) }\n"
         "function Start-Service { [CmdletBinding()] param([Parameter(Position = 0)]$Name)\n"
         "    $script:starts++; Note ('Start-Service ' + $Name)\n"
@@ -530,8 +532,8 @@ def test_the_emitted_windows_downgrade_runs_and_deletes_only_after_a_good_start(
     out = run.stdout.splitlines()
     assert run.returncode == 0, run.stdout + run.stderr
     calls = [ln[len("CALL "):] for ln in out if ln.startswith("CALL ")]
-    assert calls[0] == "Stop-Service dantesync state=present", calls
-    assert calls[-1] == "Start-Service dantesync state=present", calls
+    assert calls[0] == "Stop-Service dsync state=present", calls
+    assert calls[-1] == "Start-Service dsync state=present", calls
     assert (st.exists() and "present" or "absent") == want_state, run.stdout
     assert exe.read_text() == want_exe, run.stdout
     date_lines = [ln for ln in out if "date-offset.json" in ln]

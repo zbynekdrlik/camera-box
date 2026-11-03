@@ -125,10 +125,10 @@ fi
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->
 # 10.77.9.202; the cam boxes take NTP from it), so strih-snv's dantesync ROLE is `server` (a bare
-# `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dantesync/config.json). issue 1361: the
+# `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dsync/config.json). issue 1361: the
 # role + its upstream are box FACTS (STRIH_DANTESYNC_ROLE / STRIH_DANTESYNC_UPSTREAM), so a venue whose
 # strih is a CLIENT declares it in its fact file. The live box had a hand
-# `dantesync.service.d/10-ntp-master.conf` drop-in overriding the provisioned CLIENT ExecStart -- now
+# `dsync.service.d/10-ntp-master.conf` drop-in overriding the provisioned CLIENT ExecStart -- now
 # the role is folded INTO the unit and the stale drop-in is removed.
 DS_ROLE="$(strih_lx_dantesync_role)"
 step 2 "DanteSync ${DS_ROLE} (single timesync authority; post-M4 the notebook is the fleet NTP master)"
@@ -148,7 +148,7 @@ strih_lx_dantesync_role_ok "$DS_ROLE" "$DS_ARGS" \
 echo "  dantesync role: ${DS_ROLE}  (args: '${DS_ARGS:-<bare NTP master>}')"
 # issue 1317: install dantesync as a systemd SERVICE, role folded INTO the unit (the EXACT cambox
 # shape: Type=simple, Restart=always). strih_dantesync_unit_text fail-closes on an ambiguous shape.
-# The live box had a hand dantesync.service.d/10-ntp-master.conf resetting ExecStart; the role is now
+# The live box had a hand dsync.service.d/10-ntp-master.conf resetting ExecStart; the role is now
 # IN the unit, so strih_dantesync_install removes any stale drop-in (two files describing one role).
 # issue 1372: the unit is rewritten, reloaded and the daemon (re)started ONLY on a real change
 # (strih_dantesync_install, scripts/lib/strih-dantesync.sh) -- restarting the fleet date master steps
@@ -156,7 +156,7 @@ echo "  dantesync role: ${DS_ROLE}  (args: '${DS_ARGS:-<bare NTP master>}')"
 DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_lx_ip)")" \
   || fail "strih_dantesync_unit_text refused to emit a unit for role '$DS_ROLE' args '$DS_ARGS'"
 strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE" \
-  || fail "dantesync.service install failed (role '${DS_ROLE}') -- see the line above"
+  || fail "dsync.service install failed (role '${DS_ROLE}') -- see the line above"
 
 # ---------------------------------------------------------------------------------------------
 REC_ENC="$(strih_lx_profile_facts | grep '^rec_encoder=' | cut -d= -f2)"

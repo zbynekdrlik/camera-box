@@ -673,9 +673,9 @@ gm_check() {
 # --- PHASE_SLEW config state (#1215) ----------------------------------------------------------
 #
 # dantesync corrects UTC phase error either by SLEWING it smoothly (a per-box canary opt-in,
-# system.phase_slew.enabled=true in /etc/dantesync/config.json -- dantesync issue 97) or, absent
+# system.phase_slew.enabled=true in /etc/dsync/config.json -- dantesync issue 97) or, absent
 # that config, by STEPPING it in discrete jumps once the accumulated phase error crosses an
-# adaptive threshold. imag-nb shipped with NO /etc/dantesync/ directory at all and stepped
+# adaptive threshold. imag-nb shipped with NO /etc/dsync/ directory at all and stepped
 # 16x/hour of 6-7ms each (#1215) -- a fifth of a frame at 30fps, a visible hitch on the projected
 # output every ~4 minutes. The SAME :8898/status blob offset_us_from_pipe_json/ptp_locked_from_
 # pipe_json/gm_source_ip_from_pipe_json already read also reports which mode is active.
@@ -1904,7 +1904,7 @@ query_node_journal() {
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${CLOCK_GUARD_SSH_TIMEOUT}" \
     "${CLOCK_GUARD_SSH_USER}@${ip}" \
-    'journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null
+    'journalctl -u dsync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null
 }
 
 main() {

@@ -26,7 +26,7 @@ set -euo pipefail
 # when it is home. It is NOT in [0/8]; run it during maintenance or from a dev1 watchdog.
 #
 # Acceptance fields graded (issue 1297 #4), all from the SAME :8898/status blob + `dantesync
-# --version`: dantesync --version == pin, is_locked (PTP LOCKED), ntp_failed=false AND
+# --version`: dsync --version == pin, is_locked (PTP LOCKED), ntp_failed=false AND
 # ntp_age_s < 120 (one ntp_freshness_verdict), |ntp_offset_us| < 2000, and the clock discipline
 # (issue 1372): dantesync 1.9.0's ptp_phase_lock with ptp_phase_locked=true, or on a pre-1.9.0 node
 # phase_slew_enabled=true -- clock_discipline_class, the ONE classifier the E2E gate also uses.
@@ -47,20 +47,20 @@ MAINT_BOUND_US="${DANTESYNC_MAINT_BOUND_US:-2000}"
 MAINT_STATUS_PORT="${DANTESYNC_MAINT_STATUS_PORT:-8898}"
 MAINT_SSH_TIMEOUT="${DANTESYNC_MAINT_SSH_TIMEOUT:-10}"
 MAINT_HTTP_TIMEOUT="${DANTESYNC_MAINT_HTTP_TIMEOUT:-6}"
-# The Windows dantesync.exe path for read_maint_version's OWN thin ssh reader. We write our own
+# The Windows dsync.exe path for read_maint_version's OWN thin ssh reader. We write our own
 # transport (not dantesync-version-gate.sh's read_dantesync_version_output) because that function
 # lives BELOW that gate's source-guard and is UNDEFINED when we source the gate for its pure parser
 # (dantesync-version-reading.md's documented split). To keep the two readers from drifting, DEFAULT
 # this (and the ssh pass, below) from the version-gate's OWN override env vars when they are set, so
 # an operator who repoints one repoints both; overridable in its own right for tests/ops.
-DANTESYNC_MAINT_WIN_EXE="${DANTESYNC_MAINT_WIN_EXE:-${DANTESYNC_VERSION_GATE_WIN_EXE:-C:\\Program Files\\DanteSync\\dantesync.exe}}"
+DANTESYNC_MAINT_WIN_EXE="${DANTESYNC_MAINT_WIN_EXE:-${DANTESYNC_VERSION_GATE_WIN_EXE:-C:\\Program Files\\dsync\\dsync.exe}}"
 
 # --- PURE verdict (no network/ssh -- unit-tested by sourcing this file) -------------------------
 
 # dantesync_maintenance_verdict NAME HOME_FLAG VERSION_OUT STATUS_JSON PIN FRESHNESS_S BOUND_US ->
 # prints ONE honest row on stdout and returns 0 OK / 30 ALARM / 11 UNKNOWN. HOME_FLAG "1" = home;
 # anything else -> SKIP row + return 0 (a traveling box that is away is never a false red). When
-# home, every acceptance field is graded from VERSION_OUT (`dantesync --version` stdout) + the
+# home, every acceptance field is graded from VERSION_OUT (`dsync --version` stdout) + the
 # STATUS_JSON blob via the shared parsers; an UNREADABLE field is UNKNOWN, never a silent OK
 # (test-strictness). ALARM only when a field is READ and WRONG.
 dantesync_maintenance_verdict() {
@@ -160,7 +160,7 @@ read_maint_status() {
   curl -fsS --max-time "$MAINT_HTTP_TIMEOUT" "http://${host}:${MAINT_STATUS_PORT}/status" 2>/dev/null || true
 }
 
-# read_maint_version NAME HOST -> `dantesync --version` stdout read over ssh (Windows exe path runs
+# read_maint_version NAME HOST -> `dsync --version` stdout read over ssh (Windows exe path runs
 # via cmd.exe directly -- dantesync-version-reading.md). A DANTESYNC_MAINT_VERSION_<NAME> fixture
 # overrides for tests. `|| true` -> empty on failure -> UNKNOWN downstream, never a guessed version.
 read_maint_version() {

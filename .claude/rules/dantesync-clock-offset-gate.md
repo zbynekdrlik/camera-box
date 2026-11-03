@@ -439,8 +439,8 @@ EXISTING sibling pair's shape rather than inventing a new one — same `|| true`
 same `case`-based check function, same "unreadable is never OK" contract.
 
 **Finding while investigating this ticket's scope: `scripts/setup-device.sh` (the cam1-4
-provisioning script) does NOT write `/etc/dantesync/config.json` at all** —
-`grep -rn "phase_slew\|/etc/dantesync" scripts/setup-device.sh` returns nothing. The cam-box
+provisioning script) does NOT write `/etc/dsync/config.json` at all** —
+`grep -rn "phase_slew\|/etc/dsync" scripts/setup-device.sh` returns nothing. The cam-box
 fleet's `phase_slew.enabled=true`/`gm_allowlist` config came from an out-of-band hand/canary
 rollout (dantesync issue 97), never from this repo's own provisioning. So there is currently
 **zero shared code** between imag-nb's config write (`setup-imag.sh` step 3, #1215) and the cam

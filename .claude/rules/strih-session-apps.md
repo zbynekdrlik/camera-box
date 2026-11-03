@@ -18,7 +18,7 @@ paths:
   - "tests/python/test_strih_companion_satellite_1399.py"
   - "tests/python/test_strih_satellite_watch_1399.py"
   - "tests/python/test_strih_lx_deploy_session_apps_1399.py"
-  - "systemd/dantesync-tray.service"
+  - "systemd/dsync-tray.service"
   - "scripts/lib/dantesync-install.sh"
   - "tests/python/test_dantesync_tray_1429.py"
 ---
@@ -249,14 +249,14 @@ uses the install / unit row / autostart machinery above unchanged; its packages 
 (`STRIH_STREAM_MONITOR_ROWS` counted by `strih_session_apps_row_count`). Everything else:
 `.claude/rules/stream-headphone-monitor.md`.
 
-## The dantesync tray (`dantesync-tray.service`, issue 1429)
+## The dantesync tray (`dsync-tray.service`, issue 1429)
 
 Owner, 14.10.2026: "dantesinc ma mat pod linuxom tiez v liste ikonuzo stavmi tak ako na windovse aby
 sme videli". Design comment 6176755827 (Approach 1). The fifth entry; it runs on EVERY Linux
 workstation, the stream role too (`obs_box_role_apply` keeps it next to the keeper).
 
 - **The program is a release binary, not a repo script** (the Satellite pattern):
-  `/usr/local/bin/dantesync-tray` = the PINNED dantesync release's `dantesync-tray-linux-amd64`
+  `/usr/local/bin/dsync-tray` = the PINNED dantesync release's `dsync-tray-linux-amd64`
   (first in v1.18.0, dantesync issue 132). It reads the local daemon's `127.0.0.1:8898/status` and
   shows the state in the tint2 systray. `strih_session_app_script` is EMPTY for it;
   `strih_session_app_program` prints `dantesync_install_tray_bin` (`DANTESYNC_INSTALL_TRAY_BIN`, the
@@ -272,7 +272,7 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
     `install` alone unlinks the name and creates it 0600 first, review round 1). Unlike the daemon, the
     tray FOLLOWS the pin;
   - every install (and every kept tray) writes the release record `v<pin> <sha256>` to
-    `DANTESYNC_INSTALL_TRAY_RELEASE_FILE` (`/usr/local/share/dantesync-tray/release`), so verify grades a
+    `DANTESYNC_INSTALL_TRAY_RELEASE_FILE` (`/usr/local/share/dsync-tray/release`), so verify grades a
     tray BEHIND the pin with no network read (`dantesync_install_tray_state`: `absent` / `stale:<why>` /
     `ok`);
   - a download failure, a malformed `.sha256` or a mismatch is rc 1 + a stderr line, nothing installed.
@@ -284,10 +284,10 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
   `STRIH_SESSION_APP_PACKAGES` (the same install line; the stream role gets them too).
 - **The unit:** `DISPLAY=:0`, `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0`,
   `TimeoutStopSec=10`, journal output, `WantedBy=graphical-session.target`, and
-  `ConditionFileIsExecutable=/usr/local/bin/dantesync-tray`: while the pin has no Linux tray the autostart /
+  `ConditionFileIsExecutable=/usr/local/bin/dsync-tray`: while the pin has no Linux tray the autostart /
   deploy `start` is a clean condition skip (rc 0, no `[strih-snv start]` WARNING), never a 5 s
   restart loop on a missing (or non-executable) ExecStart.
-- **The grader row `(dantesync-tray)`:** the binary branch (unit byte-identical, the binary = the
+- **The grader row `(dsync-tray)`:** the binary branch (unit byte-identical, the binary = the
   pinned release by its record (`dantesync_install_tray_state`; `stale:*` FAILs `script-differs`, e.g.
   `program=stale:installed-v1.18.0-pin-v1.19.0` after a pin bump setup has not followed), enabled, the
   autostart line, active, `/proc/<MainPID>/exe` = the binary, started after the newest of unit +
@@ -308,8 +308,8 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
 - **Live steps (supervisor):** roll the fleet dantesync to 1.18.0 (`dantesync-fleet-upgrade.sh`,
   canaried) and bump `DANTESYNC_VERSION_PIN` to 1.18.0 in `scripts/dantesync-version-gate.sh`; then
   re-run setup-strih on strih-snv / strih-pp / stream-pp (step 16d logs `installed the dantesync tray
-  v1.18.0`), `systemctl --user start dantesync-tray.service` (or the next kiosk login / genlock deploy),
-  and `verify-strih.sh` reads `(dantesync-tray) ... OK`. Before the pin bump every box reads the NOTE.
+  v1.18.0`), `systemctl --user start dsync-tray.service` (or the next kiosk login / genlock deploy),
+  and `verify-strih.sh` reads `(dsync-tray) ... OK`. Before the pin bump every box reads the NOTE.
   Acceptance: the tint2 panel shows the icon and its colour follows the daemon state.
 
 ## Start path: the kiosk autostart, not default.target

@@ -1169,7 +1169,7 @@ fn gm_check_ok_foreign_and_unknown() {
 
 // --- phase_slew_enabled_from_pipe_json (#1215) + clock_discipline_check (issue 1372) ---------
 //
-// #1215: imag-nb shipped with NO /etc/dantesync/config.json at all, so it ran on dantesync's
+// #1215: imag-nb shipped with NO /etc/dsync/config.json at all, so it ran on dantesync's
 // built-in default (system.phase_slew.enabled=false) and corrected phase error by STEPPING
 // (16 steps/hour of 6-7ms each -- a visible ~4-minute hitch on the projected output) instead of
 // SLEWING it smoothly like the cam1-4 fleet. dantesync reports which mode is active via the SAME

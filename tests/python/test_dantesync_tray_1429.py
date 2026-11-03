@@ -1,7 +1,7 @@
 """Issue 1429 -- the dantesync tray icon on every Linux workstation box (strih-snv, strih-pp, stream-pp).
 
 WHY (owner, 14.10.2026): "dantesinc ma mat pod linuxom tiez v liste ikonuzo stavmi tak ako na windovse aby
-sme videli". dantesync 1.18.0 (dantesync issue 132) ships `dantesync-tray-linux-amd64`; nothing on the Linux
+sme videli". dantesync 1.18.0 (dantesync issue 132) ships `dsync-tray-linux-amd64`; nothing on the Linux
 boxes installed or started it.
 
 What this pins (design comment 6176755827, Approach 1):
@@ -9,7 +9,7 @@ What this pins (design comment 6176755827, Approach 1):
     sha256 verified before anything is installed, `install -m 0755` to DANTESYNC_INSTALL_TRAY_BIN; an
     installed tray with the release's sha256 is kept, any other is replaced (the tray follows the pin);
     a pin below 1.18.0 is a named WARN + rc 0; a download or sha failure is rc 1 + a stderr line;
-  * scripts/lib/strih-session-apps.sh: the fifth session app `dantesync-tray.service` (the unit text, the
+  * scripts/lib/strih-session-apps.sh: the fifth session app `dsync-tray.service` (the unit text, the
     autostart line, the item label, the program seam, the packages, the install with its try-restart only
     when the unit or the binary changed, the grader row incl. the NOTE below 1.18.0);
   * the stream role keeps the tray (scripts/lib/obs-box-role.sh).
@@ -30,10 +30,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import strih_session_apps_fakes_1399 as F  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _fixture_release(monkeypatch):
+    """issue 1487: these tests serve a fixture release, never the pinned bytes."""
+    monkeypatch.setenv("DSYNC_PINNED_SHA_VERSION", "")
+
+
 REPO = F.REPO
 DS_INSTALL = F.SCRIPTS / "lib" / "dantesync-install.sh"
-TRAY_UNIT_FILE = REPO / "systemd" / "dantesync-tray.service"
-TRAY = "dantesync-tray.service"
+TRAY_UNIT_FILE = REPO / "systemd" / "dsync-tray.service"
+TRAY = "dsync-tray.service"
 GOOD = b"#!/bin/sh\n# dantesync tray v1.18.0\n"
 
 
@@ -65,11 +71,11 @@ def test_version_ge(a, b, rc):
 
 def test_the_tray_follows_the_one_pin_and_its_release_asset():
     r = F.bash('dantesync_install_tray_url 1.18.0; echo; printf "%s" "$DANTESYNC_TRAY_FIRST_VERSION"',
-               sources=(DS_INSTALL,), env={"DANTESYNC_RELEASE_BASE": "https://github.com/zbynekdrlik/dantesync/releases/download"})
+               sources=(DS_INSTALL,), env={"DANTESYNC_RELEASE_BASE": "https://github.com/zbynekdrlik/dsync/releases/download"})
     assert r.stdout.split("\n") == [
-        "https://github.com/zbynekdrlik/dantesync/releases/download/v1.18.0/dantesync-tray-linux-amd64", "1.18.0"]
+        "https://github.com/zbynekdrlik/dsync/releases/download/v1.18.0/dsync-tray-linux-amd64", "1.18.0"]
     r = F.bash("dantesync_install_tray_bin", sources=(DS_INSTALL,), env={"DANTESYNC_INSTALL_TRAY_BIN": ""})
-    assert r.stdout == "/usr/local/bin/dantesync-tray"
+    assert r.stdout == "/usr/local/bin/dsync-tray"
 
 
 # --- dantesync_install_tray ----------------------------------------------------------------------------------
@@ -118,7 +124,7 @@ def test_a_good_download_installs_the_tray(tmp_path):
     assert "installed the dantesync tray v1.18.0 -> %s" % b in r.stdout
     # the release record verify grades with no network read
     assert F.tray_record(tmp_path).read_text() == "v1.18.0 %s\n" % hashlib.sha256(GOOD).hexdigest()
-    assert sorted(p.name for p in b.parent.iterdir()) == ["dantesync-tray"], "no .new sibling left behind"
+    assert sorted(p.name for p in b.parent.iterdir()) == ["dsync-tray"], "no .new sibling left behind"
 
 
 def test_an_upper_case_release_sha256_is_accepted(tmp_path):
@@ -252,7 +258,7 @@ def _unit():
 
 def test_the_unit_text():
     u = _unit()
-    assert u["ExecStart"] == "/usr/local/bin/dantesync-tray"
+    assert u["ExecStart"] == "/usr/local/bin/dsync-tray"
     assert u["Restart"] == "always" and u["RestartSec"] == "5" and u["StartLimitIntervalSec"] == "0"
     assert u["Type"] == "simple" and u["Environment"] == "DISPLAY=:0"
     assert u["StandardOutput"] == "journal" and u["StandardError"] == "journal"
@@ -267,7 +273,7 @@ def test_the_unit_runs_the_binary_the_install_writes():
     r = F.bash("dantesync_install_tray_bin", sources=(DS_INSTALL,), env={"DANTESYNC_INSTALL_TRAY_BIN": ""})
     assert _unit()["ExecStart"] == r.stdout
     r = F.bash("strih_session_app_program %s" % TRAY, env={"DANTESYNC_INSTALL_TRAY_BIN": ""})
-    assert r.returncode == 0 and r.stdout == "/usr/local/bin/dantesync-tray", r.stderr
+    assert r.returncode == 0 and r.stdout == "/usr/local/bin/dsync-tray", r.stderr
     r = F.bash("strih_session_app_program %s" % TRAY, env={"DANTESYNC_INSTALL_TRAY_BIN": "/tmp/x-tray"})
     assert r.stdout == "/tmp/x-tray", "ONE seam: the install and the grader read the same path"
 
@@ -277,10 +283,10 @@ def test_the_tray_is_the_fifth_session_app_with_its_autostart_line():
     # issue 1424: the display watch joined after the tray
     assert r.stdout.split() == list(F.UNITS) and r.stdout.split()[4] == TRAY
     r = F.bash("strih_session_app_autostart_line %s" % TRAY)
-    assert r.stdout == "systemctl --user start dantesync-tray.service || true"
+    assert r.stdout == "systemctl --user start dsync-tray.service || true"
     assert r.stdout in F.bash("strih_session_apps_autostart_lines").stdout.splitlines()
     r = F.bash('printf "[%%s] %%s" "$(strih_session_app_script %s)" "$(strih_session_app_item %s)"' % (TRAY, TRAY))
-    assert r.stdout == "[] dantesync-tray"
+    assert r.stdout == "[] dsync-tray"
 
 
 def test_the_runtime_packages_join_the_session_app_packages():
@@ -295,7 +301,7 @@ def test_the_kiosk_autostart_starts_the_tray_after_obs():
     assert r.returncode == 0, r.stderr
     lines = r.stdout.splitlines()
     assert lines.index("systemctl --user start strih-obs.service || true") < lines.index(
-        "systemctl --user start dantesync-tray.service || true")
+        "systemctl --user start dsync-tray.service || true")
 
 
 # --- the install (setup-strih step 16d) -------------------------------------------------------------------------
@@ -395,88 +401,88 @@ def _rows(tmp_path, env_extra=None, home_kw=None, **fakes):
 def test_grade_row_ok(tmp_path):
     rows = _rows(tmp_path)
     b = F.tray_bin(tmp_path)
-    assert F.row(rows, "dantesync-tray") == (
-        "OK|(dantesync-tray) %s: unit matches the checkout, %s installed, enabled, started by the kiosk "
+    assert F.row(rows, "dsync-tray") == (
+        "OK|(dsync-tray) %s: unit matches the checkout, %s installed, enabled, started by the kiosk "
         "autostart, active, its process runs %s and started after the unit was installed" % (TRAY, b, b))
     assert len(rows) == len(F.UNITS) + 5  # issue 1424: + the display watch's last pass + its X config row
 
 
 def test_grade_row_note_while_the_pin_has_no_linux_tray(tmp_path):
     rows = _rows(tmp_path, env_extra={"DANTESYNC_VERSION_PIN": "1.17.0"}, home_kw={"tray": False})
-    row = F.row(rows, "dantesync-tray")
-    assert row.startswith("NOTE|(dantesync-tray) %s: " % TRAY)
+    row = F.row(rows, "dsync-tray")
+    assert row.startswith("NOTE|(dsync-tray) %s: " % TRAY)
     assert "v1.17.0" in row and "1.18.0" in row and "DANTESYNC_VERSION_PIN" in row
 
 
 def test_grade_row_fails_a_missing_tray_once_the_pin_ships_one(tmp_path):
     rows = _rows(tmp_path, home_kw={"tray": False})
-    row = F.row(rows, "dantesync-tray")
-    assert row.startswith("FAIL|(dantesync-tray) %s: script-absent" % TRAY)
+    row = F.row(rows, "dsync-tray")
+    assert row.startswith("FAIL|(dsync-tray) %s: script-absent" % TRAY)
     assert "step 16d" in row and "dantesync" in row.split(" -- ", 1)[1]
 
 
 def test_grade_row_fails_a_tray_behind_the_pin(tmp_path):
     # the pin moved to 1.19.0 and setup-strih did not follow (or its fetch failed): a FAIL, never a quiet OK
     rows = _rows(tmp_path, env_extra={"DANTESYNC_VERSION_PIN": "1.19.0"})
-    row = F.row(rows, "dantesync-tray")
-    assert row.startswith("FAIL|(dantesync-tray) %s: script-differs" % TRAY), row
+    row = F.row(rows, "dsync-tray")
+    assert row.startswith("FAIL|(dsync-tray) %s: script-differs" % TRAY), row
     assert "program=stale:installed-v1.18.0-pin-v1.19.0" in row and "step 16d" in row
 
 
 def test_grade_row_fails_a_hand_replaced_tray(tmp_path):
     home_rows = _rows(tmp_path)
-    assert F.row(home_rows, "dantesync-tray").startswith("OK|"), home_rows
+    assert F.row(home_rows, "dsync-tray").startswith("OK|"), home_rows
     F.tray_bin(tmp_path).write_text("#!/bin/sh\n# a hand copy\n")
     rows = _rows(tmp_path / "again", env_extra={
         "DANTESYNC_INSTALL_TRAY_BIN": str(F.tray_bin(tmp_path)),
         "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(F.tray_record(tmp_path))},
         home_kw={"tray_exe": str(F.tray_bin(tmp_path))})
-    assert "program=stale:sha256-is-not-the-v1.18.0-release" in F.row(rows, "dantesync-tray")
+    assert "program=stale:sha256-is-not-the-v1.18.0-release" in F.row(rows, "dsync-tray")
 
 
 def test_grade_row_note_still_fails_a_broken_unit_install(tmp_path):
     # below 1.18.0 a missing binary is a NOTE only when the unit, its enablement and autostart are in place
     rows = _rows(tmp_path, env_extra={"DANTESYNC_VERSION_PIN": "1.17.0"},
                  home_kw={"tray": False, "enabled": False})
-    row = F.row(rows, "dantesync-tray")
-    assert row.startswith("FAIL|(dantesync-tray) %s: not-enabled" % TRAY), row
+    row = F.row(rows, "dsync-tray")
+    assert row.startswith("FAIL|(dsync-tray) %s: not-enabled" % TRAY), row
     assert "ships no Linux tray" in row
 
 
 def test_grade_row_an_installed_tray_is_graded_in_full(tmp_path):
     rows = _rows(tmp_path, active="inactive")
-    assert F.row(rows, "dantesync-tray").startswith("FAIL|(dantesync-tray) %s: not-active:inactive" % TRAY)
+    assert F.row(rows, "dsync-tray").startswith("FAIL|(dsync-tray) %s: not-active:inactive" % TRAY)
 
 
 def test_grade_row_an_installed_tray_below_1_18_0_is_never_a_note(tmp_path):
     # a binary on the box is graded whatever the pin says: the NOTE is only for "nothing to run yet". A pin
     # rolled back below 1.18.0 with a tray left installed reads stale (its record names another release).
     rows = _rows(tmp_path, env_extra={"DANTESYNC_VERSION_PIN": "1.17.0"})
-    row = F.row(rows, "dantesync-tray")
-    assert row.startswith("FAIL|(dantesync-tray) %s: script-differs" % TRAY), row
+    row = F.row(rows, "dsync-tray")
+    assert row.startswith("FAIL|(dsync-tray) %s: script-differs" % TRAY), row
     assert "program=stale:installed-v1.18.0-pin-v1.17.0" in row
 
 
 def test_grade_row_a_tray_started_some_other_way_is_the_wrong_program(tmp_path):
     rows = _rows(tmp_path, home_kw={"tray_exe": "/usr/bin/python3"})
-    assert F.row(rows, "dantesync-tray").startswith("FAIL|(dantesync-tray) %s: process:wrong-program" % TRAY)
+    assert F.row(rows, "dsync-tray").startswith("FAIL|(dsync-tray) %s: process:wrong-program" % TRAY)
 
 
 def test_grade_row_a_replaced_tray_under_the_running_process_is_the_wrong_program(tmp_path):
     rows = _rows(tmp_path, home_kw={"tray_exe": "%s (deleted)" % F.tray_bin(tmp_path)})
-    assert F.row(rows, "dantesync-tray").startswith("FAIL|(dantesync-tray) %s: process:wrong-program" % TRAY)
+    assert F.row(rows, "dsync-tray").startswith("FAIL|(dsync-tray) %s: process:wrong-program" % TRAY)
 
 
 def test_grade_row_a_tray_older_than_its_files_is_stale(tmp_path):
     rows = _rows(tmp_path, started=int(time.time()) - 3 * 86400)
-    row = F.row(rows, "dantesync-tray")
-    assert row.startswith("FAIL|(dantesync-tray) %s: process:stale" % TRAY)
+    row = F.row(rows, "dsync-tray")
+    assert row.startswith("FAIL|(dsync-tray) %s: process:stale" % TRAY)
     assert "systemctl --user restart %s" % TRAY in row
 
 
 def test_grade_row_not_enabled(tmp_path):
     rows = _rows(tmp_path, home_kw={"enabled": False})
-    assert F.row(rows, "dantesync-tray").startswith("FAIL|(dantesync-tray) %s: not-enabled" % TRAY)
+    assert F.row(rows, "dsync-tray").startswith("FAIL|(dsync-tray) %s: not-enabled" % TRAY)
 
 
 def test_grade_report_routes_a_note_row_to_note(tmp_path):
@@ -489,5 +495,5 @@ def test_grade_report_routes_a_note_row_to_note(tmp_path):
                'strih_session_apps_grade_report "%s" "%s" newlevel; echo rc=$?' % (REPO, home),
                env=env, path_prepend=str(b))
     assert r.returncode == 0, r.stderr
-    assert "NOTE (dantesync-tray) " in r.stdout and "FAIL " not in r.stdout
+    assert "NOTE (dsync-tray) " in r.stdout and "FAIL " not in r.stdout
     assert r.stdout.strip().endswith("rc=0"), "a NOTE row still counts toward the row total"

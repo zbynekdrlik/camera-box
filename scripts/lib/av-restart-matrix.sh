@@ -52,7 +52,7 @@ av_matrix_default_cambox() {
 #                 unit-installed guard, reset-failed, a BLOCKING restart so the old OBS is gone
 #                 before the health read; markers MV_REVERIFY_OBS_RESTART / _NO_UNIT / _FAILED).
 #   cambox     -- `systemctl restart camera-box` on the camera (root);
-#   dantesync  -- `systemctl restart dantesync` on the camera (root); both first echo
+#   dantesync  -- `systemctl restart dsync` on the camera (root); both first echo
 #                 `AV_MATRIX_INVOCATION_BEFORE=<the unit's systemd InvocationID>` so the health read
 #                 can require a NEW process, then the outcome marker.
 #   stream-obs -- ONLY on a Linux stream box (av_matrix_stream_obs_mode = restart, issue 1474): the
@@ -64,7 +64,7 @@ av_matrix_restart_remote_cmd() {
   case "${1:-}" in
     strih-obs | stream-obs) mv_reverify_obs_restart_linux_cmd; return 0 ;;
     cambox) unit=camera-box ;;
-    dantesync) unit=dantesync ;;
+    dantesync) unit=dsync ;;
     *) echo "av-restart-matrix: no remote restart for kind '${1:-}'" >&2; return 1 ;;
   esac
   printf '%s\n' "printf 'AV_MATRIX_INVOCATION_BEFORE=%s\\n' \"\$(systemctl show -p InvocationID --value ${unit} 2>/dev/null || true)\";"
@@ -159,7 +159,7 @@ av_matrix_ensure_running_remote_cmd() {
   case "${1:-}" in
     strih-obs | stream-obs) sc="systemctl --user"; unit=strih-obs.service ;;  # stream-obs: Linux box only
     cambox) sc="systemctl"; unit=camera-box ;;
-    dantesync) sc="systemctl"; unit=dantesync ;;
+    dantesync) sc="systemctl"; unit=dsync ;;
     *) echo "av-restart-matrix: no remote ensure-running for kind '${1:-}'" >&2; return 1 ;;
   esac
   printf '%s\n' "if ! ${sc} is-active --quiet ${unit}; then ${sc} reset-failed ${unit} 2>/dev/null || true; ${sc} start ${unit} 2>/dev/null || true; fi;"

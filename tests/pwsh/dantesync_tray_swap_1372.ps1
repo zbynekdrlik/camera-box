@@ -17,8 +17,8 @@
 param([Parameter(Mandatory = $true)][string]$Program)
 
 $env:TEMP = [System.IO.Path]::GetTempPath()
-$script:Exe = 'C:\Program Files\DanteSync\dantesync-tray.exe'
-$script:TmpNew = Join-Path $env:TEMP 'dantesync-tray-new.exe'
+$script:Exe = 'C:\Program Files\dsync\dsync-tray.exe'
+$script:TmpNew = Join-Path $env:TEMP 'dsync-tray-new.exe'
 
 function Reset-Node([int]$Respawn, [string]$Unkillable, [bool]$Lock33, [bool]$SpawnAfterCopy) {
     $script:S = @{
@@ -36,7 +36,7 @@ function Reset-Node([int]$Respawn, [string]$Unkillable, [bool]$Lock33, [bool]$Sp
 }
 function New-Tray([switch]$Unkillable) {
     $p = [pscustomobject]@{
-        Id = $script:S.nextId; ProcessName = 'dantesync-tray'; SessionId = 1
+        Id = $script:S.nextId; ProcessName = 'dsync-tray'; SessionId = 1
         ParentProcessId = 4242; Unkillable = [bool]$Unkillable
     }
     $script:S.nextId++
@@ -44,7 +44,7 @@ function New-Tray([switch]$Unkillable) {
     $p
 }
 function Get-Process {
-    [CmdletBinding()] param([string]$Name, [int[]]$Id)
+    [CmdletBinding()] param([string[]]$Name, [int[]]$Id)
     if ($PSBoundParameters.ContainsKey('Id')) { return @($script:S.procs | Where-Object { $Id -contains $_.Id }) }
     return @($script:S.procs)
 }
@@ -92,7 +92,7 @@ function Get-FileHash {
 }
 function Invoke-WebRequest {
     [CmdletBinding()] param([switch]$UseBasicParsing, $Uri, $OutFile)
-    if ($Uri -like '*.sha256') { $script:S.files[$OutFile] = 'NEWHASH  dantesync-tray-windows-amd64.exe' }
+    if ($Uri -like '*.sha256') { $script:S.files[$OutFile] = 'NEWHASH  dsync-tray-windows-amd64.exe' }
     else { $script:S.files[$OutFile] = 'NEWHASH' }
 }
 function Get-Content { [CmdletBinding()] param([Parameter(Position = 0)]$Path) $script:S.files[$Path] }

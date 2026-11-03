@@ -26,3 +26,11 @@ def _reset_av_sync_measure_module_state():
     _clear()
     yield
     _clear()
+
+import os
+
+# issue 1487: dev1 itself may still run dantesync, and a swap program reads the box it runs on. No test
+# reads the real legacy paths; tests/python/test_dsync_swap_1487.py sets its own.
+os.environ["DSYNC_LEGACY_LINUX_UNIT"] = "/nonexistent/dantesync.service"
+os.environ["DSYNC_LEGACY_LINUX_BIN"] = "/nonexistent/dantesync"
+os.environ["DSYNC_LEGACY_LINUX_STATE"] = "/nonexistent/etc-dantesync"

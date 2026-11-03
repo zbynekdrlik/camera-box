@@ -10,7 +10,7 @@
 //! dev1 itself (the control box that RUNS this gate) — dev1 must not be exempted just because it
 //! is the harness's own host (#862 point 2: "dev1 sa nesmie vynechať").
 //!
-//! These tests pin the gate's own PURE functions (version extraction from `dantesync --version`
+//! These tests pin the gate's own PURE functions (version extraction from `dsync --version`
 //! stdout, the per-node verdict, and the fleet-wide roll-up + table print) and its end-to-end
 //! exit-code contract over fixture files (the path that needs no live rig).
 
@@ -106,7 +106,7 @@ fn tmp_dir_is_removed_when_it_drops_1395() {
 }
 
 // ---------------------------------------------------------------------------
-// dantesync_version_from_version_output — PURE version extraction from `dantesync --version`
+// dantesync_version_from_version_output — PURE version extraction from `dsync --version`
 // stdout (#862 follow-up: the journal/service-log reader this replaced returned "" on EVERY box
 // in the real fleet -- the version line it looked for is never actually logged. `dantesync
 // --version` prints "dantesync X.Y.Z" and answers on every platform this gate runs against.)
@@ -334,7 +334,7 @@ fn fleet_report_prints_a_box_to_version_table_on_failure() {
 }
 
 // ---------------------------------------------------------------------------
-// End-to-end CLI: --win, --local, and --linux, all reading `dantesync --version` output via
+// End-to-end CLI: --win, --local, and --linux, all reading `dsync --version` output via
 // fixture injection (no live rig, no bundle-state coupling -- #862 follow-up dropped --win-state
 // entirely: strih/stream are read the SAME way as every other node now, over SSH).
 // ---------------------------------------------------------------------------
@@ -415,7 +415,7 @@ fn cli_zero_nodes_is_a_usage_error() {
 }
 
 // ---------------------------------------------------------------------------
-// #1139 — REPORT-ONLY orphan alarms: dantesync-tray.exe sha-pin + pin-vs-newest-release lag.
+// #1139 — REPORT-ONLY orphan alarms: dsync-tray.exe sha-pin + pin-vs-newest-release lag.
 // The tray is in NO gate (a daemon roll can leave the tray behind — live 2026-08-20 the deployed
 // tray sha != the pinned v1.8.48 release asset), and the fixed DANTESYNC_VERSION_PIN can lag the
 // newest published release. Both SCREAM (report-only) but never flip the gate exit — the tray is a
@@ -540,7 +540,7 @@ fn tray_alarm_is_report_only_does_not_block_an_otherwise_clean_gate() {
         "daemon-clean gate must pass: {out}"
     );
     assert!(
-        out.contains("dantesync-tray.exe sha-pin") && out.contains("ALARM"),
+        out.contains("dsync-tray.exe sha-pin") && out.contains("ALARM"),
         "the tray section must SCREAM the drift: {out}"
     );
     assert!(

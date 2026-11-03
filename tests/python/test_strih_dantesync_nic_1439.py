@@ -68,7 +68,7 @@ def test_the_journal_read_is_bounded_to_the_newest_match_of_this_boot(tmp_path):
     args = log.split()
     assert "-b" in args and "-n" in args and args[args.index("-n") + 1] == "1", log
     assert "-g" in args or any(a.startswith("--grep") for a in args), log
-    assert "dantesync" in log
+    assert "dsync" in log
 
 
 def test_verify_strih_grades_it_before_item_6c():

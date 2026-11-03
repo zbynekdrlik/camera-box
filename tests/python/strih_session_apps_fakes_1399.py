@@ -23,10 +23,10 @@ REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "strih-session-apps.sh"
 UNITS = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-         "strih-satellite-watch.timer", "dantesync-tray.service", "strih-display-watch.service")
+         "strih-satellite-watch.timer", "dsync-tray.service", "strih-display-watch.service")
 # every unit FILE the install writes (the watch timer's oneshot service rides with the timer)
 UNIT_FILES = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-              "strih-satellite-watch.timer", "strih-satellite-watch.service", "dantesync-tray.service",
+              "strih-satellite-watch.timer", "strih-satellite-watch.service", "dsync-tray.service",
               "strih-display-watch.service")
 PROGRAMS = ("strih_browser_keeper.py", "bkshading_panel_app.py", "strih_satellite_watch.py",
             "strih_display_watch.py")
@@ -36,13 +36,13 @@ LEAKY = ("STRIH_SESSION_APPS_BIN_DIR", "STRIH_SESSION_APPS_RUNTIME_DIR", "STRIH_
          "DANTESYNC_INSTALL_TRAY_RELEASE_FILE")
 # issue 1429: the hermetic defaults (see the module doc); a test's own env wins
 HERMETIC = {"DANTESYNC_RELEASE_BASE": "file:///nonexistent-1429/release",
-            "DANTESYNC_INSTALL_TRAY_BIN": "/nonexistent-1429/bin/dantesync-tray",
+            "DANTESYNC_INSTALL_TRAY_BIN": "/nonexistent-1429/bin/dsync-tray",
             "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": "/nonexistent-1429/share/release"}
 TRAY_PIN = "1.18.0"
-TRAY_ASSET = "dantesync-tray-linux-amd64"
+TRAY_ASSET = "dsync-tray-linux-amd64"
 # the main processes /proc shows (the watch's oneshot service has none between its runs)
 PIDS = {"strih-browser-keeper.service": 4242, "bkshading-panel-app.service": 4343,
-        "companion-satellite.service": 4444, "strih-satellite-watch.service": 0, "dantesync-tray.service": 4545,
+        "companion-satellite.service": 4444, "strih-satellite-watch.service": 0, "dsync-tray.service": 4545,
         "strih-display-watch.service": 4646}
 PANEL_CLASS = "bkshading-panel-app.Bkshading-panel-app"
 WIN = "0x01  0 %s  strih-snv Shading\n" % PANEL_CLASS
@@ -139,7 +139,7 @@ def fake_tray_release(tmp_path, content=b"#!/bin/sh\n# dantesync tray v1.18.0\n"
 
 
 def tray_bin(tmp_path):
-    return tmp_path / "tray" / "dantesync-tray"
+    return tmp_path / "tray" / "dsync-tray"
 
 
 def tray_record(tmp_path):
@@ -204,7 +204,7 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
         "bkshading-panel-app.service": panel_cmd or ["/usr/bin/python3", str(bindir / "bkshading_panel_app.py")],
         # Chromium rewrites the browser process title, so the Satellite's argv proves nothing: its exe does
         "companion-satellite.service": ["companion-satellite", "--rewritten-title"],
-        "dantesync-tray.service": [str(tray_path)],
+        "dsync-tray.service": [str(tray_path)],
         # issue 1424: the display watch
         "strih-display-watch.service": ["/usr/bin/python3", str(bindir / "strih_display_watch.py"),
                                         "--state-file", "/run/user/1000/strih-display-watch.json"],
@@ -213,7 +213,7 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
         (proc / str(PIDS[unit])).mkdir(parents=True)
         (proc / str(PIDS[unit]) / "cmdline").write_bytes(b"\0".join(w.encode() for w in words) + b"\0")
     os.symlink(satellite_exe or str(sat), proc / str(PIDS["companion-satellite.service"]) / "exe")
-    os.symlink(tray_exe or str(tray_path), proc / str(PIDS["dantesync-tray.service"]) / "exe")
+    os.symlink(tray_exe or str(tray_path), proc / str(PIDS["dsync-tray.service"]) / "exe")
     return home, bindir
 
 

@@ -43,8 +43,8 @@ command -v ro_window_close_cmds >/dev/null 2>&1 \
 # The first dantesync release that persists the master's fleet date offset (dantesync issue 126).
 DANTESYNC_DATE_STATE_FIRST_VERSION='1.15.0'
 # Where it lives: dantesync src/main.rs DATE_STATE_PATH, per OS.
-DANTESYNC_LINUX_DATE_STATE='/etc/dantesync/date-offset.json'
-DANTESYNC_WIN_DATE_STATE='C:\ProgramData\DanteSync\date-offset.json'
+DANTESYNC_LINUX_DATE_STATE='/etc/dsync/date-offset.json'
+DANTESYNC_WIN_DATE_STATE='C:\ProgramData\dsync\date-offset.json'
 
 # dantesync_rollback_clears_date_state ROLE RESTORED_VERSION -> 0 iff the rollback must delete the
 # persisted date state: ROLE is the fleet's `ntp-master` (the date master, the dantesync-fleet.sh
@@ -85,8 +85,8 @@ _dantesync_remount_ro() {
   _ds_rw_open=0
 EOF
   ro_window_close_cmds "issue 1407" "\$(hostname 2>/dev/null || echo this node)" \
-    "No dantesync start runs on a writable root; dantesync is '\$(systemctl show -p ActiveState --value dantesync 2>/dev/null || true)' now." \
-    "stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then start dantesync there by hand if it is not running."
+    "No dsync start runs on a writable root; dsync is '\$(systemctl show -p ActiveState --value dsync 2>/dev/null || true)' now." \
+    "stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then start dsync there by hand if it is not running."
   cat <<'EOF'
 }
 _dantesync_reopen_rw() {
@@ -161,7 +161,11 @@ EOF
 dantesync_linux_rollback_cmd() {
   cat <<EOF
 set -e
-if [ ! -f "$DANTESYNC_LINUX_BAK" ]; then
+# issue 1487: dantesync.service still here = the swap to dsync is not finalized: the way back is the
+# reverse swap.
+_ds_legacy=0
+if [ -f "$DSYNC_LEGACY_LINUX_UNIT" ]; then _ds_legacy=1; fi
+if [ "\$_ds_legacy" = 0 ] && [ ! -f "$DANTESYNC_LINUX_BAK" ]; then
   echo "no $DANTESYNC_LINUX_BAK to roll back to" >&2
   exit 1
 fi
@@ -170,14 +174,24 @@ fi
 # #1077 defect (3): the root mode is the real mount state (findmnt, /proc/mounts fallback).
 $(_dantesync_linux_rw_window_sh)
 trap '_dantesync_remount_ro' EXIT
-systemctl stop dantesync
-cp -a "$DANTESYNC_LINUX_BAK" $DANTESYNC_LINUX_BIN
+systemctl stop dsync
+if [ "\$_ds_legacy" = 1 ]; then
+$(dsync_linux_swap_back_sh | sed 's/^/  /')
+else
+  cp -a "$DANTESYNC_LINUX_BAK" $DANTESYNC_LINUX_BIN
+fi
 EOF
   _dantesync_linux_date_state_rm_sh "${1:-}" "${2:-}"
   cat <<EOF
 _dantesync_remount_ro
-systemctl restart dantesync
-dantesync --version
+if [ "\$_ds_legacy" = 1 ]; then
+  systemctl daemon-reload
+  systemctl restart dantesync
+  "$DSYNC_LEGACY_LINUX_BIN" --version || true
+  exit 0
+fi
+systemctl restart dsync
+dsync --version
 EOF
 }
 
@@ -190,14 +204,23 @@ dantesync_windows_rollback_ps() {
 \$ErrorActionPreference = 'Stop'
 \$exe = '$DANTESYNC_WIN_EXE'
 \$bak = '$DANTESYNC_WIN_BAK'
-if (-not (Test-Path \$bak)) { throw 'no dantesync.exe.bak to roll back to' }
-Stop-Service dantesync
+$(dsync_windows_swap_back_fn_ps)
+# issue 1487: the dantesync service still here = the swap is not finalized: the way back is the reverse swap.
+\$dsLegacy = [bool](Get-Service -Name dantesync -ErrorAction SilentlyContinue)
+if (-not \$dsLegacy -and -not (Test-Path \$bak)) { throw 'no dsync.exe.bak to roll back to' }
+Stop-Service dsync
 $(dantesync_windows_wait_service_exit_ps)
+if (\$dsLegacy) {
+    Invoke-DsyncSwapBack
+    Start-Service dantesync
+    & '$DSYNC_LEGACY_WIN_EXE' --version
+    exit 0
+}
 Copy-Item -Force \$bak \$exe
 EOF
   _dantesync_windows_date_state_rm_ps "${1:-}" "${2:-}"
   cat <<EOF
-Start-Service dantesync
+Start-Service dsync
 & \$exe --version
 EOF
 }

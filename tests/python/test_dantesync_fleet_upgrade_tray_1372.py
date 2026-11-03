@@ -1,7 +1,7 @@
 """Issue 1372 part a -- a dantesync fleet roll carries the TRAY too.
 
 WHY: `scripts/dantesync-fleet-upgrade.sh` swapped only the dantesync SERVICE binary on a Windows
-node. `dantesync-tray.exe` -- the version the operator actually sees -- stayed behind on every
+node. `dsync-tray.exe` -- the version the operator actually sees -- stayed behind on every
 roll, and the version gate's tray sha-pin ALARMed until someone swapped it by hand (after both the
 1.11.0 and the 1.11.1 rolls on 26.9.2026, issue comment 5847559578).
 
@@ -31,6 +31,12 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from dantesync_upgrade_harness_1372 import _ROOT, _TARGET, _UPGRADE, _at, _roll, _source  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _every_node_rolled(monkeypatch):
+    """issue 1487: these tests use mbc / fohabl as their rolled nodes."""
+    monkeypatch.setenv("DSYNC_SELF_UPGRADED_NODES", "")
+
+
 
 @pytest.fixture()
 def ps(tmp_path):
@@ -41,13 +47,13 @@ def ps(tmp_path):
 
 def test_tray_release_url_is_the_pinned_tag_asset(tmp_path):
     r = _source(tmp_path, "dantesync_release_url_windows_tray 1.11.1")
-    assert r.stdout.strip() == ("https://github.com/zbynekdrlik/dantesync/releases/download/"
-                                "v1.11.1/dantesync-tray-windows-amd64.exe")
+    assert r.stdout.strip() == ("https://github.com/zbynekdrlik/dsync/releases/download/"
+                                "v1.11.1/dsync-tray-windows-amd64.exe")
 
 
 def test_the_tray_is_fetched_and_verified_before_anything_is_stopped(ps):
-    stop = _at(ps, "Stop-Service dantesync")
-    url = _at(ps, "releases/download/v1.11.1/dantesync-tray-windows-amd64.exe")
+    stop = _at(ps, "Stop-Service dsync")
+    url = _at(ps, "releases/download/v1.11.1/dsync-tray-windows-amd64.exe")
     sha = _at(ps, "(Get-FileHash -Algorithm SHA256 $trayTmp).Hash")
     assert url < stop and sha < stop, ps
     assert _at(ps, "'.sha256'", url) < stop
@@ -58,7 +64,7 @@ def test_the_tray_is_fetched_and_verified_before_anything_is_stopped(ps):
 def test_a_failed_tray_fetch_is_a_warning_never_an_abort(ps):
     """The fetch sits in its own try/catch that records a warning -- it must not throw, or the
     service upgrade (which follows) would be skipped for a UI binary."""
-    stop = _at(ps, "Stop-Service dantesync")
+    stop = _at(ps, "Stop-Service dsync")
     start = _at(ps, "$trayUrl = ")
     # the fetch block ends where the service backup begins (the service's own self-heal comment,
     # which says "rethrow", follows it and is not part of the tray fetch)
@@ -70,19 +76,19 @@ def test_a_failed_tray_fetch_is_a_warning_never_an_abort(ps):
 
 
 def test_the_tray_swap_runs_after_the_service_is_back(ps):
-    service_start = _at(ps, "    Start-Service dantesync\n} catch {")
+    service_start = _at(ps, "    Start-Service dsync\n} catch {")
     service_catch_end = _at(ps, "    throw\n}", service_start)
     tray_stop = _at(ps, "Stop-Process -Force", service_catch_end)
-    assert "-Name dantesync-tray" in ps[tray_stop - 120:tray_stop], ps[tray_stop - 120:tray_stop]
+    assert "-Name dsync-tray" in ps[tray_stop - 120:tray_stop], ps[tray_stop - 120:tray_stop]
     assert tray_stop > service_catch_end
 
 
 def test_the_tray_is_backed_up_replaced_and_its_installed_sha_verified(ps):
     swap = ps[_at(ps, "# 5. the tray"):]
-    assert "$trayPre = 'C:\\Program Files\\DanteSync\\dantesync-tray.exe.pre-1.11.1'" in ps
+    assert "$trayPre = 'C:\\Program Files\\dsync\\dsync-tray.exe.pre-1.11.1'" in ps
     backup = _at(swap, "Copy-Item -Force $trayExe $trayPre")
     # review round 1: a re-run on the same target never overwrites the original pre-roll backup
-    assert _at(swap, "if (-not (Test-Path $trayPre)) {") < backup
+    assert _at(swap, "if (-not $trayFirst -and -not (Test-Path $trayPre)) {") < backup
     replace = _at(swap, "Copy-Item -Force $trayTmp $trayExe")
     verify = _at(swap, "(Get-FileHash -Algorithm SHA256 $trayExe).Hash")
     assert backup < replace < verify, swap
@@ -130,7 +136,7 @@ def test_a_current_tray_that_is_not_running_is_relaunched(ps):
     swap_start = _at(ps, "# 5. the tray")
     relaunch = _at(ps, "# 6. relaunch the tray", swap_start)
     swap = ps[swap_start:relaunch]
-    running = _at(swap, "$trayRunning = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue "
+    running = _at(swap, "$trayRunning = @(Get-Process -Name dsync-tray -ErrorAction SilentlyContinue "
                         "| Where-Object { $_.SessionId -ge 1 })")
     assert running < _at(swap, "$trayLaunch = $true", running)
     assert _at(ps, "if ($trayStopped -or $trayLaunch) {", relaunch) < _at(ps, "Register-ScheduledTask", relaunch)
@@ -142,7 +148,7 @@ def test_the_one_tray_check_is_read_after_the_task_is_unregistered(ps):
     """Review round 2: the count proves the tray outlives the task deletion."""
     relaunch = ps[_at(ps, "# 6. relaunch the tray"):]
     unregister = _at(relaunch, "Unregister-ScheduledTask -TaskName $trayTask")
-    reread = _at(relaunch, "$trayProcs = @(Get-Process -Name dantesync-tray", unregister)
+    reread = _at(relaunch, "$trayProcs = @(Get-Process -Name dsync-tray", unregister)
     assert reread < _at(relaunch, "$trayProcs.Count -ne 1", unregister)
 
 
@@ -170,18 +176,18 @@ def _swap(ps):
 
 def test_the_killed_tray_is_waited_on_by_its_pids_never_by_name(ps):
     swap = _swap(ps)
-    assert "Wait-Process -Name dantesync-tray" not in ps, "a wait by NAME also waits for a relaunched tray"
-    capture = _at(swap, "$trayKilled = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)")
+    assert "Wait-Process -Name dsync-tray" not in ps, "a wait by NAME also waits for a relaunched tray"
+    capture = _at(swap, "$trayKilled = @(Get-Process -Name dsync-tray, dantesync-tray -ErrorAction SilentlyContinue)")
     kill = _at(swap, "$trayKilled | Stop-Process -Force", capture)
     pids = _at(swap, "$trayPids = @($trayKilled | ForEach-Object { $_.Id })", kill)
     wait = _at(swap, "Wait-Process -Id $trayPids -Timeout 15", pids)
-    # race-fix review round 1: a reused PID is not the tray -- only a still-alive dantesync-tray counts
+    # race-fix review round 1: a reused PID is not the tray -- only a still-alive dsync-tray counts
     check = _at(swap, "@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue | Where-Object "
-                      "{ $_.ProcessName -eq 'dantesync-tray' }).Count -gt 0", wait)
-    assert "did not exit" in swap[check:check + 200], swap[check:check + 200]
+                      "{ @('dsync-tray', 'dantesync-tray') -contains $_.ProcessName }).Count -gt 0", wait)
+    assert "did not exit" in swap[check:check + 260], swap[check:check + 260]
     # nothing between the wait and the backup re-reads the tray by name and throws on it
     backup = _at(swap, "Copy-Item -Force $trayExe $trayPre", check)
-    assert "throw" not in swap[check + 200:backup], swap[check:backup]
+    assert "throw" not in swap[check + 260:backup], swap[check:backup]
 
 
 def test_a_relaunched_tray_is_killed_again_right_before_the_replace(ps):
@@ -191,7 +197,7 @@ def test_a_relaunched_tray_is_killed_again_right_before_the_replace(ps):
     loop = _at(swap, "for ($trayTry = 1; $trayTry -le 3; $trayTry++) {", backup)
     replace = _at(swap, "Copy-Item -Force $trayTmp $trayExe", loop)
     body = swap[loop:replace]
-    assert "$trayFresh = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)" in body
+    assert "$trayFresh = @(Get-Process -Name dsync-tray, dantesync-tray -ErrorAction SilentlyContinue)" in body
     assert "if ($trayFresh.Count -eq 0) { break }" in body
     assert "$trayRespawnedBy += (Get-TrayParent $trayP.Id)" in body, "who relaunched it is recorded"
     assert "$trayFresh | Stop-Process -Force" in body
@@ -287,7 +293,7 @@ def test_the_relaunch_never_starts_a_second_tray(ps):
     """A tray relaunched meanwhile (by the scheduler or the Run entry) is kept; starting another
     would leave two and fail the one-tray check."""
     relaunch = ps[_at(ps, "# 6. relaunch the tray"):]
-    running = _at(relaunch, "$trayProcs = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue "
+    running = _at(relaunch, "$trayProcs = @(Get-Process -Name dsync-tray -ErrorAction SilentlyContinue "
                             "| Where-Object { $_.SessionId -ge 1 })")
     guard = _at(relaunch, "if ($trayProcs.Count -eq 0) {", running)
     assert running < guard < _at(relaunch, "Register-ScheduledTask"), relaunch[:800]
@@ -335,13 +341,13 @@ def test_a_tray_failure_never_throws_out_of_the_program(ps):
 def test_the_service_self_heal_and_the_dead_task_purge_are_unchanged(ps):
     assert ps.find("Copy-Item -Force $exe $bak") < ps.find("Copy-Item -Force $tmp $exe")
     assert "try { Copy-Item -Force $bak $exe } catch {" in ps
-    assert "try { Start-Service dantesync } catch {" in ps
+    assert "try { Start-Service dsync } catch {" in ps
     assert 'cmd /c "schtasks /Delete /TN \\"DanteSyncUpdate\\" /F >nul 2>&1"' in ps
 
 
 @pytest.mark.parametrize("out,want", [
-    ("TRAY OK: dantesync-tray.exe sha256 AB running in session 1\ndantesync 1.11.1\n",
-     "OK dantesync-tray.exe sha256 AB running in session 1"),
+    ("TRAY OK: dsync-tray.exe sha256 AB running in session 1\ndantesync 1.11.1\n",
+     "OK dsync-tray.exe sha256 AB running in session 1"),
     ("TRAY OK: first\nTRAY-WARNING: later\n", "WARNING later"),
     ("TRAY-WARNING: tray not fetched: 404\ndantesync 1.11.1\n", "WARNING tray not fetched: 404"),
     ("dantesync 1.11.1\n", "WARNING no tray report in the upgrade output"),
@@ -356,7 +362,7 @@ def test_tray_outcome_is_read_from_the_program_output(tmp_path, out, want):
 def test_help_documents_the_tray_arm(tmp_path):
     r = subprocess.run(["bash", str(_UPGRADE), "--help"], capture_output=True, text=True)
     assert r.returncode == 0
-    assert "dantesync-tray" in r.stdout and "WARNING" in r.stdout
+    assert "dsync-tray" in r.stdout and "WARNING" in r.stdout
     assert "Exit codes" in r.stdout
 
 
@@ -374,9 +380,9 @@ def test_the_tray_only_program_fetches_and_swaps_without_touching_the_service(tm
     r = _source(tmp_path, "dantesync_windows_tray_only_ps 1.11.1")
     prog = r.stdout
     assert prog.startswith("$ErrorActionPreference = 'Stop'"), prog[:80]
-    assert "v1.11.1/dantesync-tray-windows-amd64.exe" in prog
+    assert "v1.11.1/dsync-tray-windows-amd64.exe" in prog
     assert "# 5. the tray" in prog and "# 6. relaunch the tray" in prog and "TRAY-WARNING:" in prog
-    for service in ("Stop-Service", "Start-Service", "dantesync-windows-amd64.exe", "--version"):
+    for service in ("Stop-Service", "Start-Service", "dsync-windows-amd64.exe", "--version"):
         assert service not in prog, service
 
 
@@ -404,17 +410,17 @@ def test_roll_reports_a_tray_warning_by_name_and_keeps_the_service(tmp_path):
     assert r.returncode == 0, out
     assert "rolled back" not in out and "ROLLBACK" not in out
     assert "[stream] verified" in out
-    assert re.search(r"WARNING: dantesync-tray was NOT refreshed on 1 node", out), out
+    assert re.search(r"WARNING: dsync-tray was NOT refreshed on 1 node", out), out
     assert "stream: tray not fetched: The remote server returned an error: (404)" in out
     assert "tray-windows-amd64.exe" in (tmp_path / "uploaded.ps1").read_text()
 
 
 def test_roll_with_a_refreshed_tray_prints_no_warning(tmp_path):
-    r = _roll(tmp_path, "TRAY OK: dantesync-tray.exe sha256 3C37CB51A064 running in session 1\n"
+    r = _roll(tmp_path, "TRAY OK: dsync-tray.exe sha256 3C37CB51A064 running in session 1\n"
                         f"dantesync {_TARGET}\n")
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
-    assert "[stream] tray OK: dantesync-tray.exe sha256 3C37CB51A064 running in session 1" in out
+    assert "[stream] tray OK: dsync-tray.exe sha256 3C37CB51A064 running in session 1" in out
     assert "NOT refreshed" not in out
 
 
@@ -425,20 +431,20 @@ def test_roll_reports_tray_warnings_on_the_canary_abort_too(tmp_path):
               flip=False)
     out = r.stdout + r.stderr
     assert r.returncode == 10, out
-    assert "WARNING: dantesync-tray was NOT refreshed on 1 node" in out, out
+    assert "WARNING: dsync-tray was NOT refreshed on 1 node" in out, out
     assert "stream: tray: expected one tray process" in out
 
 
 def test_roll_refreshes_the_tray_of_a_node_already_on_the_target(tmp_path):
     """Review round 1: a TRAY-WARNING on an earlier roll is repaired by simply re-running it -- a
     Windows node whose service is already on the target gets the tray-only program."""
-    r = _roll(tmp_path, "TRAY OK: dantesync-tray.exe sha256 3C37CB51A064 running in session 1\n",
+    r = _roll(tmp_path, "TRAY OK: dsync-tray.exe sha256 3C37CB51A064 running in session 1\n",
               start=_TARGET)
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
-    assert "[stream] tray OK: dantesync-tray.exe sha256 3C37CB51A064 running in session 1" in out
+    assert "[stream] tray OK: dsync-tray.exe sha256 3C37CB51A064 running in session 1" in out
     uploaded = (tmp_path / "uploaded.ps1").read_text()
-    assert "dantesync-tray-windows-amd64.exe" in uploaded and "Stop-Service" not in uploaded
+    assert "dsync-tray-windows-amd64.exe" in uploaded and "Stop-Service" not in uploaded
 
 
 def test_dry_run_names_the_tray_check_and_uploads_nothing(tmp_path):
@@ -452,14 +458,14 @@ def test_dry_run_names_the_tray_check_and_uploads_nothing(tmp_path):
 def test_roll_refreshes_the_tray_of_a_current_node_in_a_mixed_fleet(tmp_path):
     """Review round 2: after the roll, a Windows node already on the target gets the tray-only
     program too (not only on the all-current early exit)."""
-    r = _roll(tmp_path, "TRAY OK: dantesync-tray.exe sha256 3C37CB51A064 running in session 1\n",
+    r = _roll(tmp_path, "TRAY OK: dsync-tray.exe sha256 3C37CB51A064 running in session 1\n",
               win="stream=user@10.77.9.204 mbc=user@10.77.7.232",
               hosts={"10.77.9.204": ("1.11.0", True), "10.77.7.232": (_TARGET, False)})
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
     assert "[stream] verified" in out and "[mbc] tray OK:" in out, out
     tray_only = (tmp_path / "uploaded-10.77.7.232.ps1").read_text()
-    assert "dantesync-tray-windows-amd64.exe" in tray_only and "Stop-Service" not in tray_only
+    assert "dsync-tray-windows-amd64.exe" in tray_only and "Stop-Service" not in tray_only
     assert "Stop-Service" in (tmp_path / "uploaded-10.77.9.204.ps1").read_text()
 
 
@@ -473,7 +479,7 @@ def test_roll_names_a_relaunching_tray_and_keeps_the_service(tmp_path):
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
     assert "[stream] verified" in out and "rolled back" not in out
-    assert "WARNING: dantesync-tray was NOT refreshed on 1 node" in out, out
+    assert "WARNING: dsync-tray was NOT refreshed on 1 node" in out, out
     assert f"stream: a tray keeps relaunching: {parent}" in out, out
 
 
@@ -482,10 +488,10 @@ def test_roll_reports_a_tray_that_was_killed_once_before_the_swap(tmp_path):
     roll prints it as OK with no warning. Like every roll case here, this tests how the outcome line
     is read; the emitted PowerShell itself is run against stubbed cmdlets by
     tests/pwsh/run_dantesync_tray_swap_1372.sh (needs pwsh, not on dev1)."""
-    ok = ("TRAY OK: dantesync-tray.exe sha256 93748C27 running in session 1 (killed a relaunched tray "
+    ok = ("TRAY OK: dsync-tray.exe sha256 93748C27 running in session 1 (killed a relaunched tray "
           "before the swap, started by: svchost.exe (C:\\Windows\\system32\\svchost.exe -k netsvcs -p -s Schedule))")
     r = _roll(tmp_path, f"{ok}\ndantesync {_TARGET}\n")
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
-    assert "[stream] tray OK: dantesync-tray.exe sha256 93748C27 running in session 1 (killed a relaunched" in out
+    assert "[stream] tray OK: dsync-tray.exe sha256 93748C27 running in session 1 (killed a relaunched" in out
     assert "NOT refreshed" not in out

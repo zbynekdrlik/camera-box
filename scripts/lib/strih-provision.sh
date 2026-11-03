@@ -735,7 +735,7 @@ strih_lx_single_timesync_authority_ok() {
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      *dantesync*) has_dante=1 ;;
+      *dsync*) has_dante=1 ;;
       *timesyncd*|*chrony*|*ntpd*|*ntpsec*|*ptp4l*) competitor=1 ;;
     esac
   done
@@ -1041,7 +1041,7 @@ strih_install_bundle_prefix() {
 # Post-M4 (20.9.2026) the strih notebook IS the fleet's ONE NTP master (`strih.lan` -> 10.77.9.202),
 # so the unit now carries a ROLE: `server` (the M4 default) renders the bare NTP-master daemon; the
 # historical `client` role (the dead parallel-run shape) renders `--ntp-server <host>`. setup-strih.sh
-# step 2 installs the unit + removes any stale `dantesync.service.d/*.conf` drop-in (the live box had a
+# step 2 installs the unit + removes any stale `dsync.service.d/*.conf` drop-in (the live box had a
 # hand `10-ntp-master.conf` overriding the client ExecStart -- now folded INTO the unit); verify-strih
 # asserts the unit is active, a fresh offset, and (server) an NTP :123 listener. These pure helpers are
 # unit-tested in tests/strih_provision_pure_functions.rs.
@@ -1049,8 +1049,8 @@ strih_install_bundle_prefix() {
 # strih_dantesync_unit_text ROLE [ARGS] -> print the systemd unit text for the strih-snv dantesync
 # daemon (the EXACT cambox unit shape: Type=simple, Restart=always, RestartSec=5,
 # WantedBy=multi-user.target). ROLE is `server` (NTP master, the M4 default -- ExecStart is the BARE
-# `/usr/local/bin/dantesync`, folding the live 10-ntp-master.conf drop-in into the unit) or `client`
-# (ExecStart `/usr/local/bin/dantesync <ARGS>`, ARGS defaulting to the client args). `--service` is
+# `/usr/local/bin/dsync`, folding the live 10-ntp-master.conf drop-in into the unit) or `client`
+# (ExecStart `/usr/local/bin/dsync <ARGS>`, ARGS defaulting to the client args). `--service` is
 # NOT an installer flag -- it is a run mode, so it never appears here. Fail-closed via
 # strih_lx_dantesync_role_ok: an ambiguous shape (server WITH args, client with master/empty args, an
 # unknown role) emits NOTHING and returns 1 -- but a plain server role is CORRECT and NEVER refused
@@ -1084,13 +1084,13 @@ strih_dantesync_unit_text() {
   esac
   cat <<EOF
 [Unit]
-Description=Dante Time Sync (PTP/NTP Synchronization)
+Description=dsync (PTP/NTP Synchronization)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-${waitpre}ExecStart=/usr/local/bin/dantesync${execargs}
+${waitpre}ExecStart=/usr/local/bin/dsync${execargs}
 Restart=always
 RestartSec=5
 StandardOutput=journal

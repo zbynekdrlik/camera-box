@@ -300,7 +300,7 @@ each program-switch WINDOW boundary on dev1's CLOCK_REALTIME, while `recording-v
 1 s), frames near every boundary are mis-attributed to the WRONG cambox window (silent #312 false
 FAIL / false PASS). `scripts/clock-offset-painter-gate.sh` (invoked by recording-e2e.sh in the
 `ALL_CAMBOX=1` path, after the DanteSync/version gates, before the sweep) reads dev1's local
-`journalctl -u dantesync` + the painter's over SSH, computes `|dev1 - painter|` (both DanteSync
+`journalctl -u dsync` + the painter's over SSH, computes `|dev1 - painter|` (both DanteSync
 offsets on the shared strih basis), and FAILS FAST (exit 20) if it exceeds the guard (default
 200 ms = 1/5 of the 1 s switch-guard). Bypass with `SKIP_CLOCK_OFFSET_ASSERT=1` (on by default).
 The pure comparator (`painter_offset_check`) lives in `clock-offset-guard.sh` and is unit-tested

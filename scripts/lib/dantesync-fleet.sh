@@ -116,6 +116,11 @@ stream-pp|obs:stream-pp|linux|video-pp|reach|-|
 resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|
 alex-nb|10.77.7.109|windows|audio|reach|alexnb|}"
 
+# issue 1487: the nodes dsync upgrades itself (its own release flow since the handover to the dsync
+# project). They stay rows of the table, so the clock watchdog and the config drift check keep
+# grading them on :8898, but the fleet upgrader never rolls them and the version gate never pins them.
+DSYNC_SELF_UPGRADED_NODES="${DSYNC_SELF_UPGRADED_NODES-companion-snv mbc fohabl iem-snv alex-nb}"
+
 # The audio-VLAN PTP grandmaster: an Audinate device, locked to the same clock as the video
 # grandmaster video-clock.lan (#1367 comment 5832526338). Since 25.9.2026 ~21:07 the leader is
 # 10.77.7.104 (MAC 00:1d:c1:08:02:14/15); the earlier leader 10.77.7.106 (00:1d:c1:1a:44:30) is
@@ -141,9 +146,15 @@ DANTESYNC_FLEET_CRED_FILE="${DANTESYNC_FLEET_CRED_FILE:-$HOME/.config/camera-box
 
 # The config.json path per OS (the drift check reads it; nothing here ever writes it).
 # shellcheck disable=SC2034  # consumed cross-file by scripts/dantesync-config-drift.sh
-DANTESYNC_FLEET_CONFIG_LINUX="/etc/dantesync/config.json"
+DANTESYNC_FLEET_CONFIG_LINUX="/etc/dsync/config.json"
 # shellcheck disable=SC2034  # consumed cross-file by scripts/dantesync-config-drift.sh
-DANTESYNC_FLEET_CONFIG_WINDOWS='C:\ProgramData\DanteSync\config.json'
+DANTESYNC_FLEET_CONFIG_WINDOWS='C:\ProgramData\dsync\config.json'
+# issue 1487: a node dsync upgrades itself keeps the pre-1.25 state dir IN PLACE until someone renames
+# it, so the drift check falls back to these.
+# shellcheck disable=SC2034  # consumed cross-file by scripts/dantesync-config-drift.sh
+DANTESYNC_FLEET_CONFIG_LINUX_LEGACY="/etc/dantesync/config.json"
+# shellcheck disable=SC2034  # consumed cross-file by scripts/dantesync-config-drift.sh
+DANTESYNC_FLEET_CONFIG_WINDOWS_LEGACY='C:\ProgramData\DanteSync\config.json'
 
 # A bound on the camera_resolve walk (a guard against a runaway loop, not a roster).
 DANTESYNC_FLEET_CAMERA_MAX=99
@@ -417,6 +428,11 @@ dantesync_fleet_present() {
       ;;
   esac
   return 0
+}
+
+# dantesync_fleet_self_upgraded NAME -> 0 iff dsync upgrades NAME itself (issue 1487).
+dantesync_fleet_self_upgraded() {
+  case " $DSYNC_SELF_UPGRADED_NODES " in *" ${1:-} "*) [ -n "${1:-}" ] ;; *) return 1 ;; esac
 }
 
 # dantesync_fleet_spec <linux|win|local> <default-user> [--present] -> the node spec for ONE arm of
