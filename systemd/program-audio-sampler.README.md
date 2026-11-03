@@ -1,6 +1,6 @@
 # program-audio-sampler — install note (issue 1404)
 
-The YouTube channel guard. The sampler runs on **strih-snv** as the operator's E-core `--user` unit
+The YouTube channel guard. The sampler runs on **strih-snv** as the operator's `--user` unit, off the OBS cores and the reserved Dante CPU (issue 1485: the E-cores, else the background set, 0-1 on the AMD strih-snv),
 `program-audio-sampler.service`, rendered from the template `program-audio-sampler.strih-snv.service`:
 - setup-strih step 16e installs it (enable-only);
 - verify-strih item 41 grades it;
@@ -107,7 +107,7 @@ lease reads `held=false` (`curl -s http://dev1:8890/rig-lease.json`).
 # 1. provision: setup-strih (the genlock deploy runs it, or by hand on the box) -- step 16e logs
 #    "installing python3-numpy" (first time), "installed the sampler files -> /usr/local/lib/camera-box",
 #    "decoder shim missing: building it as newlevel", "program-audio-sampler.service written
-#    (CPUAffinity=12-15; normal priority)", "enabled ... (NOT started here ...)". Step 17 (verify-strih)
+#    (CPUAffinity=0-1: the E-cores, else the background set ...; normal priority)", "enabled ... (NOT started here ...)". Step 17 (verify-strih)
 #    then shows item 41: two PASS rows + "NOTE (program-audio-endpoint) down: not in TEST mode ...".
 #    A redeploy rebuilds the shim when its sources changed and try-restarts a running sampler.
 sudo GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh --box strih-snv --yes
@@ -119,10 +119,10 @@ ssh newlevel@10.77.9.202 'mkdir -p ~/.config/camera-box && touch ~/.config/camer
 # 3. verify on strih-snv (as newlevel)
 journalctl --user -u program-audio-sampler -n 12 --no-pager
 #   "marker decoder /home/newlevel/.local/lib/camera-box/libqpsk-guard-shim.so ... " with NO WARNING about the sources
-#   "scheduling nice=0 cpus=12-15 cpu.weight=..." (the E-cores, no WARNING)
+#   "scheduling nice=0 cpus=0-1 cpu.weight=..." (the background set on strih-snv, no WARNING)
 #   "serving http://0.0.0.0:8891/program-audio.json from /run/user/<uid>/program-audio-sampler"
 #   the start line ends "capture=thread"; within ~5 s "verdict UNKNOWN -> MEASUREMENT ... marker_chain=6..8"
-grep Cpus_allowed_list /proc/$(systemctl --user show -p MainPID --value program-audio-sampler.service)/status  # 12-15
+grep Cpus_allowed_list /proc/$(systemctl --user show -p MainPID --value program-audio-sampler.service)/status  # 0-1 (never the reserved Dante CPU 15)
 # from dev1:
 curl -s http://10.77.9.202:8891/program-audio.json; echo        # verdict MEASUREMENT, "queue_drops": 0, "lag_ms" tens of ms
 python3 ~/devel/camera-box/scripts/program_audio_guard.py       # (default URL = strih-snv) exit 0

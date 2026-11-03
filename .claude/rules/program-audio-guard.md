@@ -804,9 +804,18 @@ shim + numpy next to restreamer's broadcast encoder).
   `test_the_dev1_server_no_longer_serves_program_audio`, `test_the_default_serve_dir_is_the_samplers_own`.
 - **The unit** `systemd/program-audio-sampler.strih-snv.service` (a TEMPLATE) is installed as the
   operator's `--user` `program-audio-sampler.service`:
-  - `CPUAffinity=` = the box's own `/sys/devices/cpu_atom/cpus` (12-15 on strih-snv), read the way
-    `strih_lx_lowprio_prefix` reads it (whitespace stripped; a value that is not a cpu list = no pin;
-    no cpu_atom = no affinity line). Normal priority (no Nice/CPUWeight: never ahead of OBS).
+  - `CPUAffinity=` = `strih_program_audio_cpus` (issue 1485), never every CPU and never empty:
+    - a hybrid box: its own `/sys/devices/cpu_atom/cpus`, read the way `strih_lx_lowprio_prefix`
+      reads it, minus the reserved Dante CPU (`/etc/strih-dante-rx-cpu.conf` `reserved=`);
+    - no cpu_atom (the AMD strih-snv), or E-cores that are only the reserved CPU: the BACKGROUND set,
+      `obs_box_background_cpus` = online minus `/etc/strih-isolated-cpus.conf` (the
+      `rig-background.slice` set; strih-snv 0-1), minus the reserved CPU;
+    - neither derivable (no OBS mask yet): step 16e FAILS by name and item 41 reads `unit=no-cpu-set`.
+    - Why: the old rule dropped the line when cpu_atom was absent, so on strih-snv the sampler (with
+      the CG receivers + correlation, ~11-20 % CPU) ran on 0-15. On CPU 15 it cost the dstack engine
+      a rebootstrap in every 10-15 min window; moved live to 0-1 a 15.5-min window was clean (A/B
+      3.11.2026, `strih-dante-input.md`).
+    - Normal priority (no Nice/CPUWeight: never ahead of OBS).
   - `ExecCondition=/usr/bin/test -e %h/.config/camera-box/program-audio-sampler.test-mode`: an OPT-IN
     TEST marker (review round 3). Without it every start is skipped, so the sampler is DOWN by default:
     a fresh provisioning, and a reboot during a production (strih-snv lingers the user manager,

@@ -5,7 +5,8 @@
 # FOREIGN / SILENT / UNKNOWN; serves the verdict itself at http://<strih-snv>:8891/program-audio.json
 # (scripts/program_audio_http.py), read by scripts/program_audio_guard.py (the YouTube channel guard).
 # This is a TEMPLATE: setup-strih.sh step 16e (scripts/lib/strih-program-audio.sh) fills the
-# CPUAffinity= line in from the box's own /sys/devices/cpu_atom/cpus (no line on a non-hybrid box) and
+# CPUAffinity= line in (strih_program_audio_cpus: the E-cores, else the box's background set, never the
+# reserved Dante CPU, issue 1485) and
 # installs it as ~/.config/systemd/user/program-audio-sampler.service, enable-only. rig-mode.sh test
 # starts it, rig-mode.sh event stops it (scripts/lib/program-audio-mode.sh); verify-strih.sh grades it.
 Description=strih-snv stream program-audio sampler (issue 1404) -- NDI audio-only -> :8891/program-audio.json
@@ -34,8 +35,10 @@ RestartSec=10
 # under load (issue 1404); the sampler's own numpy work never needs them.
 Environment=OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 EnvironmentFile=-%h/.config/camera-box/program-audio-sampler.env
-# The E-cores only (strih-snv: 12-15), off the P-cores OBS runs on; normal priority (no Nice, no
-# CPUWeight): the sampler must never be ahead of OBS on this production box.
+# Off the OBS cores: the E-cores of a hybrid box, else the background set (online minus
+# /etc/strih-isolated-cpus.conf; the AMD strih-snv has no cpu_atom: 0-1), never the reserved Dante CPU
+# (issue 1485: the sampler on CPU 15 cost the dstack engine a rebootstrap every window); normal priority
+# (no Nice, no CPUWeight): the sampler must never be ahead of OBS on this production box.
 CPUAffinity=@E_CORES@
 NoNewPrivileges=yes
 StandardOutput=journal

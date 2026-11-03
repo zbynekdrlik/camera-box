@@ -74,8 +74,32 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     from its caller); its tests rewrite its `PATH=` / `PROC=` / `BUDGET_S=` / `CONF=` lines.
   - **Every OBS start:** the launcher runs it in the background right after the launch (`sudo -n`), so an
     OBS restart by the unit re-pins. A failure is a WARN in `/tmp/strih-obs-start.log`, never fatal.
-  - **Not exclusive:** other processes (dantesync, the hub, kernel threads) may still run on CPU 15; only
-    OBS is kept off it. A thread the two create later inherits their mask and nice.
+  - **Exclusive since the A/B of 3.11.2026 (`scripts/lib/strih-dante-reserved-cpu.sh`).** The rx pin
+    alone kept only OBS's MAIN mask off CPU 15: PID 1 and everything it forked had 0-15 (bkshading, the
+    hub, Xorg, dsync, the session apps), and the program-audio sampler on 0-15 cost the engine a
+    rebootstrap in every 10-15 min window (moved live to 0-1: a 15.5-min window clean). Now:
+    - **ONE manager-level default, a Dante box only:** step 13 (`strih_dante_reserved_cpu_install`,
+      right after the rx pin) writes `/etc/systemd/system.conf.d/` AND `/etc/systemd/user.conf.d/`
+      `50-strih-dante-reserved-cpu.conf` = `[Manager] CPUAffinity=<online minus reserved>` (0-14), so
+      every unit and every forked process of both managers starts off CPU 15, units we do not own
+      included (the camboxes' `cambox-housekeeping-cpus.sh` precedent, plus the user manager). Rejected: a per-unit `CPUAffinity=` drop-in (every new unit must remember it, foreign
+      units stay on 15) and a cpuset `AllowedCPUs=` (a cpuset BOUNDS sched_setaffinity, so the helper
+      could no longer put the dstack threads there).
+    - **Affinity, not a bound:** `sched_setaffinity` is limited by the cgroup cpuset and the online CPUs
+      only, never by a parent's or the manager's mask, so the helper's `taskset -p -c 15` still works
+      (pinned by a test that widens a narrowed mask) and OBS's `taskset -c 2-14` is a subset.
+    - **It applies when a manager starts (the next boot).** Setup never daemon-reexecs and never moves a
+      live process; after a deploy the supervisor reboots or moves the running ones (`taskset -a -p -c
+      0-14 <pid>`).
+    - **The sampler is placed off it too** (`strih_program_audio_cpus`, `program-audio-guard.md`).
+    - **verify item 9's `(program-dante) reserved-cpu` rows** (`strih_dante_reserved_cpu_grade`, before
+      the rx-pin rows): the two drop-ins byte-identical to the render, and a /proc scan (bash builtins,
+      no fork per task) that FAILs every task allowed on the reserved CPU except OBS's two dstack threads
+      and kernel threads (PF_KTHREAD), named by comm with a count (first 8, then `(+N more)`). Another
+      process's own `dstack-*` threads (the hub's) are offenders. A box provisioned before this FAILs
+      the second row until it reboots.
+    - Another box: step 13 removes our two drop-ins (header-checked), never a foreign file.
+    - A thread the two dstack threads create later inherits their mask and nice.
   - **verify item 9's `(program-dante) rx-pin` rows** (`strih_dante_rx_pin_grade`, in the lib; verify-strih
     is at its line budget): FAIL when OBS's main `Cpus_allowed_list` still holds the reserved CPU, when a
     thread is missing, runs on anything but exactly that CPU, or has nice > -10; no conf / no running OBS
