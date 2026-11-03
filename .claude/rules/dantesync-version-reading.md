@@ -10,21 +10,21 @@ paths:
 **Corrected 2026-07-30 (follow-up fix) — the ORIGINAL version of this note was factually wrong.**
 It claimed dantesync has no readable version on Windows and must be parsed from a startup log
 line. That premise was never verified live, and the resulting gate (`dantesync-version-gate.sh`)
-shipped hard-blocking every E2E run: `journalctl -u dantesync` never actually carries a version
+shipped hard-blocking every E2E run: `journalctl -u dsync` never actually carries a version
 line on Linux (cam1-4, imag-nb, dev1 all returned ""), and the strih/stream bundle-state servers
 deployed at the time never picked up the new `dantesync_version` key either — 7 of 8 boxes read
 UNKNOWN on every run. See the #862 supervisor-verification comment for the full incident.
 
-## The actual answer: `dantesync --version` answers on EVERY platform
+## The actual answer: `dsync --version` answers on EVERY platform
 
 ```
-$ dantesync --version                                    # Linux / dev1, on PATH (/usr/local/bin)
+$ dsync --version                                    # Linux / dev1, on PATH (/usr/local/bin)
 dantesync 1.8.25
-$ ssh newlevel@<strih-or-stream-ip> '"C:\Program Files\DanteSync\dantesync.exe" --version'
+$ ssh newlevel@<strih-or-stream-ip> '"C:\Program Files\dsync\dsync.exe" --version'
 dantesync 1.8.20
 ```
 
-Confirmed live 2026-07-30 across cam1, imag-nb, dev1 (bare `dantesync --version`, on PATH) and
+Confirmed live 2026-07-30 across cam1, imag-nb, dev1 (bare `dsync --version`, on PATH) and
 strih/stream (the full quoted exe path over SSH — **OpenSSH-for-Windows runs the command via
 `cmd.exe` directly; no PowerShell wrapper is needed**, unlike several OTHER Windows facets this
 repo reads via `powershell -NoProfile -Command "..."`, e.g. `bundle_state_windows.py`'s
@@ -46,14 +46,14 @@ resurrect this path from memory.
 
 ## The dantesync-TRAY is the EXCEPTION — it has NO console `--version`, pin it by sha256 (#1139)
 
-`dantesync-tray.exe` (the system-tray GUI on strih/stream) does NOT answer `--version` the way the
-daemon does — verified LIVE 2026-08-20: `"C:\Program Files\DanteSync\dantesync-tray.exe" --version`
+`dsync-tray.exe` (the system-tray GUI on strih/stream) does NOT answer `--version` the way the
+daemon does — verified LIVE 2026-08-20: `"C:\Program Files\dsync\dsync-tray.exe" --version`
 over ssh prints **nothing** (rc=0, empty), because it is a Windows GUI-subsystem app with no
 attached console when launched over ssh (session 0), so its stdout goes nowhere. `Get-Item
 ….VersionInfo.FileVersion`/`ProductVersion` is ALSO empty (a plain Rust binary carries no PE
 version resource). So neither of the daemon's two read paths works for the tray. The read path that
 DOES work: **sha256 against the release asset.** The dantesync gh release ships
-`dantesync-tray-windows-amd64.exe` + a `.sha256` sidecar asset, so pin the deployed tray's
+`dsync-tray-windows-amd64.exe` + a `.sha256` sidecar asset, so pin the deployed tray's
 `certutil -hashfile … SHA256` (a session-agnostic file read, fine over ssh) against the
 `v{PIN}` release's tray-asset sha — the #1118 `recording-verdict-on-imag.sh` sha-compare pattern,
 which needs no on-box `--version`. Implemented as a REPORT-ONLY alarm in
@@ -100,8 +100,8 @@ precondition beside this gate.
 ## The lesson: a design comment's factual premise still needs LIVE verification before shipping
 
 The original `#862` design comment stated the Windows-no-version-info premise as settled fact and
-built the whole read path on it, without ever running `dantesync --version` against a live box
-first. A one-line live check (`ssh ... dantesync --version`) would have caught both broken sources
+built the whole read path on it, without ever running `dsync --version` against a live box
+first. A one-line live check (`ssh ... dsync --version`) would have caught both broken sources
 before any code was written. When a gate's read path depends on "X can only be read this way",
 verify that claim against the real target BEFORE designing around it — especially when the
 gate is fail-closed and will hard-block real work the moment it's wrong.
@@ -121,7 +121,7 @@ below it), the same shape `upgrade-fleet-ndi.sh` uses.
 ## The `[0/8]` version-parity CALLER must ROUTE strih to the right arm by platform — the `--win` exe-path read returns nothing on a Linux strih (#1351)
 
 The gate itself is uniform, but its two read arms are NOT: `--linux "name=user@ip …"` reads
-`dantesync --version` on the bare command line (works on every Linux node); `--win "name=user@ip …"`
+`dsync --version` on the bare command line (works on every Linux node); `--win "name=user@ip …"`
 reads the Windows quoted-exe-path (`"$DANTESYNC_VERSION_GATE_WIN_EXE" --version`), which returns
 **nothing on Linux** → that node reads UNKNOWN → `GATE INCOMPLETE` → exit 11. After the M4 cut-over
 strih is the Linux notebook strih-snv (10.77.9.202), so `scripts/recording-e2e.sh`'s `[0/8]`

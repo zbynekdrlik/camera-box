@@ -32,7 +32,7 @@ stream  DRIFT    (offset -21354 us, ...)
 
 The GM was reachable from every node the whole time. The real state:
 
-- **cam2** — `journalctl -u dantesync | grep -ci ptp` over the last 3000 lines returned **0**: the
+- **cam2** — `journalctl -u dsync | grep -ci ptp` over the last 3000 lines returned **0**: the
   PTP loop had never (re-)engaged after a long uptime, leaving pure NTP sawtooth. `systemctl restart
   dantesync` → `=== LOCKED ===` within ~40 s, offset −20 µs.
 - **stream** (Windows) — the `\\.\pipe\dantesync` status read showed `mode: ACQ`, `is_locked: false`,
@@ -96,9 +96,9 @@ age-blind** (a plain `cat`, no `updated_ts`/mtime check).
 The three incidents above all had a REAL service that merely stopped running. `dantesync-version-gate.sh`
 (#862) is a different shape: the gate hard-blocked EVERY run from its very first deploy, because
 its design comment ASSERTED "dantesync has no readable version on Windows, only a startup log
-line" without ever running `dantesync --version` against a live box first. Both assumed sources
-(`journalctl -u dantesync` on Linux, the Windows service log via bundle-state) were empty on the
-REAL fleet — the log line the parser looked for is simply never logged there. `dantesync --version`
+line" without ever running `dsync --version` against a live box first. Both assumed sources
+(`journalctl -u dsync` on Linux, the Windows service log via bundle-state) were empty on the
+REAL fleet — the log line the parser looked for is simply never logged there. `dsync --version`
 answers directly on every platform (Linux bare command on PATH; Windows the quoted full exe path
 over SSH — OpenSSH-for-Windows runs it via `cmd.exe` directly, no PowerShell wrapper needed, unlike
 several OTHER Windows facets this repo reads via `powershell -NoProfile -Command "..."`).

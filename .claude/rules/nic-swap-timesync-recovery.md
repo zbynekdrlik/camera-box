@@ -50,7 +50,7 @@ interface.
    with a high `ntp_steps_last_hour` and is not in `"mode": "LOCK"`. A healthy one:
    `"is_locked": true, "mode": "LOCK", "gm_source_ip": "<gm>", "ntp_step_storm": false,
    "ntp_steps_last_hour": 0`.
-2. Grep the service log (`C:\ProgramData\dantesync\dantesync.log` on Windows) for
+2. Grep the service log (`C:\ProgramData\dsync\dantesync.log` on Windows) for
    `ERROR_DEVICE_REMOVED` — its FIRST occurrence timestamps the moment the card was pulled.
 3. Compare the adapter dantesync selected (`Found device: ... Some("<adapter name>")`) against
    what actually holds the rig IP now (`Get-NetIPAddress` / `Get-NetAdapter`). A name mismatch
@@ -59,7 +59,7 @@ interface.
 
 ## Cure
 
-`Restart-Service dantesync -Force` (Windows) / `systemctl restart dantesync` (Linux). Verify the
+`Restart-Service dantesync -Force` (Windows) / `systemctl restart dsync` (Linux). Verify the
 fresh init block names the NEW adapter and that multicast actually joined:
 
 ```
@@ -119,7 +119,7 @@ Po výmene za Intel X520-DA2 (27.8., jediný driver = 2019 ixgbn 4.1.197) sa str
 3. **Adapter reset TIEŽ zmrazí všetky strih NDI receivery** (známa trieda vyššie — jeden zmrznutý
    frame; lieči len OBS reštart cez AHK kill+sentinel-clear respawn) A degraduje per-connection NDI
    rýchlosť (~51 fps arrival, stovky underrunov/2 min — lieči `obs_phase2 idle-receiver` cyklus).
-4. **dantesync-tray.exe je AUTOSTART súčasť boxu a beží PARALELNE so službou** — dve frekvenčné
+4. **dsync-tray.exe je AUTOSTART súčasť boxu a beží PARALELNE so službou** — dve frekvenčné
    servá na jednom clocku. Pri zdravom stave koexistujú (stream LOCK drží), ale pri debugovaní
    flapu tray VŽDY zabi, nech je autorita jedna; po boote sa vráti sám.
 5. Diagnostický rozlišovač: REJECTED spiky sú filtrované a NEZHADZUJÚ lock (245/h koexistovalo so

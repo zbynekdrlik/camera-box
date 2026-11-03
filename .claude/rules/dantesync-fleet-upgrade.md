@@ -108,7 +108,7 @@ a box (mbc sat one release behind on 25.9.2026). A node whose fleet row names it
 `NTP_MASTER`, the fleet's `ntp-master` row (strih-snv) gets the master-aware verify. An
 audio-role node (mbc, fohabl) is verified with `RIG_GRANDMASTER_IP` = the audio grandmaster
 (`dantesync_gate_env_for`), never the video one, so GM enforcement cannot fail its verify. Always
-`--fleet --dry-run` first. A roll also refreshes `dantesync-tray.exe` on every Windows node, including
+`--fleet --dry-run` first. A roll also refreshes `dsync-tray.exe` on every Windows node, including
 one whose service is already on the target (next section); the version gate's report-only tray
 sha-pin names any tray that still lags.
 
@@ -120,7 +120,7 @@ now carries a tray arm. Its text lives in `scripts/lib/dantesync-tray-upgrade.sh
 upgrade script under the ~1000-line budget.
 
 - **Fetch before any stop.** `dantesync_windows_tray_fetch_ps VERSION` runs right after the service
-  binary is verified. It reads the SAME pinned tag's `dantesync-tray-windows-amd64.exe.sha256`
+  binary is verified. It reads the SAME pinned tag's `dsync-tray-windows-amd64.exe.sha256`
   (`dantesync_release_url_windows_tray`, never latest).
   - If the installed tray already has that sha, it sets `$trayCurrent`: no download, no restart. A
     current tray is still checked for a running process in an interactive session; none running
@@ -132,9 +132,9 @@ upgrade script under the ~1000-line budget.
 - **Swap after the service is back (step 5).** `dantesync_windows_tray_swap_ps` runs after the
   service's try/catch and the dead-task purge.
   - It captures the running trays (exact name), kills them, sets `$trayStopped`, and waits on
-    THOSE PIDs only (`Wait-Process -Id $trayPids`). A PID that is still a live `dantesync-tray`
+    THOSE PIDs only (`Wait-Process -Id $trayPids`). A PID that is still a live `dsync-tray`
     after 15 s is the named `the killed tray (pid N) did not exit` (a reused PID is not the tray).
-  - It backs the tray up to `dantesync-tray.exe.pre-<version>` only when that file does not exist, so
+  - It backs the tray up to `dsync-tray.exe.pre-<version>` only when that file does not exist, so
     a re-run never overwrites the original pre-roll tray.
   - It reads the exe's hash (`$trayBefore`, `-ErrorAction Stop`; an empty hash throws into the arm's
     own catch before any copy), then, right before the replace, kills any tray started
@@ -179,14 +179,14 @@ upgrade script under the ~1000-line budget.
     started after the new exe landed. The check matches by NAME only, deliberately: reading `.Path` of a
     process in another session from the ssh session is unverified live and could turn every roll
     into a false warning (review round 1 of the race fix, declined with this reason).
-  - The count is read again AFTER the unregister: exactly ONE `dantesync-tray` process with
+  - The count is read again AFTER the unregister: exactly ONE `dsync-tray` process with
     `SessionId >= 1` (session 0 is the ssh/service session). A box with nobody logged on reads as a
     warning, which is honest. The downloaded tray and its `.sha256` are removed.
 - **Never a throw, never a rollback.** The block ends with ONE `TRAY OK: …` or `TRAY-WARNING: …`
   line.
   - `dantesync_tray_outcome` reads the last one; a missing line is a warning too.
   - `dantesync_tray_note` logs `[name] tray OK/WARNING`.
-  - `dantesync_tray_report` prints `WARNING: dantesync-tray was NOT refreshed on N node(s)`, one
+  - `dantesync_tray_report` prints `WARNING: dsync-tray was NOT refreshed on N node(s)`, one
     reason per node, before EVERY exit after the roll started (canary abort, incomplete, complete).
   - The exit code stays the service's: the tray is UI, the service is the clock.
 - **Re-running the roll repairs a tray.** A Windows node whose service is already on the target
@@ -195,13 +195,13 @@ upgrade script under the ~1000-line budget.
   service step). A current tray costs one `.sha256` read. `--dry-run` only names these nodes. A
   canary abort does not touch them.
 - **Anchors.** The Rust test `windows_upgrade_ps_waits_for_the_process_to_exit_between_stop_and_swap_1265`
-  bans `dantesync-tray` only inside the daemon's stop -> swap window; the wildcard ban stays
+  bans `dsync-tray` only inside the daemon's stop -> swap window; the wildcard ban stays
   program-wide. The tray code uses its own variable names (`$trayExe`, `$trayTmp`, `$trayPre`), so the
   service anchors `Copy-Item -Force $exe $bak` / `$tmp $exe` / `$bak $exe` stay unique.
 - **The service rollback does not touch the tray.** On a verify failure the service goes back to
   `.bak` while the tray stays on the target release. The node already counts as a failed node, and
   the version gate names the service drift. To restore the tray by hand, use
-  `dantesync-tray.exe.pre-<version>`.
+  `dsync-tray.exe.pre-<version>`.
 
 `--help` prints the whole extended header (`sed -n '2p;4,/^HERE=/…'`); it used to stop at a fixed
 line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its default value.
@@ -218,7 +218,7 @@ line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its de
   - the tests cover warning, OK, canary abort, the all-current and the mixed-fleet SAME-node
     refresh, a relaunching tray (the named warning reaches the summary, the service stays), and
     dry-run.
-- The race fix is pinned as text: the PID wait (no `Wait-Process -Name dantesync-tray` anywhere),
+- The race fix is pinned as text: the PID wait (no `Wait-Process -Name dsync-tray` anywhere),
   the bounded re-kill loop directly before the replace `try {`, `Get-TrayParent` defined before use
   and never throwing, the in-use branch before (and exclusive of) the restore, and the step-6
   keep-a-running-tray guard before `Register-ScheduledTask`, the hash-proven `$trayUntouched`,
@@ -257,7 +257,7 @@ line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its de
 ## dantesync 1.15.0: the master's saved date on a rollback, and `holding` (issue 1372)
 
 dantesync 1.15.0 (dantesync issue 126) persists the NTP master's fleet date offset in
-`date-offset.json` beside `config.json` (`/etc/dantesync/`, `C:\ProgramData\DanteSync\`) and restores
+`date-offset.json` beside `config.json` (`/etc/dsync/`, `C:\ProgramData\dsync\`) and restores
 it at start, so a master restart keeps the fleet date.
 
 **The rule (a rollback or a forced downgrade).** A master taken back to an older build must delete
