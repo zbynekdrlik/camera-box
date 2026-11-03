@@ -1,7 +1,7 @@
 //! Issue 1381 (design 5882391108) — the WIRING of the per-source audio SKEW HOLD across a wall step,
 //! the timecode ASRC's placement re-seed and the beyond-cap backstop.
 //!
-//! The decisions are pinned elsewhere: `src/genlock_audio_pairing.rs` `audio_step_hold` (its C port by
+//! The decisions are pinned elsewhere: `vstack:rig/core/src/genlock_audio_pairing.rs` `audio_step_hold` (its C port by
 //! `tests/genlock_audio_step_hold_parity_1381.rs`), the compensator's re-seed and backstop by
 //! `tests/asrc_compensator_parity_1367.rs`, the behaviour by the two-clock bench
 //! `src/asrc_timecode_step_bench.rs`. This file pins that `obs-source.c` CALLS them where the design

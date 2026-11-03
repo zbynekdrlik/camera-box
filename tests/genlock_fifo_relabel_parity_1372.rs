@@ -960,7 +960,7 @@ fn c_fifo_relabel_matches_the_rust_authority_1372() {
     for (i, (cl, rl)) in c.iter().zip(&r).enumerate() {
         assert_eq!(
             cl, rl,
-            "issue 1372: {HEADER} diverges from src/genlock_fifo_relabel.rs at line {i}"
+            "issue 1372: {HEADER} diverges from vstack:rig/core/src/genlock_fifo_relabel.rs at line {i}"
         );
     }
     // The vectors must reach the paths they claim to cover.

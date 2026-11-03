@@ -5,7 +5,7 @@
 //! step, within one interval, while its samples stay continuous. Stock OBS turns that into a loss:
 //! a stamp jump of 70 ms or more fails `TS_SMOOTHING_THRESHOLD` and the packet is PLACED r early
 //! (r ms of queued audio overwritten), and a jump over 2 s runs `handle_ts_jump`, which drops the
-//! whole queued buffer. The relabel decision (`src/genlock_audio_pairing.rs` `audio_relabel`, its C
+//! whole queued buffer. The relabel decision (`vstack:rig/core/src/genlock_audio_pairing.rs` `audio_relabel`, its C
 //! port parity-gated by `tests/genlock_audio_step_hold_parity_1381.rs`) continues the timeline
 //! instead, so the packet APPENDS.
 //!

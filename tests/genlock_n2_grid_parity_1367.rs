@@ -1,6 +1,6 @@
 //! Issue 1367 slice D1 — the EXECUTABLE C-vs-Rust parity gate for the grid-exact N>=2 conveyor.
 //!
-//! `src/genlock_n2_grid.rs` is the Tier-0 authority; the contiguous `genlock_n2_*` block in
+//! `vstack:rig/core/src/genlock_n2_grid.rs` is the Tier-0 authority; the contiguous `genlock_n2_*` block in
 //! `vendor/obs-studio/libobs/obs-source.c` is the production port. This gate lifts that block
 //! VERBATIM (from `struct genlock_n2_pick {` to the end of `genlock_n2_select`) plus the five
 //! `#define`s it reads, compiles it standalone under `-Werror` against the REAL `obs-genlock-grid.h`

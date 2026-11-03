@@ -1,6 +1,5 @@
 ---
 paths:
-  - "src/genlock_n2_grid.rs"
   - "src/genlock_n2_grid_bench.rs"
   - "src/probe/genlock_n2_tests.rs"
   - "tests/genlock_n2_grid_parity_1367.rs"
@@ -8,7 +7,7 @@ paths:
   - "vendor/obs-studio/libobs/obs-source.c"
   - "scripts/genlock_n2_grid.py"
   - "tests/python/test_genlock_n2_grid_twin_1367.py"
-  - "tests/fixtures/genlock_n2_present_age_1367.tsv"
+  - "vstack:rig/core/tests/fixtures/genlock_n2_present_age_1367.tsv"
 ---
 
 # The grid-exact N>=2 conveyor (issue 1367 slice D1, design 5879332205)
@@ -31,7 +30,7 @@ Now an N>=2 source presents, at render tick T, the stamp
 on the per-second SOURCE grid — a pure function of the tick and the pin. Every camera, every
 restart, every relock lands on the same frame.
 
-| Piece | Rust authority (`src/genlock_n2_grid.rs`) | C (`obs-source.c`) |
+| Piece | Rust authority (`vstack:rig/core/src/genlock_n2_grid.rs`) | C (`obs-source.c`) |
 |---|---|---|
 | fleet constant | `GENLOCK_N2_AGE_BASE_NS` 50 ms | `#define GENLOCK_N2_AGE_BASE_NS 50000000ULL` |
 | source interval | `n2_source_interval_ns(canvas, n)` = canvas / n | `genlock_n2_source_interval_ns` |
@@ -134,7 +133,7 @@ cumulative ratio, trusted only past 30 ticks. `classify_audit_inputs` also gives
 Δn2_early / Δticks: the share of ticks presented one frame OLDER than the twin says (the 0.1 %
 budget base). It never retypes the age base: `load_age_base_ns()` reads
 `GENLOCK_N2_AGE_BASE_NS` from this file at run time and fails closed. **Changing the constant or the
-target:** `tests/fixtures/genlock_n2_present_age_1367.tsv` is read by BOTH
+target:** `vstack:rig/core/tests/fixtures/genlock_n2_present_age_1367.tsv` is read by BOTH
 `present_age_table_shared_with_the_python_twin_1367` (here, every canvas tick of one second at each
 row's own canvas rate) and the twin's pytest — update the table, both sides follow or fail.
 

@@ -311,13 +311,13 @@ class TestPrerecordMeasuredByCamera:
         # review finding (D1b): a traceback here read as "no usable per-camera measurement" in the
         # [4g/8] step; the failure must name the constant and its Rust source
         def _boom(repo_root=None):
-            raise g.N2GridConstantError("GENLOCK_N2_AGE_BASE_NS not found in src/genlock_n2_grid.rs")
+            raise g.N2GridConstantError("GENLOCK_N2_AGE_BASE_NS not found")
         monkeypatch.setattr(g, "load_age_base_ns", _boom)
         rc = ppc.main(["--jitter-json", str(D1_JSON), "--strih-log", str(D1_LOG),
                        "--out", str(tmp_path / "m.json")])
         err = capsys.readouterr().err
         assert rc == 1
-        assert "GENLOCK_N2_AGE_BASE_NS" in err and "src/genlock_n2_grid.rs" in err
+        assert "GENLOCK_N2_AGE_BASE_NS" in err and g.AGE_BASE_SOURCE[0] in err
         assert not (tmp_path / "m.json").exists()
 
     def test_the_4g8_step_passes_its_calibration_log(self):

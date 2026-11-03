@@ -510,7 +510,7 @@ fn c_audio_buffering_matches_the_rust_authority_1367() {
     for (i, (cl, rl)) in c.iter().zip(&r).enumerate() {
         assert_eq!(
             cl, rl,
-            "issue 1367: {HEADER} diverges from src/genlock_audio_buffering.rs at line {i}"
+            "issue 1367: {HEADER} diverges from vstack:rig/core/src/genlock_audio_buffering.rs at line {i}"
         );
     }
     // The vectors reach every path they claim to cover.

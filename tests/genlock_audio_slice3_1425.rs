@@ -20,10 +20,16 @@
 //!
 //! Std-only: `CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/genlock_audio_slice3_1425.rs`.
 
+#[path = "support/vstack.rs"]
+mod vstack;
+
 use std::fs;
 use std::path::PathBuf;
 
 fn read(rel: &str) -> String {
+    if let Some(pinned) = rel.strip_prefix("vstack:") {
+        return vstack::read(pinned);
+    }
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
@@ -38,7 +44,7 @@ const OBS_AUDIO: &str = "vendor/obs-studio/libobs/obs-audio.c";
 const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
 const ASRC_H: &str = "vendor/obs-studio/libobs/media-io/asrc-compensator.h";
 const ASRC_C: &str = "vendor/obs-studio/libobs/media-io/asrc-compensator.c";
-const BUFFERING_RS: &str = "src/genlock_audio_buffering.rs";
+const BUFFERING_RS: &str = "vstack:rig/core/src/genlock_audio_buffering.rs";
 const ASRC_RS: &str = "src/asrc_bench.rs";
 const GUARDED_LAUNCH: &str = "scripts/obs-guarded-launch.ps1";
 const LAUNCH_GENLOCK: &str = "scripts/launch-obs-genlock.sh";

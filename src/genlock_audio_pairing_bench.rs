@@ -1,8 +1,8 @@
 //! Issue 1367 — the two-clock A/V PAIRING bench for a genlocked NDI source that carries its own
 //! audio (the SongPlayer → cg OBS chain).
 //!
-//! A test-only child of `genlock_audio_pairing` (declared there with `#[path]`), so the plain
-//! standalone recipe `rustc --test --edition 2021 src/genlock_audio_pairing.rs` runs it too. Its
+//! A test-only child of the `genlock_audio_pairing` re-export of rig-core (declared in `src/lib.rs`
+//! with `#[path]`), so its `use super::*` sees that module's public items. Its
 //! audio leg ([`AudioLeg`]) is shared with the shallow-source bench (`genlock_shallow_av_bench.rs`,
 //! a child of this module), which drives it from a real simulated FIFO.
 //!

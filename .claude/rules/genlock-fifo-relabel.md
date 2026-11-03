@@ -1,7 +1,5 @@
 ---
 paths:
-  - "src/genlock_fifo_relabel.rs"
-  - "src/genlock_fifo_relabel_tests.rs"
   - "src/genlock_fifo_relabel_bench.rs"
   - "vendor/obs-studio/libobs/obs-genlock-fifo-relabel.h"
   - "tests/genlock_fifo_relabel_parity_1372.rs"
@@ -23,7 +21,7 @@ Approach 1 (dantesync quantizes, the FIFO relabels its old-epoch frames by +S).
 
 ## The pieces
 
-| Piece | Rust (`src/genlock_fifo_relabel.rs`) | C (`obs-genlock-fifo-relabel.h`) | Call site (`obs-source.c`) |
+| Piece | Rust (`vstack:rig/core/src/genlock_fifo_relabel.rs`) | C (`obs-genlock-fifo-relabel.h`) | Call site (`obs-source.c`) |
 |---|---|---|---|
 | booking | `Booking::observe` (runs `WallStepState::observe`) | `genlock_fifo_relabel_book` | `genlock_fifo_relabel_tick`, file-static `genlock_relabel_booking` |
 | queued frames | `plan` + `RelabelState::apply` | `genlock_fifo_relabel_plan` / `_apply` (queue via two callbacks) | `ready_async_frame`, right after the one bracketed `wall_now` read |
