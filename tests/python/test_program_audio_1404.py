@@ -475,7 +475,7 @@ def test_main_with_an_unloadable_libndi_writes_unknown_and_fails(tmp_path, shim_
 
     old = pa.build_payload("MEASUREMENT", -35.0, 15.0, now=datetime.now(timezone.utc), window_s=2.0,
                            source="X")
-    serve.mkdir()
+    serve.mkdir(mode=0o700)  # the sampler refuses a group-writable serve dir, whatever the umask
     pa.write_payload(str(serve), old)
     rc = pas.main(["--serve-dir", str(serve), "--lib", str(tmp_path / "no-libndi.so"),
                    "--source", "STREAM-SNV (stream)", "--marker-shim", shim_path])

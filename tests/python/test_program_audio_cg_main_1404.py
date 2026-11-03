@@ -150,6 +150,19 @@ def test_a_failed_cg_receiver_closes_the_ones_before_it(wired):
     assert [r.source for r in _Rx.made] == [SP] and _Rx.made[0].closed
 
 
+def test_an_http_port_that_cannot_be_served_closes_every_receiver(wired, monkeypatch):
+    _seen, serve = wired
+    import program_audio_http as pah
+
+    def busy(bind, port, serve_dir):
+        raise OSError(98, "Address already in use")
+
+    monkeypatch.setattr(pah, "make_server", busy)
+    assert pas.main(["--serve-dir", str(serve), "--source", STREAM, "--http-port", "18891"]) == 1
+    assert [r.source for r in _Rx.made] == [SP, CGOBS, STREAM] and all(r.closed for r in _Rx.made)
+    assert "cannot serve http" in _payload(serve)["reason"]
+
+
 def test_the_box_env_picks_the_cg_sources(wired, monkeypatch):
     seen, serve = wired
     monkeypatch.setenv(pcg.CG_SOURCES_ENV, "X (a)|Y (b)")
