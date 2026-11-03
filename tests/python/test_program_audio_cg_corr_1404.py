@@ -223,8 +223,19 @@ def test_a_cg_that_lags_the_program_by_seconds_is_undecided():
     assert c.kind == pcc.UNDECIDED and "behind the program" in c.why
 
 
-def test_a_near_silent_cg_never_decides():
-    cg = _scale(music_like(), 10 ** (-55 / 10))
+# E2E 41703531109, 3.11.2026 19:49:39: an idle SongPlayer at -52 dBFS (above the -60 silence bar) read
+# 'not proven absent' under the old -50 floor and the strict FOREIGN stopped the YouTube stage. The CG
+# is a digital NDI source and the NCC is level-independent, so a quiet CG is decided like a loud one.
+@pytest.mark.parametrize("cg_dbfs", [-52.0, -59.0])
+def test_a_quiet_cg_above_the_silence_bar_is_decided_both_ways(cg_dbfs):
+    cg = _scale(music_like(), 10 ** (cg_dbfs / 10))
+    assert pcc.judge(frames(program_with(None)), frames(cg)).kind == pcc.ABSENT
+    c = pcc.judge(frames(program_with(cg)), frames(cg))
+    assert c.kind == pcc.PRESENT and c.lag_ms == pytest.approx(600.0, abs=1.0), c
+
+
+def test_an_effectively_empty_cg_segment_never_decides():
+    cg = _scale(music_like(), 10 ** (-85 / 10))
     c = pcc.judge(frames(program_with(None)), frames(cg))
     assert c.kind == pcc.UNDECIDED and "dBFS <" in c.why
 
