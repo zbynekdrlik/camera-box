@@ -733,7 +733,11 @@ strih_vban_leg_grade() {
     if [ "$a2" -gt "$a1" ]; then
       ok "(vban-leg) vban: $((a2 - a1)) packets from ${sender} to UDP ${port} on ${ifc} in ${wait} s"
     else
-      bad "(vban-leg) vban: no VBAN from ${sender} arrived on ${ifc} in ${wait} s -- is the console ${sender} sending stream '${stream}' to ${addr}:${port}?"
+      if strih_program_dante_declared 2>/dev/null; then   # issue 1485: the program is on Dante, VBAN is only the hub's fallback
+        note "(vban-leg) vban: no VBAN from ${sender} on ${ifc} in ${wait} s -- this box takes its program from the Dante device strih-obs (graded by (program-dante)); the console's VBAN is not needed"
+      else
+        bad "(vban-leg) vban: no VBAN from ${sender} arrived on ${ifc} in ${wait} s -- is the console ${sender} sending stream '${stream}' to ${addr}:${port}?"
+      fi
     fi
   fi
   if [[ "$o1" =~ ^[0123456789]+$ ]] && [[ "$o2" =~ ^[0123456789]+$ ]]; then

@@ -123,6 +123,8 @@ strih_pipewire_purge_why() {
   local role="" streams="" toml=""
   role="$(strih_box_role 2>/dev/null)" || role=""
   streams="$(strih_lx_program_vban_streams 2>/dev/null)" || streams=""
+  # issue 1485: a program from the Dante device strih-obs (the dante_input source) needs no sound server either
+  if [ "$streams" = none ] && strih_program_dante_declared 2>/dev/null; then streams="dante:strih-obs"; fi
   toml="$(_strih_pw_purge_toml)" || toml=""
   strih_pipewire_purge_decision "$role" "$streams" "$toml"
 }

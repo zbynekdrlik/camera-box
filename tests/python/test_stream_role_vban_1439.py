@@ -121,7 +121,7 @@ def test_every_box_fact_file_loads(box):
 
 
 @pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "stream|6980|80"),
-                                      ("strih-snv", "strih-obs|6981|30"), ("strih-pp", "strih-obs|6981|40")])
+                                      ("strih-snv", "none|none|none"), ("strih-pp", "strih-obs|6981|40")])   # strih-snv: Dante, issue 1485
 def test_each_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s" "$(strih_lx_program_vban_streams)" '
               '"$(strih_lx_program_vban_port)" "$(strih_lx_program_vban_reserve_ms)"', box)
@@ -867,9 +867,10 @@ def test_verify_wiring_and_budget():
     item9 = v[v.index("# 9) program audio"):v.index("# 9b)")]
     # issue 1439 phase 2: the obs-vban grade follows the facts (every role), the hub-fed program verdict a
     # box that declares none, the hub-only rows (the HDMI leg, the cutters' card leg) every hub box
-    assert 'if strih_program_vban_declared; then\n  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"\nelse\n' \
-        in item9
-    assert item9.index("strih_program_vban_grade") < item9.index("\nelse\n") < item9.index("AUDIO_SINK=0") \
+    # issue 1485: the dispatcher picks the Dante grade on a Dante box, else this obs-vban grade
+    assert ('if strih_program_audio_declared; then   # issue 1485: the Dante device strih-obs, else the console\'s VBAN\n'
+            '  strih_program_audio_grade "$SCN_BIN" "$WS_HOST" "$LOG"\nelse\n') in item9
+    assert item9.index("strih_program_audio_grade") < item9.index("\nelse\n") < item9.index("AUDIO_SINK=0") \
         < item9.index("strih_intercom_hub_hdmi_leg_grade") < item9.index("strih_intercom_hub_alsa_leg_grade") \
         < item9.rindex("\nfi\n")
     item16 = v[v.index("# 16) intercom hub unit"):v.index("# 17)")]

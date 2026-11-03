@@ -20,6 +20,9 @@ import importlib.util
 import os
 import re
 import subprocess
+import tempfile
+import atexit
+import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -33,7 +36,30 @@ REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
-BOXES = SCRIPTS / "strih-boxes"
+REAL_BOXES = SCRIPTS / "strih-boxes"
+
+
+def _vban_era_boxes():
+    """issue 1485: strih-snv takes its program from the Dante device strih-obs now, so this file -- the
+    obs-vban strih role it pins -- reads strih-snv as of the VBAN program (the three facts back, the Dante
+    OBS device off its device list), the rollback shape. strih-pp is its real, live VBAN box."""
+    d = Path(tempfile.mkdtemp(prefix="strih-boxes-vban-era-"))
+    atexit.register(shutil.rmtree, d, True)
+    for f in REAL_BOXES.glob("*.env"):
+        (d / f.name).write_text(f.read_text())
+    f = d / "strih-snv.env"
+    t = f.read_text()
+    for old, new in (("STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n"),
+                     ("STRIH_PROGRAM_VBAN_PORT=none\n", "STRIH_PROGRAM_VBAN_PORT=6981\n"),
+                     ("STRIH_PROGRAM_VBAN_RESERVE_MS=none\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=30\n"),
+                     (" strih-obs=4440:8800:4455:47200-47231\n", "\n")):
+        assert t.count(old) == 1, old
+        t = t.replace(old, new)
+    f.write_text(t)
+    return d
+
+
+BOXES = _vban_era_boxes()
 HEADER = REPO / "vendor" / "obs-vban" / "src" / "vban-receive-timeline.h"
 VBAN_KIND = "net.nagater.obs-vban.source"
 
@@ -67,6 +93,7 @@ def _scenes():
 def _bash(body, *args, env=None):
     """BODY under the callers' strict mode, the provisioning libs sourced; values reach it as $1.. only."""
     e = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    e["STRIH_BOXES_DIR"] = str(BOXES)
     e.update(env or {})
     script = 'set -euo pipefail\n. "%s"\n%s' % (PROVISION, body)
     return subprocess.run(["bash", "-c", script, "harness", *[str(a) for a in args]], capture_output=True,
@@ -283,12 +310,13 @@ def test_verify_item_9_follows_the_facts_not_the_role():
     v = VERIFY.read_text()
     assert len(v.splitlines()) <= 1000
     item9 = v[v.index("# 9) program audio"):v.index("# 9b)")]
-    assert item9.count("strih_program_vban_grade") == 1
-    # the obs-vban grade whenever the facts declare a program VBAN stream, on every role
-    assert 'if strih_program_vban_declared; then\n  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"\n' \
-        in item9
+    assert item9.count("strih_program_audio_grade") == 1
+    # issue 1485: the dispatcher -- the Dante grade on a Dante box, else the obs-vban grade whenever the facts
+    # declare a program VBAN stream, on every role
+    assert 'if strih_program_audio_declared; then' in item9
+    assert '  strih_program_audio_grade "$SCN_BIN" "$WS_HOST" "$LOG"\n' in item9
     # the strih-program sink / pulse / hub-rx verdict only on a box that declares none
-    assert item9.index("strih_program_vban_grade") < item9.index("AUDIO_SINK=0") \
+    assert item9.index("strih_program_audio_grade") < item9.index("AUDIO_SINK=0") \
         < item9.index('AUDIO_VERDICT="$(strih_lx_program_audio_verdict')
     # the hub-only rows (the HDMI leg, the cutters' card leg) stay on every hub box
     gate = item9.index('if WHY="$(obs_box_step_applies 13)"; then')

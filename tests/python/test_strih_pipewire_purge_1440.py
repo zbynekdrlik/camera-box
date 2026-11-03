@@ -231,7 +231,7 @@ def _log(tmp_path):
 # --- 1. the derived condition over the four real boxes ------------------------------------------------------
 
 @pytest.mark.parametrize("box,verdict,words", [
-    ("strih-snv", "purge", ("STRIH_PROGRAM_VBAN_STREAMS=strih-obs", "intercom.strih-snv.toml")),
+    ("strih-snv", "purge", ("STRIH_PROGRAM_VBAN_STREAMS=dante:strih-obs", "intercom.strih-snv.toml")),   # issue 1485
     ("strih-pp", "purge", ("STRIH_PROGRAM_VBAN_STREAMS=strih-obs", "intercom.strih-pp.toml")),
     ("stream-pp", "keep", ("stream role", "1465")),
     ("stream-snv", "keep", ("stream role", "1465")),

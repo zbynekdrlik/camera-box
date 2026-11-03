@@ -675,7 +675,7 @@ fi
 # finds no /run/user/<uid>/pipewire-0 otherwise (the hub's pw-cat backoff self-heals; linger removes the gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
-if strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
+if strih_program_dante_declared; then echo "  the OBS program-audio input = the dante_input source of the Dante device strih-obs (issue 1485), seeded by scripts/strih_scenes.py --bootstrap"; elif strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
 [ -n "${STRIH_PW_PURGED:-}" ] || echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
@@ -701,6 +701,7 @@ else
   strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"
 fi
 strih_vban_leg_install || fail "issue 1439: the VBAN-only leg (a second NIC or a VLAN on the rig NIC, ROZHODNUTE 6360417876) failed (above)"
+strih_dante_input_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1485: the strih-obs Dante device's ~/.camera-box/dante-input.toml (above; the site file $(strih_dante_input_site_file) must exist)"
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"

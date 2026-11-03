@@ -309,7 +309,14 @@ strih_box_validate() {
   # or all four `none`: a hub-fed strih (none deployed since strih-pp took lv1's `strih-obs`, 24.10.2026).
   local vs="${f[STRIH_PROGRAM_VBAN_STREAMS]}" vp="${f[STRIH_PROGRAM_VBAN_PORT]}" vr="${f[STRIH_PROGRAM_VBAN_RESERVE_MS]}"
   local ai="${f[STRIH_PROGRAM_AUDIO_INPUT]}"
-  if [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}:${ai}" = none:none:none:none ]; then
+  if [[ " ${f[STRIH_DANTE_DEVICES]} " == *" strih-obs="* ]]; then
+    # issue 1485: the program from the Dante device strih-obs (the obs release's dante_input source): no
+    # VBAN program, the input name kept (strih role only; one program source)
+    [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}" = none:none:none ] && [ "$ai" != none ] \
+      || { echo "strih-box ${name}: a strih-obs Dante device (STRIH_DANTE_DEVICES) is the program source: strih role only, STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS none, STRIH_PROGRAM_AUDIO_INPUT the input name (issue 1485)" >&2; bad=1; }
+    _strih_box_obs_input_name "$ai" \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_INPUT '${ai}' must be the OBS program-audio input's name (1..64 letters, digits, space, . _ - ( ), no space first or last)" >&2; bad=1; }
+  elif [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}:${ai}" = none:none:none:none ]; then
     :   # a hub-fed strih: its program is the hub's program_out (its STRIH_INTERCOM_CONFIG)
   else
     if [ "${f[STRIH_ROLE]}" = strih ] && { [ "$vs" = none ] || [ "$vp" = none ] || [ "$vr" = none ] || [ "$ai" = none ]; }; then

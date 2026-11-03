@@ -102,7 +102,7 @@ from drm_output_config import (  # noqa: E402,F401
 from program_audio_vban import (  # noqa: E402,F401
     AUDIO_MONITOR_FILTER_KIND, AUDIO_MONITOR_FILTER_NAME, audio_monitor_filter_settings,   # issue 1436
     parse_program_audio_monitor_filter, seed_audio_monitor_filter,
-    VBAN_SOURCE_KIND,
+    VBAN_SOURCE_KIND, DANTE_SOURCE_KIND, program_audio_want, kind_missing_text,   # issue 1485
     browser_audio_report,
     drop_pulse_capture_inputs,
     input_create_verified,
@@ -615,24 +615,22 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
     recreated keeping the operator's state (every scene and the item's visibility, volume, mute,
     monitoring, tracks, balance, sync offset, filters); an input of the right kind is left alone (its
     settings are the operator's; a difference from the box facts is named in the status). An obs-vban
-    kind OBS has not loaded (a bundle without the plugin) never removes anything. Returns a short status
-    string for the log."""
-    want_kind = VBAN_SOURCE_KIND if vban else AUDIO_INPUT_KIND
-    want_settings = dict(vban) if vban else program_audio_input_settings()
+    kind OBS has not loaded (a bundle without the plugin) never removes anything. issue 1485: the DANTE_SEED
+    marker makes it the obs release's dante_input (no settings). Returns a short status for the log."""
+    want_kind, want_settings = program_audio_want(vban, AUDIO_INPUT_KIND, program_audio_input_settings())
     inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
     exists = any(i.get("inputName") == name for i in inputs)
     kind = program_audio_input_kind_from_inputs(inputs, name)
     action = audio_input_action(exists, kind, want_kind)
     if action == "ok":
-        if not vban:
+        if not vban or want_kind == DANTE_SOURCE_KIND:
             return "matched"
         current = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True) or {}).get("inputSettings")
         diff = settings_differences(current, want_settings)
         return "matched" if not diff else "matched (the operator's settings differ from the box facts: %s)" % (
             "; ".join(diff))
     if vban and not kind_available(obs, want_kind):
-        return "kept %s: OBS has no %s source loaded (deploy the strih bundle with obs-vban, issue 1439)" % (
-            kind or "absent", want_kind)
+        return kind_missing_text(kind, want_kind)
     scene = _current_scene_name(obs)
     if scene is None:
         return "no-scene (deferred)"
