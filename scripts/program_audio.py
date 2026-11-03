@@ -662,7 +662,8 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
                   last_foreign_ts_utc: str | None = None, markers_decoded: int | None = None,
                   marker_chain: int | None = None, holes_bridged: int | None = None,
                   bridged_ms: float | None = None, queue_drops: int | None = None,
-                  lag_ms: float | None = None, sender_stalls: int | None = None) -> dict:
+                  lag_ms: float | None = None, sender_stalls: int | None = None,
+                  cg: dict | None = None) -> dict:
     """The program-audio.json payload. `age_s` is 0.0 as written; the sampler's own endpoint
     (program_audio_http) recomputes it (and `last_foreign_age_s` from `last_foreign_ts_utc`, the
     FOREIGN latch) at every request (rig_serve_files.program_audio_response). `markers_decoded`
@@ -678,7 +679,9 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
     fresh one (the window's own FFT + decode + write, ~17-85 ms, comes on top); null with no
     window. `sender_stalls` (additive, ROZHODNUTÉ on issue 1404): the sender stalls the look-ahead
     found since the sampler started (a frame ahead of the timeline whose followers came back within
-    the tolerance: nothing lost, no zeros), null while it is not sampling."""
+    the tolerance: nothing lost, no zeros), null while it is not sampling. `cg` (additive, issue 1404
+    the 3.11.2026 claim): the CG arm's block (program_audio_cg.payload_block), present only when the
+    sampler runs one, so a payload without a CG arm is byte-identical to before."""
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
     payload = {
@@ -699,6 +702,8 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
         "lag_ms": _round1(lag_ms),
         "sender_stalls": _count(sender_stalls),
     }
+    if cg is not None:
+        payload["cg"] = cg
     if reason is not None:
         payload["reason"] = reason
     return payload
