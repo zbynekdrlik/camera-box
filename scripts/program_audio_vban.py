@@ -65,12 +65,58 @@ def parse_program_audio_vban(text):
         d = json.loads(text)
     except ValueError:
         return None
+    if parse_program_audio_dante(text):   # issue 1485: the Dante program (a malformed block raises)
+        return dict(DANTE_SEED)
     if not isinstance(d, dict) or "program_audio_vban" not in d:
         return None
     v = d["program_audio_vban"]
     if not isinstance(v, dict):
         raise ValueError("program_audio_vban is not an object")
     return vban_source_settings(v.get("port"), v.get("stream_name"), v.get("receive_buffer_ms"))
+
+
+# issue 1485: the obs release's Dante source (plugins/dante-input in zbynekdrlik/obs). It has NO
+# settings: the device comes from ~/.camera-box/dante-input.toml at module load, and the kind is
+# registered only when that file exists.
+DANTE_SOURCE_KIND = "dante_input"
+
+
+DANTE_SEED = {"__kind__": DANTE_SOURCE_KIND}
+
+
+def parse_program_audio_dante(text):
+    """issue 1485: True when the manifest declares `program_audio_dante` (the strih box whose program is
+    the Dante device strih-obs), else False. A block that is present but not an object raises ValueError:
+    the caller must leave the input alone rather than turn it into another kind."""
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return False
+    if not isinstance(d, dict) or "program_audio_dante" not in d:
+        return False
+    if not isinstance(d["program_audio_dante"], dict):
+        raise ValueError("program_audio_dante is not an object")
+    return True
+
+
+def program_audio_want(source, pulse_kind, pulse_settings):
+    """issue 1485: (kind, settings) the seed makes the program-audio input from what
+    parse_program_audio_vban returned: None = the pulse capture (PULSE_KIND, PULSE_SETTINGS), the
+    DANTE_SEED marker = the obs release's dante_input (no settings), else the obs-vban source's."""
+    if not source:
+        return pulse_kind, pulse_settings
+    if source.get("__kind__") == DANTE_SOURCE_KIND:
+        return DANTE_SOURCE_KIND, {}
+    return VBAN_SOURCE_KIND, dict(source)
+
+
+def kind_missing_text(kind, want_kind):
+    """The seed's status when OBS has no WANT_KIND source loaded: the input is kept as it is."""
+    if want_kind == DANTE_SOURCE_KIND:
+        return ("kept %s: OBS has no %s source registered (the obs release's dante-input.so loads it only "
+                "with ~/.camera-box/dante-input.toml, setup-strih step 13; issue 1485)" % (kind or "absent", want_kind))
+    return "kept %s: OBS has no %s source loaded (deploy the strih bundle with obs-vban, issue 1439)" % (
+        kind or "absent", want_kind)
 
 
 def settings_differences(current, want):

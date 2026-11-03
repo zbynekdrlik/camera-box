@@ -100,6 +100,8 @@ assets/lipsync/*.jpg
 intercom-release/
 # the pinned shading release assets (scripts/lib/shading-release.sh)
 shading-release/
+# the pinned OBS release bundle (scripts/lib/obs-release.sh)
+obs-release/
 
 # issue 1417 -- the tally ESP firmware WiFi credentials (copy secrets.h.example, never commit it)
 tally/esp/WsTally/secrets.h

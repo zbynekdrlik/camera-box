@@ -28,6 +28,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from intercom_release_fake_1487 import fake_release_env  # noqa: E402
 from shading_release_fake_1487 import fake_service_env  # noqa: E402
+from obs_release_fake_1487 import TAG as OBS_TAG, fake_obs_pin_env, fake_obs_release_env  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 FLEET = REPO / "scripts" / "deploy-genlock-fleet.sh"
@@ -44,6 +45,7 @@ def _env(extra=None, home="/home/newlevel"):
 
 
 def _plan(boxes, mode="--full", extra=None):
+    extra = dict(fake_obs_pin_env(SHA), **(extra or {}))   # issue 1487: the Linux boxes' commit = the pin's
     r = subprocess.run(
         ["bash", str(FLEET), "--plan", "--run-id", "4242", "--sha", SHA, "--stage", "/stage", mode,
          "--boxes", boxes],
@@ -80,7 +82,7 @@ def test_the_pp_plan_runs_the_setup_strih_arm_per_box_dialling_the_fleet_name():
         assert "repo/scripts/verify-strih.sh' --box %s" % box in part
         assert "newlevel@%s:/tmp/genlock-stage-%s/bundle/" % (host, SHA) in part
         assert "http://%s:8899/bundle-state.json" % host in part
-        assert "obs-genlock-linux-x86_64-strih" in part, "a setup-strih box installs the strih FULL build"
+        assert "obs-strih-linux-x86_64-%s.tar.zst" % OBS_TAG in part, "a setup-strih box installs the pinned obs release"
         assert "audit %s's NDI-input forced table" % box in part
         assert "genlock_forced_table_audit %s'" % box.split("-")[0] in part
         assert "AWAY" in part, "a traveling box's plan states the AWAY skip"
@@ -167,7 +169,7 @@ case "$cmd" in
   *setup-strih.log*) echo "setup log tail"; exit 0 ;;
   *strih-obs-stop.sh*) exit 0 ;;
   *GENLOCK_BUILD_SHA.txt*)
-    printf 'installed=%s active=active pid=4242 restarts=0 lib=%s tick=1\n' "$STUB_SHA" "$STUB_LIBSHA"; exit 0 ;;
+    printf 'installed=%s obs_tag=v9.9.5 active=active pid=4242 restarts=0 lib=%s tick=1\n' "$STUB_SHA" "$STUB_LIBSHA"; exit 0 ;;
   *"--user start"*) exit 0 ;;
   *) exit 0 ;;
 esac
@@ -215,6 +217,9 @@ def _execute(tmp_path, boxes, extra=None):
     }, home=str(home))
     env.update(fake_release_env(tmp_path))
     env.update(fake_service_env(tmp_path))
+    obs_env, libsha = fake_obs_release_env(tmp_path, SHA)   # issue 1487: the pinned obs release
+    env.update(obs_env)
+    env["STUB_LIBSHA"] = libsha
     env.update(extra or {})
     r = subprocess.run(["bash", str(FLEET), "--run-id", "R1", "--boxes", boxes], capture_output=True,
                        text=True, cwd=REPO, env=env, timeout=300)

@@ -583,9 +583,10 @@ def test_execute_mode_stages_the_abi_before_strih_lx_is_touched_1302():
     main = s[s.index("main() {"):]
     resolve = main.index('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")" 1)" || exit 3',
                          main.index("# --- execute mode"))
-    prepare = main.index('strih_lx_prepare "$sha"')
-    stage = main.index('genlock_stats_abi_stage "$STRIH_LX_PREP_WORK/bundle" "$stats_abi" || exit 3')
-    apply_ = main.index('strih_lx_apply_all "$sha"')
+    # issue 1487: the Linux boxes take the pinned obs release, its pair from the release's own manifest
+    prepare = main.index('strih_lx_prepare "$lx_sha"')
+    stage = main.index('genlock_stats_abi_stage "$STRIH_LX_PREP_WORK/bundle" "$(obs_release_stats_abi "$STRIH_LX_PREP_WORK/bundle" || true)" || exit 3')
+    apply_ = main.index('strih_lx_apply_all "$lx_sha"')
     assert resolve < prepare < stage < apply_
     assert '"$yes" "$stats_abi"' in main
     assert 'build_imag_deploy_program "$imag_stage" \'/opt/obs-genlock\' \'/opt/obs-backup\' "$sha" "$sha" "$RETENTION_KEEP" "$yes" "$stats_abi"' in main
@@ -595,18 +596,20 @@ def test_plan_reads_without_network_and_names_the_boxes_1302():
     s = FLEET.read_text()
     main = s[s.index("main() {"):]
     plan = main[:main.index("# --- execute mode")]
-    assert 'stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")")" || exit 3' in plan
+    assert '[ -z "$rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")")" || exit 3' in plan
     # the execute mode's own Windows-box switch reads the same predicate (one place names the boxes)
     assert 'want_win="$(fleet_boxes_swap_obs_dll "$boxes")"' in main
 
 
-@pytest.mark.parametrize("boxes", ["imag", "strih-snv", "strih-snv,imag", "stream-snv", "strih-snv,stream-snv"])
-def test_plan_fast_without_a_windows_box_never_refuses_an_unknown_abi_1302(tmp_path, boxes):
+@pytest.mark.parametrize("boxes,warned", [("imag", True), ("strih-snv", False), ("strih-snv,imag", True),
+                                          ("stream-snv", False), ("strih-snv,stream-snv", False)])
+def test_plan_fast_without_a_windows_box_never_refuses_an_unknown_abi_1302(tmp_path, boxes, warned):
     """--fast swaps an obs.dll only on resolume-snv (stream-snv is Linux since issue 1462); a Linux-only run
-    deploys the full bundle."""
+    deploys the full bundle. issue 1487: the setup-strih boxes take the pinned obs release, whose pair is its
+    manifest's, so a run of only those boxes reads no vendor obs.h at all."""
     r = _plan(tmp_path, "fast", "deadbeefdeadbeef", boxes)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "WARNING: cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr
+    assert ("WARNING: cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr) is warned
     assert "ERROR: cannot read" not in r.stderr
 
 

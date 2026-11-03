@@ -30,6 +30,22 @@
 
 command -v linux_obs_box_so_gather_cmd >/dev/null 2>&1 \
   || . "${BASH_SOURCE[0]%/*}/manifest-autosource.sh"
+command -v obs_pin_commit >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/obs-release.sh"
+
+# issue 1487: the Linux OBS boxes run the pinned obs release (scripts/obs-release.pin), never a
+# linux-genlock.yml build of this repo's vendor/. The manifest the gate grades their bytes against is
+# that release's own BUNDLE_MANIFEST.json (proved against the pin, cached in <tree>/obs-release/).
+# A box whose marker is another commit gets NO manifest: the gate reads UNKNOWN and refuses, naming it.
+# Seam: E2E_LINUX_BYTES_PIN_ROOT (the tree whose scripts/obs-release.pin is read; default this checkout).
+_e2e_linux_bytes_pinned_manifest() {
+  local sha="$1" root="${E2E_LINUX_BYTES_PIN_ROOT:-${BASH_SOURCE[0]%/*}/../..}" pin
+  pin="$(obs_pin_commit "$root" 2>/dev/null)" || { echo "  the obs release pin is unreadable" >&2; return 1; }
+  if [ "$sha" != "$pin" ]; then
+    echo "  the box runs build ${sha}, not the pinned obs release ${pin} ($(obs_pin_tag "$root" 2>/dev/null)) -- deploy it with deploy-genlock-fleet.sh (issue 1487)" >&2
+    return 1
+  fi
+  _obs_release_get "$root" "$OBS_RELEASE_MANIFEST" "$(obs_pin_manifest_sha256 "$root")" 0
+}
 
 # e2e_linux_bytes_gather ROLE HOST USER PW STATE_FILE OUTDIR REPO -> appends
 # `--linux-manifest ROLE=<path>` and `--linux-bytes ROLE=<csv>` to the caller's LINUX_BYTES_GATE_ARGS
@@ -67,9 +83,8 @@ e2e_linux_bytes_gather() {
   if [ "$sha" = "${E2E_LINUX_BYTES_MEMO_SHA:-}" ]; then
     manifest="${E2E_LINUX_BYTES_MEMO_PATH:-}"
   else
-    manifest="$(MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S="${E2E_LINUX_BYTES_FETCH_TIMEOUT:-900}" \
-      manifest_autosource_fetch "$repo" linux-genlock.yml "$(linux_obs_box_bundle_artifact)" \
-      "$sha" "${outdir}/${role}-linux-manifest.json" || true)"
+    : "$repo" "$outdir"   # the CI-artifact source is retired for these boxes (issue 1487)
+    manifest="$(_e2e_linux_bytes_pinned_manifest "$sha" || true)"
     E2E_LINUX_BYTES_MEMO_SHA="$sha"
     E2E_LINUX_BYTES_MEMO_PATH="$manifest"
   fi
@@ -80,9 +95,9 @@ e2e_linux_bytes_gather() {
     # /opt/obs-genlock/BUNDLE_MANIFEST.json generated_at (.claude/rules/version-integrity-gate.md)
     local gen=""
     gen="$(sed -n 's/^[[:space:]]*"generated_at":[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" 2>/dev/null | sed -n 1p || true)"
-    echo "  ${role} (${host}): linux bundle manifest of build ${sha} (generated ${gen:-unknown}) fetched"
+    echo "  ${role} (${host}): the pinned obs release manifest of build ${sha} (generated ${gen:-unknown}) read"
   else
-    echo "  ${role} (${host}): could not fetch the $(linux_obs_box_bundle_artifact) manifest of build ${sha} -- the gate refuses (issue 1474)"
+    echo "  ${role} (${host}): no pinned obs release manifest for build ${sha} (above) -- the gate refuses (issues 1474, 1487)"
   fi
   return 0
 }

@@ -20,6 +20,9 @@
 # definition can never leave one of them missing.
 # shellcheck source=scripts/lib/vendor-range.sh
 . "${BASH_SOURCE[0]%/*}/vendor-range.sh"
+# issue 1487: the Linux OBS boxes run the pinned obs release, whose commit is not in this repo.
+# shellcheck source=scripts/lib/obs-release.sh
+. "${BASH_SOURCE[0]%/*}/obs-release.sh"
 
 # vendor_pin_range_log REPO_ROOT DEPLOYED_SHA -> prints one `<short-sha> <subject>` line per commit
 # touching vendor/ that origin/main carries and DEPLOYED_SHA's own lineage never received -- the
@@ -175,8 +178,17 @@ vig_row_vendor_pin() {
     printf '%s\n' "$vp_out" | sed 's/^/    /'
     echo "!! VENDOR-PIN ALARM: no deployed genlock_build_sha to pin -- vendor currency UNVERIFIED (report-only, does NOT block this run)." >&2
   else
-    local vp_sha vp_newest_eff vp_pending vp_ahead vp_on_dev vp_rc vp_out vprc
+    local vp_sha vp_newest_eff vp_pending vp_ahead vp_on_dev vp_rc vp_out vprc vp_obs=""
+    vp_obs="$(obs_pin_commit "${repo_root_vp:-$HERE/..}" 2>/dev/null)" || vp_obs=""
     for vp_sha in "${vp_shas[@]}"; do
+      # issue 1487: a deployed sha that IS the pinned obs release (the Linux OBS boxes) is graded against
+      # scripts/obs-release.pin, never this repo's vendor/ tree (that commit is not in this repo at all);
+      # its currency is the pin's (a pin bump + deploy), the cross-box parity row still compares the boxes.
+      if [ -n "$vp_obs" ] && [ "$vp_sha" = "$vp_obs" ]; then
+        printf '    %-22s OK       (deployed bundle %s is the pinned obs release %s, scripts/obs-release.pin -- not a vendor/ build, issue 1487)\n' \
+          "vendor_pin" "$vp_sha" "$(obs_pin_tag "${repo_root_vp:-$HERE/..}" 2>/dev/null)"
+        continue
+      fi
       vp_newest_eff="$vp_newest"
       vp_pending=""
       vp_ahead=""

@@ -108,6 +108,16 @@ if ! declare -F strih_intercom_hub_cred_dropin_apply >/dev/null; then
   # shellcheck source=scripts/lib/strih-intercom-hub-unit.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-hub-unit.sh"
 fi
+# issue 1487: the forked OBS is the pinned release of zbynekdrlik/obs (scripts/obs-release.pin), step 4.
+if ! declare -F obs_release_bundle >/dev/null; then
+  # shellcheck source=scripts/lib/obs-release.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-release.sh"
+fi
+# issue 1485: the strih-obs Dante device's dante-input.toml (step 13) + verify item 9's Dante grade.
+if ! declare -F strih_dante_input_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-dante-input.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-input.sh"
+fi
 # issue 1439: verify item 9 on a box whose program audio is the console's VBAN into the obs-vban source.
 if ! declare -F strih_program_vban_grade >/dev/null; then
   # shellcheck source=scripts/lib/strih-program-vban.sh
@@ -356,7 +366,13 @@ strih_lx_seed_manifest_json() {
   # carries the program-audio input + its obs-vban source settings, which strih_scenes.py --bootstrap
   # switches (keeping the operator's mixer state); a hub-fed strih carries neither, byte-identical.
   local vban ai
-  if vban="$(strih_lx_program_audio_vban_json)"; then
+  if strih_program_dante_declared; then
+    # issue 1485: the program from the Dante device strih-obs -- the seed switches the input to dante_input
+    ai="$(strih_lx_program_audio_input)" || return 1
+    printf '  "camera_latency_ms": %s,\n' "$lat"
+    printf '  "program_audio_input": "%s",\n' "$ai"
+    printf '  "program_audio_dante": {"device": "%s"}\n' "$STRIH_DANTE_INPUT_DEVICE"
+  elif vban="$(strih_lx_program_audio_vban_json)"; then
     ai="$(strih_lx_program_audio_input)" || return 1
     printf '  "camera_latency_ms": %s,\n' "$lat"
     printf '  "program_audio_input": "%s",\n' "$ai"
@@ -380,8 +396,6 @@ strih_lx_program_audio_vban_json() {
   printf '{"port": %s, "stream_name": "%s", "receive_buffer_ms": %s}' "$vp" "$vs" "$vr"
 }
 
-# strih_lx_bundle_artifact -> the strih FULL-build CI artifact name (linux-genlock.yml strih job).
-strih_lx_bundle_artifact() { printf 'obs-genlock-linux-x86_64-strih'; }
 
 # strih_lx_dantesync_is_client_not_master MODE -> 0 iff MODE is a CLIENT mode (never server/master).
 # INTERNAL helper (issue 1317, this lane): retained as the pure CLIENT-args classifier that the

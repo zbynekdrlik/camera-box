@@ -178,9 +178,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-ART="$(strih_lx_bundle_artifact)"
-step 4 "Genlock bundle -> ${GENLOCK_DIR} (strih FULL artifact: ${ART})"
+ART="$(obs_release_tarball_name "$(obs_pin_tag "${HERE}/..")")" || fail "issue 1487: scripts/obs-release.pin is unreadable"
+step 4 "Genlock bundle -> ${GENLOCK_DIR} (the pinned obs release: ${ART})"
 mkdir -p "$GENLOCK_DIR"
+[ "${STRIH_LX_BUNDLE_SRC:-}" != pin ] || { STRIH_LX_BUNDLE_SRC="${HERE}/../obs-release/bundle-$$"; obs_release_bundle "${HERE}/.." "$STRIH_LX_BUNDLE_SRC" || fail "issue 1487: the pinned obs release did not fetch + verify (above) -- never another build"; }
 if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   # issue 1317: NEVER install a bundle built for a different Ubuntu release than the box runs -- a
   # 24.04-built bundle (noble ffmpeg/Qt sonames) would crash OBS at load on the 26.04 strih-snv box.
@@ -224,7 +225,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   # marker = unknown = the marker is removed.
   SABI="$(genlock_stats_abi_pair_from_marker 2>/dev/null < "${STRIH_LX_BUNDLE_SRC%/}/GENLOCK_STATS_ABI.txt" || true)"
   genlock_write_markers "$GENLOCK_DIR" "$GSHA" "$DSHA" "" "$SABI" || fail "genlock_write_markers failed"
-  echo "  installed genlock bundle to ${GENLOCK_DIR} (genlock ${GSHA}, distroav ${DSHA})"
+  echo "  installed genlock bundle to ${GENLOCK_DIR} (obs $(sed -n 's/^tag=//p' "$GENLOCK_DIR/OBS_RELEASE.txt" 2>/dev/null || true), commit ${GSHA}, distroav ${DSHA})"
   # issue 1317: install the bundle into its /usr prefix so the dynamic loader finds it -- the /opt
   # staged copy above is the marker home, but OBS is BUILT for /usr (libs -> /usr/lib/x86_64-linux-gnu,
   # the frontend -> /usr/bin/obs, data -> /usr/share/obs). Without this the loader has libobs.so.30 /
@@ -235,7 +236,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
     || fail "strih_install_bundle_prefix: installing the bundle into the /usr prefix failed -- OBS would not load"
   echo "  installed bundle into the /usr prefix (/usr/bin/obs + /usr/lib/x86_64-linux-gnu + ldconfig)"
 else
-  warn "  STRIH_LX_BUNDLE_SRC unset -- fetch the ${ART} CI artifact and re-run with STRIH_LX_BUNDLE_SRC=<dir>"
+  warn "  STRIH_LX_BUNDLE_SRC unset -- OBS not installed; STRIH_LX_BUNDLE_SRC=pin fetches + installs the pinned ${ART}"
   warn "  (deploy-genlock-fleet.sh --boxes ${BOX_NAME} does this over ssh once the box is reachable)"
 fi
 # chrome-sandbox setuid-root (issue 1317 F6): the CEF SUID sandbox helper must be owned root:root
@@ -674,7 +675,7 @@ fi
 # finds no /run/user/<uid>/pipewire-0 otherwise (the hub's pw-cat backoff self-heals; linger removes the gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
-if strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
+if strih_program_dante_declared; then echo "  the OBS program-audio input = the dante_input source of the Dante device strih-obs (issue 1485), seeded by scripts/strih_scenes.py --bootstrap"; elif strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
 [ -n "${STRIH_PW_PURGED:-}" ] || echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
@@ -700,6 +701,7 @@ else
   strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"
 fi
 strih_vban_leg_install || fail "issue 1439: the VBAN-only leg (a second NIC or a VLAN on the rig NIC, ROZHODNUTE 6360417876) failed (above)"
+strih_dante_input_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1485: the strih-obs Dante device's ~/.camera-box/dante-input.toml (above; the site file $(strih_dante_input_site_file) must exist)"
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"

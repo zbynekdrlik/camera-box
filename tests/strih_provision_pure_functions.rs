@@ -102,12 +102,6 @@ fn camera_latency_is_the_rig_floor_three() {
 }
 
 #[test]
-fn bundle_artifact_is_the_strih_variant() {
-    let (_c, out, _e) = run_sourced(&[], "strih_lx_bundle_artifact");
-    assert_eq!(out.trim(), "obs-genlock-linux-x86_64-strih");
-}
-
-#[test]
 fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
     // issue 1361: the client upstream is the box fact STRIH_DANTESYNC_UPSTREAM. strih-snv is the NTP
     // master (role server, NO upstream), so asking it for client args fails closed -- there is no

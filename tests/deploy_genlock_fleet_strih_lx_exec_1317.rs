@@ -32,7 +32,8 @@ use std::time::{Duration, Instant};
 const SHA: &str = "abc123def4567890";
 const OTHER: &str = "000000000000bad0";
 const TOKEN: &str = "tok-SECRET-123";
-const LIBSHA: &str = "libobs-bytes-good";
+/// Issue 1487: the strih boxes take the pinned obs release; the fake release's tag.
+const OBS_TAG: &str = "v9.9.5";
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -124,7 +125,7 @@ case "$cmd" in
     pid=4242; restarts=0
     if [ -n "${STUB_CRASHLOOP:-}" ]; then pid=$((4242 + n)); restarts="$n"; fi
     if [ -n "${STUB_LATE_CRASHLOOP:-}" ] && [ "$n" -ge 3 ]; then pid=$((4242 + n)); restarts="$n"; fi
-    printf 'installed=%s active=%s pid=%s restarts=%s lib=%s tick=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}"; exit 0 ;;
+    printf 'installed=%s obs_tag=%s active=%s pid=%s restarts=%s lib=%s tick=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_OBS_TAG:-v9.9.5}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}"; exit 0 ;;
   *"--user start"*) exit "${STUB_START_RC:-0}" ;;
   *) exit "${STUB_SSH_RC:-0}" ;;
 esac
@@ -300,8 +301,104 @@ fn fake_shading_release(dir: &Path) -> (PathBuf, PathBuf) {
     (pin, cache)
 }
 
+fn sha256_of(p: &Path) -> String {
+    let sum = Command::new("sha256sum").arg(p).output().unwrap();
+    String::from_utf8(sum.stdout).unwrap()[..64].to_string()
+}
+
+/// Issue 1487: a stand-in obs release, already in its cache dir, + the pin that matches it (commit =
+/// SHA), so the download step never reaches GitHub. `artifact_sha` writes another commit into the
+/// bundle's marker, `no_lib` leaves libobs.so.30 out of the manifest, `absent` publishes nothing.
+/// Returns (pin, cache, the libobs.so.30 sha256).
+fn fake_obs_release(
+    dir: &Path,
+    artifact_sha: Option<&str>,
+    no_lib: bool,
+    absent: bool,
+) -> (PathBuf, PathBuf, String) {
+    let stage = dir.join("fake-obs-stage");
+    let files = [
+        ("bin/obs", "#!/bin/sh\necho obs\n".to_string()),
+        (
+            "lib/x86_64-linux-gnu/libobs.so.30",
+            "fake libobs\n".to_string(),
+        ),
+        (
+            "lib/x86_64-linux-gnu/obs-plugins/dante-input.so",
+            "fake dante\n".to_string(),
+        ),
+        ("RUNTIME_PACKAGES.txt", "libqt6core6t64\n".to_string()),
+        (
+            "STRIH_BUILD_FLAGS.txt",
+            "TARGET-RELEASE: ubuntu-26.04\n".to_string(),
+        ),
+        (
+            "GENLOCK_BUILD_SHA.txt",
+            format!("{}\n", artifact_sha.unwrap_or(SHA)),
+        ),
+        (
+            "OBS_RELEASE.txt",
+            format!("tag={OBS_TAG}\ncommit={SHA}\nversion=9.9.5\n"),
+        ),
+    ];
+    let mut entries = Vec::new();
+    for (rel, text) in &files {
+        let f = stage.join(rel);
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(&f, text).unwrap();
+        if no_lib && rel.ends_with("libobs.so.30") {
+            continue;
+        }
+        entries.push(format!(
+            "    {{\"path\": \"{rel}\", \"sha256\": \"{}\"}}",
+            sha256_of(&f)
+        ));
+    }
+    let libsha = sha256_of(&stage.join("lib/x86_64-linux-gnu/libobs.so.30"));
+    let manifest = format!(
+        "{{\n  \"release\": {{\"obs_tag\": \"{OBS_TAG}\", \"obs_commit\": \"{SHA}\", \"genlock_stats_version\": 4, \"genlock_output_stats_version\": 1}},\n  \"files\": [\n{}\n  ]\n}}\n",
+        entries.join(",\n")
+    );
+    fs::write(stage.join("BUNDLE_MANIFEST.json"), &manifest).unwrap();
+    let cache = dir.join("fake-obs-cache");
+    let rel_dir = cache.join(OBS_TAG);
+    fs::create_dir_all(&rel_dir).unwrap();
+    let tb = rel_dir.join(format!("obs-strih-linux-x86_64-{OBS_TAG}.tar.zst"));
+    let st = Command::new("bash")
+        .arg("-c")
+        .arg("tar -C \"$1\" -cf - . | zstd -q -o \"$2\"")
+        .arg("pack")
+        .arg(&stage)
+        .arg(&tb)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    fs::write(rel_dir.join("BUNDLE_MANIFEST.json"), &manifest).unwrap();
+    let pin = dir.join("fake-obs-pin");
+    fs::write(
+        &pin,
+        format!(
+            "OBS_RELEASE_TAG={OBS_TAG}\nOBS_RELEASE_COMMIT={SHA}\nOBS_RELEASE_STRIH_SHA256={}\nOBS_RELEASE_MANIFEST_SHA256={}\n",
+            sha256_of(&tb),
+            sha256_of(&rel_dir.join("BUNDLE_MANIFEST.json"))
+        ),
+    )
+    .unwrap();
+    if absent {
+        fs::remove_dir_all(&rel_dir).unwrap();
+    }
+    (pin, cache, libsha)
+}
+
 fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
     let dir = tempfile::tempdir().expect("tempdir");
+    let env_of = |k: &str| extra_env.iter().find(|(n, _)| *n == k).map(|(_, v)| *v);
+    let (obs_pin, obs_cache, libsha) = fake_obs_release(
+        dir.path(),
+        env_of("STUB_ARTIFACT_SHA"),
+        env_of("STUB_MANIFEST_NO_LIB").is_some(),
+        env_of("STUB_NO_OBS_RELEASE").is_some(),
+    );
     let (intercom_pin, intercom_tarball) = fake_intercom_release(dir.path());
     let (shading_pin, shading_cache) = fake_shading_release(dir.path());
     let bin = stub_bin(dir.path());
@@ -320,7 +417,13 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
         .env("STUB_DIR", dir.path())
         .env("STUB_SHA", SHA)
         .env("STUB_TOKEN", TOKEN)
-        .env("STUB_LIBSHA", LIBSHA)
+        .env("STUB_LIBSHA", &libsha)
+        .env("OBS_RELEASE_PIN_FILE", &obs_pin)
+        .env("OBS_RELEASE_CACHE", &obs_cache)
+        .env(
+            "OBS_RELEASE_URL",
+            format!("file://{}", dir.path().join("no-obs-release").display()),
+        )
         .env("STRIH_INTERCOM_PIN_FILE", &intercom_pin)
         .env("STRIH_INTERCOM_TARBALL_SRC", &intercom_tarball)
         .env("SHADING_RELEASE_PIN_FILE", &shading_pin)
@@ -368,18 +471,15 @@ fn strih_lx_execute_stages_first_then_stops_sets_up_starts_and_verifies_1317() {
         r.out, r.err, r.calls
     );
     let stage = format!("/tmp/genlock-stage-{SHA}");
-    // same-SHA resolution: the linux-genlock run at the anchor SHA, the strih FULL artifact.
+    // issue 1487: the pinned obs release, never a linux-genlock.yml artifact of this repo.
+    assert!(!r.calls.contains("linux-genlock"), "{}", r.calls);
     assert!(
-        r.calls.contains("--workflow linux-genlock.yml"),
-        "{}",
-        r.calls
-    );
-    assert!(
-        r.calls.contains(
-            "run download 777 --repo zbynekdrlik/camera-box -n obs-genlock-linux-x86_64-strih"
-        ),
-        "downloads the strih FULL artifact from the same-SHA run:\n{}",
-        r.calls
+        r.out.contains(&format!(
+            "the pinned obs release {OBS_TAG} unpacked + verified file by file, GENLOCK_BUILD_SHA={SHA}"
+        )),
+        "out={}\nerr={}",
+        r.out,
+        r.err
     );
     // order: installer preflight < prep(touch) < sweep < stage check < rsync bundle/repo < stop
     //        < launch < rc poll < start < read-back < :8899
@@ -665,9 +765,9 @@ fn strih_lx_preparation_failures_never_touch_the_box_1317() {
             "libobs.so.30",
         ),
         (
-            ("STUB_NO_LINUX_RUN", "1"),
-            "[strih-snv resolve]",
-            "linux-genlock",
+            ("STUB_NO_OBS_RELEASE", "1"),
+            "[strih-snv download]",
+            "never another build",
         ),
         (("STUB_TOKEN", ""), "[strih-snv tree]", "GH_TOKEN"),
         (

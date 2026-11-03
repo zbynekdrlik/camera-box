@@ -345,8 +345,8 @@ esac
 
 # 9) program audio by the FACTS (issue 1439): a box declaring the console's VBAN program -> its obs-vban source; a hub-fed one
 #    (issue 1344) -> strih-program sink + pulse capture + hub program rx (FOH level: supervisor). Hub boxes: HDMI legs + the card leg.
-if strih_program_vban_declared; then
-  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"
+if strih_program_audio_declared; then   # issue 1485: the Dante device strih-obs, else the console's VBAN
+  strih_program_audio_grade "$SCN_BIN" "$WS_HOST" "$LOG"
 else
   AUDIO_SINK=0
   # 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's PipeWire
