@@ -574,7 +574,8 @@ pub use rig_core::genlock_jxs_state;
 // the two-clock bench stays here as a test-only child of this re-export). Std-only; the C
 // mirror (`genlock_audio_*` in `vendor/obs-studio/libobs/obs-source.c`) is held identical by the
 // committed parity gate `tests/genlock_audio_pairing_parity.rs`.
-#[path = "."] // no src/genlock_audio_pairing/ exists to step out of
+#[allow(unused_attributes)] // only the test build reads the path: no src/genlock_audio_pairing/ exists
+#[path = "."]
 pub mod genlock_audio_pairing {
     pub use rig_core::genlock_audio_pairing::*;
     #[cfg(test)]
