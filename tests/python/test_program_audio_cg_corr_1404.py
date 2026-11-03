@@ -162,7 +162,7 @@ def test_a_cg_marker_of_its_own_never_correlates_with_the_cam2_marker(seed):
     assert c.ncc < pcc.DETECT_NCC * 0.75
 
 
-@pytest.mark.parametrize("delay_s", [-0.45, 0.0, 0.3, 1.0, 1.45])
+@pytest.mark.parametrize("delay_s", [-0.95, -0.45, 0.0, 0.3, 1.0, 1.45, 2.5, 2.95])
 def test_every_lag_of_the_declared_range_is_found(delay_s):
     cg = music_like(seed=4)
     if delay_s >= 0:
@@ -177,12 +177,12 @@ def test_every_lag_of_the_declared_range_is_found(delay_s):
 
 def test_a_lag_outside_the_range_is_not_searched():
     cg = music_like(seed=4)
-    prog = program_with(cg, delay_s=2.5)  # longer than LAG_MAX_MS: not the declared path
+    prog = program_with(cg, delay_s=3.5)  # longer than LAG_MAX_MS: not the declared path
     assert pcc.judge(frames(prog), frames(cg)).kind == pcc.ABSENT
 
 
 def test_the_lag_range_is_the_documented_path():
-    assert pcc.LAG_MIN_MS == -500.0 and pcc.LAG_MAX_MS == 1500.0
+    assert pcc.LAG_MIN_MS == -1000.0 and pcc.LAG_MAX_MS == 3000.0   # review round 1: widened
     assert pcc.NOTCH_LO_HZ == pa.BAND_LO_HZ and pcc.NOTCH_HI_HZ == pa.BAND_HI_HZ
     assert pcc.PASS_LO_HZ >= pcc.NOTCH_HI_HZ   # nothing of the marker band is ever correlated
 
@@ -232,7 +232,7 @@ def test_a_near_silent_cg_never_decides():
 def test_a_gap_in_the_cg_audio_is_undecided():
     cg = music_like()
     fr = frames(cg)
-    del fr[len(fr) - 120:len(fr) - 100]   # ~0.4 s missing inside the searched stretch
+    del fr[len(fr) - 140:len(fr) - 100]   # ~0.85 s missing inside the searched stretch
     assert pcc.judge(frames(program_with(None)), fr).kind == pcc.UNDECIDED
 
 
@@ -423,3 +423,61 @@ def test_the_loop_hands_the_cg_arm_the_programs_own_frames_at_their_stamps(tmp_p
     assert not bad and fr[0][1].shape[1] == 2 and fr[0][2] == 48000
     assert pcc.RING_S - 0.1 <= (end - first) / UNITS <= pcc.RING_S + 0.1  # bounded by the stamps
     assert end == 10_000_000_000 + int(round(12.0 * UNITS))                # the program's sender timeline
+
+
+# ----------------------------------------------------------------- review round 1
+
+@pytest.mark.parametrize("delay_s", [0.6, 2.2])
+def test_a_polarity_inverted_cg_in_the_program_reads_present(delay_s):
+    """A console channel with its polarity flipped, a miswired balanced cable, an inverting hop:
+    the song reaches the program with the sign flipped and must still read PRESENT (the peak is
+    taken by magnitude, its sign reported)."""
+    cg = music_like(seed=4)
+    c = pcc.judge(frames(program_with(-cg, delay_s=delay_s)), frames(cg))
+    assert c.kind == pcc.PRESENT, c
+    assert c.ncc <= -pcc.DETECT_NCC and c.lag_ms == pytest.approx(delay_s * 1e3, abs=1.0)
+
+
+def test_the_null_by_magnitude_stays_under_the_threshold_too(rec_clip):
+    peaks = []
+    for seed in range(6):
+        c = pcc.judge(frames(rec_clip), frames(music_like(seed=40 + seed, secs=rec_clip.shape[0] / SR)))
+        assert c.kind == pcc.ABSENT, c
+        peaks.append(abs(c.ncc))
+    assert max(peaks) < pcc.DETECT_NCC * 0.75, peaks
+
+
+def test_a_frozen_sender_stamp_never_grows_the_ring_past_its_sample_cap():
+    ring = pcc.AudioRing(mono=True)
+    block = np.zeros((FRAME, 1), np.float32)
+    for _ in range(5000):
+        ring.push(TS0, block, SR)          # the same stamp forever: the stamp bound never pops
+    fr, _bad = ring.snapshot()
+    assert sum(x.shape[0] for _ts, x, _sr in fr) <= getattr(pcc, 'RING_MAX_SAMPLES', 0)
+    assert getattr(pcc, 'RING_MAX_SAMPLES', 0) >= int(pcc.RING_S * 192000)  # never cuts a healthy 192 kHz ring short
+
+
+def test_a_correlation_that_raises_is_undecided_never_a_crash(monkeypatch):
+    m = _monitor(CGOBS, np.stack([music_like()] * 2, axis=1) * 0.3)
+
+    def boom(*_a, **_k):
+        raise MemoryError("numpy")
+
+    monkeypatch.setattr(pcc, "judge", boom)
+    st = pcg.CgArm("resolume-snv", [m], _Probe()).state(now=100.0, program=_program_ring(program_with(None)))
+    c = st.readings[0].correlation
+    assert c.kind == pcc.UNDECIDED and "correlation failed" in c.why and "MemoryError" in c.why
+    assert pcg.overlay("MEASUREMENT", None, st)[0] == "FOREIGN"     # fail closed
+
+
+def test_a_ring_push_that_raises_keeps_the_capture_thread_alive(monkeypatch):
+    m = _monitor(CGOBS, np.zeros((FRAME * 2, 2), np.float32))
+
+    def bad_push(*_a, **_k):
+        raise ValueError("odd shape")
+
+    monkeypatch.setattr(m.ring, "push", bad_push)
+    m.receiver.blocks = [_Block(TS0, np.zeros((FRAME, 2), np.float32))]
+    m.poll_once()                                                    # must not raise
+    r = m.reading(100.0)
+    assert r.error and "odd shape" in r.error

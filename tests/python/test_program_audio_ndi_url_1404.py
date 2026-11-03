@@ -24,6 +24,8 @@ import program_audio_ndi_url as pnu  # noqa: E402
 
 SP = "RESOLUME-SNV (SP-program)"
 RECREATE_S = getattr(pnu, "RECREATE_AFTER_S", 60.0)
+BACKOFF_S = getattr(pnu, "RECREATE_BACKOFF_S", 300.0)
+FRUITLESS_MAX = getattr(pnu, "RECREATE_FRUITLESS_MAX", 3)
 CGOBS = "RESOLUME-SNV (cg-obs)"
 AVAHI_3_11 = r"""+;enp7s0.70;IPv4;RESOLUME-SNV\032\040SP-program\041;_ndi._tcp;local
 =;enp7s0.70;IPv4;RESOLUME-SNV\032\040cg-obs\041;_ndi._tcp;local;RESOLUME-SNV-000048d4-2217.local;10.77.7.107;5962;"discovery=5960" "groups=Public"
@@ -196,6 +198,12 @@ def test_a_failing_recreate_keeps_the_old_receiver(clock):
     clock["t"] += pnu.REPIN_AFTER_S + 1.0
     r.capture(500)
     assert not _Rx.made[0].closed and r.url is None and "ERROR re-creating" in logs[-1]
+    # review round 1: ONE attempt per window, never one per capture call (~every 500 ms)
+    tries = calls["n"]
+    for _ in range(200):                     # 100 s: past RECREATE_AFTER_S, one more try at most
+        clock["t"] += 0.5
+        r.capture(500)
+    assert calls["n"] <= tries + 2
 
 
 def test_open_receiver_honours_the_pin_switch(monkeypatch):
@@ -291,3 +299,32 @@ def test_main_creates_every_receiver_through_the_pin(monkeypatch, tmp_path):
     assert pas.main(["--serve-dir", str(tmp_path / "serve"), "--source", "STREAM-SNV (stream)",
                      "--http-port", "0"]) == 0
     assert made == [(SP, "10.77.9.201:5961"), (CGOBS, "10.77.9.201:5962"), ("STREAM-SNV (stream)", None)]
+
+
+def test_a_sender_that_never_answers_backs_the_recreate_off(clock):
+    """The CG box away (or its sender off): a re-create a minute forever is churn. After
+    RECREATE_FRUITLESS_MAX fruitless re-creates the interval grows to RECREATE_BACKOFF_S; a
+    connection resets it."""
+    r = _pinned(clock, ["10.77.9.201:5962"])
+    t = clock["t"]
+    made_at = []
+    for step in range(int(3600 / 5)):
+        clock["t"] = t + 1.0 + step * 5.0
+        n = len(_Rx.made)
+        r.capture(500)
+        if len(_Rx.made) > n:
+            made_at.append(clock["t"] - t)
+    gaps = [b - a for a, b in zip(made_at, made_at[1:])]
+    k = FRUITLESS_MAX
+    assert all(g < BACKOFF_S for g in gaps[:k - 1])
+    assert gaps[k:] and all(g >= BACKOFF_S for g in gaps[k:])
+    _Rx.made[-1].conns = 1                       # a connection resets the back-off
+    clock["t"] += BACKOFF_S
+    r.capture(500)
+    _Rx.made[-1].conns = 0
+    n = len(_Rx.made)
+    clock["t"] += 1.0
+    r.capture(500)
+    clock["t"] += RECREATE_S + 1.0
+    r.capture(500)
+    assert len(_Rx.made) == n + 1
