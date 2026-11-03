@@ -4,6 +4,10 @@ paths:
   - "scripts/program_audio_ndi.py"
   - "scripts/program_audio_sampler.py"
   - "scripts/program_audio_cg.py"
+  - "scripts/program_audio_cg_corr.py"
+  - "scripts/program_audio_ndi_url.py"
+  - "tests/python/test_program_audio_cg_corr_1404.py"
+  - "tests/python/test_program_audio_ndi_url_1404.py"
   - "scripts/program_audio_capture.py"
   - "scripts/program_audio_http.py"
   - "scripts/lib/strih-program-audio.sh"
@@ -259,6 +263,12 @@ IN the program.
   - Detection: the same live cg-obs mixed 18 dB under the program level, 600 ms late: 0.117-0.313
     (median 0.19). 24 dB under: median 0.12, min 0.026 in a quiet passage. 50 ppm fast: median
     0.16. `DETECT_NCC` 0.07 = 1.6 x the null maximum.
+  - The LONG live null (review round 2): 600 s of the live stream program and the live SP-program
+    read together from dev1 at their real sender stamps, every 2 s window, plus the CG shifted by
+    60/120/180 s: 990 windows ABSENT (2 UNDECIDED: the CG segment under -50 dBFS), |NCC| p50 0.030,
+    p99.9 0.042, max 0.043, none at or over 0.07. One E2E grades a few hundred windows, so the margin
+    holds against false refusals. Recipe: `~/.claude/work-products/issue-1404-cg-corr/` (probe
+    `probe_sp.py`, `longnull.py`).
   - Clock-rate mismatch was measured at +50 ppm only. A larger crystal error loses coherence over
     the 4 s segment first in the top of the band.
   - Known limit: a passage more than ~24 dB under the program level can read ABSENT in one window.
