@@ -481,3 +481,15 @@ def test_a_ring_push_that_raises_keeps_the_capture_thread_alive(monkeypatch):
     m.poll_once()                                                    # must not raise
     r = m.reading(100.0)
     assert r.error and "odd shape" in r.error
+
+
+def test_the_correlation_never_calls_blas(monkeypatch):
+    """np.dot goes through OpenBLAS, whose worker threads spun to 15x the judge's CPU under load on
+    dev1; the sampler runs on a production box."""
+    def no_blas(*_a, **_k):
+        raise AssertionError("a BLAS call in the CG correlation")
+
+    for name in ("dot", "matmul", "inner", "vdot", "einsum"):
+        monkeypatch.setattr(np, name, no_blas)
+    cg = music_like()
+    assert pcc.judge(frames(program_with(cg)), frames(cg)).kind == pcc.PRESENT
