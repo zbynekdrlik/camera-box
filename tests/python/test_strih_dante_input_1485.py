@@ -185,7 +185,7 @@ START = ("12:00:00.000: dante-input start: config=/home/newlevel/.camera-box/dan
          "ports=Some(4440)/Some(8800)/Some(4455) rx_port_base=Some(47200) subscriptions=2 state_file=x")
 
 
-def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=None):
+def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=None, user=None):
     log = tmp_path / "obs.log"
     log.write_text("\n".join(log_lines) + "\n")
     kf = tmp_path / "kind"
@@ -199,8 +199,8 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     body = ('ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; note() { echo "NOTE $*"; }; %s; '
             'strih_box_load strih-snv >/dev/null; strih_dante_input_grade "$1" "$2" "$4"') % sleep_fn
     return _bash(body, "scn", "127.0.0.1", "unused", log,
-                 env={"STRIH_DANTE_INPUT_KIND_FILE": str(kf), "STRIH_DANTE_INPUT_TOML": str(dest),
-                      "STRIH_DANTE_INPUT_WAIT_S": "0"})
+                 env=dict({"STRIH_DANTE_INPUT_KIND_FILE": str(kf), "STRIH_DANTE_INPUT_TOML": str(dest),
+                           "STRIH_DANTE_INPUT_WAIT_S": "0"}, **({"STRIH_LX_USER": user} if user else {})))
 
 
 def test_item9_passes_a_healthy_dante_source(tmp_path):
@@ -240,6 +240,14 @@ def test_item9_keeps_a_counter_flat_over_the_window_as_history(tmp_path):
                nxt=_status("12:00:20.000", 999999, rx_late="27"))
     assert "BAD" not in r.stdout, r.stdout
     assert "OK (program-dante) live: delivered_frames 4800 -> 999999" in r.stdout and "rx_late=27" in r.stdout
+
+
+# CI 41574708709: the GitHub runner has no `newlevel`, getent exits 2 and the caller's errexit ended the
+# grade before its first row. A user without a passwd entry must still be graded.
+def test_item9_grades_when_the_obs_user_has_no_passwd_entry(tmp_path):
+    r = _grade(tmp_path, [START, _status("12:00:10.000", 4800)], user="no-such-user-1485")
+    assert r.returncode == 0, r.stderr
+    assert "OK (program-dante) live: delivered_frames 4800 -> 999999" in r.stdout, r.stdout
 
 
 def test_item9_fails_each_fault_by_name(tmp_path):
