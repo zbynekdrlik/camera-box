@@ -74,7 +74,7 @@ _strih_dante_input_field_ok() {
 # order; rc 1 + every problem on stderr (the file's line named) when the file is missing or malformed.
 strih_dante_input_site_rows() {
   local file="${1:?site file required}" line n=0 key val label dev chan bad=0 k
-  local -A rows=()
+  local -A site_rows=()
   [ -f "$file" ] || { echo "dante-input: the site file ${file} is missing -- the supervisor places it (RX<n>=<rx label>|<tx device>|<tx channel>, never in git)" >&2; return 1; }
   while IFS= read -r line || [ -n "$line" ]; do
     n=$((n + 1)); line="${line%$'\r'}"
@@ -88,23 +88,23 @@ strih_dante_input_site_rows() {
        || ! _strih_dante_input_field_ok "$chan"; then
       echo "dante-input: ${file} line ${n}: ${key} needs three fields <rx label>|<tx device>|<tx channel>, printable ASCII without quote, backslash or |" >&2; bad=1; continue
     fi
-    [ -z "${rows[${key#RX}]:-}" ] || { echo "dante-input: ${file} line ${n}: ${key} twice" >&2; bad=1; continue; }
-    rows[${key#RX}]="${label}"$'\t'"${dev}"$'\t'"${chan}"
+    [ -z "${site_rows[${key#RX}]:-}" ] || { echo "dante-input: ${file} line ${n}: ${key} twice" >&2; bad=1; continue; }
+    site_rows[${key#RX}]="${label}"$'\t'"${dev}"$'\t'"${chan}"
   done <"$file"
-  n="${#rows[@]}"
+  n="${#site_rows[@]}"
   case "$n" in 1 | 2 | 3 | 4 | 5 | 6 | 8) ;; *) echo "dante-input: ${file} declares ${n} RX channels; OBS takes 1 to 6 or 8" >&2; bad=1 ;; esac
   for ((k = 1; k <= n; k++)); do
-    [ -n "${rows[$k]:-}" ] || { echo "dante-input: ${file} has no RX${k} (the RX numbers run 1..${n})" >&2; bad=1; }
+    [ -n "${site_rows[$k]:-}" ] || { echo "dante-input: ${file} has no RX${k} (the RX numbers run 1..${n})" >&2; bad=1; }
   done
   [ "$bad" = 0 ] || return 1
-  for ((k = 1; k <= n; k++)); do printf '%s\n' "${rows[$k]}"; done
+  for ((k = 1; k <= n; k++)); do printf '%s\n' "${site_rows[$k]}"; done
 }
 
 # strih_dante_input_toml IFACE "ARC CMC FLOWS RXBASE" ROWS -> the dante-input.toml text (pure). ROWS =
 # strih_dante_input_site_rows' output. network_rate 96000 (the Dante network; dlink halves it to OBS's
 # 48 kHz), no sample_rate (OBS's own), latency 10 ms.
 strih_dante_input_toml() {
-  local iface="${1:?iface required}" ports="${2:?ports required}" rows="${3:?rows required}"
+  local iface="${1:?iface required}" ports="${2:?ports required}" chans="${3:?rows required}"
   local arc cmc flows base label dev chan rx="" i=0 subs=""
   read -r arc cmc flows base <<<"$ports"
   while IFS=$'\t' read -r label dev chan; do
@@ -112,7 +112,7 @@ strih_dante_input_toml() {
     i=$((i + 1))
     rx="${rx}${rx:+, }\"${label}\""
     subs="${subs}"$'\n'"[[subscribe]]"$'\n'"rx = ${i}"$'\n'"tx_channel = \"${chan}\""$'\n'"tx_device = \"${dev}\""$'\n'
-  done <<<"$rows"
+  done <<<"$chans"
   printf '%s\n\n' "$STRIH_DANTE_INPUT_HEADER"
   printf 'name = "%s"\niface = "%s"\nnetwork_rate = %s\nlatency_ms = %s\nrx = [%s]\n' \
     "$STRIH_DANTE_INPUT_DEVICE" "$iface" "$STRIH_DANTE_INPUT_NETWORK_RATE" "$STRIH_DANTE_INPUT_LATENCY_MS" "$rx"
@@ -137,7 +137,7 @@ _strih_dante_input_iface() {
 # file or an unresolvable leg fails (rc 1, named). Any other box: a file carrying our header is removed
 # (an operator's own file is left, named). OBS reads it at its next start.
 strih_dante_input_install() {
-  local user="${1:?desktop user required}" home="${2:?home required}" dest ports rows iface group
+  local user="${1:?desktop user required}" home="${2:?home required}" dest ports chans iface group
   dest="$(_strih_dante_input_dest "$home")"
   if ! strih_program_dante_declared; then
     if [ -f "$dest" ] && head -n 1 "$dest" 2>/dev/null | grep -qxF "$STRIH_DANTE_INPUT_HEADER"; then
@@ -150,12 +150,12 @@ strih_dante_input_install() {
     return 0
   fi
   ports="$(strih_dante_input_ports "$(strih_lx_dante_devices)")" || return 1
-  rows="$(strih_dante_input_site_rows "$(strih_dante_input_site_file)")" || return 1
+  chans="$(strih_dante_input_site_rows "$(strih_dante_input_site_file)")" || return 1
   iface="$(_strih_dante_input_iface)" || { echo "dante-input: the leg's interface cannot be resolved (above)" >&2; return 1; }
   group="$(id -gn "$user" 2>/dev/null)" || { echo "dante-input: no user ${user}" >&2; return 1; }
   install -d -m 0755 -o "$user" -g "$group" "$(dirname "$dest")" || return 1
-  strih_dante_input_toml "$iface" "$ports" "$rows" | obs_box_write_if_changed "$dest" 0644 "${user}:${group}" "dante-input" || return 1
-  echo "  dante-input: ${STRIH_DANTE_INPUT_DEVICE} on ${iface}, $(printf '%s\n' "$rows" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
+  strih_dante_input_toml "$iface" "$ports" "$chans" | obs_box_write_if_changed "$dest" 0644 "${user}:${group}" "dante-input" || return 1
+  echo "  dante-input: ${STRIH_DANTE_INPUT_DEVICE} on ${iface}, $(printf '%s\n' "$chans" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
 }
 
 # strih_dante_input_field LINE KEY -> the value of KEY=<value> in a dante-input line.

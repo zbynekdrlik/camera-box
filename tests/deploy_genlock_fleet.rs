@@ -88,6 +88,20 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
     )
 }
 
+fn run_script_env(env: &[(&str, &str)], args: &[&str]) -> (i32, String, String) {
+    let mut cmd = Command::new(script());
+    cmd.args(args).current_dir(manifest_dir());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("failed to run deploy-genlock-fleet.sh");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 fn win_program(box_name: &str, mode: &str, has_ahk: &str) -> String {
     run_sourced(
         &script(),
@@ -1128,8 +1142,17 @@ fn usage_errors_exit_two() {
     // --plan requires --stage and --sha (no network in plan mode)
     let (c3, _o, _e) = run_script(&["--plan", "--run-id", "R"]);
     assert_eq!(c3, 2, "--plan requires --stage and --sha");
-    // no --run-id at all
-    let (c4, _o, _e) = run_script(&["--plan", "--stage", "/tmp", "--sha", "S"]);
+    // no --run-id with a Windows box in the list (issue 1487: a Linux-only run needs none, its boxes
+    // take the pinned obs release)
+    let (c4, _o, _e) = run_script(&[
+        "--plan",
+        "--stage",
+        "/tmp",
+        "--sha",
+        "S",
+        "--boxes",
+        "resolume-snv",
+    ]);
     assert_eq!(c4, 2, "missing --run-id");
 }
 
@@ -1563,24 +1586,34 @@ fn default_plan_is_strih_lx_and_stream_never_a_windows_strih_1317() {
 #[test]
 fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (code, out, err) = run_script(&[
-        "--plan",
-        "--run-id",
-        "R1",
-        "--sha",
-        "deadbeef",
-        "--stage",
-        tmp.path().to_str().unwrap(),
-        "--boxes",
-        "strih-snv",
-    ]);
+    // issue 1487: the strih-snv commit is the pinned obs release's; a stand-in pin names `deadbeef`
+    let pin = tmp.path().join("obs-release.pin");
+    std::fs::write(
+        &pin,
+        "OBS_RELEASE_TAG=v9.9.5\nOBS_RELEASE_COMMIT=deadbeef\n",
+    )
+    .unwrap();
+    let (code, out, err) = run_script_env(
+        &[("OBS_RELEASE_PIN_FILE", pin.to_str().unwrap())],
+        &[
+            "--plan",
+            "--run-id",
+            "R1",
+            "--sha",
+            "deadbeef",
+            "--stage",
+            tmp.path().to_str().unwrap(),
+            "--boxes",
+            "strih-snv",
+        ],
+    );
     assert_eq!(
         code, 0,
         "--plan strih-snv must succeed.\nstdout={out}\nstderr={err}"
     );
     for want in [
         "scripts/deploy-genlock-fleet.sh --run-id R1 --boxes strih-snv",
-        "obs-genlock-linux-x86_64-strih",
+        "obs-strih-linux-x86_64-v9.9.5.tar.zst",
         "obs-backup-retention.sh",
         // review round 1: stage dirs only, as the operator (never sudo), the running installer
         // refused first, and a read-back that proves the new OBS runs (bytes, stable PID, tick).

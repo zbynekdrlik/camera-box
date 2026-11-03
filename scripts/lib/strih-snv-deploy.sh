@@ -551,8 +551,9 @@ _strih_lx_installer_state() {  # -> alive | idle | unreachable (the ssh itself f
 # resolved here too (the STRIH_LX_BOX_* maps), so every box is resolved before any box is touched. Sets
 # the STRIH_LX_PREP_* globals strih_lx_apply reads. 0 or 3.
 strih_lx_prepare() {
-  local sha="$1" work="$2" repo="$3" gh_repo="$4" boxes="${5:-strih-snv}"
-  local w="$work/strih-snv" art lrun rc art_sha tree_rev tool f b host guard
+  # $4 (the GitHub repo) is no longer read: the bundle is the pinned obs release (issue 1487)
+  local sha="$1" work="$2" repo="$3" boxes="${5:-strih-snv}"
+  local w="$work/strih-snv" art rc art_sha tree_rev tool f b host guard
   local -a box_list
   IFS=',' read -r -a box_list <<< "$boxes"
   STRIH_LX_BOX="$boxes"   # a shared step's error names every box it serves
