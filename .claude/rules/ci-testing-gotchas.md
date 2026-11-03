@@ -1912,3 +1912,12 @@ rename the variable instead of disabling the warning.
 `cargo metadata` resolves every target's packages, so it fails offline on one not in the local cache
 (`failed to download cc`). `tests/intercom_pin_1487.rs` takes the commit from Cargo.lock and reads
 `<cargo home>/git/checkouts/intercom-*/<first 7 of the commit>/`, which building the crate has created.
+
+## `while read ...; do [ "$k" = x ] && v=...; done < file || return 1` always returns 1 (issue 1485)
+
+A `while` loop's status is the status of the LAST command its body ran. When the last line read does not
+match, `[ ... ] && ...` leaves 1, so a `|| return 1` (or `|| continue`) on the loop fires on every file
+whose match is not on its last line. The first cut of the reserved-cpu grade read `btime` from
+`/proc/stat` this way and never saw a pending reboot; only a test with `btime` in the middle of the
+fixture caught it. Put the match in a `case` (status 0) inside the body, and keep the `||` for a
+redirection that fails.
