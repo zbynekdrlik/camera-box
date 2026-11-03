@@ -56,7 +56,7 @@ OBS_BOX_STREAM_OUTPUT_NAME="stream"
 # step reads the same list for a stream-role box, issue 1462).
 # issue 1436: the pulse sink the program input's Audio Monitor filter plays to (stream-operator-audio.sh's sink).
 OBS_BOX_STREAM_AUDIO_MONITOR_FILTER_DEVICE=stream-operator-headphones
-OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service strih-display-watch.service)
+OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dsync-tray.service strih-display-watch.service)
 # issue 1380 (ROZHODNUTE 13.10.2026): the stream role's YouTube-safe Development scene -- the program
 # video input (muted) over the measurement clip, never the production scene (it holds the live mixer).
 # The scene name equals STREAM_DEV_SCENE_DEFAULT (scripts/lib/stream-dev-scene.sh, pinned by a pytest).

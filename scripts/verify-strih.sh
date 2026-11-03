@@ -284,11 +284,11 @@ fi
 #    dantesync 1.12.0 master in daily mode on the daily bound + margin and its nightly schedule (a
 #    dead schedule reads DATE MASTER OUT); without a readable /status on the step bound + margin,
 #    named as such. Never the 2 ms UTC bound.
-DS_ACTIVE="$(systemctl is-active dantesync 2>/dev/null || true)"
+DS_ACTIVE="$(systemctl is-active dsync 2>/dev/null || true)"
 if [ "$DS_ACTIVE" != active ]; then
-  bad "dantesync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
+  bad "dsync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
 else
-  DS_JOURNAL="$(journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null || true)"
+  DS_JOURNAL="$(journalctl -u dsync --no-pager -n 400 -o short-iso 2>/dev/null || true)"
   # Issue 1372: the date master's journal reads `[NTP] offset:-2140us (date authority, fleet line
   # ..., step bound 50000us)` on every release since 1.9.0 -- the line cannot tell a 1.11.x master
   # (micro-corrections, DATE_MASTER_MICRO_BOUND_MS) from a 1.10.0 one (step bound). The box's own
@@ -772,7 +772,7 @@ DS_JOIN_V="$(strih_dantesync_join_verdict "$(strih_lx_ip)")"; case "$DS_JOIN_V" 
 #     setup-strih step 2 emits for the role, no drop-in overrides it, and the running process runs its
 #     ExecStart (strih_dantesync_unit_verdict). Step 2 restarts only on a change (a date-master restart
 #     steps the whole fleet date), so drift is caught HERE, never by a blind restart on a deploy.
-DS_UNIT_PATH_V="/etc/systemd/system/dantesync.service"
+DS_UNIT_PATH_V="/etc/systemd/system/dsync.service"
 DS_ARGS_V="$(strih_lx_dantesync_args 2>/dev/null)" || DS_ARGS_V=""
 DS_UNIT_ARGV_V="$(strih_dantesync_running_argv 2>/dev/null || true)"
 if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" "$(strih_lx_ip)" 2>/dev/null)"; then

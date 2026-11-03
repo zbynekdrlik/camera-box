@@ -336,34 +336,36 @@ step 3 "DanteSync (#479): pin imag's system clock to the cluster master (genlock
 # 474->541ms/80min, CAM underruns climbing). DanteSync OWNS the clock (ops skill hard rule) —
 # NEVER timesyncd/chrony/ptp4l alongside it. Pin the NIC ($NIC, resolved in step 1) since imag is
 # a notebook with other network interfaces that must not be mistaken for the rig link.
-DANTESYNC_REPO="zbynekdrlik/dantesync"
-DANTESYNC_URL="$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/latest" 2>/dev/null \
-    | grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' \
-    | grep -o 'https://[^"]*' | head -1 || true)"
+# issue 1487: the PINNED release, never latest (the setup-device #1066 rule), through the ONE install lib.
+# shellcheck source=scripts/lib/dantesync-install.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/dantesync-install.sh"
+DANTESYNC_PIN="$(dantesync_install_pinned_version)" || fail "no pinned dsync version"
+DANTESYNC_URL="$(dantesync_install_release_url "$DANTESYNC_PIN")"
+curl -fsSL -r 0-0 -o /dev/null "$DANTESYNC_URL" 2>/dev/null || DANTESYNC_URL=""   # unreachable: the fallback ladder below
 
 # #1289: derive the release's TARGET version from the download URL's own path
-# (.../releases/download/vX.Y.Z/dantesync-linux-amd64), and read the CURRENTLY-installed
-# dantesync's own version (per .claude/rules/dantesync-version-reading.md: `dantesync --version`
+# (.../releases/download/vX.Y.Z/dsync-linux-amd64), and read the CURRENTLY-installed
+# dantesync's own version (per .claude/rules/dantesync-version-reading.md: `dsync --version`
 # answers on every platform, no journal/bundle-state coupling needed). Skip the install entirely
 # when they already agree -- both to avoid a needless replace on an idempotent re-run, and because
-# `curl -o`/`scp -O` straight onto a RUNNING dantesync.service binary fails (the kernel refuses to
+# `curl -o`/`scp -O` straight onto a RUNNING dsync.service binary fails (the kernel refuses to
 # open a currently-executing file for write, ETXTBSY) -- mirrors the setup-device.sh #1289 fix.
 DANTESYNC_TARGET_VERSION=""
 if [ -n "$DANTESYNC_URL" ]; then
     DANTESYNC_TARGET_VERSION="$(printf '%s\n' "$DANTESYNC_URL" | grep -oE '/v[0-9]+\.[0-9]+\.[0-9]+/' | head -1 | tr -d '/v' || true)"
 fi
 DANTESYNC_CURRENT_VERSION=""
-if [ -x /usr/local/bin/dantesync ]; then
-    DANTESYNC_CURRENT_VERSION="$(/usr/local/bin/dantesync --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+if [ -x /usr/local/bin/dsync ]; then
+    DANTESYNC_CURRENT_VERSION="$(/usr/local/bin/dsync --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 fi
 
 # #1289: an ALREADY-installed dantesync is fine to keep even when the release URL could not be
 # determined (imag's other network interfaces mean GitHub is not always reachable, per the
 # pre-existing fallback ladder below) -- only reinstall when we KNOW the target differs, never
 # because we simply couldn't check. Preserves the pre-#1289 behavior for this specific case (the
-# old `if [ ! -x /usr/local/bin/dantesync ]` gate skipped the whole ladder whenever a binary was
+# old `if [ ! -x /usr/local/bin/dsync ]` gate skipped the whole ladder whenever a binary was
 # already present, regardless of network reachability).
-if [ -x /usr/local/bin/dantesync ] \
+if [ -x /usr/local/bin/dsync ] \
     && { [ -z "$DANTESYNC_TARGET_VERSION" ] || [ "$DANTESYNC_CURRENT_VERSION" = "$DANTESYNC_TARGET_VERSION" ]; }; then
     if [ -n "$DANTESYNC_TARGET_VERSION" ]; then
         echo "  dantesync already at v$DANTESYNC_CURRENT_VERSION -- skipping install"
@@ -373,7 +375,7 @@ if [ -x /usr/local/bin/dantesync ] \
 else
     # download/copy to a temp file and `install -m 0755` it into place, never write straight onto
     # the live path (see #1289 rationale above) -- install's rename-into-place semantics are safe
-    # over a running dantesync.service.
+    # over a running dsync.service.
     _dantesync_dl_tmp="$(mktemp)"
     if [ -n "$DANTESYNC_URL" ]; then
         curl -fsSL "$DANTESYNC_URL" -o "$_dantesync_dl_tmp" || {
@@ -383,7 +385,7 @@ else
     elif [ -n "${CAM_PW:-}" ]; then
         command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
         sshpass -p "$CAM_PW" scp -O -o StrictHostKeyChecking=no \
-            "${DESKTOP_USER}@${NDI_PEER}:/usr/local/bin/dantesync" "$_dantesync_dl_tmp" \
+            "${DESKTOP_USER}@${NDI_PEER}:/usr/local/bin/dsync" "$_dantesync_dl_tmp" \
             || {
                 rm -f "$_dantesync_dl_tmp"
                 fail "dantesync copy from cam1 fallback failed"
@@ -396,19 +398,23 @@ else
         rm -f "$_dantesync_dl_tmp"
         fail "downloaded/copied dantesync is empty"
     }
-    install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync || {
+    dsync_release_sha_ok dsync-linux-amd64 "$DANTESYNC_TARGET_VERSION" "$(sha256sum "$_dantesync_dl_tmp" | awk '{print $1}')" || {
         rm -f "$_dantesync_dl_tmp"
-        fail "could not install dantesync to /usr/local/bin/dantesync"
+        fail "the downloaded dsync is not the pinned release"
+    }
+    install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dsync || {
+        rm -f "$_dantesync_dl_tmp"
+        fail "could not install dantesync to /usr/local/bin/dsync"
     }
     rm -f "$_dantesync_dl_tmp"
 fi
-[ -x /usr/local/bin/dantesync ] || fail "dantesync binary missing after install attempt"
+[ -x /usr/local/bin/dsync ] || fail "dantesync binary missing after install attempt"
 
 # #1215: install the dantesync config on a from-scratch provision so the box never STEPS its clock
 # in discrete jumps. Issue 1372: the pinned dantesync (1.9.0+) runs `clock_discipline=ptp_phase_lock`
 # (the rate and phase from the PTP tick only, phase slew not used), written explicitly so the
 # canonical config reads it; the old phase_slew canary key is no longer written. imag-nb was
-# the ONE box on the rig that never received this -- it had no /etc/dantesync/ directory at all
+# the ONE box on the rig that never received this -- it had no /etc/dsync/ directory at all
 # and stepped 16x/hour of 6-7ms each, a visible hitch on the projected output every ~4 minutes.
 # The cam1-4 fleet got its copy through an out-of-band canary rollout, never this script -- this
 # is written BEFORE the systemd unit/restart below so the same restart that proves PTP re-lock
@@ -431,8 +437,10 @@ RIG_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
   echo "FAIL: setup-imag: cannot resolve the PTP grandmaster host -- refusing to write an empty gm_allowlist (#1307)" >&2
   exit 1
 }
-install -d -m 755 /etc/dantesync
-cat > /etc/dantesync/config.json <<DANTECFGEOF
+# issue 1487: a box still on dantesync moves to dsync here: the old service out, its state dir renamed.
+dantesync_install_retire_legacy || fail "could not retire dantesync (above)"
+install -d -m 755 /etc/dsync
+cat > /etc/dsync/config.json <<DANTECFGEOF
 {
   "_ntp_server_examples": "sk.pool.ntp.org, europe.pool.ntp.org, time.google.com, time.cloudflare.com",
   "http_status": {
@@ -453,18 +461,18 @@ cat > /etc/dantesync/config.json <<DANTECFGEOF
   }
 }
 DANTECFGEOF
-chmod 644 /etc/dantesync/config.json
-echo "  #1215/#1372: /etc/dantesync/config.json installed (clock_discipline=ptp_phase_lock, gm_allowlist=${RIG_GRANDMASTER_IP}) -- reprovision-durable"
+chmod 644 /etc/dsync/config.json
+echo "  #1215/#1372: /etc/dsync/config.json installed (clock_discipline=ptp_phase_lock, gm_allowlist=${RIG_GRANDMASTER_IP}) -- reprovision-durable"
 
-cat > /etc/systemd/system/dantesync.service <<EOF
+cat > /etc/systemd/system/dsync.service <<EOF
 [Unit]
-Description=Dante Time Sync (PTP/NTP Synchronization)
+Description=dsync (PTP/NTP Synchronization)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/dantesync -i ${NIC} --ntp-server strih.lan
+ExecStart=/usr/local/bin/dsync -i ${NIC} --ntp-server strih.lan
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -482,7 +490,7 @@ systemctl disable --now systemd-timesyncd >/dev/null 2>&1 || true
 systemctl mask systemd-timesyncd >/dev/null 2>&1 || true
 
 systemctl daemon-reload
-systemctl enable dantesync >/dev/null 2>&1 || true
+systemctl enable dsync >/dev/null 2>&1 || true
 # #491: stamp the restart instant, then FORCE a restart so the running daemon matches the
 # just-(re)installed binary+unit, and verify a FRESH post-restart lock. A re-provision restarts an
 # already-locked dantesync; PTP re-acquisition then takes 30-70s while the pre-restart LOCK lines
@@ -490,19 +498,19 @@ systemctl enable dantesync >/dev/null 2>&1 || true
 # re-locked fine. The journal read is ANCHORED to the restart instant (--since) so a stale
 # pre-restart LOCK can't satisfy it and a fresh one can't be scrolled out; budget is 150s.
 DANTESYNC_RESTART_EPOCH="$(date +%s)"
-systemctl restart dantesync
+systemctl restart dsync
 
 # Verify PTP/NTP lock — the Linux equivalent of the ops-skill journalctl check. Accepts either
 # PTP LOCK/NANO or the NTP-fallback offset line (grandmaster may be transiently absent).
 DANTESYNC_LOCKED=0
 for i in $(seq 1 75); do
-    if journalctl -u dantesync --no-pager --since "@$DANTESYNC_RESTART_EPOCH" 2>/dev/null | grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'; then
+    if journalctl -u dsync --no-pager --since "@$DANTESYNC_RESTART_EPOCH" 2>/dev/null | grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'; then
         DANTESYNC_LOCKED=1
         break
     fi
     sleep 2
 done
-[ "$DANTESYNC_LOCKED" -eq 1 ] || fail "dantesync did not report PTP/NTP lock within 150s of restart — genlock clock discipline not established (check journalctl -u dantesync)"
+[ "$DANTESYNC_LOCKED" -eq 1 ] || fail "dantesync did not report PTP/NTP lock within 150s of restart — genlock clock discipline not established (check journalctl -u dsync)"
 echo "  dantesync locked to strih.lan via $NIC (timesyncd masked)"
 
 # =============================================================================

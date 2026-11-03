@@ -6,7 +6,7 @@
 # scripts/lib/dantesync-tray-upgrade.sh -- issue 1372: the dantesync TRAY rides every fleet roll.
 #
 # WHY: dantesync-fleet-upgrade.sh swapped only the dantesync SERVICE binary on a Windows node, so
-# dantesync-tray.exe -- the version the operator actually sees -- stayed behind on every roll, and
+# dsync-tray.exe -- the version the operator actually sees -- stayed behind on every roll, and
 # the version gate's tray sha-pin ALARMed until someone swapped it by hand (after the 1.11.0 and
 # 1.11.1 rolls, 26.9.2026). This lib emits the PowerShell tray arm the upgrade program carries (and a
 # tray-only program for a node whose service is already on the target), and reads its one-line
@@ -20,9 +20,11 @@
 # DEPENDS (resolved at CALL time): dantesync_release_url_windows_tray (dantesync-fleet-upgrade.sh).
 
 # The tray's install path: the one dantesync-version-gate.sh sha-pins (DANTESYNC_TRAY_GATE_WIN_EXE).
-DANTESYNC_WIN_TRAY_EXE='C:\Program Files\DanteSync\dantesync-tray.exe'
+DANTESYNC_WIN_TRAY_EXE='C:\Program Files\dsync\dsync-tray.exe'
 # The temporary relaunch task: registered, started and unregistered in the same program.
-DANTESYNC_WIN_TRAY_TASK='DanteSyncTrayRelaunch-1372'
+DANTESYNC_WIN_TRAY_TASK='DsyncTrayRelaunch-1372'
+# issue 1487: the tray of a node still on dantesync: killed by the swap, its dir removed by the finalize.
+DANTESYNC_WIN_LEGACY_TRAY_EXE='C:\Program Files\DanteSync\dantesync-tray.exe'
 # The per-roll collector of "<node>: <reason>" tray warnings (dantesync_tray_note / _report).
 DANTESYNC_TRAY_WARNINGS=()
 
@@ -38,20 +40,21 @@ dantesync_windows_tray_fetch_ps() {
 # 1b. the tray (issue 1372): the same pinned release's tray asset, fetched + verified before any stop
 \$trayUrl = '$url'
 \$trayExe = '$DANTESYNC_WIN_TRAY_EXE'
+\$trayLegacy = '$DANTESYNC_WIN_LEGACY_TRAY_EXE'
 \$trayPre = '$DANTESYNC_WIN_TRAY_EXE.pre-$version'
 \$trayTask = '$DANTESYNC_WIN_TRAY_TASK'
 EOF
   cat <<'EOF'
-$trayTmp = Join-Path $env:TEMP 'dantesync-tray-new.exe'
+$trayTmp = Join-Path $env:TEMP 'dsync-tray-new.exe'
 $trayNotes = @()
 $trayExpected = ''
 $trayCurrent = $false
 $trayProcs = @()
 try {
-    if (-not (Test-Path $trayExe)) { throw ('no tray installed at ' + $trayExe) }
+    if (-not (Test-Path $trayExe) -and -not (Test-Path $trayLegacy)) { throw ('no tray installed at ' + $trayExe) }
     Invoke-WebRequest -UseBasicParsing -Uri ($trayUrl + '.sha256') -OutFile ($trayTmp + '.sha256')
     $trayExpected = ((Get-Content ($trayTmp + '.sha256')) -split '\s+')[0].Trim()
-    if ((Get-FileHash -Algorithm SHA256 $trayExe).Hash -eq $trayExpected) {
+    if ((Test-Path $trayExe) -and (Get-FileHash -Algorithm SHA256 $trayExe).Hash -eq $trayExpected) {
         $trayCurrent = $true
     } else {
         Invoke-WebRequest -UseBasicParsing -Uri $trayUrl -OutFile $trayTmp
@@ -119,34 +122,38 @@ function Get-TrayParent([int]$trayChildId) {
     }
 }
 if ($trayNotes.Count -eq 0 -and $trayCurrent) {
-    $trayRunning = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
+    $trayRunning = @(Get-Process -Name dsync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
     if ($trayRunning.Count -eq 0) { $trayLaunch = $true }
 }
 if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
     try {
         # kill the running trays, then wait on THEIR PIDs only: a tray started after the kill is a
         # relaunch, handled right before the replace, never read as the killed one still running
-        $trayKilled = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)
+        $trayKilled = @(Get-Process -Name dsync-tray, dantesync-tray -ErrorAction SilentlyContinue)
         $trayKilled | Stop-Process -Force -ErrorAction SilentlyContinue
         $trayStopped = $true
         $trayPids = @($trayKilled | ForEach-Object { $_.Id })
         $trayTried = @($trayPids)
         if ($trayPids.Count -gt 0) {
             Wait-Process -Id $trayPids -Timeout 15 -ErrorAction SilentlyContinue
-            # a reused PID is not the tray: only a still-alive dantesync-tray counts
-            if (@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'dantesync-tray' }).Count -gt 0) { throw "the killed tray (pid $($trayPids -join ', ')) did not exit" }
+            # a reused PID is not the tray: only a still-alive dsync-tray counts
+            if (@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue | Where-Object { @('dsync-tray', 'dantesync-tray') -contains $_.ProcessName }).Count -gt 0) { throw "the killed tray (pid $($trayPids -join ', ')) did not exit" }
         }
-        if (-not (Test-Path $trayPre)) { Copy-Item -Force $trayExe $trayPre }
+        $trayFirst = -not (Test-Path $trayExe)
+        if (-not $trayFirst -and -not (Test-Path $trayPre)) { Copy-Item -Force $trayExe $trayPre }
         # the exe as it is now: a failed replace is "untouched" only when the file still hashes to this.
         # On Windows PowerShell 5.1 Get-FileHash is a script function whose read failure is a
         # non-terminating error (a null hash), so -ErrorAction Stop + an empty check: two unreadable
         # hashes must never compare equal
-        $trayBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe -ErrorAction Stop).Hash
-        if (-not $trayBefore) { throw 'could not hash the tray exe before the replace' }
+        $trayBefore = ''
+        if (-not $trayFirst) {
+            $trayBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe -ErrorAction Stop).Hash
+            if (-not $trayBefore) { throw 'could not hash the tray exe before the replace' }
+        }
         # a tray relaunched since the kill holds the exe again: kill it right before the replace,
         # at most 3 times, and remember who started each NEW one (a PID tried before is not a relaunch)
         for ($trayTry = 1; $trayTry -le 3; $trayTry++) {
-            $trayFresh = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)
+            $trayFresh = @(Get-Process -Name dsync-tray, dantesync-tray -ErrorAction SilentlyContinue)
             if ($trayFresh.Count -eq 0) { break }
             foreach ($trayP in $trayFresh) {
                 if ($trayTried -notcontains $trayP.Id) {
@@ -176,7 +183,7 @@ if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
                 } catch { }
             }
             # who holds it now: a NEW PID is a relaunch, a PID already tried is a tray that did not die
-            $trayHolders = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)
+            $trayHolders = @(Get-Process -Name dsync-tray -ErrorAction SilentlyContinue)
             $trayNew = @($trayHolders | Where-Object { $trayTried -notcontains $_.Id })
             $trayStuck = @($trayHolders | Where-Object { $trayTried -contains $_.Id })
             foreach ($trayP in $trayNew) { $trayRespawnedBy += (Get-TrayParent $trayP.Id) }
@@ -209,7 +216,7 @@ if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
 if ($trayStopped -or $trayLaunch) {
     try {
         # a tray relaunched meanwhile (the scheduler, the HKLM Run entry) is kept: never a second tray
-        $trayProcs = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
+        $trayProcs = @(Get-Process -Name dsync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
         if ($trayProcs.Count -eq 0) {
             $trayAction = New-ScheduledTaskAction -Execute $trayExe
             $trayPrincipal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
@@ -218,7 +225,7 @@ if ($trayStopped -or $trayLaunch) {
             try {
                 Start-ScheduledTask -TaskName $trayTask
                 for ($i = 0; $i -lt 30; $i++) {
-                    $trayProcs = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
+                    $trayProcs = @(Get-Process -Name dsync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
                     if ($trayProcs.Count -ge 1) { break }
                     Start-Sleep -Milliseconds 500
                 }
@@ -232,7 +239,7 @@ if ($trayStopped -or $trayLaunch) {
         } else {
             $trayKept = $true
         }
-        $trayProcs = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
+        $trayProcs = @(Get-Process -Name dsync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
         if ($trayProcs.Count -ne 1) { throw ('expected one tray process in an interactive session after the relaunch, found ' + $trayProcs.Count + ' (is a user logged on?)') }
     } catch {
         $trayNotes += ('tray relaunch: ' + $_.Exception.Message)
@@ -250,9 +257,9 @@ if ($trayNotes.Count -gt 0) {
         # the swap succeeded, so a tray running afterwards was started after the new exe landed
         $trayOkNote += ' (kept a tray that was running again, not launched)'
     }
-    Write-Output ('TRAY OK: dantesync-tray.exe sha256 ' + $trayExpected + ' running in session ' + $trayProcs[0].SessionId + $trayOkNote)
+    Write-Output ('TRAY OK: dsync-tray.exe sha256 ' + $trayExpected + ' running in session ' + $trayProcs[0].SessionId + $trayOkNote)
 } else {
-    Write-Output ('TRAY OK: dantesync-tray.exe already on sha256 ' + $trayExpected + ', running in session ' + $trayRunning[0].SessionId)
+    Write-Output ('TRAY OK: dsync-tray.exe already on sha256 ' + $trayExpected + ', running in session ' + $trayRunning[0].SessionId)
 }
 EOF
 }
@@ -297,7 +304,7 @@ dantesync_tray_note() {
 dantesync_tray_report() {
   local w
   [ "${#DANTESYNC_TRAY_WARNINGS[@]}" -gt 0 ] || return 0
-  printf 'WARNING: dantesync-tray was NOT refreshed on %s node(s) -- the service roll is unaffected (the tray is UI, the service is the clock); re-run the roll to retry the tray, the version gate sha-pin names it meanwhile:\n' \
+  printf 'WARNING: dsync-tray was NOT refreshed on %s node(s) -- the service roll is unaffected (the tray is UI, the service is the clock); re-run the roll to retry the tray, the version gate sha-pin names it meanwhile:\n' \
     "${#DANTESYNC_TRAY_WARNINGS[@]}"
   for w in "${DANTESYNC_TRAY_WARNINGS[@]}"; do printf '  - %s\n' "$w"; done
 }

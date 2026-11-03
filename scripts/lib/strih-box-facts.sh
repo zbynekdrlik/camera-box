@@ -289,7 +289,7 @@ strih_box_validate() {
       || { echo "strih-box ${name}: STRIH_HDMI_OUTPUTS '${v}' must be auto, none or 1..2 space-separated CONNECTOR:program|multiview[:noaudio] (no connector twice)" >&2; bad=1; } ;;
   esac
   # issue 1412: the box ROLE (strih = the cutter, stream = the stream OBS box), the PTP grandmaster the
-  # dantesync config allows (setup-strih step 2 writes it into a FRESH box's /etc/dantesync/config.json)
+  # dantesync config allows (setup-strih step 2 writes it into a FRESH box's /etc/dsync/config.json)
   # and whether the box runs the YouTube-guard program-audio sampler (setup-strih step 16e / verify 41).
   case "${f[STRIH_ROLE]}" in
     strih | stream) ;;

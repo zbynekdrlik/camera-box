@@ -1246,7 +1246,7 @@ fi
 
 # (l) dantesync PTP LOCKED + FRESH offset + SAME grandmaster (#8/#550/#591/#834) -----------------
 rc=0
-DS_JOURNAL="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null")" || rc=$?
+DS_JOURNAL="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "journalctl -u dsync --no-pager -n 400 -o short-iso 2>/dev/null")" || rc=$?
 DS_HTTP_STATUS="$(ssh_box "curl -fsS --max-time 8 http://127.0.0.1:8898/status 2>/dev/null" || true)"
 if [ -n "$DS_HTTP_STATUS" ]; then
   # #686 precedent: the network status endpoint is authoritative and immune to journal-cadence
@@ -1273,7 +1273,7 @@ if [ -n "$DS_HTTP_STATUS" ]; then
 elif [ "$rc" -ne 0 ] || [ -z "$DS_JOURNAL" ]; then
   fail "dantesync journal unreadable (ssh rc=$rc) and :8898/status unreachable"
 else
-  DS_ACTIVE="$(ssh_box "systemctl is-active dantesync 2>/dev/null")" || true
+  DS_ACTIVE="$(ssh_box "systemctl is-active dsync 2>/dev/null")" || true
   ds_now_rc=0
   BOX_NOW="$(ssh_box "date +%s 2>/dev/null")" || ds_now_rc=$?
   if ! dantesync_service_active "$DS_ACTIVE"; then

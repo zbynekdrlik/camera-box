@@ -37,7 +37,7 @@ set -euo pipefail
 #     cambox     -- `systemctl restart camera-box` on ONE camera (root ssh), NEVER a reboot (a remote
 #                   cambox reboot is banned); healthy = active AND a `Streaming:` journal line of the
 #                   NEW process (its systemd invocation, never the old process's last lines).
-#     dantesync  -- `systemctl restart dantesync` on ONE camera node; healthy = its :8898/status
+#     dantesync  -- `systemctl restart dsync` on ONE camera node; healthy = its :8898/status
 #                   graded OK by dantesync_clock_decision.py analyze (locked on the rig grandmaster).
 #     stream-obs -- picked by the stream box's obs-fleet class (av_matrix_stream_obs_mode, issue
 #                   1474). On the Linux stream-snv: AUTOMATIC, the strih-obs kind's blocking

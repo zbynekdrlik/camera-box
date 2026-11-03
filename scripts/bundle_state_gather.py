@@ -432,7 +432,7 @@ def build_bundle_state(**facets):
 
     Note: `dantesync_version` was added here for #862, then REVERTED in its own follow-up fix —
     the deployed strih/stream servers never picked up the new key (half-wired), and the gate now
-    reads every node's dantesync version uniformly via `dantesync --version` over SSH instead
+    reads every node's dantesync version uniformly via `dsync --version` over SSH instead
     (scripts/dantesync-version-gate.sh), with no bundle-state involvement at all."""
     unknown = [k for k in facets if k not in _BUNDLE_STATE_KEY_SET]
     if unknown:
