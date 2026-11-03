@@ -242,6 +242,29 @@ def test_a_render_that_drops_lines_is_refused(tmp_path):
     _unchanged(hosts, "127.0.0.1 localhost\n10.77.9.1 gw\n", ino)
 
 
+def test_a_render_without_the_managed_line_is_refused(tmp_path):
+    rig = Rig(tmp_path)
+    script = _script(tmp_path)
+    _exec(rig.bin / "awk", '#!/bin/bash\nexec cat\n')  # returns the input unchanged, exit 0
+    hosts = _hosts(tmp_path)
+    ino = hosts.stat().st_ino
+    r = _run(script, hosts, rig)
+    assert r.returncode == 1 and "refused" in r.stderr and "unchanged" not in r.stdout, (r.stdout, r.stderr)
+    _unchanged(hosts, "127.0.0.1 localhost\n10.77.9.1 gw\n", ino)
+
+
+def test_an_unreadable_hosts_path_fails_at_the_read(tmp_path):
+    rig = Rig(tmp_path)
+    script = _script(tmp_path)
+    for target in (tmp_path / "a-directory", tmp_path / "missing"):
+        if target.name == "a-directory":
+            target.mkdir()
+        r = _run(script, target, rig)
+        assert r.returncode == 1 and "cannot read" in r.stderr, (target, r.stderr)
+        assert not [p for p in tmp_path.iterdir() if ".lease-host." in p.name]
+    assert not (tmp_path / "missing").exists()
+
+
 def test_a_failed_write_leaves_no_temp_file_and_the_hosts_file_unchanged(tmp_path):
     rig = Rig(tmp_path)
     script = _script(tmp_path)
