@@ -36,7 +36,7 @@
 #                 source setup-strih step 1b builds through DKMS, issue 1391) + the vendored dock headers
 #                 the program-audio sampler step 16e builds its shim from (issue 1404; the list is
 #                 strih_lx_tree_paths) of this checkout (an archive
-#                 of HEAD) + the pinned intercom release bundle (issue 1487) + the generated run-setup.sh, checked
+#                 of HEAD) + the pinned intercom and shading releases (issue 1487) + the generated run-setup.sh, checked
 #                 for the box's fact file scripts/strih-boxes/strih-snv.env and the routing file it names; the GH token (STRIH_LX_GH_TOKEN, else
 #                 `gh auth token`). setup-strih.sh runs as `setup-strih.sh --box strih-snv` (issue 1361).
 #   strih_lx_apply (exit 4 on failure, every message names its step)
@@ -109,6 +109,10 @@ fi
 if ! declare -F strih_intercom_release_ensure >/dev/null; then
   # shellcheck source=scripts/lib/strih-intercom-release.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-release.sh"
+fi
+if ! declare -F shading_release_service >/dev/null; then
+  # shellcheck source=scripts/lib/shading-release.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/shading-release.sh"
 fi
 if ! declare -p STRIH_PROGRAM_AUDIO_FILES >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/strih-program-audio.sh
@@ -584,9 +588,11 @@ strih_lx_prepare() {
   local -a tree_paths; mapfile -t tree_paths < <(strih_lx_tree_paths)
   git -C "$repo" archive --format=tar HEAD "${tree_paths[@]}" | tar -x -C "$w/repo"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail tree "$rc" 3 "archiving ${tree_paths[*]} at $tree_rev failed"; return; }
-  # issue 1487: the pinned intercom release goes into the tree, so the box installs it with no network.
+  # issue 1487: the pinned intercom and shading releases go into the tree, so the box installs them with no network.
   strih_intercom_release_ensure "$w/repo" >/dev/null \
     || { _strih_lx_fail tree 1 3 "the pinned intercom release (above)"; return; }
+  shading_release_service "$w/repo" >/dev/null \
+    || { _strih_lx_fail tree 1 3 "the pinned shading release (above)"; return; }
   for b in "${box_list[@]}"; do
     STRIH_LX_BOX="$b"
     STRIH_LX_BOX_HOSTNAME[$b]="$(strih_lx_tree_check "$w/repo" "$b")" \
@@ -597,7 +603,7 @@ strih_lx_prepare() {
   STRIH_LX_BOX="$boxes"
   STRIH_LX_PREP_TOKEN="${STRIH_LX_GH_TOKEN:-}"
   [ -n "$STRIH_LX_PREP_TOKEN" ] || STRIH_LX_PREP_TOKEN="$(gh auth token 2>/dev/null)" || STRIH_LX_PREP_TOKEN=""
-  [ -n "$STRIH_LX_PREP_TOKEN" ] || { _strih_lx_fail tree 1 3 "no GH token (STRIH_LX_GH_TOKEN / gh auth token) -- setup-strih.sh needs GH_TOKEN for the bundle-state + bkshading fetch"; return; }
+  [ -n "$STRIH_LX_PREP_TOKEN" ] || { _strih_lx_fail tree 1 3 "no GH token (STRIH_LX_GH_TOKEN / gh auth token) -- setup-strih.sh needs GH_TOKEN for the bundle-state fetch"; return; }
   for b in "${box_list[@]}"; do
     echo "# ${b}: provisioning tree = the committed ${tree_paths[*]} at $tree_rev; target ${STRIH_LX_PREP_USER}@${STRIH_LX_BOX_HOST[$b]}:$STRIH_LX_PREP_STAGE"
   done
@@ -838,7 +844,7 @@ strih_lx_plan_steps() {
 #          when either is unreadable; issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
 # STEP 1 (tree): the committed scripts/ systemd/ vendor/realtek-r8152 Cargo.toml + the program-audio sampler's
 #          vendored dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + the
-#          pinned intercom release, its sha256 verified (scripts/intercom-release.pin, issue 1487) + the
+#          pinned intercom and shading releases, their sha256 verified (scripts/intercom-release.pin, scripts/shading-release.pin, issue 1487) + the
 #          generated run-setup.sh -> ${lstage}/repo.
 # STEP 2 (preflight): the box must be the fact file's host ('$(strih_lx_remote_identity_cmd)' == STRIH_HOSTNAME),
 #          and no previous install may run:  $(strih_lx_remote_installer_cmd)

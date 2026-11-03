@@ -98,6 +98,8 @@ assets/lipsync/*.jpg
 # issue 1345 phone PWA Playwright E2E (npm install + test output)
 # the pinned intercom release bundle (scripts/lib/strih-intercom-release.sh)
 intercom-release/
+# the pinned shading release assets (scripts/lib/shading-release.sh)
+shading-release/
 
 # issue 1417 -- the tally ESP firmware WiFi credentials (copy secrets.h.example, never commit it)
 tally/esp/WsTally/secrets.h

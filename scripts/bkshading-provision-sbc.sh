@@ -61,7 +61,7 @@ set -euo pipefail
 # .claude/rules/provisioning-scripts.md; the relay's live verify against the camera is the
 # supervisor's post-reboot rig step).
 #
-# The relay BINARY must be the aarch64 build (the `bkshading-relay-linux-arm64` CI artifact,
+# The relay BINARY must be the aarch64 build (the `bkshading-relay-linux-arm64` asset of the pinned shading release,
 # deployed via `scripts/bkshading-deploy-relay.sh --arch arm64`). --check verifies the deployed
 # binary is actually AArch64 (an ELF e_machine read) so a mis-deployed amd64 binary is caught here,
 # not at reboot with an opaque `Exec format error`.

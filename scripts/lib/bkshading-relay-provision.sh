@@ -16,17 +16,15 @@
 #   - pure decisions: the rig-mode enable-state, the relay binary source plan, the (ao) verdict, and
 #     the read-only remote gather snippet verify-device.sh runs over ssh.
 #
-# Source-only: function definitions + three sibling-lib sources (pure constants + the run resolver). No side effects.
+# Source-only: function definitions + two sibling-lib sources. No side effects.
 # Overridable targets (Tier-0 tests point them at a temp root -- no root/apt/systemd needed):
 #   BKSHADING_RELAY_UNIT_DEST, BKSHADING_RELAY_ENV_FILE, BKSHADING_RELAY_BIN,
 #   BKSHADING_RELAY_DROPIN_DIR, BKSHADING_RELAY_GPHOTO2, BKSHADING_RELAY_SYSTEMCTL
 _BKRP_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$_BKRP_HERE/bkshading-relay-runtime.sh"
-# shellcheck source=scripts/lib/ci-run-resolve.sh
-. "$_BKRP_HERE/ci-run-resolve.sh"  # ci_run_latest_success -- the `latest` relay-binary plan
-# shellcheck source=scripts/lib/bkshading-deploy-runtime.sh
-. "$_BKRP_HERE/bkshading-deploy-runtime.sh"  # the relay CI artifact + the binary name inside it
+# shellcheck source=scripts/lib/shading-release.sh
+. "$_BKRP_HERE/shading-release.sh"  # issue 1487: the pinned relay
 
 # --- targets (resolved per call, so an env override set after sourcing still applies) -------------
 _bkrp_init() {
@@ -69,7 +67,7 @@ bkshading_relay_provision_install_gphoto2() {
   command -v "$BKRP_GPHOTO2" >/dev/null 2>&1 || { echo "  gphoto2 still missing after the apt install" >&2; return 1; }
 }
 
-# bkshading_relay_provision_install_binary SRC -> installs the CI relay binary at the relay bin path
+# bkshading_relay_provision_install_binary SRC -> installs the relay binary at the relay bin path
 # via a NEW inode (`install -m 0755`, safe over a running binary -- never an in-place truncate).
 bkshading_relay_provision_install_binary() {
   _bkrp_init
@@ -125,7 +123,7 @@ bkshading_relay_provision_install() {
   echo "  $BKRP_UNIT_NAME $want (NOT started -- it comes up at boot when enabled / via rig-mode.sh event)"
 
   if [ ! -x "$BKRP_BIN" ]; then
-    echo "  WARNING: relay binary not present/executable at $BKRP_BIN -- deploy the CI-built" >&2
+    echo "  WARNING: relay binary not present/executable at $BKRP_BIN -- deploy the pinned" >&2
     echo "           bkshading-relay there (scripts/bkshading-deploy-relay.sh) before reboot." >&2
   fi
   return 0
@@ -162,15 +160,16 @@ bkshading_relay_expected_enable_state() {
 # (cam2 -- the SAME box rig-mode.sh passes as `cam2=$PAINTER_IP` and cam2_is_painter_box pins).
 bkshading_relay_roster_painter_box() { printf '%s\n' cam2; }
 
-# bkshading_relay_provision_binary_plan RELAY_ARG RUN_ID GH_AVAILABLE(yes|no)
-#   -> local:<path> | url:<url> | run:<id> | latest | none
-#   Where setup-device.sh takes the relay binary from, in order: an explicit --relay-binary that is an
-#   existing file; an http(s) URL; the SAME ci.yml run camera-box came from (RUN_ID); the newest
-#   successful run carrying the artifact (gh available); else none (the caller records the gap --
-#   a gh-less box is handed a dev1-staged binary, the --probe-binary idiom). A --relay-binary that is
-#   neither an existing file nor a URL is `none` (a typo must not silently fall through to a download).
+# bkshading_relay_pin_version -> the version the pin in this tree says, the (ao) grade's WANT.
+bkshading_relay_pin_version() { shading_pin_version "$(cd "$_BKRP_HERE/../.." && pwd)" 2>/dev/null || true; }
+
+# bkshading_relay_provision_binary_plan RELAY_ARG -> local:<path> | url:<url> | release | none
+#   Where setup-device.sh takes the relay binary from: an explicit --relay-binary that is an existing
+#   file; an http(s) URL; else the pinned shading release. A --relay-binary that is neither an existing
+#   file nor a URL is `none` (a typo must not silently fall through to a download). Every source must
+#   end up with the pinned bytes (issue 1487).
 bkshading_relay_provision_binary_plan() {
-  local arg="${1:-}" run="${2:-}" gh="${3:-no}"
+  local arg="${1:-}"
   if [ -n "$arg" ]; then
     case "$arg" in
       http://* | https://*) printf 'url:%s\n' "$arg" ;;
@@ -178,67 +177,54 @@ bkshading_relay_provision_binary_plan() {
     esac
     return 0
   fi
-  if [ "$gh" = yes ]; then
-    case "$run" in
-      '' | *[!0-9]*) printf '%s\n' latest ;;
-      *) printf 'run:%s\n' "$run" ;;
-    esac
-    return 0
-  fi
-  printf '%s\n' none
+  printf '%s\n' release
 }
 
-# bkshading_relay_provision_fetch_binary PLAN DEST_DIR REPO BRANCH
-#   Carry out a bkshading_relay_provision_binary_plan: stdout = the local path of the relay binary,
-#   rc 0; or stdout = ONE line saying why there is none, rc 1 (the caller records it -- it never
-#   aborts the provisioner). Progress goes to stderr. gh / curl are overridable for Tier-0 tests
-#   (BKSHADING_RELAY_GH, BKSHADING_RELAY_CURL); the `latest` plan uses the ONE shared resolver.
+# bkshading_relay_provision_fetch_binary PLAN DEST_DIR
+#   Carry out a bkshading_relay_provision_binary_plan: stdout = the local path of the verified relay
+#   binary, rc 0; or stdout = ONE line saying why there is none, rc 1 (the caller records it -- it
+#   never aborts the provisioner). Progress goes to stderr. curl is overridable for Tier-0 tests
+#   (BKSHADING_RELAY_CURL). No fallback: only the pinned bytes pass.
 bkshading_relay_provision_fetch_binary() {
-  local plan="${1:-none}" dir="${2:-}" repo="${3:-}" branch="${4:-}" run art bin
-  local gh="${BKSHADING_RELAY_GH:-gh}" curl="${BKSHADING_RELAY_CURL:-curl}"
-  art="$(bkshading_deploy_artifact_name)"
-  bin="$(bkshading_deploy_relay_artifact_bin)"
+  local plan="${1:-none}" dir="${2:-}" root out bin
+  local curl="${BKSHADING_RELAY_CURL:-curl}" asset="$SHADING_ASSET_RELAY_AMD64"
+  root="$(cd "$_BKRP_HERE/../.." && pwd)"
   [ -n "$dir" ] && mkdir -p "$dir" || { echo "no download dir for the relay binary"; return 1; }
+  bin="$dir/bkshading-relay"
   case "$plan" in
     local:*)
       echo "  relay binary: local ${plan#local:}" >&2
-      printf '%s\n' "${plan#local:}"
+      bin="${plan#local:}"
       ;;
     url:*)
       echo "  relay binary: downloading ${plan#url:}" >&2
-      if "$curl" -fsSL "${plan#url:}" -o "$dir/$bin" && [ -s "$dir/$bin" ]; then
-        printf '%s\n' "$dir/$bin"
-      else
+      if ! "$curl" -fsSL "${plan#url:}" -o "$bin" || [ ! -s "$bin" ]; then
         echo "download of the relay binary from ${plan#url:} failed"
         return 1
       fi
       ;;
-    run:* | latest)
-      run="${plan#run:}"
-      if [ "$plan" = latest ]; then
-        run="$(CI_RUN_RESOLVE_GH="$gh" ci_run_latest_success "$repo" "$branch" ci.yml "$art")" || run=""
-      fi
-      if [ -z "$run" ]; then
-        echo "no successful ci.yml run on '$branch' carries $art"
+    release)
+      if ! out="$(SHADING_RELEASE_CACHE="$dir" shading_release_relay "$root" amd64 2>&1)"; then
+        echo "${out##*$'\n'} -- no network on this box? STAGE IT FROM dev1: scp ${asset} of the pinned release to the box, then re-run with --relay-binary <path>"
         return 1
       fi
-      local gh_err=""
-      if gh_err="$("$gh" run download "$run" --repo "$repo" -n "$art" --dir "$dir" 2>&1 >/dev/null)" && [ -s "$dir/$bin" ]; then
-        echo "  relay binary: $art from ci.yml run $run" >&2
-        printf '%s\n' "$dir/$bin"
-      else
-        echo "gh run download of $art from ci.yml run $run failed (${gh_err##*$'\n'})"
-        return 1
-      fi
+      echo "  relay binary: ${asset} of the pinned shading release" >&2
+      printf '%s\n' "$out"
+      return 0
       ;;
     *)
-      echo "no relay binary source -- this box has no gh/GH_TOKEN and no usable --relay-binary. STAGE IT FROM dev1: gh run download <ci.yml run> -n $art --dir /tmp && scp /tmp/$bin root@<box>:/tmp/ , then re-run with --relay-binary /tmp/$bin"
+      echo "no relay binary source: the --relay-binary given is neither a file nor a URL"
       return 1
       ;;
   esac
+  if ! out="$(shading_release_file_ok "$root" "$asset" "$bin" 2>&1)"; then
+    printf '%s\n' "$out"
+    return 1
+  fi
+  printf '%s\n' "$bin"
 }
 
-# bkshading_relay_provision_gather_remote_snippet -> REMOTE sh text (read-only) that prints the seven
+# bkshading_relay_provision_gather_remote_snippet -> REMOTE sh text (read-only) that prints the eight
 # KEY=value lines bkshading_relay_provision_verdict grades. Embed as the WHOLE ssh command.
 bkshading_relay_provision_gather_remote_snippet() {
   local bin unit env
@@ -247,6 +233,7 @@ bkshading_relay_provision_gather_remote_snippet() {
   env="$(bkshading_relay_env_path)"
   cat <<SNIP
 printf 'BIN_X=%s\n' "\$(test -x $bin && echo yes || echo no)"
+printf 'BIN_VER=%s\n' "\$($bin --version 2>/dev/null | awk '{print \$NF}')"
 printf 'UNIT_SHA=%s\n' "\$(sha256sum $unit 2>/dev/null | awk '{print \$1}')"
 printf 'ENV_FPS=%s\n' "\$(grep -oE '^CAMERA_BOX_CAPTURE_FPS=[0-9]+\$' $env 2>/dev/null | tail -n 1 | cut -d= -f2)"
 printf 'ENV_REGISTER_URL=%s\n' "\$(grep -E '^BKSHADING_REGISTER_URL=' $env 2>/dev/null | tail -n 1 | cut -d= -f2-)"
@@ -259,19 +246,24 @@ SNIP
 # _bkrp_block_field BLOCK KEY -> the LAST `KEY=value` value in BLOCK (empty when absent). Pure.
 _bkrp_block_field() { printf '%s\n' "${1:-}" | sed -n "s/^$2=//p" | tail -n 1; }
 
-# bkshading_relay_provision_verdict BLOCK EXPECTED_ENABLE_STATE RELAY_ID -> `ok` | one `FAIL: <reason>` per line
+# bkshading_relay_provision_verdict BLOCK EXPECTED_ENABLE_STATE RELAY_ID [PIN_VERSION] -> `ok` | one `FAIL: <reason>` per line
+#   PIN_VERSION, when given: the relay's --version must equal it (issue 1487, the shading pin).
 #   RELAY_ID = the camN this box must register as at strih.lan (issue 1431); empty FAILs (not derivable).
 #   BLOCK = the gather snippet's output. The installed unit must BYTE-match the repo unit (sha256).
 #   EXPECTED = bkshading_relay_expected_enable_state's answer; `unknown` FAILs (the rig mode could not
 #   be read for a roster box -- never a silent pass, test-strictness).
 bkshading_relay_provision_verdict() {
-  local block="${1:-}" want="${2:-}" relay_id="${3:-}" out="" v want_sha url
+  local block="${1:-}" want="${2:-}" relay_id="${3:-}" pin="${4:-}" out="" v want_sha url
   _bkrp_init
   if [ -z "$block" ]; then
     printf '%s\n' "FAIL: empty relay state read -- cannot certify the bkshading relay is provisioned"
     return 0
   fi
   [ "$(_bkrp_block_field "$block" BIN_X)" = yes ] || out="${out}FAIL: relay binary missing/not executable at $(bkshading_relay_bin_path) -- run scripts/bkshading-deploy-relay.sh"$'\n'
+  if [ -n "$pin" ] && [ "$(_bkrp_block_field "$block" BIN_X)" = yes ]; then
+    v="$(_bkrp_block_field "$block" BIN_VER)"
+    [ "$v" = "$pin" ] || out="${out}FAIL: relay binary reads version '${v:-unreadable}', the shading pin says ${pin} -- run scripts/deploy-fleet.sh"$'\n'
+  fi
   want_sha="$(sha256sum "$BKRP_UNIT_SRC" 2>/dev/null | awk '{print $1}')"
   v="$(_bkrp_block_field "$block" UNIT_SHA)"
   if [ -z "$v" ]; then

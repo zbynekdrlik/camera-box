@@ -9,15 +9,17 @@ the CLI's `--check` FAIL a relay.env without them.
 import hashlib
 import os
 import subprocess
+import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shading_release_fake_1487 import contract  # noqa: E402
 RUNTIME = os.path.join(REPO, "scripts", "lib", "bkshading-relay-runtime.sh")
 PROV_LIB = os.path.join(REPO, "scripts", "lib", "bkshading-relay-provision.sh")
 PROVISION = os.path.join(REPO, "scripts", "bkshading-provision-relay.sh")
 UNIT = os.path.join(REPO, "systemd", "bkshading-relay.service")
-RELAY_MAIN = os.path.join(REPO, "bkshading", "relay", "src", "main.rs")
 URL = "http://strih.lan:8770/api/relays/register"
 
 
@@ -36,10 +38,8 @@ def _unit_sha():
 def test_the_register_url_is_strih_lan_and_the_relay_reads_both_env_names():
     r = _bash(RUNTIME, "bkshading_relay_register_url")
     assert r.returncode == 0 and r.stdout.strip() == URL, r.stdout + r.stderr
-    with open(RELAY_MAIN, encoding="utf-8") as f:
-        main = f.read()
-    # the relay reads exactly the two names the env file writes
-    assert 'env = "BKSHADING_REGISTER_URL"' in main and 'env = "BKSHADING_RELAY_ID"' in main
+    # the relay reads exactly the two names the env file writes (the shading contract)
+    assert "`BKSHADING_REGISTER_URL`, `BKSHADING_RELAY_ID`" in contract()
 
 
 def test_the_relay_id_is_the_lowercased_camera_name():

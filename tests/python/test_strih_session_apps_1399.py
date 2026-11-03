@@ -681,10 +681,10 @@ def test_panel_closing_the_window_quits_so_the_unit_restarts_it():
 
 
 def test_panel_url_port_is_the_service_default_bind_port():
-    # ONE source of truth: the bkshading service's own default_bind (the shading-https sibling pins it too)
-    cfg = (REPO / "bkshading" / "service" / "src" / "config.rs").read_text()
-    port = re.search(r'fn default_bind\(\) -> String \{\s*"[0-9.]+:(\d+)"', cfg).group(1)
-    assert _load_panel().PANEL_URL == "http://127.0.0.1:%s/" % port
+    # ONE source of truth: the shading contract (the shading-https sibling pins it too)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from shading_release_fake_1487 import service_port
+    assert _load_panel().PANEL_URL == "http://127.0.0.1:%s/" % service_port()
 
 
 def test_panel_source_never_uses_the_deprecated_or_stacking_calls():

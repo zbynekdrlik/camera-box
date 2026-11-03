@@ -832,6 +832,7 @@ else
   bad "(bkshading-service) unit /etc/systemd/system/bkshading-service.service not installed -- re-run setup-strih.sh step 16c (issue 1353)"
 fi
 
+strih_bkshading_version_grade "http://127.0.0.1:${BKSH_PORT}"   # issue 1487: against the shading pin
 else note "(bkshading-service) not graded: ${WHY}"; fi
 # 37)-40) issue 1399 session apps (scripts/lib/strih-session-apps.sh, sourced by strih-provision.sh): the
 #     browser-source keeper (unit + its last pass), the shading panel window (unit + "Shading" on :0),

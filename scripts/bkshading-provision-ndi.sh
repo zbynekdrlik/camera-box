@@ -4,10 +4,10 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------------------------
-# WHY: the bkshading service (bkshading/service) loads libndi at RUNTIME to receive the M2 live
+# WHY: the bkshading service (shading:bkshading/service) loads libndi at RUNTIME to receive the M2 live
 # camera preview (feature `ndi`). It is a SEPARATE workspace member and does NOT inherit the
 # appliance's own libndi provisioning. This script makes the runtime DISCOVERABLE by the EXACT
-# search order the service uses (bkshading/service/src/preview/ndi_paths.rs) and verifies it.
+# search order the service uses (shading:bkshading/service/src/preview/ndi_paths.rs) and verifies it.
 #
 # Idempotent (a re-run on a provisioned box just re-verifies), fail-loud (a missing/undiscoverable
 # runtime exits non-zero with the exact remediation), enable-only (provisions a LIBRARY; never
@@ -159,7 +159,7 @@ case "$os" in
     ;;
   *)
     echo "unsupported OS '$os' — the bkshading service targets Linux (/usr/lib/ndi) and Windows" >&2
-    echo "(NDI Tools runtime DLL). See bkshading/service/src/preview/ndi_paths.rs." >&2
+    echo "(NDI Tools runtime DLL). See shading:bkshading/service/src/preview/ndi_paths.rs." >&2
     exit 1
     ;;
 esac

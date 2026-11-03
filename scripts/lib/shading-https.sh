@@ -3,7 +3,7 @@
 # serves the bkshading PWA panel at a trusted-cert hostname (camera-box issue 808, owner ruling
 # 17.9.2026: "HTTPS áno, ale cez lokálnu sieť, nie cez internet").
 #
-# WHY: the bkshading web panel (bkshading/service, binds 0.0.0.0:8770) is reachable only over plain
+# WHY: the bkshading web panel (shading:bkshading/service, binds 0.0.0.0:8770) is reachable only over plain
 # HTTP on strih.lan:8770. Chrome/Edge offer a full PWA install ONLY in a SECURE CONTEXT (HTTPS with
 # a trusted cert, or localhost), so from any other LAN PC there is no "Install app". The chosen
 # design (owner-rejected the cloudflared/internet path) fronts the panel with a dev1 nginx TLS
@@ -36,7 +36,7 @@ shading_https_zone() { printf '%s\n' newlevel.media; }
 shading_https_lan_ip() { printf '%s\n' 10.77.9.200; }
 
 # The upstream the proxy forwards to — the bkshading panel on strih. MUST match the service's own
-# default_bind (bkshading/service/src/config.rs -> "0.0.0.0:8770"); the python test pins the port
+# default_bind (shading:bkshading/service/src/config.rs -> "0.0.0.0:8770"); the python test pins the port
 # against config.rs so the proxy always points where the panel listens. ONE source of truth.
 shading_https_upstream() { printf '%s\n' http://strih.lan:8770; }
 

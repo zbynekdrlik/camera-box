@@ -582,8 +582,8 @@ ITEMS = [
     # forgot (in development the relay is legitimately disabled per bkshading.md, so an all-off
     # fleet reads UNKNOWN + the per-box detail in the capture, not a page). The `mode` item already
     # catches a whole rig left in EVENT.
-    # issue 1452: the same probe also prints one `verdict=RELAY-*` line per box, the relay version
-    # graded against that box's camera-box version (scripts/lib/bkshading-relay-version.sh). An OLD
+    # issue 1452 + 1487: the same probe also prints one `verdict=RELAY-*` line per box, the relay version
+    # graded against the shading pin (scripts/lib/bkshading-relay-version.sh). An OLD
     # relay (RELAY-STALE) or a relay unit without its binary (RELAY-MISSING) is FORGOT even while the
     # relay is off in TEST mode: the 28.10.2026 event ran on old relays because nothing showed it.
     # RELAY-CURRENT / RELAY-NONE / RELAY-UNKNOWN are neutral, so they never turn a TEST-mode UNKNOWN
@@ -598,7 +598,7 @@ ITEMS = [
          forgot_token_msgs={
              "SHADING-DEAD": "bkshading relay je zapnutý ale spadol na niektorom camboxe (SHADING-DEAD) — "
                              "reštartuj / preprovizuj relay (issue 1309)",
-             "RELAY-STALE": "shading relay na niektorom camboxe má inú (starú) verziu ako camera-box "
+             "RELAY-STALE": "shading relay na niektorom camboxe má inú verziu ako scripts/shading-release.pin "
                             "(RELAY-STALE) — nasaď celú flotilu jedným príkazom scripts/deploy-fleet.sh, "
                             "ten upgraduje aj relay (issue 1452)",
              "RELAY-MISSING": "shading relay je na niektorom camboxe nainštalovaný bez binárky "

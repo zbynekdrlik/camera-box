@@ -27,6 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from intercom_release_fake_1487 import fake_release_env  # noqa: E402
+from shading_release_fake_1487 import fake_service_env  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 FLEET = REPO / "scripts" / "deploy-genlock-fleet.sh"
@@ -213,6 +214,7 @@ def _execute(tmp_path, boxes, extra=None):
         "STRIH_LX_OBS_PHASE2_DIR": str(obs_dir),
     }, home=str(home))
     env.update(fake_release_env(tmp_path))
+    env.update(fake_service_env(tmp_path))
     env.update(extra or {})
     r = subprocess.run(["bash", str(FLEET), "--run-id", "R1", "--boxes", boxes], capture_output=True,
                        text=True, cwd=REPO, env=env, timeout=300)

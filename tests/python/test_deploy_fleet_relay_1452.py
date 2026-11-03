@@ -5,16 +5,17 @@ som ziadal aby sa spravili upgrady!". `scripts/deploy-fleet.sh` updated camera-b
 painter) but never the relay: every cambox ran an old relay (dev.755-810) and cam7's shading did not
 set values until the relay was redeployed by hand.
 
-Now one fleet upgrade brings camera-box AND the relay to the SAME CI run on every cambox it touches:
-  * the relay comes from the same ci.yml run (`bkshading-linux-amd64`), or `--relay-binary` next to
-    `--binary`; it is swapped by `scripts/bkshading-deploy-relay.sh` itself (rig-busy gate, relay
-    stop/restore, byte-verify, the verified ro close), never a second copy of the swap;
+Now one fleet upgrade brings camera-box AND the relay of the pinned shading release (issue 1487) to
+every cambox it touches:
+  * the relay is verified before any box is touched and swapped by
+    `scripts/bkshading-deploy-relay.sh` itself (rig-busy gate, relay stop/restore, byte-verify, the
+    verified ro close), never a second copy of the swap; a box already on the pin is left alone;
   * a box with no relay is reported "not installed", never a failure;
   * a relay failure is named in FAILED (record, continue, fold at the end: the issue-868 pattern);
   * the final summary line names each box's camera-box and relay version;
   * `--no-relay` exists for the [0/8] parity align (an E2E that holds the lease and pauses the relay).
 And the readiness check: rig-dev-handover-check's shading item grades the relay version against the
-box's camera-box version (RELAY-STALE = forgot).
+shading pin (RELAY-STALE = forgot).
 
 Every deploy runs WHOLE on the issue-1407 fake read-only-root box (tests/python/ro_window_fakes_1407.py)
 behind a fake `sshpass`. Tier-0: no rig, no network, no cargo.
@@ -28,6 +29,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ro_window_fakes_1407 import log, make_box, root, starts_on_rw  # noqa: E402
+from shading_release_fake_1487 import fake_release_env  # noqa: E402
 from test_ro_window_sites_1407 import (  # noqa: E402
     _DEPLOY, _OLD_CAMERA_BOX, _camera_box_artifact, _dev1_bin, _log_file_tools,
 )
@@ -100,6 +102,7 @@ def _deploy_with_relay(tmp_path, args, relay_live=_OLD_RELAY, relay_active=False
     if camera_set is not None:
         env["CAMERA_SET"] = camera_set
     env.update(_relay_env(tmp_path))
+    env.update(fake_release_env(tmp_path, {"bkshading-relay-linux-amd64": _relay_artifact(tmp_path)}))
     env.update({k: v for k, v in extra.items() if v is not None})
     proc = subprocess.run(["bash", str(_DEPLOY), *args], env=env, capture_output=True, text=True, timeout=180)
     return proc, box
@@ -115,10 +118,10 @@ def _summary(proc):
 # ---- deploy-fleet.sh: the relay comes along ----------------------------------------------------- #
 
 
-def test_fleet_upgrade_swaps_an_old_relay_to_the_same_build_and_names_both_versions(tmp_path):
+def test_fleet_upgrade_swaps_an_old_relay_to_the_pin_and_names_both_versions(tmp_path):
     cb = _camera_box_artifact(tmp_path)
     rl = _relay_artifact(tmp_path)
-    proc, box = _deploy_with_relay(tmp_path, ["--binary", str(cb), "--relay-binary", str(rl)])
+    proc, box = _deploy_with_relay(tmp_path, ["--binary", str(cb)])
     out = proc.stdout + proc.stderr
     calls = log(box)
     assert proc.returncode == 0, out + "\n".join(calls)
@@ -136,7 +139,7 @@ def test_fleet_upgrade_swaps_an_old_relay_to_the_same_build_and_names_both_versi
 
 def test_an_active_relay_is_stopped_for_the_swap_and_started_again_on_a_read_only_root(tmp_path):
     proc, box = _deploy_with_relay(
-        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--relay-binary", str(_relay_artifact(tmp_path))],
+        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))],
         relay_active=True)
     calls = log(box)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -147,7 +150,7 @@ def test_an_active_relay_is_stopped_for_the_swap_and_started_again_on_a_read_onl
 
 def test_a_box_without_a_relay_is_reported_not_installed_never_a_failure(tmp_path):
     proc, box = _deploy_with_relay(
-        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--relay-binary", str(_relay_artifact(tmp_path))],
+        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))],
         relay_live=None)
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
@@ -155,18 +158,6 @@ def test_a_box_without_a_relay_is_reported_not_installed_never_a_failure(tmp_pat
     assert "[bkshading-deploy-relay]" not in out, out
     line = _summary(proc)
     assert "FLEET ALIGNED" in line and "cam2 camera-box=9.9.9-test relay=not installed" in line, line
-
-
-def test_binary_without_a_relay_binary_fails_a_box_whose_relay_is_installed_by_name(tmp_path):
-    proc, box = _deploy_with_relay(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))])
-    out = proc.stdout + proc.stderr
-    assert proc.returncode == 1, out
-    assert "cam2-relay(no relay binary" in out, out
-    assert "FLEET NOT FULLY ALIGNED" in out, out
-    # camera-box itself still went through, and the old relay is untouched
-    assert _live(box, "camera-box").read_bytes() == _camera_box_artifact(tmp_path).read_bytes()
-    assert _live(box, "bkshading-relay").read_bytes() == _OLD_RELAY
-    assert "relay=1.7.0-dev.810" in _summary(proc)
 
 
 def test_no_relay_leaves_the_relay_alone_and_still_names_its_version(tmp_path):
@@ -177,16 +168,6 @@ def test_no_relay_leaves_the_relay_alone_and_still_names_its_version(tmp_path):
     assert "[bkshading-deploy-relay]" not in out, out
     line = _summary(proc)
     assert "FLEET ALIGNED" in line and "relay=1.7.0-dev.810 (not deployed: --no-relay)" in line, line
-
-
-def test_a_relay_binary_of_another_version_is_refused_before_any_box_is_touched(tmp_path):
-    proc, box = _deploy_with_relay(
-        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)),
-                   "--relay-binary", str(_relay_artifact(tmp_path, version="1.0.0-other"))])
-    out = proc.stdout + proc.stderr
-    assert proc.returncode == 2, out
-    assert "not from the same build" in out, out
-    assert log(box) == [], "nothing may touch a box: " + "\n".join(log(box))
 
 
 def _write_lease(lease_dir, repo, run_id, resources=None):
@@ -204,7 +185,7 @@ def test_a_relay_refused_by_a_foreign_rig_lease_is_named_and_camera_box_still_al
     lease = tmp_path / "lease"
     _write_lease(lease, "zbynekdrlik/restreamer", "4242")
     proc, box = _deploy_with_relay(
-        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--relay-binary", str(_relay_artifact(tmp_path))],
+        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))],
         RIG_LEASE_DIR=str(lease), RIG_LEASE_REPO="", RIG_LEASE_RUN_ID="", GITHUB_REPOSITORY="", GITHUB_RUN_ID="")
     out = proc.stdout + proc.stderr
     assert proc.returncode == 1, out
@@ -219,7 +200,7 @@ def test_the_callers_own_rig_lease_lets_the_relay_deploy_through(tmp_path):
     _write_lease(lease, "zbynekdrlik/camera-box", "777")
     rl = _relay_artifact(tmp_path)
     proc, box = _deploy_with_relay(
-        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--relay-binary", str(rl)],
+        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))],
         RIG_LEASE_DIR=str(lease), GITHUB_REPOSITORY="zbynekdrlik/camera-box", GITHUB_RUN_ID="777")
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
@@ -229,7 +210,7 @@ def test_the_callers_own_rig_lease_lets_the_relay_deploy_through(tmp_path):
 
 def test_a_box_whose_camera_box_close_left_the_root_writable_gets_no_relay_deploy(tmp_path):
     proc, box = _deploy_with_relay(
-        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--relay-binary", str(_relay_artifact(tmp_path))],
+        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))],
         FAKE_RO_FAIL="1")
     out = proc.stdout + proc.stderr
     assert proc.returncode == 1, out
@@ -260,41 +241,12 @@ def _fake_gh(tmp_path, cb, rl):
     return d, logf
 
 
-def test_a_run_deploy_fetches_the_relay_from_the_same_ci_run(tmp_path):
-    cb = _camera_box_artifact(tmp_path)
-    rl = _relay_artifact(tmp_path)
-    ghdir, logf = _fake_gh(tmp_path, cb, rl)
-    proc, box = _deploy_with_relay(tmp_path, ["--run", "5555"], gh_dir=ghdir)
-    out = proc.stdout + proc.stderr
-    assert proc.returncode == 0, out
-    downloads = [ln for ln in logf.read_text().splitlines() if ln.startswith("run download")]
-    assert any("5555" in d and "bkshading-linux-amd64" in d for d in downloads), downloads
-    assert any("5555" in d and "camera-box-linux-amd64" in d for d in downloads), downloads
-    assert _live(box, "bkshading-relay").read_bytes() == rl.read_bytes()
-
-
 # ---- the pure lib -------------------------------------------------------------------------------- #
 
 
 def _lib(body, *args):
     return subprocess.run(["bash", "-c", f"set -euo pipefail\n. '{LIB}'\n{body}", "harness", *args],
                           capture_output=True, text=True, timeout=30)
-
-
-def test_version_verdict_grades_the_relay_against_the_boxs_camera_box():
-    cases = {
-        ("1.8.1", "1.8.1"): "RELAY-CURRENT",
-        ("1.8.1", "1.7.0-dev.810"): "RELAY-STALE",
-        ("1.8.1", "absent"): "RELAY-NONE",
-        ("1.8.1", "missing-binary"): "RELAY-MISSING",
-        ("1.8.1", "unreadable"): "RELAY-UNKNOWN",
-        ("unreadable", "1.8.1"): "RELAY-UNKNOWN",
-        ("absent", "1.8.1"): "RELAY-UNKNOWN",
-        ("", ""): "RELAY-UNKNOWN",
-    }
-    for (cbv, rlv), want in cases.items():
-        r = _lib('bkshading_relay_version_verdict "$1" "$2"', cbv, rlv)
-        assert r.returncode == 0 and r.stdout.strip() == want, (cbv, rlv, r.stdout, r.stderr)
 
 
 def test_versions_field_reads_the_last_line_of_its_key():
@@ -356,22 +308,6 @@ def _job(text, name):
     return text[start:nxt if nxt != -1 else len(text)]
 
 
-def test_the_post_merge_deploy_job_ships_the_relay_from_this_run():
-    import yaml
-    wf = yaml.safe_load(CI.read_text())
-    job = wf["jobs"]["deploy-fleet"]
-    assert "bkshading" in job["needs"], job["needs"]
-    steps = job["steps"]
-    dl = [s for s in steps if s.get("with", {}).get("name") == "bkshading-linux-amd64"]
-    assert len(dl) == 1, "the relay artifact of THIS run is downloaded once"
-    path = dl[0]["with"]["path"]
-    runs = [s["run"] for s in steps if "scripts/deploy-fleet.sh" in s.get("run", "")]
-    assert len(runs) == 2, runs
-    for r in runs:
-        assert f"--relay-binary {path}/bkshading-relay" in r, r
-        assert "--no-relay" not in r, r
-
-
 def test_the_e2e_parity_align_deploys_camera_box_only():
     s = ALIGN.read_text()
     assert '--binary "$bin" --no-relay' in s, "the [0/8] align holds the E2E lease and the relay is paused"
@@ -392,7 +328,7 @@ def test_an_away_venue_relay_is_gated_on_its_own_obs_boxes_and_its_own_cameras_l
     _write_lease(lease, "zbynekdrlik/restreamer", "4242", resources=["snv-cams", "stream-snv"])
     rl = _relay_artifact(tmp_path)
     proc, box = _deploy_with_relay(
-        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp", "--relay-binary", str(rl)],
+        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp"],
         camera_set=None, OBS_FLEET_HOME="cam7", RIG_LEASE_DIR=str(lease),
         GITHUB_REPOSITORY="", GITHUB_RUN_ID="", RIG_LEASE_REPO="", RIG_LEASE_RUN_ID="")
     out = proc.stdout + proc.stderr
@@ -408,8 +344,7 @@ def test_an_away_venue_relay_is_refused_by_a_lease_that_holds_its_cameras(tmp_pa
     lease = tmp_path / "lease"
     _write_lease(lease, "zbynekdrlik/restreamer", "4242", resources=["pp-cams"])
     proc, box = _deploy_with_relay(
-        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp",
-                   "--relay-binary", str(_relay_artifact(tmp_path))],
+        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp"],
         camera_set=None, OBS_FLEET_HOME="cam7", RIG_LEASE_DIR=str(lease),
         GITHUB_REPOSITORY="", GITHUB_RUN_ID="", RIG_LEASE_REPO="", RIG_LEASE_RUN_ID="")
     out = proc.stdout + proc.stderr
@@ -418,37 +353,96 @@ def test_an_away_venue_relay_is_refused_by_a_lease_that_holds_its_cameras(tmp_pa
     assert _live(box, "bkshading-relay").read_bytes() == _OLD_RELAY
 
 
-def test_binary_together_with_run_still_fetches_the_relay_of_that_run(tmp_path):
-    cb = _camera_box_artifact(tmp_path)
-    rl = _relay_artifact(tmp_path)
-    ghdir, logf = _fake_gh(tmp_path, cb, rl)
-    proc, box = _deploy_with_relay(tmp_path, ["--binary", str(cb), "--run", "5555"], gh_dir=ghdir)
-    out = proc.stdout + proc.stderr
-    assert proc.returncode == 0, out
-    assert any("bkshading-linux-amd64" in d for d in logf.read_text().splitlines()), out
-    assert _live(box, "bkshading-relay").read_bytes() == rl.read_bytes()
-
-
-def test_a_relay_on_mains_release_next_to_a_dev_candidate_camera_box_is_not_forgotten():
-    # the E2E [0/8] align puts the dev candidate (main + one patch) on the boxes with --no-relay
-    r = _lib('bkshading_relay_version_verdict "$1" "$2" "$3"', "1.8.2", "1.8.1", "1.8.1")
-    assert r.stdout.strip() == "RELAY-CURRENT", r.stdout + r.stderr
-    r = _lib('bkshading_relay_version_verdict "$1" "$2" "$3"', "1.8.2", "1.7.0-dev.810", "1.8.1")
-    assert r.stdout.strip() == "RELAY-STALE", r.stdout + r.stderr
-    r = _lib('bkshading_relay_version_verdict "$1" "$2" ""', "1.8.2", "1.8.1")
-    assert r.stdout.strip() == "RELAY-STALE", "no main pin read: graded against camera-box alone"
-
-
-def test_main_version_is_read_from_the_workspace_package_line():
-    cargo = '[workspace]\nmembers = ["a"]\n\n[workspace.package]\nversion = "1.8.1"\n\n[dependencies]\nx = { version = "2" }\n'
-    r = _lib('bkshading_relay_main_version_from_cargo "$1"', cargo)
-    assert r.returncode == 0 and r.stdout.strip() == "1.8.1", r.stdout + r.stderr
-    r = _lib('bkshading_relay_main_version_from_cargo ""')
-    assert r.returncode == 0 and r.stdout.strip() == "", r.stdout
-
-
 def test_the_handover_probe_reads_state_and_versions_in_one_ssh_call_and_passes_mains_release():
     s = HANDOVER.read_text()
     body = s[s.index("probe_shading() {"):s.index("\n}\n", s.index("probe_shading() {"))]
     assert body.count("sshpass -p") == 1, "one connect per box: a down box costs one ConnectTimeout"
-    assert "origin/main:Cargo.toml" in body and '"$main")' in body, body
+    assert "origin/main:scripts/shading-release.pin" in body and '"$main")' in body, body
+
+
+# ---- issue 1487: the relay is the pinned shading release ------------------------------------------ #
+
+
+def test_a_box_already_on_the_pin_is_left_alone(tmp_path):
+    relay = _relay_artifact(tmp_path).read_bytes()
+    proc, box = _deploy_with_relay(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))], relay_live=relay,
+                                   relay_active=True)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "[bkshading-deploy-relay]" not in out, out
+    assert "already on the pin (9.9.9-test)" in out, out
+    assert not any("stop bkshading-relay" in c for c in log(box)), "\n".join(log(box))
+    assert "cam2 camera-box=9.9.9-test relay=9.9.9-test" in _summary(proc)
+
+
+def test_the_relay_version_has_nothing_to_do_with_camera_box(tmp_path):
+    proc, box = _deploy_with_relay(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))],
+                                   relay_live=_OLD_RELAY)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "not from the same build" not in proc.stdout + proc.stderr
+
+
+def test_no_verified_relay_refuses_before_any_box_is_touched(tmp_path):
+    proc, box = _deploy_with_relay(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))],
+                                   SHADING_RELEASE_URL="file:///nonexistent")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out
+    assert "never another build" in out and "nothing deployed" in out, out
+    assert log(box) == [], "nothing may touch a box: " + "\n".join(log(box))
+
+
+def test_no_relay_needs_no_release(tmp_path):
+    proc, box = _deploy_with_relay(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--no-relay"],
+                                   SHADING_RELEASE_URL="file:///nonexistent")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_a_ci_run_deploy_takes_the_pinned_relay_never_the_runs(tmp_path):
+    cb = _camera_box_artifact(tmp_path)
+    d = tmp_path / "gh-bin"
+    d.mkdir()
+    logf = tmp_path / "gh.log"
+    (d / "gh").write_text(
+        "#!/bin/bash\n"
+        f"echo \"$*\" >> '{logf}'\n"
+        "case \"$1 $2\" in\n"
+        "  'run view') echo 0123456789abcdef0123456789abcdef01234567 ;;\n"
+        "  'run download')\n"
+        "    dir=''\n"
+        "    while [ $# -gt 0 ]; do case \"$1\" in --dir) dir=$2; shift 2;; *) shift;; esac; done\n"
+        f"    mkdir -p \"$dir\"; cp '{cb}' \"$dir/camera-box\" ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n")
+    (d / "gh").chmod(0o755)
+    proc, box = _deploy_with_relay(tmp_path, ["--run", "5555"], gh_dir=d)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "bkshading" not in logf.read_text()
+    assert _live(box, "bkshading-relay").read_bytes() == _relay_artifact(tmp_path).read_bytes()
+
+
+def test_version_verdict_grades_the_relay_against_the_pin():
+    cases = {
+        ("0.1.0", "0.1.0", ""): "RELAY-CURRENT",
+        ("0.1.0", "1.8.6", ""): "RELAY-STALE",
+        ("0.1.0", "1.7.0-dev.810", ""): "RELAY-STALE",
+        ("0.2.0", "0.1.0", "0.1.0"): "RELAY-CURRENT",
+        ("0.2.0", "0.0.9", "0.1.0"): "RELAY-STALE",
+        ("0.1.0", "absent", ""): "RELAY-NONE",
+        ("0.1.0", "missing-binary", ""): "RELAY-MISSING",
+        ("0.1.0", "unreadable", ""): "RELAY-UNKNOWN",
+        ("0.1.0", "", ""): "RELAY-UNKNOWN",
+        ("", "0.1.0", ""): "RELAY-UNKNOWN",
+    }
+    for (pin, rlv, main), want in cases.items():
+        r = _lib('bkshading_relay_version_verdict "$1" "$2" "$3"', pin, rlv, main)
+        assert r.returncode == 0 and r.stdout.strip() == want, (pin, rlv, main, r.stdout, r.stderr)
+
+
+def test_the_post_merge_deploy_job_takes_the_pinned_relay():
+    import yaml
+    wf = yaml.safe_load(CI.read_text())
+    job = wf["jobs"]["deploy-fleet"]
+    runs = [s["run"] for s in job["steps"] if "scripts/deploy-fleet.sh" in s.get("run", "")]
+    assert len(runs) == 2, runs
+    for r in runs:
+        assert "--relay-binary" not in r and "--no-relay" not in r, r

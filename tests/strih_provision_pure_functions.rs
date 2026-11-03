@@ -2807,21 +2807,10 @@ fn setup_strih_installs_ffmpeg_and_verify_checks_ffprobe() {
 
 // ===========================================================================================
 // issue 1353: strih-snv bkshading SERVICE provisioning -- the shading panel backend moved off the
-// Windows PC to the notebook as a systemd unit. Three pure printers (artifact name / system unit /
-// config seed) + setup-strih step 16c (enable-only) + verify-strih item + the ci.yml service
-// artifact. The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs), so the
-// unit needs only the self-contained binary; web/ ships beside it per the design as a panel-source
-// copy. Development = one camera on cam1.
+// Windows PC to the notebook as a systemd unit. Two pure printers (system unit / config seed) +
+// setup-strih step 16c (enable-only) + verify-strih item, the service being the pinned shading
+// release (issue 1487). Development = one camera on cam1.
 // ===========================================================================================
-
-/// The Linux service artifact NAME is single-sourced here (the ci.yml upload + the setup-strih fetch
-/// both key on it) -- the strih variant of the Windows `bkshading-windows-amd64` canon.
-#[test]
-fn bkshading_artifact_name_is_the_linux_service_variant() {
-    let (code, out, _e) = run_sourced(&[], "strih_bkshading_artifact_name");
-    assert_eq!(code, 0);
-    assert_eq!(out.trim(), "bkshading-service-linux-amd64");
-}
 
 /// The systemd unit is a SYSTEM unit run as the operator (User=newlevel for libndi/PipeWire parity),
 /// ExecStart the installed binary with --config, Restart=on-failure, multi-user target, and it never
@@ -2946,8 +2935,8 @@ fn setup_strih_installs_bkshading_service_in_step_16c_enable_only() {
         "bkshading service must be lettered sub-step 16c so TOTAL_STEPS stays 17"
     );
     assert!(
-        s.contains("strih_bkshading_artifact_name"),
-        "the fetch keys on the single-sourced artifact name"
+        s.contains("shading_release_service"),
+        "the service comes from the pinned shading release"
     );
     assert!(
         s.contains("/opt/bkshading"),
@@ -3008,28 +2997,6 @@ fn verify_strih_has_the_bkshading_service_item() {
     assert!(
         v.contains("8770"),
         "verify-strih must reference the service port :8770"
-    );
-}
-
-/// The ci.yml Linux bkshading job uploads the service artifact under the SAME name the printer
-/// single-sources, staging the service binary + the panel web assets.
-#[test]
-fn ci_uploads_the_bkshading_service_linux_artifact() {
-    let (code, name, _e) = run_sourced(&[], "strih_bkshading_artifact_name");
-    assert_eq!(code, 0);
-    let ci = read_script(".github/workflows/ci.yml");
-    assert!(
-        ci.contains(&format!("name: {}", name.trim())),
-        "ci.yml must upload the artifact named by strih_bkshading_artifact_name ({})",
-        name.trim()
-    );
-    assert!(
-        ci.contains("bkshading/service/web"),
-        "the service artifact must stage the panel web assets"
-    );
-    assert!(
-        ci.contains("target/release/bkshading"),
-        "the service artifact must carry the service binary"
     );
 }
 
@@ -3551,16 +3518,14 @@ fn verify_strih_bkshading_probe_hits_a_real_service_route() {
         .chars()
         .take_while(|c| *c != '"' && !c.is_whitespace())
         .collect();
-    let router = read_script("bkshading/service/src/http.rs");
-    let routes: Vec<String> = router
-        .split(".route(\"")
-        .skip(1)
-        .filter_map(|r| r.split('"').next().map(str::to_string))
-        .collect();
+    let contract = read_script("tests/fixtures/shading_pinned/CONTRACT.md");
+    let service = contract
+        .split("## Service")
+        .nth(1)
+        .expect("the Service section");
     assert!(
-        routes.iter().any(|r| r == &path),
-        "verify-strih probes the service at `{path}`, which is not a route the service serves \
-         (routes: {routes:?})"
+        service.contains(&format!("`GET {path}`")),
+        "verify-strih probes the service at `{path}`, which is not the contract's health route"
     );
 }
 

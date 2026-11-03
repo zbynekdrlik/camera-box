@@ -25,7 +25,7 @@
 #          when either is unreadable; issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
 # STEP 1 (tree): the committed scripts/ systemd/ vendor/realtek-r8152 Cargo.toml + the program-audio sampler's
 #          vendored dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + the
-#          pinned intercom release, its sha256 verified (scripts/intercom-release.pin, issue 1487) + the
+#          pinned intercom and shading releases, their sha256 verified (scripts/intercom-release.pin, scripts/shading-release.pin, issue 1487) + the
 #          generated run-setup.sh -> /stage/repo.
 # STEP 2 (preflight): the box must be the fact file's host ('hostname' == STRIH_HOSTNAME),
 #          and no previous install may run:  if pgrep -x setup-strih.sh >/dev/null; then echo alive; else echo idle; fi

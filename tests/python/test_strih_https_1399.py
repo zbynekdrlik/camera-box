@@ -36,6 +36,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shading_release_fake_1487 import service_port  # noqa: E402
 SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "strih-https.sh"
 SHADING = SCRIPTS / "lib" / "shading-https.sh"
@@ -445,12 +447,11 @@ def test_the_snv_interkom_render_lists_every_name_on_one_cert():
 @pytest.mark.parametrize("box", ["strih-snv", "strih-pp"])
 def test_the_upstream_ports_are_the_services_own_binds(box):
     """One source of truth: the hub port is the box's intercom matrix [http] bind, bkshading's is its
-    default_bind (bkshading/service/src/config.rs)."""
+    default bind (the shading contract)."""
     r = _bash('strih_box_load "$1" || exit 9\nstrih_lx_intercom_config', box, sources=(FACTS,))
     matrix = (REPO / "tests" / "fixtures" / "intercom_pinned" / r.stdout.strip()).read_text()
     hub = re.search(r'(?m)^bind = "0\.0\.0\.0:(\d+)"', matrix).group(1)
-    cfg = (REPO / "bkshading" / "service" / "src" / "config.rs").read_text()
-    bks = re.search(r'"0\.0\.0\.0:(\d+)"', cfg).group(1)
+    bks = service_port()
     sites = {row[0]: row for row in _sites(box)}
     assert sites["interkom"][3] == "http://127.0.0.1:%s" % hub
     assert sites["shading"][3] == "http://127.0.0.1:%s" % bks
