@@ -12,7 +12,8 @@ Both YouTube gates call it before the broadcast starts and every ~10 s while it 
           within --latch-s; a MEASUREMENT must also carry its `marker_chain` (the QPSK marker
           requirement, ROZHODNUTÉ issue 1404 comment 6026826572) -- one without it comes from a
           sampler older than that requirement and reads UNKNOWN
-  exit 1  FOREIGN (non-measurement audio on the program) -- also when stale: an old FOREIGN
+  exit 1  FOREIGN (non-measurement audio on the program; since issue 1404's CG arm also CG-chain
+          audio, reason `cg-audio: ...`, which the line shows) -- also when stale: an old FOREIGN
           reading is never downgraded to "maybe" -- and also when the CURRENT window is clean but
           a FOREIGN window ended within --latch-s (`last_foreign_age_s`, the sampler's latch;
           default 30 s, three times a ~10 s gate poll plus the guard's own runtime), so a gate
@@ -95,7 +96,10 @@ def decide(payload: dict, max_age_s: float, latch_s: float = DEFAULT_LATCH_S) ->
     else:
         stale_why = f"stale (age {age:.1f} s > max {max_age_s:g} s)"
     if verdict == "FOREIGN":
-        return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age, stale_why if stale else None, **counts)
+        # issue 1404 (the CG arm): the sampler's own reason (`cg-audio: <source> at <x> dBFS`) is
+        # shown; a spectral FOREIGN carries none, so its line is unchanged.
+        why = ", ".join(w for w in (stale_why if stale else None, payload.get("reason")) if w) or None
+        return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age, why, **counts)
     last_foreign = _num(payload.get("last_foreign_age_s"))
     if last_foreign is not None and last_foreign <= latch_s:
         return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age,

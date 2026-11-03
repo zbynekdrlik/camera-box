@@ -58,15 +58,19 @@ STRIH_PROGRAM_AUDIO_UNIT="program-audio-sampler.service"
 STRIH_PROGRAM_AUDIO_UNIT_TEMPLATE="program-audio-sampler.strih-snv.service"
 STRIH_PROGRAM_AUDIO_PACKAGES=(python3-numpy)
 # Everything the sampler imports + the decoder shim's sources and build script, in the checkout layout
-# (pinned against the sampler's real import closure by a test).
+# (pinned against the sampler's real import closure by a test). scripts/lib/obs-fleet.sh is DATA here:
+# obs_fleet_table.py parses its OBS_FLEET + OBS_FLEET_IDENTITY declarations (issue 1404, the CG arm).
 STRIH_PROGRAM_AUDIO_FILES=(
   scripts/program_audio.py
   scripts/program_audio_capture.py
+  scripts/program_audio_cg.py
   scripts/program_audio_http.py
   scripts/program_audio_marker.py
   scripts/program_audio_ndi.py
   scripts/program_audio_sampler.py
   scripts/rig_serve_files.py
+  scripts/obs_fleet_table.py
+  scripts/lib/obs-fleet.sh
   scripts/qpsk_guard_shim.cpp
   scripts/build-qpsk-guard-shim.sh
   vendor/av-sync-dock/src/camera-box-audio.hpp

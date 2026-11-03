@@ -62,6 +62,11 @@ time" and "dev1's own wall-clock step" mean strih-snv's own.
   pa.resolve_ahead). Back within the tolerance = the stream OBS stamped late after an audio-thread
   stall, nothing lost: no zeros, the span kept, counted (`sender_stalls`). Otherwise the hole is the
   smallest offset over them: bridged or a restart, as before.
+* CG ARM (issue 1404, the 3.11.2026 Content ID claim): the sampler also receives, audio-only, the
+  CG chain's own NDI senders (scripts/program_audio_cg.py: `RESOLUME-SNV (SP-program)` +
+  `RESOLUME-SNV (cg-obs)`, from the one declaration there). Any of them heard at or over the
+  -60 dBFS silence bar turns the window FOREIGN (`cg-audio`, latched); while the CG box is home, one
+  not heard turns a MEASUREMENT/SILENT window UNKNOWN. The payload carries a `cg` block.
 
 Usage (systemd/program-audio-sampler.strih-snv.service, installed by setup-strih step 16e):
   program_audio_sampler.py [--source "STREAM-SNV (stream)"] [--serve-dir DIR] [--lib PATH]
@@ -85,6 +90,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import program_audio as pa  # noqa: E402
 import program_audio_capture as pac  # noqa: E402
+import program_audio_cg as pcg  # noqa: E402
 import program_audio_http as pah  # noqa: E402
 import program_audio_marker as pam  # noqa: E402
 import rig_serve_files as rsf  # noqa: E402
@@ -277,7 +283,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         capture_timeout_ms: int = CAPTURE_TIMEOUT_MS, no_audio_timeout_s: float = NO_AUDIO_TIMEOUT_S,
         receive_gap_s: float = RECEIVE_GAP_S, window_s: float = pa.WINDOW_S,
         should_stop: Callable[[], bool] = lambda: False, capture=None,
-        wall_offset: Callable[[], int | None] | None = None) -> None:
+        wall_offset: Callable[[], int | None] | None = None, cg=None) -> None:
     """The sampler's consumer loop. `receiver` has capture(timeout_ms) -> AudioBlock|None (raises
     ConnectionError on an NDI error frame) and connections(); `decoder` has
     decode(samples, sample_rate) -> CRC-valid words per channel (program_audio_marker.MarkerDecoder).
@@ -286,7 +292,10 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     dev1's wall offset through `wall_offset` once per block -- None (the default) reads no clock, so
     a real dantesync step never decides a test or a calibration run; the dev1 service's
     CaptureThread reads the clock itself. Every written payload also goes through `on_write`
-    (tests)."""
+    (tests). `cg`: the CG arm (program_audio_cg.CgArm, or any object with state() -> CgState), read
+    once per written window: program_audio_cg.overlay decides the verdict after it and the payload
+    carries its `cg` block; None = no CG arm (every payload byte-identical to before issue 1404's
+    CG arm)."""
     latch = {"last_foreign": None}
     bridged_total = {"holes": 0, "ms": 0.0}  # since the start: the JSON's holes_bridged / bridged_ms
     drops_total = {"frames": 0}              # since the start: the JSON's queue_drops
@@ -297,7 +306,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     lag = {"ms": None}        # the consumer's lag behind the capture for the window being written
     walls = pa.WallSteps()
 
-    def write(verdict, rms, outside, reason=None, markers=None, chain=None):
+    def write(verdict, rms, outside, reason=None, markers=None, chain=None, cg_state=None):
         now = datetime.now(timezone.utc)
         if verdict == "FOREIGN":
             latch["last_foreign"] = rsf.format_ts_utc(now)
@@ -306,7 +315,8 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                                    markers_decoded=markers, marker_chain=chain,
                                    holes_bridged=bridged_total["holes"],
                                    bridged_ms=bridged_total["ms"], queue_drops=drops_total["frames"],
-                                   lag_ms=lag["ms"], sender_stalls=stalls_total["n"])
+                                   lag_ms=lag["ms"], sender_stalls=stalls_total["n"],
+                                   cg=pcg.payload_block(cg_state))
         pa.write_payload(serve_dir, payload)
         if on_write is not None:
             on_write(payload)
@@ -345,6 +355,15 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     bad_rate_logged = False
     loops = 0
 
+    def with_cg(verdict, reason):
+        """The window's (verdict, reason, CG state) after the CG arm (issue 1404, the 3.11.2026
+        claim): CG audio heard = FOREIGN `cg-audio`, a CG source not heard while home = UNKNOWN."""
+        if cg is None:
+            return verdict, reason, None
+        st = cg.state()
+        verdict2, reason2 = pcg.overlay(verdict, reason, st)
+        return verdict2, reason2, st
+
     def restart_span(why: str) -> None:
         nonlocal rebase_windows
         acc.reset()
@@ -363,7 +382,8 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                                                                             win_real,
                                                                             rebased=rebase_windows > 0)
             rebase_windows = max(0, rebase_windows - 1)
-            write(verdict, rms, outside, reason, markers, chain)
+            verdict, reason, cg_state = with_cg(verdict, reason)
+            write(verdict, rms, outside, reason, markers, chain, cg_state)
             counts[verdict] += 1
             if verdict != last_verdict:
                 log(f"program-audio verdict {last_verdict} -> {verdict} rms={_fmt(rms)} dBFS "
@@ -513,12 +533,13 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                 reason = (f"no audio from {source!r} for {now - last_audio:.1f} s "
                           f"(connections={receiver.connections()})")
                 lag["ms"] = None  # no window judged: no lag to report
-                write("UNKNOWN", None, None, reason=reason)
-                counts["UNKNOWN"] += 1
+                verdict, reason, cg_state = with_cg("UNKNOWN", reason)
+                write(verdict, None, None, reason=reason, cg_state=cg_state)
+                counts[verdict] += 1
                 last_unknown = now
-                if last_verdict != "UNKNOWN":
-                    log(f"program-audio verdict {last_verdict} -> UNKNOWN: {reason}")
-                    last_verdict = "UNKNOWN"
+                if last_verdict != verdict:
+                    log(f"program-audio verdict {last_verdict} -> {verdict}: {reason}")
+                    last_verdict = verdict
         if now - last_summary >= LOG_SUMMARY_S:
             log("program-audio summary (last %.0f s): %s error_frames=%d bad_rate_frames=%d "
                 "queue_drops=%d max_lag_ms=%.0f date_steps=%d sender_stalls=%d max_stall_ms=%.1f "
@@ -850,22 +871,40 @@ def main(argv=None) -> int:
             f"sources than this checkout ({decoder.built_sha256[:12]} != {pam.sources_sha256()[:12]}) -- "
             "rebuild it with scripts/build-qpsk-guard-shim.sh and restart")
 
+    # issue 1404 (the 3.11.2026 claim): the CG arm's sources BEFORE any receiver: a CG box whose NDI
+    # names are unknown would leave the guard blind to it, so the sampler must not run (fail loud).
+    try:
+        cg_box = pcg.cg_box()
+        cg_names = pcg.cg_sources(cg_box)
+    except (ValueError, OSError, RuntimeError) as exc:
+        set_unknown(f"sampler cannot listen to the CG chain: {exc}")
+        log(f"program-audio sampler: FATAL the CG arm: {exc}")
+        return 1
+
     ndi_config_dir = private_ndi_config_dir()
     prev_ndi_config_dir = os.environ.get("NDI_CONFIG_DIR")
     os.environ["NDI_CONFIG_DIR"] = ndi_config_dir
     try:
+        # The CG receivers first (issue 1404, the CG arm: audio-only, the same binding), then the
+        # stream program's own; a receiver that cannot be created closes the ones before it.
+        cg = None
         try:
+            cg = pcg.open_arm(cg_box, cg_names, lambda name: pan.NdiAudioReceiver(name, lib_path=args.lib))
             receiver = pan.NdiAudioReceiver(args.source, lib_path=args.lib)
         except (OSError, RuntimeError) as exc:
+            if cg is not None:
+                pcg.close_arm(cg, log)
             set_unknown(f"sampler cannot receive: {exc}")
             log(f"program-audio sampler: FATAL cannot create the NDI receiver: {exc}")
             return 1
+        log(pcg.start_line(cg))
         http = None
         if args.http_port:
             try:
                 server = pah.make_server(args.http_bind, args.http_port, args.serve_dir)
             except OSError as exc:
                 receiver.close()
+                pcg.close_arm(cg, log)
                 set_unknown(f"sampler cannot serve http on {args.http_bind}:{args.http_port}: {exc}")
                 log(f"program-audio sampler: FATAL cannot serve http on {args.http_bind}:{args.http_port}: {exc}")
                 return 1
@@ -887,8 +926,9 @@ def main(argv=None) -> int:
         cap = pac.CaptureThread(receiver, timeout_ms=CAPTURE_TIMEOUT_MS)
         cap.start()
         try:
+            cg.start()
             run(receiver, args.serve_dir, source=args.source, decoder=decoder, capture=cap,
-                should_stop=lambda: stop["signal"] is not None)
+                should_stop=lambda: stop["signal"] is not None, cg=cg)
         finally:
             if cap.stop():
                 receiver.close()
@@ -896,6 +936,7 @@ def main(argv=None) -> int:
                 log("program-audio sampler: ERROR the capture thread is still inside the NDI capture call -- "
                     "the receiver is left to the process exit (destroying it under a running capture "
                     "would crash the SDK)")
+            pcg.close_arm(cg, log)
             set_unknown("sampler stopped")
             if http is not None:
                 pah.stop(*http)
