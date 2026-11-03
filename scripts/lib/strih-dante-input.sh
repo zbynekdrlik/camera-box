@@ -202,7 +202,7 @@ strih_dante_input_grade() {
   local scn="${1-}" ws="${2-}" log="${3-}" name kind dest home user l1 l2 v start errs wait="${STRIH_DANTE_INPUT_WAIT_S:-12}"
   name="$(strih_lx_program_audio_input 2>/dev/null)" || name="ASIO zvuk"
   user="${STRIH_LX_USER:-newlevel}"
-  home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6)"; home="${home:-/home/${user}}"
+  home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6 || true)"; home="${home:-/home/${user}}"
   dest="$(_strih_dante_input_dest "$home")"
   if [ -f "$dest" ] && grep -q "^name = \"${STRIH_DANTE_INPUT_DEVICE}\"$" "$dest" 2>/dev/null; then
     ok "(program-dante) ${dest} declares the ${STRIH_DANTE_INPUT_DEVICE} device ($(grep -c '^\[\[subscribe\]\]' "$dest") subscription(s))"
