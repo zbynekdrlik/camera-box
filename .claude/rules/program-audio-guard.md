@@ -244,7 +244,9 @@ IN the program.
   - UNDECIDED -> today's strict FOREIGN, with `not proven absent from the stream program (<why>)`
     (fail closed). That covers: no sender stamp on the newest frame, too little audio buffered (a
     sampler start, a CG that just started), a CG behind the program by > 3 s, segment coverage
-    < 95 %, the CG segment < `MIN_CG_DBFS` -50 dBFS (a near-silent CG never decides), a digitally
+    < 95 %, the CG segment < `MIN_CG_DBFS` -80 dBFS (an effectively empty segment; it was -50 until
+    E2E 41703531109 on 3.11.2026, where an idle SongPlayer at -52 dBFS read UNDECIDED and the strict
+    arm stopped a clean YouTube stage: the CG is digital and the NCC level-independent), a digitally
     silent program, < -90 dBFS in the correlation band, and a non-finite sample.
   - Any exception in the correlation (`program_audio_cg._correlate`) is UNDECIDED `correlation failed:
     <exc>`, never a crash of the consumer loop. A raising ring push in a CG capture thread is that
