@@ -329,8 +329,9 @@ it. setup-strih.sh / verify-strih.sh carry no line of their own: it rides step 1
   (v0.6.13: a device on an older dstack is not discoverable). A bump edits the tag, asset and sha
   together and `tests/python/test_dtray_1485.py` pins the shipped values.
 - **The install** (`dtray_install HOME`, `scripts/lib/dtray.sh`, step 16d inside the per-entry loop):
-  the release `.sha256` must name the pin's sha256, else nothing is downloaded; a binary already on the
-  pin is kept (mtime unchanged); else download, prove against the pin, install 0755 as a
+  a binary already on the pin's sha256 is kept with NO network read (mtime unchanged; the pin is the
+  authority, so a GitHub outage never WARNs a box already on it); else the release `.sha256` must name
+  the pin's sha256, else nothing is downloaded; then download, prove against the pin, install 0755 as a
   `<bin>.new.<pid>` sibling and rename (a running tray keeps its inode). Record `<tag> <sha256>` in
   `/usr/local/share/dtray/release`. No fallback: a failure is rc 1 + stderr, step 16d WARNs once and
   provisions the rest, verify FAILs `(dtray)`. It also removes `~/.config/autostart/dtray.desktop`
@@ -339,11 +340,17 @@ it. setup-strih.sh / verify-strih.sh carry no line of their own: it rides step 1
   0644 (dtray reads only the name), for every name of the box fact `STRIH_DANTE_DEVICES` (strih-snv:
   `strih-snv-intercom`, `strih-obs`; none elsewhere). The names WE wrote are recorded in
   `/usr/local/share/dtray/devices`; a recorded name the facts no longer declare is deleted, a marker we
-  did not write is never claimed or deleted.
+  did not write is never claimed or deleted. A name (from the facts or the record) that is not a plain
+  device name (ASCII letters, digits, `-_.`, not starting with `.`; `dtray_name_ok`) is refused before
+  any write or delete, so no marker path leaves the dir. A marker change needs no tray restart: the
+  running dtray reads the dir on every 1 s tick (dstack v0.6.19 `crates/dtray/src/tray.rs`).
 - **The unit:** foreground `/usr/local/bin/dtray`, no args, `DISPLAY=:0`, `PartOf=` + `After=graphical-session.target`,
   `ConditionFileIsExecutable=`, `Restart=on-failure`, `RestartSec=10`, and UNLIKE the other entries a
   start limit (`StartLimitIntervalSec=300`, `StartLimitBurst=5`): dtray exits 1 when it has no desktop,
-  so a box with no session must not restart it forever. The next login's autostart start retries.
+  so a box with no session must not restart it forever. The next login's autostart start retries; a
+  start within 300 s of the fifth failure is refused (start-limit-hit, no `reset-failed` in the autostart
+  line), so restart it by hand then. `on-failure`, not `always`: the tray's own Exit menu item (exit 0)
+  closes it until the next login, which is the operator's choice.
 - **The runtime packages** libgtk-3-0t64 (libgtk-3-0 on 24.04) + libayatana-appindicator3-1 were already
   in `STRIH_SESSION_APP_PACKAGES` (the dsync tray's), installed only when missing.
 - **Verify:** the `(dtray)` unit row is the binary branch (unit byte-identical, enabled, autostart line,
@@ -352,12 +359,16 @@ it. setup-strih.sh / verify-strih.sh carry no line of their own: it rides step 1
   `(dtray-devices)` (`dtray_devices_row`, counted by `strih_session_apps_row_count`): every declared
   marker present and no stale one of ours, then on a Dante box `timeout 15 dtray --print` (a 3.5 s
   discovery pass, no desktop needed) must list each expected device. Its lines are `<name>: <status>` or
-  `<name>: expected, not running` (dtray `model.rs`), names compared case aside (`dtray_print_states`).
+  `<name>: expected, not running` (dtray `model.rs`), names compared case aside, trailing blanks/CR
+  ignored (`dtray_print_states`). ONLY the status form `<name>: clock ...` is present; any other text
+  (`status unreadable (...)`, a reworded line) is `odd` and FAILs naming it, never a false OK.
   A device reported "expected, not running" is a NOTE while the pinned intercom OR obs dstack
   (`INTERCOM_RELEASE_DSTACK_VERSION` / `OBS_RELEASE_DSTACK_VERSION`, new keys in their pins, both v0.6.10
   on 3.11.2026) is below `DTRAY_DEVICE_FIRST_DSTACK`, a FAIL once both reach it; a device dtray does not
   list at all, a failed or hung `--print`, or a missing marker FAILs. A pin bump of the intercom or obs
-  release MUST update its `*_DSTACK_VERSION` key (the release notes name it), or the threshold lies.
+  release MUST update its `*_DSTACK_VERSION` key: `tests/intercom_pin_1487.rs` checks it against the
+  tag's Cargo.lock (cargo's checkout), `tests/obs_pin_1487.rs` against the release commit's
+  `plugins/dante-input/ffi/Cargo.lock` (HTTPS), so a stale key FAILs there.
 - **Tests:** `tests/python/test_dtray_1485.py` (a file:// release the real curl reads, a fake dtray that
   prints a `--print` fixture, the shared fakes' `dtray_env`); the fakes' `HERMETIC` points every dtray
   path at `/nonexistent-1485` and declares no Dante device, so no other session-app test reaches GitHub

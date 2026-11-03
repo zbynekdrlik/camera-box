@@ -40,6 +40,10 @@ DTRAY_DEFAULT_DEVICES_DIR=/etc/dstack/devices
 # dtray --print waits ~3.5 s for discovery; the bound only catches a hang.
 DTRAY_DEFAULT_PRINT_TIMEOUT=15
 DTRAY_NOT_RUNNING="expected, not running"
+# The ASCII letter sets, spelled out (a bracket range follows the locale, issue 1302). Kept apart so no
+# literal is a 32+ character run (the secret scan, issue 1441).
+DTRAY_LOWER=abcdefghijklmnopqrstuvwxyz
+DTRAY_UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
 
 dtray_bin() { printf '%s' "${DTRAY_BIN:-$DTRAY_DEFAULT_BIN}"; }
 dtray_release_file() { printf '%s' "${DTRAY_RELEASE_FILE:-${DTRAY_DEFAULT_SHARE}/release}"; }
@@ -57,7 +61,7 @@ dtray_pin() {
   v="$(_dtray_field "$file" "DTRAY_${key}")"
   case "$key" in
     RELEASE_TAG|DEVICE_FIRST_DSTACK) re='^v[0123456789]+\.[0123456789]+\.[0123456789]+$' ;;
-    RELEASE_ASSET) re='^[-.0123456789A-Za-z_]+$' ;;
+    RELEASE_ASSET) re="^[-.0123456789${DTRAY_LOWER}${DTRAY_UPPER}_]+\$" ;;
     RELEASE_SHA256) re='^[0123456789abcdef]{64}$' ;;
     *) echo "dtray: unknown pin key ${key}" >&2; return 1 ;;
   esac
@@ -92,10 +96,12 @@ _dtray_write_file() {
 
 # dtray_install HOME -> the pinned dtray at dtray_bin + its release record; removes HOME's XDG autostart
 # entry of dtray (`dtray --autostart on` writes one; the unit is the ONE start path).
-#   * the release `.sha256` first: it must name the pin's sha256, else nothing is downloaded;
-#   * an installed, executable dtray with that sha256 is kept (its mtime unchanged: verify's process check
-#     compares against it); else the asset is downloaded to a temp dir, proved against the pin, installed
-#     0755 as `<bin>.new.<pid>` and renamed over the name (a running tray keeps its inode);
+#   * an installed, executable dtray with the PIN's sha256 is kept with no network read (its mtime
+#     unchanged: verify's process check compares against it; the pin is the authority, so a GitHub
+#     outage never WARNs a box already on it);
+#   * else the release `.sha256` first: it must name the pin's sha256, else nothing is downloaded; the
+#     asset is downloaded to a temp dir, proved against the pin, installed 0755 as `<bin>.new.<pid>` and
+#     renamed over the name (a running tray keeps its inode);
 #   * any failure: rc 1 + a stderr line, nothing installed (an installed dtray is left as it is).
 dtray_install() {
   local home="${1:?user home required}" bin tag want url tmp said cur have desktop
@@ -108,6 +114,12 @@ dtray_install() {
   tag="$(dtray_pin RELEASE_TAG)" || return 1
   want="$(dtray_pin RELEASE_SHA256)" || return 1
   url="$(dtray_release_url)" || return 1
+  cur="$(_dtray_sha "$bin")"
+  if [ -x "$bin" ] && [ "$cur" = "$want" ]; then
+    echo "  dtray ${tag} present (${bin}, sha256 matches the pin) -- kept"
+    _dtray_write_file "$(dtray_release_file)" "${tag} ${want}"
+    return
+  fi
   tmp="$(mktemp -d)" || { echo "dtray: mktemp failed" >&2; return 1; }
   if ! curl -fsSL "${url}.sha256" -o "${tmp}/dtray.sha256"; then
     rm -rf "$tmp"
@@ -119,13 +131,6 @@ dtray_install() {
     rm -rf "$tmp"
     echo "dtray: the release .sha256 of dtray ${tag} says '${said}', the pin says '${want}' -- refusing it" >&2
     return 1
-  fi
-  cur="$(_dtray_sha "$bin")"
-  if [ -x "$bin" ] && [ "$cur" = "$want" ]; then
-    rm -rf "$tmp"
-    echo "  dtray ${tag} present (${bin}, sha256 matches the pin) -- kept"
-    _dtray_write_file "$(dtray_release_file)" "${tag} ${want}"
-    return
   fi
   if ! curl -fsSL "$url" -o "${tmp}/dtray"; then
     rm -rf "$tmp"
@@ -174,10 +179,19 @@ dtray_state() {
 
 # --- the expected devices ----------------------------------------------------------------------------
 
+# dtray_name_ok NAME -> rc 0 iff NAME is a plain device name: ASCII letters, digits, `-`, `_`, `.`, not
+# starting with `.` (it becomes a file name under the markers dir: never a path, never hidden).
+dtray_name_ok() {
+  local re="^[0123456789${DTRAY_LOWER}${DTRAY_UPPER}_-][-.0123456789${DTRAY_LOWER}${DTRAY_UPPER}_]*\$"
+  [[ "${1-}" =~ $re ]]
+}
+
 # dtray_expected_devices -> the Dante device names the box declares (STRIH_DANTE_DEVICES: `none` or
-# `name=arc:cmc:flows:rx ...`), one per line; nothing on a box without one. rc 1 when unreadable.
+# `name=arc:cmc:flows:rx ...`), one per line; nothing on a box without one. rc 1 when unreadable or a name
+# is not a plain device name (dtray_name_ok, a stderr line).
 dtray_expected_devices() {
   local spec d
+  local -a words=()
   if [ -n "${DTRAY_DANTE_DEVICES+set}" ]; then
     spec="$DTRAY_DANTE_DEVICES"
   elif declare -F strih_lx_dante_devices >/dev/null; then
@@ -187,25 +201,40 @@ dtray_expected_devices() {
   fi
   [ -n "$spec" ] || return 1
   [ "$spec" = none ] && return 0
-  for d in $spec; do
+  read -r -a words <<<"$spec"   # split on whitespace, never globbed
+  for d in "${words[@]}"; do
+    dtray_name_ok "${d%%=*}" || { echo "dtray: '${d%%=*}' (STRIH_DANTE_DEVICES) is not a plain device name" >&2; return 1; }
+  done
+  for d in "${words[@]}"; do
     printf '%s\n' "${d%%=*}"
   done
 }
 
-# _dtray_recorded -> the marker names we wrote (the devices record), one per line. Always rc 0.
-_dtray_recorded() { grep -v '^[[:space:]]*$' "$(dtray_devices_record)" 2>/dev/null || true; }
+# _dtray_recorded -> the marker names we wrote (the devices record), one per line. rc 1 + a stderr line
+# when a recorded name is not a plain device name (a tampered record never deletes outside the dir).
+_dtray_recorded() {
+  local recorded n
+  recorded="$(grep -v '^[[:space:]]*$' "$(dtray_devices_record)" 2>/dev/null || true)"
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    dtray_name_ok "$n" || { echo "dtray: '${n}' in $(dtray_devices_record) is not a plain device name -- refusing it" >&2; return 1; }
+  done <<<"$recorded"
+  printf '%s' "$recorded"
+}
 
 # _dtray_listed NAME LIST -> rc 0 iff NAME is a line of LIST.
 _dtray_listed() { [ -n "$2" ] && printf '%s\n' "$2" | grep -qxF -- "$1"; }
 
 # dtray_devices_apply -> each declared device's marker (created empty 0644 when missing), each recorded
 # marker no longer declared removed, the record rewritten to the declared names that are ours. A marker we
-# did not create is never removed. rc 1 + a stderr line on an unreadable fact or a failed write.
+# did not create is never removed. A running dtray needs no restart: it reads the markers dir on every
+# 1 s tick (dstack v0.6.19 crates/dtray/src/tray.rs). rc 1 + a stderr line on an unreadable fact, a name
+# that is not a plain device name or a failed write.
 dtray_devices_apply() {
   local dir want old n f keep="" made=0 gone=0 what=""
   dir="$(dtray_devices_dir)"
   want="$(dtray_expected_devices)" || { echo "dtray: the box facts are unreadable (STRIH_DANTE_DEVICES) -- no device marker written" >&2; return 1; }
-  old="$(_dtray_recorded)"
+  old="$(_dtray_recorded)" || return 1
   while IFS= read -r n; do
     [ -n "$n" ] || continue
     f="${dir}/${n}.device"
@@ -270,9 +299,11 @@ dtray_device_shows() {
   return "$rc"
 }
 
-# dtray_print_states NAME... (stdin = `dtray --print`) -> one line per NAME: `present NAME` (a status line
-# of it), `not-running NAME` (dtray's "expected, not running" line), `unlisted NAME` (no line at all: dtray
-# never read its marker). Names compare case aside, as dtray does. Reads all of stdin. Always rc 0.
+# dtray_print_states NAME... (stdin = `dtray --print`) -> one line per NAME: `present NAME` (dtray's status
+# line of it, `<name>: clock ...`), `not-running NAME` (dtray's "expected, not running" line), `odd NAME`
+# (any other text: an unreadable status, a reworded line -- never read as present), `unlisted
+# NAME` (no line at all: dtray never read its marker). Trailing blanks and CR are ignored; names compare
+# case aside, as dtray does. Reads all of stdin. Always rc 0.
 dtray_print_states() {
   local text n
   text="$(cat)"
@@ -281,24 +312,43 @@ dtray_print_states() {
       BEGIN { st = "unlisted"; ln = tolower(n) ": " }
       tolower(substr($0, 1, length(ln))) == ln {
         rest = substr($0, length(ln) + 1)
-        if (rest == nr) { if (st == "unlisted") st = "not-running" } else st = "present"
+        sub(/[ \t\r]+$/, "", rest)
+        if (substr(rest, 1, 6) == "clock ") st = "present"
+        else if (rest == nr) { if (st == "unlisted") st = "not-running" }
+        else if (st != "present") st = "odd"
       }
       END { print st " " n }'
   done
   return 0
 }
 
+# _dtray_print_odd NAME (stdin = `dtray --print`) -> the text after `NAME: ` on its first line that is
+# neither a status nor the not-running line (what an `odd` state names). Always rc 0.
+_dtray_print_odd() {
+  awk -v n="${1-}" -v nr="$DTRAY_NOT_RUNNING" '
+    BEGIN { ln = tolower(n) ": " }
+    tolower(substr($0, 1, length(ln))) == ln && out == "" {
+      rest = substr($0, length(ln) + 1)
+      sub(/[ \t\r]+$/, "", rest)
+      if (substr(rest, 1, 6) != "clock " && rest != nr) out = rest
+    }
+    END { print out }'
+}
+
 # dtray_devices_row -> ONE verify-strih row: the declared markers in place and no stale marker of ours,
 # then on a Dante box `dtray --print` (bounded) listing every declared device. Always rc 0.
 dtray_devices_row() {
-  local dir want old n missing="" stale="" out rc=0 st shown bad="" note="" present=""
+  local dir want old n missing="" stale="" out rc=0 st shown bad="" note="" present="" rest
   local -a dt_names=()
   dir="$(dtray_devices_dir)"
   if ! want="$(dtray_expected_devices)"; then
     printf 'FAIL|(dtray-devices) the box facts are unreadable (STRIH_DANTE_DEVICES) -- load the box facts (setup/verify-strih --box <name>)\n'
     return 0
   fi
-  old="$(_dtray_recorded)"
+  if ! old="$(_dtray_recorded 2>&1)"; then
+    printf 'FAIL|(dtray-devices) %s\n' "$old"
+    return 0
+  fi
   while IFS= read -r n; do
     [ -n "$n" ] || continue
     dt_names+=("$n")
@@ -329,6 +379,7 @@ dtray_devices_row() {
     case "$st" in
       present) present="${present} ${n}" ;;
       not-running) if [ "${shown%%:*}" = ok ]; then bad="${bad} ${n}(not running)"; else note="${note} ${n}"; fi ;;
+      odd) rest="$(printf '%s\n' "$out" | _dtray_print_odd "$n")"; bad="${bad} ${n}(status: ${rest})" ;;
       *) bad="${bad} ${n}(not listed)" ;;
     esac
   done < <(printf '%s\n' "$out" | dtray_print_states "${dt_names[@]}")

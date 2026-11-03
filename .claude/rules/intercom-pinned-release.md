@@ -36,7 +36,9 @@ the boxes and keeps the glue: `strih-intercom-hub-unit.sh`, `strih-interkom-publ
 
 ## Bumping the pin
 
-1. `scripts/intercom-release.pin`: the tag and the new tarball's sha256; `Cargo.toml` tag; `cargo update -p intercom-vban`.
+1. `scripts/intercom-release.pin`: the tag and the new tarball's sha256, and `INTERCOM_RELEASE_DSTACK_VERSION`
+   = the dstack the tag's Cargo.lock locks (issue 1485: dtray's `--print` NOTE/FAIL threshold reads it,
+   `scripts/lib/dtray.sh`); `Cargo.toml` tag; `cargo update -p intercom-vban`.
 2. Copy the four TOMLs and the unit into `tests/fixtures/intercom_pinned/`.
 3. `cargo test --test intercom_pin_1487`: it reads cargo's git checkout of the tag and fails until the
    copy, `src/drm_output_audio_match.rs` (apart from the hub's doc note), the TURN credential contract and
