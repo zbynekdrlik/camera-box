@@ -91,8 +91,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import program_audio as pa  # noqa: E402
 import program_audio_capture as pac  # noqa: E402
 import program_audio_cg as pcg  # noqa: E402
+import program_audio_cg_corr as pcc  # noqa: E402
 import program_audio_http as pah  # noqa: E402
 import program_audio_marker as pam  # noqa: E402
+import program_audio_ndi_url as pnu  # noqa: E402
 import rig_serve_files as rsf  # noqa: E402
 
 DEFAULT_SOURCE = "STREAM-SNV (stream)"
@@ -305,6 +307,8 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         sleep=sleep)
     lag = {"ms": None}        # the consumer's lag behind the capture for the window being written
     walls = pa.WallSteps()
+    # issue 1404: the program's own audio at its sender stamps, for the CG arm's in-program test
+    program_ring = None if cg is None else pcc.AudioRing(mono=False)
 
     def write(verdict, rms, outside, reason=None, markers=None, chain=None, cg_state=None):
         now = datetime.now(timezone.utc)
@@ -360,7 +364,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         claim): CG audio heard = FOREIGN `cg-audio`, a CG source not heard while home = UNKNOWN."""
         if cg is None:
             return verdict, reason, None
-        st = cg.state()
+        st = cg.state(program=program_ring)
         verdict2, reason2 = pcg.overlay(verdict, reason, st)
         return verdict2, reason2, st
 
@@ -406,6 +410,8 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         last_audio = item.arrival_s
         lag["ms"] = (now - item.arrival_s) * 1e3
         prev = (stamp, block.samples.shape[0], block.sample_rate, block.samples.shape[1])
+        if program_ring is not None:
+            program_ring.push(stamp, block.samples, block.sample_rate)
         if missing:
             # The hole's samples, as silence, at their place on the sender's timeline: every
             # later sample keeps its timeline position, so the marker chain stays on its line.
@@ -888,9 +894,16 @@ def main(argv=None) -> int:
         # The CG receivers first (issue 1404, the CG arm: audio-only, the same binding), then the
         # stream program's own; a receiver that cannot be created closes the ones before it.
         cg = None
+
+        def make_receiver(name: str):
+            # issue 1404: at an address this box reaches on-link (program_audio_ndi_url), never the
+            # audio-VLAN one libndi may pick, else by name
+            return pnu.open_receiver(name, lambda n, url: pan.NdiAudioReceiver(
+                n, lib_path=args.lib, **({"url_address": url} if url else {})), log=log)
+
         try:
-            cg = pcg.open_arm(cg_box, cg_names, lambda name: pan.NdiAudioReceiver(name, lib_path=args.lib))
-            receiver = pan.NdiAudioReceiver(args.source, lib_path=args.lib)
+            cg = pcg.open_arm(cg_box, cg_names, make_receiver)
+            receiver = make_receiver(args.source)
         except (OSError, RuntimeError) as exc:
             if cg is not None:
                 pcg.close_arm(cg, log)

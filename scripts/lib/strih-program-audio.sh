@@ -64,9 +64,11 @@ STRIH_PROGRAM_AUDIO_FILES=(
   scripts/program_audio.py
   scripts/program_audio_capture.py
   scripts/program_audio_cg.py
+  scripts/program_audio_cg_corr.py
   scripts/program_audio_http.py
   scripts/program_audio_marker.py
   scripts/program_audio_ndi.py
+  scripts/program_audio_ndi_url.py
   scripts/program_audio_sampler.py
   scripts/rig_serve_files.py
   scripts/obs_fleet_table.py

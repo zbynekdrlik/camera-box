@@ -367,7 +367,7 @@ class _FakeArm:
     def __init__(self, state):
         self.st = state
 
-    def state(self):
+    def state(self, now=None, program=None):
         return self.st
 
 
