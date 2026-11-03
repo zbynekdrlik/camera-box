@@ -256,7 +256,7 @@ for irq in $irqs; do
 done
 log "done: xhci NIC IRQ(s) [${irqs}] pinned to cpu ${target}"
 === intercom-toml ===
-e6090274d7246116691a86f32574ea2ab7e6cbcdc5975fa007faabcaf90d5bd1
+16fc33065971d7b1a747d0bff94335ad841f3a6c3a49fbada49480e725d7d3bb
 === ndi-runtime-peer ===
 10.77.9.65
 === companion-host-conf ===
