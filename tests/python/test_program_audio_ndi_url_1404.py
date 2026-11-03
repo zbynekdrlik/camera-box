@@ -23,6 +23,7 @@ import program_audio_ndi as pan  # noqa: E402
 import program_audio_ndi_url as pnu  # noqa: E402
 
 SP = "RESOLUME-SNV (SP-program)"
+RECREATE_S = getattr(pnu, "RECREATE_AFTER_S", 60.0)
 CGOBS = "RESOLUME-SNV (cg-obs)"
 AVAHI_3_11 = r"""+;enp7s0.70;IPv4;RESOLUME-SNV\032\040SP-program\041;_ndi._tcp;local
 =;enp7s0.70;IPv4;RESOLUME-SNV\032\040cg-obs\041;_ndi._tcp;local;RESOLUME-SNV-000048d4-2217.local;10.77.7.107;5962;"discovery=5960" "groups=Public"
@@ -148,6 +149,34 @@ def test_the_same_url_again_keeps_the_receiver(clock):
         clock["t"] = 1000.0 + dt
         r.capture(500)
     assert len(_Rx.made) == 1 and not _Rx.made[0].closed
+
+
+def test_a_dead_connection_at_the_same_url_is_recreated_bounded_and_logged(clock):
+    """Live 3.11.2026 16:51: a cg-obs connection that dropped came back in SYN-SENT to the
+    audio-VLAN address and the SDK never left it (connections 0 for 1807 s). With the url
+    resolving to the SAME address, the receiver is still re-created there after RECREATE_AFTER_S,
+    at most once per RECREATE_AFTER_S, each time logged."""
+    assert RECREATE_S == 60.0          # the constant, once it exists, is the one the test runs at
+    logs = []
+    r = _pinned(clock, ["10.77.9.201:5962"], logs)
+    t0 = clock["t"]
+    clock["t"] = t0 + 1.0
+    r.capture(500)                                    # the connection is gone from here on
+    for dt in range(2, int(RECREATE_S), 5):
+        clock["t"] = t0 + dt
+        r.capture(500)
+    assert len(_Rx.made) == 1                         # before RECREATE_AFTER_S: kept
+    clock["t"] = t0 + 1.0 + RECREATE_S + 0.4
+    r.capture(500)
+    assert len(_Rx.made) == 2 and _Rx.made[0].closed and _Rx.made[1].url == "10.77.9.201:5962"
+    assert "re-created after 60 s without a connection at 10.77.9.201:5962" in logs[-1]
+    for dt in range(1, int(RECREATE_S), 5):  # bounded: not again within RECREATE_AFTER_S
+        clock["t"] = t0 + 1.0 + RECREATE_S + 0.4 + dt
+        r.capture(500)
+    assert len(_Rx.made) == 2
+    clock["t"] += RECREATE_S + 1.0
+    r.capture(500)
+    assert len(_Rx.made) == 3
 
 
 def test_a_failing_recreate_keeps_the_old_receiver(clock):
