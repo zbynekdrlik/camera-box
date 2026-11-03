@@ -708,7 +708,7 @@ fn gm_check_composes_correctly_when_reused_from_clock_offset_guard_sh() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// (l) dantesync phase_slew ENABLED (#1215) -- imag-nb shipped with no /etc/dantesync/config.json
+// (l) dantesync phase_slew ENABLED (#1215) -- imag-nb shipped with no /etc/dsync/config.json
 // at all and stepped the clock (16x/hour, ~4-min hitch) instead of slewing it; the config gap is
 // closed in setup-imag.sh, and this check makes a future regression to no-config fail loud rather
 // than shipping the same silent hitch again.

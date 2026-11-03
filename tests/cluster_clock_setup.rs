@@ -5,7 +5,7 @@
 //! edit" (Script Failure Policy). The live cameras are disciplined because their dantesync unit
 //! carries `--ntp-server strih.lan` (verified read-only 2026-06-15: cam1 +333 us, cam2 +351 us,
 //! cam4 -40 us, all PTP NANO-locked). But that arg was applied out-of-band: the setup scripts
-//! wrote a BARE `ExecStart=/usr/local/bin/dantesync`, and the dantesync binary's built-in default
+//! wrote a BARE `ExecStart=/usr/local/bin/dsync`, and the dantesync binary's built-in default
 //! NTP server is a PUBLIC pool (sk.pool.ntp.org / time.cloudflare.com), NOT the cluster master.
 //! A camera re-provisioned from the old setup script would therefore sync to a DIFFERENT clock
 //! than the rest of the cluster and silently break genlock — the exact regression #8 guards.
@@ -49,7 +49,7 @@ fn setup_scripts_point_dantesync_at_the_cluster_master() {
     let body = read(script);
     assert!(
         body.contains(&format!(
-            "ExecStart=/usr/local/bin/dantesync --ntp-server {MASTER}\n"
+            "ExecStart=/usr/local/bin/dsync --ntp-server {MASTER}\n"
         )),
         "{script} must launch dantesync against the venue strih by name \
          (--ntp-server {MASTER}) so a camera in ANY venue disciplines to that venue's strih"
@@ -57,8 +57,8 @@ fn setup_scripts_point_dantesync_at_the_cluster_master() {
     // The bare ExecStart with no server must NOT remain -- a bare line would let the daemon
     // fall back to the public-pool default and silently leave the camera on the wrong clock.
     assert!(
-        !body.contains("ExecStart=/usr/local/bin/dantesync\n"),
-        "{script} still has a BARE `ExecStart=/usr/local/bin/dantesync` (no --ntp-server)"
+        !body.contains("ExecStart=/usr/local/bin/dsync\n"),
+        "{script} still has a BARE `ExecStart=/usr/local/bin/dsync` (no --ntp-server)"
     );
     // A venue-specific IP must not come back (issue 1412: the SNV IP left every PP cambox clockless).
     assert!(

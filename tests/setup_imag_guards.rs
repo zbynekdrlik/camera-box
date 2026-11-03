@@ -958,7 +958,7 @@ fn setup_imag_gh_deb_url_discovery_captures_curl_output_first() {
 fn setup_imag_installs_dantesync_pinned_to_nic_and_master() {
     let body = read(SETUP);
     assert!(
-        body.contains("ExecStart=/usr/local/bin/dantesync -i ${NIC} --ntp-server strih.lan"),
+        body.contains("ExecStart=/usr/local/bin/dsync -i ${NIC} --ntp-server strih.lan"),
         "{SETUP} must write a dantesync ExecStart pinned to both the resolved NIC and the \
          cluster master strih.lan (live-verified fix, 2026-07-04) — not a bare `dantesync` \
          (public-pool default) and not an unpinned NIC (imag has other interfaces)"
@@ -980,7 +980,7 @@ fn setup_imag_masks_timesyncd_before_enabling_dantesync() {
         .find("systemctl mask systemd-timesyncd")
         .expect("timesyncd mask must exist");
     let start = body
-        .find("systemctl restart dantesync")
+        .find("systemctl restart dsync")
         .expect("dantesync (re)start must exist");
     assert!(
         mask < start,
@@ -997,7 +997,7 @@ fn setup_imag_verifies_dantesync_ptp_lock() {
     let body = read(SETUP);
     assert!(
         body.contains(r"grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'"),
-        "{SETUP} must poll `journalctl -u dantesync` for a PTP LOCK/NANO or NTP offset line \
+        "{SETUP} must poll `journalctl -u dsync` for a PTP LOCK/NANO or NTP offset line \
          before declaring the step done"
     );
     assert!(
@@ -1009,12 +1009,12 @@ fn setup_imag_verifies_dantesync_ptp_lock() {
     // `-n 50` line window — on a re-provision the pre-restart LOCK scrolls out of a 50-line window
     // and a fresh post-restart LOCK (30-70s later) is missed, false-failing a healthy re-lock.
     assert!(
-        body.contains(r#"journalctl -u dantesync --no-pager --since "@$DANTESYNC_RESTART_EPOCH""#),
+        body.contains(r#"journalctl -u dsync --no-pager --since "@$DANTESYNC_RESTART_EPOCH""#),
         "{SETUP}: the dantesync lock check must anchor journalctl to the restart instant \
          (--since @$DANTESYNC_RESTART_EPOCH), not a bare `-n 50` window (#491 false-fail fix)"
     );
     assert!(
-        !body.contains("journalctl -u dantesync --no-pager -n 50"),
+        !body.contains("journalctl -u dsync --no-pager -n 50"),
         "{SETUP}: the dantesync lock check must NOT use the bare `-n 50` window that #491 fixed"
     );
     // #491: the re-lock budget must be generous (~150s) — a restart's PTP re-acquisition is
@@ -1032,8 +1032,8 @@ fn setup_imag_verifies_dantesync_ptp_lock() {
 fn setup_imag_dantesync_has_gh_release_and_cambox_fallback() {
     let body = read(SETUP);
     for needle in [
-        "api.github.com/repos/${DANTESYNC_REPO}/releases/latest",
-        "dantesync-linux-amd64",
+        "dantesync_install_release_url \"$DANTESYNC_PIN\"",
+        "dsync-linux-amd64",
         "CAM_PW",
         "dantesync copy from cam1 fallback failed",
     ] {
@@ -1049,33 +1049,31 @@ fn setup_imag_dantesync_has_gh_release_and_cambox_fallback() {
 // ---------------------------------------------------------------------------------------------
 // #1289 (setup-device.sh sibling defect, ported here per coordinator directive) -- the SAME
 // curl-onto-live-path truncation shape as setup-device.sh's STEP 3/3b/17 (fixed in that ticket):
-// setup-imag.sh's dantesync install did `curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync`
-// AND the scp cam1-fallback branch wrote straight to `/usr/local/bin/dantesync` too — both
+// setup-imag.sh's dantesync install did `curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dsync`
+// AND the scp cam1-fallback branch wrote straight to `/usr/local/bin/dsync` too — both
 // truncate the destination inode IN PLACE, which the kernel refuses (ETXTBSY) when the path is a
-// currently-running dantesync.service executable. The install is also only gated on "does the
-// path exist and is it executable" (`if [ ! -x /usr/local/bin/dantesync ]`), never on whether the
+// currently-running dsync.service executable. The install is also only gated on "does the
+// path exist and is it executable" (`if [ ! -x /usr/local/bin/dsync ]`), never on whether the
 // installed binary is actually at the release's target version -- mirror setup-device.sh's fix:
 // download to a temp file, verify non-empty, `install -m 0755` into place, and skip the whole
-// download+install when `dantesync --version` already matches the release URL's own tag.
+// download+install when `dsync --version` already matches the release URL's own tag.
 // ---------------------------------------------------------------------------------------------
 
 #[test]
 fn setup_imag_never_downloads_dantesync_straight_onto_a_live_binary_path_1289() {
     let body = read(SETUP);
     assert!(
-        !body.contains("-o /usr/local/bin/dantesync"),
-        "{SETUP} must never `curl ... -o /usr/local/bin/dantesync` -- that truncates the \
+        !body.contains("-o /usr/local/bin/dsync"),
+        "{SETUP} must never `curl ... -o /usr/local/bin/dsync` -- that truncates the \
          destination IN PLACE, which the kernel refuses (ETXTBSY) when the path is a currently- \
-         running dantesync.service executable (#1289, mirroring the setup-device.sh fix). \
+         running dsync.service executable (#1289, mirroring the setup-device.sh fix). \
          Download to a mktemp temp file, verify it non-empty, then `install -m 0755 tmp dest` \
          (rename-into-place, safe over a running executable) instead."
     );
     assert!(
-        !body.contains(
-            "\"${DESKTOP_USER}@${NDI_PEER}:/usr/local/bin/dantesync\" /usr/local/bin/dantesync"
-        ),
+        !body.contains("\"${DESKTOP_USER}@${NDI_PEER}:/usr/local/bin/dsync\" /usr/local/bin/dsync"),
         "{SETUP}: the cam1-fallback scp must not copy straight onto the live \
-         /usr/local/bin/dantesync path either -- scp -O truncates its destination in place, the \
+         /usr/local/bin/dsync path either -- scp -O truncates its destination in place, the \
          SAME ETXTBSY hazard as the curl branch above (#1289). Copy to a temp file first, then \
          `install -m 0755` it into place."
     );
@@ -1090,9 +1088,9 @@ fn setup_imag_dantesync_install_skips_when_already_at_target_version_1289() {
          idempotent re-run needs this to decide whether an install is even necessary"
     );
     assert!(
-        body.contains("DANTESYNC_CURRENT_VERSION") && body.contains("dantesync --version"),
+        body.contains("DANTESYNC_CURRENT_VERSION") && body.contains("dsync --version"),
         "{SETUP} must read the currently-installed dantesync's own version via \
-         `dantesync --version` (#1289, per .claude/rules/dantesync-version-reading.md) before \
+         `dsync --version` (#1289, per .claude/rules/dantesync-version-reading.md) before \
          deciding whether to (re)install"
     );
     let compare_idx = body
@@ -1106,11 +1104,11 @@ fn setup_imag_dantesync_install_skips_when_already_at_target_version_1289() {
         );
     let repo_idx = body
         .lines()
-        .position(|l| l.contains("DANTESYNC_REPO=\"zbynekdrlik/dantesync\""))
-        .expect("the DANTESYNC_REPO assignment must still be present");
+        .position(|l| l.contains("DANTESYNC_URL=\"$(dantesync_install_release_url"))
+        .expect("the pinned release URL (issue 1487: the pin, never latest) must still be present");
     assert!(
         compare_idx > repo_idx,
-        "the version comparison (line {compare_idx}) must come after DANTESYNC_REPO is resolved \
+        "the version comparison (line {compare_idx}) must come after the pinned release URL is resolved \
          (line {repo_idx}) (#1289)"
     );
 }
@@ -1119,15 +1117,15 @@ fn setup_imag_dantesync_install_skips_when_already_at_target_version_1289() {
 fn setup_imag_dantesync_install_from_temp_fails_loud_and_cleans_up_on_failure_1289() {
     let body = read(SETUP);
     assert!(
-        body.contains("install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dantesync || {"),
-        "{SETUP}: the `install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dantesync` call must \
+        body.contains("install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dsync || {"),
+        "{SETUP}: the `install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dsync` call must \
          be guarded by `|| {{ ... }}` so an install failure cleans up the temp file and fails \
          loud via fail(), matching every other failure path in the same block (#1289, mirroring \
          the setup-device.sh review-fix)"
     );
 }
 
-/// #1215: imag-nb shipped with NO /etc/dantesync/config.json at all (a hand-placed fix, never
+/// #1215: imag-nb shipped with NO /etc/dsync/config.json at all (a hand-placed fix, never
 /// provisioned by this script), so it ran on dantesync's built-in defaults. Step 3 must install
 /// the SAME JSON the cam boxes carry so a future reprovision cannot silently drift. Issue 1372:
 /// since dantesync 1.9.0 the clock policy is `system.clock_discipline = "ptp_phase_lock"` (the rate
@@ -1136,7 +1134,7 @@ fn setup_imag_dantesync_install_from_temp_fails_loud_and_cleans_up_on_failure_12
 fn setup_imag_installs_dantesync_clock_discipline_config_1372() {
     let body = read(SETUP);
     for needle in [
-        "/etc/dantesync/config.json",
+        "/etc/dsync/config.json",
         "\"clock_discipline\": \"ptp_phase_lock\"",
         "gm_allowlist",
         "\"http_status\"",
@@ -1144,7 +1142,7 @@ fn setup_imag_installs_dantesync_clock_discipline_config_1372() {
     ] {
         assert!(
             body.contains(needle),
-            "{SETUP} step 3 must install /etc/dantesync/config.json carrying `{needle}` \
+            "{SETUP} step 3 must install /etc/dsync/config.json carrying `{needle}` \
              (#1215/#1372) — the same clock config the cam boxes carry, or a reprovisioned \
              imag-nb silently drifts off the fleet's clock discipline"
         );
@@ -1152,26 +1150,26 @@ fn setup_imag_installs_dantesync_clock_discipline_config_1372() {
     // mode 644 (matching the ticket's spec: "mode 644, root-owned" — the whole script already
     // requires EUID 0, so a root-run chmod 644 write is root-owned for free).
     assert!(
-        body.contains("chmod 644 /etc/dantesync/config.json"),
+        body.contains("chmod 644 /etc/dsync/config.json"),
         "{SETUP}: the dantesync config file must be installed mode 644 (#1215)"
     );
 }
 
-/// The config write must land BEFORE `systemctl restart dantesync` — the SAME restart that
+/// The config write must land BEFORE `systemctl restart dsync` — the SAME restart that
 /// already proves PTP re-lock (the #491 restart-anchored check just above it) must be the one
 /// that also picks up phase_slew on a fresh provision, not a second restart.
 #[test]
 fn setup_imag_installs_dantesync_config_before_the_restart_1215() {
     let body = read(SETUP);
-    let config_pos = body.find("/etc/dantesync/config.json").expect(
+    let config_pos = body.find("/etc/dsync/config.json").expect(
         "the config write must exist (see setup_imag_installs_dantesync_clock_discipline_config_1372)",
     );
     let restart_pos = body
-        .find("systemctl restart dantesync")
+        .find("systemctl restart dsync")
         .expect("{SETUP} must still restart dantesync (#491)");
     assert!(
         config_pos < restart_pos,
-        "{SETUP}: /etc/dantesync/config.json must be written BEFORE `systemctl restart \
+        "{SETUP}: /etc/dsync/config.json must be written BEFORE `systemctl restart \
          dantesync` (#1215) so the restart that proves PTP re-lock also loads phase_slew on a \
          first provision — config_pos={config_pos} restart_pos={restart_pos}"
     );

@@ -116,7 +116,7 @@ def test_script_mapping_and_items():
         "bkshading-panel-app.service [bkshading_panel_app.py] shading-app",
         "companion-satellite.service [] companion-satellite",
         "strih-satellite-watch.timer [strih_satellite_watch.py] satellite-watch",
-        "dantesync-tray.service [] dantesync-tray",
+        "dsync-tray.service [] dsync-tray",
         "strih-display-watch.service [strih_display_watch.py] display-watch",
         "REFUSED",
     ]

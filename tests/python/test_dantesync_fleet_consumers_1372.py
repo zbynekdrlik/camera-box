@@ -9,11 +9,18 @@ stub that records the password each target was dialled with.
 
 Tier-0: fixture seams + PATH stubs, no box, no network.
 """
+import pytest
 import os
 import pathlib
 import stat
 import re
 import subprocess
+
+@pytest.fixture(autouse=True)
+def _every_node_rolled(monkeypatch):
+    """issue 1487: these tests use mbc / fohabl as their rolled nodes."""
+    monkeypatch.setenv("DSYNC_SELF_UPGRADED_NODES", "")
+
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _GATE = _ROOT / "scripts" / "dantesync-version-gate.sh"

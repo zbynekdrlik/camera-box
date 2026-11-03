@@ -17,9 +17,9 @@ REPO = Path(__file__).resolve().parents[2]
 FLEET = REPO / "scripts" / "deploy-genlock-fleet.sh"
 # issue 1424: strih-display-watch.service (the display hotplug watch) runs on both roles.
 STRIH_APPS = ("strih-browser-keeper.service", "bkshading-panel-app.service",
-              "companion-satellite.service", "strih-satellite-watch.timer", "dantesync-tray.service",
+              "companion-satellite.service", "strih-satellite-watch.timer", "dsync-tray.service",
               "strih-display-watch.service")
-STREAM_APPS = ("strih-browser-keeper.service", "strih-stream-monitor.service", "dantesync-tray.service",
+STREAM_APPS = ("strih-browser-keeper.service", "strih-stream-monitor.service", "dsync-tray.service",
                "strih-display-watch.service")
 
 

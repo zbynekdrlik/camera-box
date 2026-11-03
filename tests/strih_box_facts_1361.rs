@@ -869,7 +869,7 @@ fn a_client_box_with_a_master_named_upstream_host_renders_its_unit() {
     );
     assert_eq!(c, 0, "a client box must render its unit: {err}");
     assert!(
-        out.contains("ExecStart=/usr/local/bin/dantesync --ntp-server ntp-master.lan\n"),
+        out.contains("ExecStart=/usr/local/bin/dsync --ntp-server ntp-master.lan\n"),
         "{out}"
     );
 }
@@ -959,7 +959,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "STRIH-ZZ (Grading)",
         "{\"sender\": \"STRIH-ZZ (2ME PVW)\", \"input\": \"NDI 2ME PVW\", \"scene\": \"2ME PVW\"}",
         "{\"sender\": \"CAM3 (usb)\", \"input\": \"NDI cam3\", \"scene\": \"Cam 3\"}",
-        "ExecStart=/usr/local/bin/dantesync --ntp-server venue-ntp.lan\n",
+        "ExecStart=/usr/local/bin/dsync --ntp-server venue-ntp.lan\n",
         "local_ip = \"10.0.0.5\"",
         "ws_ip = \"127.0.0.1\"",
         "# strih-zz OBS kiosk boot",

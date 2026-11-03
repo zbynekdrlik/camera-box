@@ -379,7 +379,7 @@ fn setup_device_timesync_purge_runs_before_installing_dantesync() {
         .expect("the #591 competing-timesync purge must be present");
     let dantesync_idx = first_noncomment_idx(
         &body,
-        r#"install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync"#,
+        r#"install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dsync"#,
     )
     .expect("the dantesync install-into-place (install action) must be present");
     assert!(
@@ -428,7 +428,7 @@ fn setup_device_purges_linuxptp_ptp4l_phc2sys() {
         "setup-device.sh must `apt-get purge` the linuxptp PACKAGE (#597) -- its dpkg name \
          differs from its unit names (ptp4l/phc2sys), so it cannot reuse the #591 `for _ts in ...` \
          loop and needs a purge line of its own. dantesync is a standalone binary \
-         (/usr/local/bin/dantesync) with no dependency on the linuxptp package"
+         (/usr/local/bin/dsync) with no dependency on the linuxptp package"
     );
     assert!(
         on_noncomment_line(&body, r#"systemctl mask "$_u""#),
@@ -447,7 +447,7 @@ fn setup_device_linuxptp_purge_runs_before_installing_dantesync() {
     // #1289: the install action is the temp-file `install -m 0755` into place (no `curl -o`).
     let dantesync_idx = first_noncomment_idx(
         &body,
-        r#"install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync"#,
+        r#"install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dsync"#,
     )
     .expect("the dantesync install-into-place (install action) must be present");
     assert!(
@@ -556,7 +556,7 @@ fn setup_device_calls_ensure_root_writable_before_step_1_hostname_1289() {
 
 // ---------------------------------------------------------------------------------------------
 // #1289 (second re-run defect) -- STEP 17's dantesync download does `curl -fsSL $URL -o
-// /usr/local/bin/dantesync` straight onto the path of a RUNNING dantesync.service binary. The
+// /usr/local/bin/dsync` straight onto the path of a RUNNING dsync.service binary. The
 // kernel refuses to open a currently-executing file for write (ETXTBSY), so curl fails and the
 // whole STEP fail()s even though the release URL itself answers 200 (live, cam5/cam6/cam7,
 // 2026-09-03 11:52-11:56Z -- right after the STEP-1 fix above let a re-run reach STEP 17). The
@@ -590,9 +590,9 @@ fn setup_device_step17_skips_dantesync_download_when_already_at_target_version_1
     );
     assert!(
         on_noncomment_line(&body, "DANTESYNC_CURRENT_VERSION")
-            && on_noncomment_line(&body, "dantesync --version"),
+            && on_noncomment_line(&body, "dsync --version"),
         "STEP 17 must read the currently-installed dantesync's own version via \
-         `dantesync --version` (#1289, per .claude/rules/dantesync-version-reading.md) before \
+         `dsync --version` (#1289, per .claude/rules/dantesync-version-reading.md) before \
          deciding whether to download"
     );
     let compare_idx = body
@@ -640,8 +640,8 @@ fn setup_device_install_from_temp_fails_loud_and_cleans_up_on_failure_1289() {
         ),
         (
             "_dantesync_dl_tmp",
-            "/usr/local/bin/dantesync",
-            "install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dantesync || {",
+            "/usr/local/bin/dsync",
+            "install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dsync || {",
         ),
     ] {
         assert!(

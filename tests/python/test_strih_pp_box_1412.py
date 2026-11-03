@@ -20,6 +20,12 @@ from pathlib import Path
 
 import pytest
 
+@pytest.fixture(autouse=True)
+def _fixture_release(monkeypatch):
+    """issue 1487: these tests serve a fixture release, never the pinned bytes."""
+    monkeypatch.setenv("DSYNC_PINNED_SHA_VERSION", "")
+
+
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 FACTS = SCRIPTS / "lib" / "strih-box-facts.sh"
@@ -224,7 +230,7 @@ def test_the_install_pin_is_the_version_gates_pin():
     assert r.returncode == 0, r.stderr
     pin, url = r.stdout.splitlines()
     assert pin == _gate_pin()
-    assert url == "https://github.com/zbynekdrlik/dantesync/releases/download/v1.2.3/dantesync-linux-amd64"
+    assert url == "https://github.com/zbynekdrlik/dsync/releases/download/v1.2.3/dsync-linux-amd64"
 
 
 def _config(role, gm):
@@ -266,7 +272,7 @@ def _fake_curl(tmp_path, version, sha_ok=True):
     (bindir / "curl").write_text(
         "#!/bin/bash\nprintf '%%s\\n' \"$*\" >> %s\nout=\"\"; url=\"\"\n"
         "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2;; -*) shift;; *) url=\"$1\"; shift;; esac; done\n"
-        "case \"$url\" in *.sha256) printf '%s  dantesync-linux-amd64\\n' > \"$out\";; "
+        "case \"$url\" in *.sha256) printf '%s  dsync-linux-amd64\\n' > \"$out\";; "
         "*) cp %s \"$out\";; esac\n" % (log, sha, tmp_path / "payload"))
     (bindir / "curl").chmod(0o755)
     return bindir, log
@@ -297,7 +303,7 @@ def test_a_fresh_box_gets_the_pinned_binary_and_the_role_config(tmp_path):
            "DANTESYNC_INSTALL_CONFIG": str(tmp_path / "etc" / "config.json")}
     r = _bash("dantesync_install server 10.77.8.110", env=env, sources=(DS_INSTALL,), path_prefix=bindir)
     assert r.returncode == 0, r.stderr
-    assert "/v%s/dantesync-linux-amd64" % pin in log.read_text()
+    assert "/v%s/dsync-linux-amd64" % pin in log.read_text()
     assert os.access(env["DANTESYNC_INSTALL_BIN"], os.X_OK)
     cfg = json.loads(Path(env["DANTESYNC_INSTALL_CONFIG"]).read_text())
     assert cfg["system"]["gm_allowlist"] == ["10.77.8.110"] and cfg["ntp_server_mode"]["enabled"] is True

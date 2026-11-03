@@ -1,5 +1,5 @@
 //! issue 1351 — the `[0/8]` dantesync version-parity gate must read the M4 Linux strih (strih-snv,
-//! 10.77.9.202) via the gate's `--linux` arm (`dantesync --version` over plain ssh, which answers on
+//! 10.77.9.202) via the gate's `--linux` arm (`dsync --version` over plain ssh, which answers on
 //! Linux), NOT the `--win` Windows quoted-exe-path arm (which returns nothing on Linux → strih
 //! UNKNOWN → the gate refuses, exit 11). A Windows strih keeps strih+stream BOTH under `--win`
 //! (byte-identical to the pre-1351 argv).
@@ -44,7 +44,7 @@ fn version_parity_gate_routes_strih_by_platform_1351() {
 }
 
 /// On the Linux branch strih is appended to the `--linux` node list (read via the working
-/// `dantesync --version` ssh call), as `strih=${WIN_SSH_USER:-newlevel}@$STRIH`.
+/// `dsync --version` ssh call), as `strih=${WIN_SSH_USER:-newlevel}@$STRIH`.
 #[test]
 fn linux_strih_is_read_via_the_linux_arm_1351() {
     let body = read("scripts/recording-e2e.sh");
@@ -54,7 +54,7 @@ fn linux_strih_is_read_via_the_linux_arm_1351() {
             "DANTESYNC_VERSION_LINUX=\"$DANTESYNC_VERSION_LINUX strih=${WIN_SSH_USER:-newlevel}@$STRIH\""
         ),
         "issue 1351: on a Linux strih, strih must be appended to DANTESYNC_VERSION_LINUX so it is \
-         read via the working `dantesync --version` --linux arm. band=\n{band}"
+         read via the working `dsync --version` --linux arm. band=\n{band}"
     );
 }
 

@@ -129,7 +129,7 @@ fn setup_imag_pins_igpu_min_freq_from_its_own_rp0_never_a_literal_841() {
 
 /// The frequency pin must be reapplied on EVERY boot (sysfs values reset on reboot) via a
 /// boot-durable systemd oneshot unit -- matching the existing `cpu-performance.service` /
-/// `dantesync.service` convention this script already uses, never a provisioning-time-only write.
+/// `dsync.service` convention this script already uses, never a provisioning-time-only write.
 #[test]
 fn setup_imag_igpu_maxperf_service_is_enabled_every_boot_841() {
     let body = read(SETUP);

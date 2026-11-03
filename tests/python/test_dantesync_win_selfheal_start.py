@@ -36,7 +36,7 @@ def _pwsh():
 def _run(tmp_path, locked_copies):
     """Run the upgrade program with the installed exe locked for the first LOCKED_COPIES copies onto
     it after the stop (0 = never locked). Returns (stdout lines, the CALL list, the exe text)."""
-    exe, bak = tmp_path / "dantesync.exe", tmp_path / "dantesync.exe.bak"
+    exe, bak = tmp_path / "dsync.exe", tmp_path / "dsync.exe.bak"
     rel, temp = tmp_path / "release.exe", tmp_path / "temp"
     temp.mkdir()
     exe.write_text("the 1.16.0 exe\n")
@@ -66,6 +66,7 @@ def _run(tmp_path, locked_copies):
         "        throw [System.IO.IOException]::new(\"The process cannot access the file '$Destination' because it is being used by another process.\", -2147024864)\n"
         "    }\n"
         "    Microsoft.PowerShell.Management\\Copy-Item -Force -LiteralPath $Path -Destination $Destination }\n"
+        "function Get-Service { [CmdletBinding()] param($Name) }\n"
         "function Stop-Service { [CmdletBinding()] param([Parameter(Position = 0)]$Name)\n"
         "    $script:stopped = $true; $script:calls.Add('Stop-Service ' + $Name) }\n"
         "function Start-Service { [CmdletBinding()] param([Parameter(Position = 0)]$Name)\n"
@@ -87,8 +88,8 @@ def _run(tmp_path, locked_copies):
 
 def test_a_locked_exe_whose_restore_also_fails_still_starts_the_service(tmp_path):
     out, calls, exe_text = _run(tmp_path, locked_copies=2)
-    assert calls[0] == "Stop-Service dantesync", calls
-    assert calls[-1] == "Start-Service dantesync", calls
+    assert calls[0] == "Stop-Service dsync", calls
+    assert calls[-1] == "Start-Service dsync", calls
     assert exe_text == "the 1.16.0 exe\n", "the locked exe was never written"
     assert any(ln.startswith("PROGRAM THREW: ") and "being used by another process" in ln for ln in out), out
     assert any("SELF-HEAL" in ln and "restore" in ln for ln in out), out
@@ -96,13 +97,13 @@ def test_a_locked_exe_whose_restore_also_fails_still_starts_the_service(tmp_path
 
 def test_a_locked_swap_with_a_good_restore_starts_the_service(tmp_path):
     out, calls, exe_text = _run(tmp_path, locked_copies=1)
-    assert calls[-1] == "Start-Service dantesync", calls
+    assert calls[-1] == "Start-Service dsync", calls
     assert exe_text == "the 1.16.0 exe\n"
     assert any(ln.startswith("PROGRAM THREW: ") for ln in out), out
 
 
 def test_an_unlocked_swap_upgrades_and_starts_once(tmp_path):
     out, calls, exe_text = _run(tmp_path, locked_copies=0)
-    assert calls == ["Stop-Service dantesync", "Start-Service dantesync"], calls
+    assert calls == ["Stop-Service dsync", "Start-Service dsync"], calls
     assert exe_text == "the 1.17.0 exe\n"
     assert "version read" in out, out

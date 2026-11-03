@@ -1323,8 +1323,8 @@ fn check_dantesync_liveness_is_wired_into_the_d_live_flow() {
 
     // The two liveness signals are gathered over SSH from the box itself.
     assert!(
-        live_flow.contains("systemctl is-active dantesync"),
-        "the LIVE FLOW must gather `systemctl is-active dantesync` over SSH (#600) to detect a \
+        live_flow.contains("systemctl is-active dsync"),
+        "the LIVE FLOW must gather `systemctl is-active dsync` over SSH (#600) to detect a \
          DIED daemon -- not just define the helper"
     );
     assert!(

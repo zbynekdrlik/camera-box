@@ -173,7 +173,7 @@ def test_a_stream_box_runs_the_keeper_and_the_dantesync_tray_and_lists_the_pp_bo
     # issue 1429: every Linux workstation carries the dantesync tray, the stream box too; issue 1436: the
     # stream box also runs the headphone monitor of the real outgoing stream
     # issue 1424: and the display watch (an operator monitor joins X, the screen stays usable)
-    assert a["UNITS"] == ("strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service "
+    assert a["UNITS"] == ("strih-browser-keeper.service strih-stream-monitor.service dsync-tray.service "
                           "strih-display-watch.service")
     assert a["ROWS"] == "10", ("four unit rows + the keeper's + the display watch's last pass + its X config row "
                                "+ the monitor's three")
@@ -185,7 +185,7 @@ def test_strih_pp_keeps_every_session_app_and_lists_the_pp_boxes(boxes):
     a = _applied(boxes, "strih-pp")
     assert a["UNITS"].split() == ["strih-browser-keeper.service", "bkshading-panel-app.service",
                                   "companion-satellite.service", "strih-satellite-watch.timer",
-                                  "dantesync-tray.service", "strih-display-watch.service"]
+                                  "dsync-tray.service", "strih-display-watch.service"]
     assert a["ROWS"] == "11"
     assert a["PINNED"] == "10.77.8.204,10.77.8.202"
 

@@ -386,11 +386,11 @@ def _dantesync_box(tmp_path, running="the 1.15.0 binary\n", staged="the 1.16.0 b
     st = tmp_path / "staged"
     st.write_text(staged)
     sha = hashlib.sha256(staged.encode()).hexdigest()
-    (tmp_path / "staged.sha256").write_text(f"{sha}  dantesync-linux-amd64\n")
-    fake = box["stub"] / "dantesync"
+    (tmp_path / "staged.sha256").write_text(f"{sha}  dsync-linux-amd64\n")
+    fake = box["stub"] / "dsync"
     fake.write_text(f"#!{sys.executable}\nimport os, sys\nst = os.environ['FAKE_STATE']\n"
                     "root = open(os.path.join(st, 'root')).read().strip()\n"
-                    "open(os.path.join(st, 'log'), 'a').write('dantesync ' + ' '.join(sys.argv[1:]) + f' root={root}\\n')\n"
+                    "open(os.path.join(st, 'log'), 'a').write('dsync ' + ' '.join(sys.argv[1:]) + f' root={root}\\n')\n"
                     "print('dantesync 1.16.0')\n")
     fake.chmod(0o755)
     return box, bindir, st
@@ -400,6 +400,7 @@ def _dantesync_text(tmp_path, bindir, staged, fn):
     body = (f"DANTESYNC_LINUX_BIN='{bindir / 'dantesync'}'\n"
             f"DANTESYNC_LINUX_BAK='{bindir / 'dantesync.bak'}'\n"
             f"DANTESYNC_LINUX_STAGED='{staged}'\n"
+            f"DSYNC_LEGACY_LINUX_UNIT='{tmp_path / 'no-legacy.service'}'\n"
             f"DANTESYNC_LINUX_DATE_STATE='{tmp_path / 'date-offset.json'}'\n{fn}")
     return build(f'set +e\n. "{_UPGRADE}"\nset -e\n{body}')
 
@@ -418,10 +419,10 @@ def test_dantesync_upgrade_restarts_only_after_the_verified_close(tmp_path):
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}\n" + "\n".join(calls)
     assert (bindir / "dantesync").read_text() == "the 1.16.0 binary\n"
     assert starts_on_rw(calls) == [], "\n".join(calls)
-    stop = index(calls, "systemctl stop dantesync root=rw")
+    stop = index(calls, "systemctl stop dsync root=rw")
     ro = index(calls, "mount -o remount,ro / root=rw")
-    restart = index(calls, "systemctl restart dantesync root=ro")
-    version = index(calls, "dantesync --version root=ro")
+    restart = index(calls, "systemctl restart dsync root=ro")
+    version = index(calls, "dsync --version root=ro")
     assert stop < ro < restart < version, "\n".join(calls)
     assert root(box) == "ro"
 
@@ -434,7 +435,7 @@ def test_dantesync_upgrade_failed_close_never_restarts_and_names_the_writer(tmp_
     assert proc.returncode != 0, proc.stdout + proc.stderr
     assert [c for c in calls if c.startswith(("systemctl start", "systemctl restart"))] == [], "\n".join(calls)
     assert "root is NOT read-only" in proc.stderr and "systemd-journal" in proc.stderr, proc.stderr
-    assert "dantesync is 'inactive' now" in proc.stderr, (
+    assert "dsync is 'inactive' now" in proc.stderr, (
         "the failure reads whether the clock daemon runs (it was stopped for the swap):\n" + proc.stderr)
 
 
@@ -444,7 +445,7 @@ def test_dantesync_upgrade_self_heal_reopens_the_window_and_restarts_on_ro(tmp_p
                         FAKE_START_RC="1", FAKE_START_ONCE="1")
     calls = log(box)
     assert proc.returncode != 0, proc.stdout + proc.stderr
-    assert "SELF-HEAL: restored previous dantesync binary" in proc.stderr, proc.stderr
+    assert "SELF-HEAL: restored previous dsync binary" in proc.stderr, proc.stderr
     assert (bindir / "dantesync").read_text() == "the 1.15.0 binary\n", "the .bak came back"
     assert starts_on_rw(calls) == [], "\n".join(calls)
     assert sum(c.startswith("mount -o remount,rw /") for c in calls) == 2, "the restore opens its own window"
@@ -458,7 +459,7 @@ def test_dantesync_rollback_restarts_only_after_the_verified_close(tmp_path):
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}\n" + "\n".join(calls)
     assert (bindir / "dantesync").read_text() == "the pre-upgrade binary\n"
     assert starts_on_rw(calls) == [], "\n".join(calls)
-    assert index(calls, "mount -o remount,ro / root=rw") < index(calls, "systemctl restart dantesync root=ro")
+    assert index(calls, "mount -o remount,ro / root=rw") < index(calls, "systemctl restart dsync root=ro")
     assert root(box) == "ro"
 
 
@@ -498,7 +499,7 @@ def test_dantesync_self_heal_that_cannot_restore_the_bak_says_so(tmp_path):
     calls = log(box)
     assert proc.returncode != 0, proc.stdout + proc.stderr
     assert "SELF-HEAL FAILED" in proc.stderr, proc.stderr
-    assert "SELF-HEAL: restored previous dantesync binary" not in proc.stderr, proc.stderr
+    assert "SELF-HEAL: restored previous dsync binary" not in proc.stderr, proc.stderr
     assert starts_on_rw(calls) == [] and root(box) == "ro", "\n".join(calls)
 
 
@@ -526,12 +527,12 @@ def test_dantesync_orchestrator_names_a_failed_close_never_self_healed(tmp_path)
     # be left stopped there, and the roll log must say so.
     out = ("FAIL: [issue 1407] CAM1's root is NOT read-only after the remount-rw window ('findmnt -no "
            "OPTIONS /' = 'rw,relatime' -> rw; the ro remount rc=32: busy; sync rc=0). No dantesync start "
-           "runs on a writable root; dantesync is 'inactive' now.")
+           "runs on a writable root; dsync is 'inactive' now.")
     r = _upgrade_node(tmp_path, out)
     assert "rc=1" in r.stdout, r.stdout + r.stderr
     assert "NOT self-healed" in r.stderr, r.stderr
     assert "self-healed to its previous version" not in r.stderr, r.stderr
-    r = _upgrade_node(tmp_path, "SELF-HEAL: restored previous dantesync binary")
+    r = _upgrade_node(tmp_path, "SELF-HEAL: restored previous dsync binary")
     assert "self-healed to its previous version (not rolled forward)" in r.stderr, r.stderr
 
 
@@ -549,7 +550,7 @@ def test_dantesync_err_self_heal_is_disarmed_before_the_master_date_state_delete
     # the issue-1372 delete-last order exists to avoid).
     box, bindir, staged = _dantesync_box(tmp_path)
     text = _dantesync_text(tmp_path, bindir, staged, "dantesync_linux_upgrade_cmd 1.14.0 ntp-master")
-    version = text.index("\ndantesync --version\n")
+    version = text.index("\ndsync --version\n")
     disarm = text.index("\ntrap - ERR\n", version)
     rm = text.index('rm -f "' + str(tmp_path / "date-offset.json") + '"')
     assert version < disarm < rm, text
