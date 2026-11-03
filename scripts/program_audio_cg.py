@@ -281,8 +281,13 @@ class CgSourceMonitor:
         if block is None or block.sample_rate <= 0 or block.samples.shape[0] == 0:
             return
         level = block_level_dbfs(block.samples)
-        self.ring.push(getattr(block, "timestamp", pa.NDI_TIMESTAMP_UNDEFINED), block.samples,
-                       block.sample_rate)
+        try:
+            self.ring.push(getattr(block, "timestamp", pa.NDI_TIMESTAMP_UNDEFINED), block.samples,
+                           block.sample_rate)
+        except Exception as exc:  # noqa: BLE001 -- never kill the capture thread (review round 1)
+            with self._lock:
+                self._error = f"ring push failed: {exc!r}"
+            return
         t = self._mono()
         with self._lock:
             self._error = None
@@ -399,6 +404,16 @@ def start_line(arm: "CgArm") -> str:
             "obs_fleet_is_home")
 
 
+def _correlate(prog, monitor) -> pcc.Correlation:
+    """pcc.judge of one monitor's ring against the program snapshot. Any exception is UNDECIDED (the
+    strict FOREIGN, fail closed), never a crash of the consumer loop (review round 1)."""
+    try:
+        cg_frames, cg_bad = monitor.ring.snapshot()
+        return pcc.judge(prog[0], cg_frames, program_bad_stamp=prog[1], cg_bad_stamp=cg_bad)
+    except Exception as exc:  # noqa: BLE001 -- the window must still be written
+        return pcc.Correlation(pcc.UNDECIDED, why=f"correlation failed: {exc!r}")
+
+
 class CgArm:
     """The box, its home probe and one monitor per source; `state()` is what the sampler reads."""
 
@@ -419,9 +434,7 @@ class CgArm:
         for m in self.monitors:
             r = m.reading(now)
             if prog is not None and _loud(r):
-                cg_frames, cg_bad = m.ring.snapshot()
-                r = r._replace(correlation=pcc.judge(prog[0], cg_frames, program_bad_stamp=prog[1],
-                                                     cg_bad_stamp=cg_bad))
+                r = r._replace(correlation=_correlate(prog, m))
             readings.append(r)
         return CgState(self.box, self.home_probe.home, tuple(readings))
 

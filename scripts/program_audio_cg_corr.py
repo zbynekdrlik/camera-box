@@ -21,15 +21,18 @@ loud marker can never correlate and the comparison is the same band on both side
     hum harmonics and no bass, which a CG and the room could share by accident) up to 3.5 kHz,
     where a sample-clock mismatch between the CG box and the program chain still keeps most of the
     coherence (+50 ppm on the mixed copy measured: the median NCC fell 0.21 -> 0.17).
-  * Calibration (3.11.2026, dev1, frames of 1024 at 48 kHz, random offsets): the null -- live
-    cg-obs (60 s read on strih-snv) and live SP-program (68 s) against the live stream program (68 s,
-    the CG absent by the owner's mbc cleanup) and against the committed real measurement clip --
-    peaked at 0.014-0.041 over 90 trials. Detection -- the same live cg-obs mixed into the live
-    program 18 dB under the program level, 600 ms late: NCC 0.105-0.339 (median 0.21 over 20); 24
-    dB under: median 0.11 (min 0.018, a quiet passage). DETECT_NCC = 0.07 = 1.7 x the null maximum,
-    ~10 sd of the theory. A song whose passages sit more than ~24 dB under the program level can read ABSENT in a
-    window; one PRESENT window latches FOREIGN for the guard's hold, and a song has loud passages.
-    Re-calibrate only from real audio (the rule file has the recipe), never to pass a single run.
+  * Calibration (3.11.2026, dev1, frames of 1024 at 48 kHz, random offsets, the -1000..+3000 ms
+    range, |NCC|): the null -- live cg-obs (60 s read on strih-snv) and live SP-program (68 s)
+    against the live stream program (68 s, the CG absent by the owner's mbc cleanup) and against the
+    committed real measurement clip -- peaked at 0.026-0.045 over 90 trials. Detection -- the same
+    live cg-obs mixed into the live program 18 dB under the program level, 600 ms late: |NCC|
+    0.117-0.313 (median 0.19 over 20); 24 dB under: median 0.12 (min 0.026, a quiet passage); the
+    mix 50 ppm fast: median 0.16. DETECT_NCC = 0.07 = 1.6 x the null maximum. A song whose passages
+    sit more than ~24 dB under the program level can read ABSENT in a window; one PRESENT window
+    latches FOREIGN for the guard's hold, and a song has loud passages. Re-calibrate only from real
+    audio (the rule file has the recipe), never to pass a single run.
+  * Cost: ~32 ms of CPU per heard CG source per 2 s window on dev1 (one thread). Never a BLAS call
+    (np.dot): its worker threads spun to 15x that CPU under load.
   * Mono CG (the channel mean) against EACH program channel, the best one: the measurement track
     carries the marker on L and R ~10 ms apart, but the marker band is notched, and the console may
     put the CG on one side only.
@@ -37,19 +40,25 @@ loud marker can never correlate and the comparison is the same band on both side
 Time alignment: both rings hold NDI frames at their SDK `timestamp` (100 ns, the sender's
 submission wall clock; both boxes run the fleet dantesync). A CG sample stamped c appears in the
 program stamped p = c + lag, lag in [LAG_MIN_MS, LAG_MAX_MS]:
-  * LAG_MAX_MS = 1500: the CG box -> FOH console / mbc -> Dante or VBAN -> stream OBS -> its NDI
-    output path (Dante 1-5 ms, the stream OBS's audio buffering and the genlock hold of up to ~1 s
-    on the stream box), with margin;
-  * LAG_MIN_MS = -500: the CG sender's NDI copy can be stamped AFTER the same audio left the CG box
+  * LAG_MAX_MS = 3000: the CG box -> FOH console / mbc -> Dante or VBAN -> stream OBS -> its NDI
+    output path. Dante is 1-5 ms; the stream OBS adds its audio buffering and mbc's A/V sync offset;
+    a CG that reaches the stream through the strih program (cg -> strih -> `2ME PGM`, ~1 s genlock
+    hold by design) adds both OBS buffers. The real lag was never measured (the CG did not reach
+    the program once the sampler could see it), so the range is wide (review round 1: 1500 ms was
+    within reach of these sums). A lag outside the range is not searched;
+  * LAG_MIN_MS = -1000: the CG sender's NDI copy can be stamped AFTER the same audio left the CG box
     physically (the cg OBS's own audio buffering grows 128-362 ms legitimately,
-    .claude/rules/genlock-audio-buffering-floor.md), plus the two boxes' clock error.
+    .claude/rules/genlock-audio-buffering-floor.md), plus the two boxes' clock error, with margin.
+  * The peak is taken by MAGNITUDE (review round 1): a console channel with its polarity flipped,
+    a miswired balanced cable or an inverting hop put the song in the program with the sign
+    flipped, which a signed maximum read as ABSENT. `ncc` keeps the sign (negative = inverted).
 The program segment is the trailing PROGRAM_SEGMENT_S of program audio whose CG counterpart over
 the whole lag range is already buffered; a frame missing in either ring is zeros, and either
 segment covered less than MIN_COVERAGE is not computable.
 
 The decision (`judge`), per CG source the CG arm hears at or over the silence bar:
-  PRESENT     peak NCC >= DETECT_NCC                  -> the CG audio IS in the program (FOREIGN)
-  ABSENT      peak NCC <  DETECT_NCC                  -> it is not (the window keeps its verdict)
+  PRESENT     peak |NCC| >= DETECT_NCC                -> the CG audio IS in the program (FOREIGN)
+  ABSENT      peak |NCC| <  DETECT_NCC                -> it is not (the window keeps its verdict)
   UNDECIDED   not computable: no timestamps, too little CG or program audio buffered, coverage
               under MIN_COVERAGE, the CG segment under MIN_CG_DBFS (a near-silent CG never decides),
               the program segment digitally silent or its band empty, a non-finite sample
@@ -77,14 +86,16 @@ NOTCH_HI_HZ = pa.BAND_HI_HZ
 WHITEN_SMOOTH_HZ = 40.0     # the magnitude smoothing the whitening divides by
 CG_TAPER_S = 0.05           # the CG segment's raised-cosine edges (the program's: a full Hann window)
 PROGRAM_SEGMENT_S = 4.0     # program audio correlated per window
-LAG_MIN_MS = -500.0         # the CG's NDI copy stamped up to this much after its physical output
-LAG_MAX_MS = 1500.0         # the longest CG -> program path (module doc)
+LAG_MIN_MS = -1000.0        # the CG's NDI copy stamped up to this much after its physical output
+LAG_MAX_MS = 3000.0         # the longest CG -> program path (module doc)
 MAX_SEGMENT_AGE_S = 3.0     # the correlated program segment may end at most this long before the newest program audio
 MIN_COVERAGE = 0.95         # each segment's share of samples actually delivered
 MIN_CG_DBFS = -50.0         # the CG segment's level below which the correlation never decides
 MIN_BAND_DBFS = -90.0       # a side with less than this in the correlation band has nothing to compare
-DETECT_NCC = 0.07           # the PRESENT threshold: ~1.8 x the live null maximum, ~10 sd (module doc)
+DETECT_NCC = 0.07           # the PRESENT threshold on |ncc|: ~1.7 x the live null maximum (module doc)
 RING_S = PROGRAM_SEGMENT_S + (LAG_MAX_MS - LAG_MIN_MS) / 1e3 + MAX_SEGMENT_AGE_S + 1.0
+RING_MAX_RATE_HZ = 192000   # the sample cap assumes at most this rate: a healthy ring never reaches it
+RING_MAX_SAMPLES = int(RING_S * RING_MAX_RATE_HZ)  # a frozen / backward sender stamp cannot grow a ring past this
 PRESENT = "PRESENT"
 ABSENT = "ABSENT"
 UNDECIDED = "UNDECIDED"
@@ -107,8 +118,9 @@ def _undecided(why: str) -> Correlation:
 
 class AudioRing:
     """The last `seconds` of one source's NDI frames at their sender timestamps, bounded by the
-    stamps (never by a count). `mono=True` keeps the channel mean (the CG side), else every channel
-    (the program). Thread-safe: one writer (a capture thread or the consumer), one reader."""
+    stamps AND by RING_MAX_SAMPLES (a frozen or backward sender stamp never pops by stamp, review
+    round 1). `mono=True` keeps the channel mean (the CG side), else every channel (the program).
+    Thread-safe: one writer (a capture thread or the consumer), one reader."""
 
     def __init__(self, seconds: float = RING_S, mono: bool = False):
         self.seconds = float(seconds)
@@ -116,6 +128,7 @@ class AudioRing:
         self._lock = threading.Lock()
         self._frames: deque = deque()   # (timestamp, samples float32 (n, ch), sample_rate)
         self._bad_stamp = False         # the newest frame came without a sender timestamp
+        self._samples = 0               # samples held, for the RING_MAX_SAMPLES cap
 
     def push(self, timestamp: int, samples, sample_rate: int) -> None:
         x = np.asarray(samples, dtype=np.float32)
@@ -131,14 +144,17 @@ class AudioRing:
                 return
             self._bad_stamp = False
             self._frames.append((int(timestamp), x, int(sample_rate)))
+            self._samples += x.shape[0]
             newest = int(timestamp)
-            while self._frames and self._frames[0][0] < newest - self.seconds * UNITS:
-                self._frames.popleft()
+            while self._frames and (self._frames[0][0] < newest - self.seconds * UNITS
+                                    or self._samples > RING_MAX_SAMPLES):
+                self._samples -= self._frames.popleft()[1].shape[0]
 
     def clear(self) -> None:
         with self._lock:
             self._frames.clear()
             self._bad_stamp = False
+            self._samples = 0
 
     def snapshot(self):
         """(frames list, the newest frame had no stamp): what judge() reads."""
@@ -223,7 +239,9 @@ def ncc_peak(prog: np.ndarray, prog_sr: int, cg: np.ndarray, cg_sr: int, k_lo: i
     # marker-like or tonal CG content against the program) correlated at 0.4 with 50 ms tapers
     # (tests/python/test_program_audio_cg_corr_1404.py). The CG side keeps short tapers so every lag
     # of the range sees its audio at full weight; its edges meet a program with no edge.
-    cw = _whiten(cg.mean(axis=1) if cg.ndim == 2 else cg, cg_sr, n_c, CG_TAPER_S)
+    if cg.ndim == 2:  # the ring's mono channel as it is (a (n, 1) mean along axis 1 costs ~80 ms)
+        cg = cg[:, 0] if cg.shape[1] == 1 else cg.sum(axis=1, dtype=np.float64) / cg.shape[1]
+    cw = _whiten(cg, cg_sr, n_c, CG_TAPER_S)
     if cw is None or n_c < n_p:
         return None
     k_lo, k_hi = max(0, k_lo), min(n_c - n_p, k_hi)
@@ -238,13 +256,15 @@ def ncc_peak(prog: np.ndarray, prog_sr: int, cg: np.ndarray, cg_sr: int, k_lo: i
         pw = _whiten(prog[:, ch], prog_sr, n_p, None)
         if pw is None:
             continue
-        pn = float(np.sqrt(np.dot(pw, pw)))
+        # never np.dot: it goes through BLAS, whose worker threads spin (measured: 15x the CPU of
+        # the whole judge under load, a production-box cost); a plain reduction stays on this thread
+        pn = float(np.sqrt(np.square(pw).sum()))
         if not pn > 0.0:
             continue
         r = np.fft.irfft(cf * np.conj(np.fft.rfft(pw, L)), L)[:n_c - n_p + 1]
         seg = r[k_lo:k_hi + 1] / (pn * np.sqrt(np.maximum(energy[k_lo:k_hi + 1], 1e-30)))
-        i = int(np.argmax(seg))
-        if best is None or seg[i] > best[0]:
+        i = int(np.argmax(np.abs(seg)))          # by magnitude: an inverted copy is a copy
+        if best is None or abs(seg[i]) > abs(best[0]):
             best = (float(seg[i]), k_lo + i, ch)
     return best
 
@@ -297,4 +317,4 @@ def judge(program_frames, cg_frames, *, program_bad_stamp: bool = False,
         return _undecided("no energy in the correlation band")
     ncc, k, ch = best
     lag_ms = (lag_max / 1e4) - k * 1e3 / CORR_FS
-    return Correlation(PRESENT if ncc >= DETECT_NCC else ABSENT, ncc, lag_ms, ch)
+    return Correlation(PRESENT if abs(ncc) >= DETECT_NCC else ABSENT, ncc, lag_ms, ch)

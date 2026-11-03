@@ -17,7 +17,9 @@ name kept) and re-resolves while it has had no connection for REPIN_AFTER_S (a s
 another port, or no on-link record at the start), every REPIN_AFTER_S at most; still without a
 connection after RECREATE_AFTER_S at the SAME url, it re-creates the receiver there anyway (live
 3.11.2026 16:51: a cg-obs connection that dropped came back in SYN-SENT to the VLAN address and the
-SDK never left it), at most every RECREATE_AFTER_S, each re-create logged. Only the capture thread
+SDK never left it), at most every RECREATE_AFTER_S, each re-create logged; after RECREATE_FRUITLESS_MAX
+re-creates without a connection (the CG box away, the sender off) every RECREATE_BACKOFF_S, until a
+connection resets it. A failed create counts as an attempt. Only the capture thread
 calls capture() (and so re-creates the receiver); connections() from the consumer thread takes the
 same lock, so a receiver is never destroyed under either call.
 """
@@ -33,6 +35,8 @@ from typing import Callable, NamedTuple
 PIN_ENV = "PROGRAM_AUDIO_NDI_PIN"   # "0" = create every receiver by name only (tests, a rollback)
 REPIN_AFTER_S = 15.0
 RECREATE_AFTER_S = 60.0  # no connection this long at the SAME url: re-create the receiver anyway
+RECREATE_FRUITLESS_MAX = 3   # after this many re-creates without a connection ...
+RECREATE_BACKOFF_S = 300.0   # ... the next ones wait this long (a sender away / off)
 AVAHI_TIMEOUT_S = 5.0
 ROUTE_TIMEOUT_S = 2.0
 NDI_SERVICE = "_ndi._tcp"
@@ -136,6 +140,7 @@ class PinnedReceiver:
         self._since_unconnected: float | None = None
         self._last_resolve = mono()
         self._last_create = self._last_resolve
+        self._fruitless = 0          # re-creates since the last connection
 
     def _resolve_safely(self) -> str | None:
         try:
@@ -157,6 +162,7 @@ class PinnedReceiver:
         now = self._mono()
         if self.connections() > 0:
             self._since_unconnected = None
+            self._fruitless = 0
             return
         if self._since_unconnected is None:
             self._since_unconnected = now
@@ -164,23 +170,33 @@ class PinnedReceiver:
         unconnected_s = now - self._since_unconnected
         if unconnected_s < self._repin_after_s:
             return
+        backed_off = self._fruitless >= RECREATE_FRUITLESS_MAX
         url = self.url
-        if now - self._last_resolve >= self._repin_after_s:  # avahi + ip at most every REPIN_AFTER_S
+        # avahi + ip at most every REPIN_AFTER_S (every RECREATE_BACKOFF_S once backed off: the browse
+        # blocks this capture thread up to AVAHI_TIMEOUT_S)
+        if now - self._last_resolve >= (max(RECREATE_BACKOFF_S, self._repin_after_s) if backed_off
+                                        else self._repin_after_s):
             self._last_resolve = now
             url = self._resolve_safely()
-        if url == self.url and (unconnected_s < self._recreate_after_s
-                                or now - self._last_create < self._recreate_after_s):
+        wait = max(RECREATE_BACKOFF_S, self._recreate_after_s) if backed_off else self._recreate_after_s
+        first_try_at_new_url = url != self.url and not self._fruitless
+        if now - self._last_create < (self._repin_after_s if first_try_at_new_url else wait):
             return
+        if url == self.url and unconnected_s < self._recreate_after_s:
+            return
+        # One attempt per interval, also when it fails (review round 1: a failed create was retried
+        # on every capture call).
+        self._last_create = now
+        self._fruitless += 1
         try:
             new = self._make(self.source_name, url)
-        except (OSError, RuntimeError) as exc:  # keep the old receiver; the next try in REPIN_AFTER_S
+        except (OSError, RuntimeError) as exc:  # keep the old receiver; the next try after the interval
             self._log(f"program-audio sampler: ERROR re-creating {self.source_name!r} at {url}: {exc}")
             return
         with self._lock:
             old, self._recv, self.url = self._recv, new, url
         old.close()
         self._since_unconnected = None
-        self._last_create = now
         self._log_url(f"re-created after {unconnected_s:.0f} s without a connection")
 
     def connections(self) -> int:
