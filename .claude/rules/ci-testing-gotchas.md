@@ -1453,6 +1453,14 @@ Typed inline in a worktree lane, the isolation guard REFUSES that command ("runs
 `bash /abs/nonet.sh` as its own call. The run is the same, and a test that needed the network now
 fails instead of passing.
 
+**`unshare -n` takes loopback down too** (issue 1404, the CG arm): a test that serves on
+`127.0.0.1` (the guard's `_Fake` HTTP server) fails there with `Network is unreachable`, which is not
+a rig leak. Run such files normally and the rig-sensitive ones under `unshare -n`, or serve a
+payload as a `file://` URL (the guard's `urlopen` reads it) and stub `socket.create_connection` for
+a TCP-probe test. **Also run a serve-dir test under umask 022 or `mkdir(mode=0o700)`:** dev1's shells
+run umask 002, and a plain `mkdir` then makes a 775 dir that the sampler refuses before the code
+under test runs.
+
 ## Emitted PowerShell can be RUN locally, not only read as text (issue 1372)
 
 Several libs emit Windows PowerShell as text (the dantesync upgrade/tray programs, genlock deploy
