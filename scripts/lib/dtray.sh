@@ -379,7 +379,11 @@ dtray_devices_row() {
     case "$st" in
       present) present="${present} ${n}" ;;
       not-running) if [ "${shown%%:*}" = ok ]; then bad="${bad} ${n}(not running)"; else note="${note} ${n}"; fi ;;
-      odd) rest="$(printf '%s\n' "$out" | _dtray_print_odd "$n")"; bad="${bad} ${n}(status: ${rest})" ;;
+      odd)
+        # dtray's own text inside a `|`-separated row: no `|`, at most 80 characters
+        rest="$(printf '%s\n' "$out" | _dtray_print_odd "$n")"
+        rest="${rest//|//}"
+        bad="${bad} ${n}(status: ${rest:0:80})" ;;
       *) bad="${bad} ${n}(not listed)" ;;
     esac
   done < <(printf '%s\n' "$out" | dtray_print_states "${dt_names[@]}")
