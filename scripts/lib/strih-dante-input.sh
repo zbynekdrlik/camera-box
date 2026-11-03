@@ -166,7 +166,7 @@ strih_dante_input_install() {
   strih_dante_input_toml "$iface" "$ports" "$chans" | obs_box_write_if_changed "$dest" 0644 "${user}:${group}" "dante-input" || return 1
   echo "  dante-input: ${STRIH_DANTE_INPUT_DEVICE} on ${iface}, $(printf '%s\n' "$chans" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
   strih_dante_rx_pin_install "$user" || { echo "dante-input: the Dante threads' CPU reservation failed (above)" >&2; return 1; }
-  strih_dante_reserved_cpu_install || { echo "dante-input: the managers' default off the reserved CPU failed (above)" >&2; return 1; }
+  strih_dante_reserved_cpu_install "$user" || { echo "dante-input: the managers' default off the reserved CPU failed (above)" >&2; return 1; }
 }
 
 # strih_dante_input_field LINE KEY -> the value of KEY=<value> in a dante-input line.

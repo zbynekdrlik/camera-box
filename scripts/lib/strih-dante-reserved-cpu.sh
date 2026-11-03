@@ -18,8 +18,8 @@
 # two dstack threads still succeeds, and OBS's own `taskset -c <obs=>` is a subset of it. A manager takes
 # it when it re-reads its configuration: at the latest at the next boot (PID 1 may already take it on a
 # daemon-reload, not verified on a box), and every process it starts from then on inherits it. Running
-# processes keep their masks until they restart; setup never daemon-reexecs and never moves a live
-# process. So the grade reads the scan as a NOTE (reboot pending) while the drop-ins are newer than the
+# processes keep their masks until they restart; setup re-executes PID 1 + the user manager when a
+# drop-in changed and never moves a live process. So the grade reads the scan as a NOTE (reboot pending) while the drop-ins are newer than the
 # boot. Another box removes our two files (header-checked), never another file.
 # The same mechanism as the camboxes' housekeeping drop-in (scripts/lib/cambox-housekeeping-cpus.sh,
 # issue 1367: PID 1 and every unit off the capture-IRQ core); that lib is cambox-bound (read-only
@@ -85,17 +85,28 @@ strih_dante_reserved_cpu_want() {
 }
 
 # strih_dante_reserved_cpu_install -> both manager drop-ins (root), written only on a difference. rc 1 +
-# a named reason when the box's sets cannot be derived. Never a daemon-reexec, never a live move.
+# a named reason when the box's sets cannot be derived. When a drop-in changed, PID 1 and USER's user
+# manager are re-executed (daemon-reexec re-reads system.conf.d / user.conf.d and restarts no unit; live
+# on strih-snv 3.11.2026 both read the new mask at once), so new processes start off the reserved CPU
+# without a reboot; a failed re-exec is a WARN (the next boot applies it). Never a live move.
 strih_dante_reserved_cpu_install() {
-  local owner="${STRIH_DANTE_RX_PIN_OWNER:-root:root}" want cpus res f text
+  local user="${1-}" owner="${STRIH_DANTE_RX_PIN_OWNER:-root:root}" want cpus res f text out changed=0
   want="$(strih_dante_reserved_cpu_want)" || return 1
   read -r cpus res <<<"$want"
   text="$(strih_dante_reserved_cpu_manager_text "$cpus" "$res")" || return 1
   while IFS= read -r f; do
     install -d -m 0755 "$(dirname "$f")" || { echo "dante-reserved-cpu: cannot create $(dirname "$f")" >&2; return 1; }
-    printf '%s\n' "$text" | obs_box_write_if_changed "$f" 0644 "$owner" "dante-reserved-cpu" || return 1
+    out="$(printf '%s\n' "$text" | obs_box_write_if_changed "$f" 0644 "$owner" "dante-reserved-cpu")" || { printf '%s\n' "$out"; return 1; }
+    printf '%s\n' "$out"
+    case "$out" in *" written") changed=1 ;; esac
   done < <(strih_dante_reserved_cpu_manager_paths)
   echo "  dante-reserved-cpu: systemd + user managers default to CPUs ${cpus} (CPU ${res} only for the two dstack threads) -- a manager takes it when it re-reads its configuration, at the latest the next boot; running processes keep their masks until they restart"
+  [ "$changed" = 1 ] || return 0
+  if systemctl daemon-reexec && { [ -z "$user" ] || systemctl --user -M "${user}@" daemon-reexec; }; then
+    echo "  dante-reserved-cpu: re-read: PID 1${user:+ + the user manager of ${user}} re-executed (daemon-reexec)"
+  else
+    echo "  WARNING: dante-reserved-cpu: a daemon-reexec failed -- the new default applies at the next boot" >&2
+  fi
 }
 
 # strih_dante_reserved_cpu_remove -> remove OUR two drop-ins (a box without the Dante program); a file of
