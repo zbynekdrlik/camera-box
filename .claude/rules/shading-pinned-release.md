@@ -34,8 +34,8 @@ generator. A relay or service change goes to the shading project.
 - **The relay version is the pin's, never camera-box's.** deploy-fleet leaves a box already on the pin
   alone (no relay stop, no remount) and reads the version back after a swap. rig-dev-handover item 15
   grades against the tree's pin or origin/main's (a pin bump on dev reaches the boxes with the merge).
-  verify-device (ao) FAILs a relay off the pin; verify-strih item 31 is a NOTE, a running service
-  keeps its old inode until restarted. By equality: a `1.x` relay left on a box is simply not the pin.
+  verify-device (ao) FAILs a relay off the pin; verify-strih item 31 FAILs a service off the pin; step 16c
+  restarts a running service when its binary changed. By equality: a `1.x` relay left on a box is simply not the pin.
 - **The first roll to v0.1.0** replaces relays that print a camera-box version; RELAY-STALE until then.
 - **Seed:** `tests/python/test_shading_seed_check_config_1487.py` runs `bkshading --check-config` from the
   pinned release on `strih_bkshading_config_text` and compares the camera COUNT: an unknown table is

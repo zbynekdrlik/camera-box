@@ -195,10 +195,7 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   (`server` = the canonical `ntp-master` shape with `ntp_server` 162.159.200.1, `client` = `video`),
   each ONLY when absent. strih-snv keeps its binary and config, so its date master is untouched.
 - **G6 the hub** is a pinned release since issue 1487 (`.claude/rules/intercom-pinned-release.md`).
-  `strih_ci_artifact_fetch` stays the ONE CI-artifact fetch, for bkshading (step 16c;
-  `STRIH_LX_BKSHADING_SRC` = a pre-staged dir). A branch- or SHA-filtered fetch walks the pages
-  (`per_page=100`, at most `STRIH_CI_ARTIFACT_MAX_PAGES` = 10, stop on an empty page) in
-  `_strih_ci_artifact_url`; an unfiltered fetch reads page 1 only.
+  The bkshading service too (step 16c, `.claude/rules/shading-pinned-release.md`).
 - **G7 + G11, the per-box step gate** (`scripts/lib/obs-box-role.sh` `obs_box_step_applies`): step
   11b (the xhci IRQ unit) runs only for a USB rig NIC (`STRIH_NIC_MIN_USB_MBPS != none`; a PCIe NIC
   has no xhci walk and the unit would fail every boot), step 16e only with

@@ -177,7 +177,7 @@ def _grade(tmp_path, json_text, want_line):
     f = tmp_path / "v.json"
     f.write_text(json_text)
     bin_ = _script(tmp_path / "bks", "#!/bin/sh\necho 'bkshading 0.0.1'\n")
-    r = _lib('ok() { echo "OK $*"; }\nnote() { echo "NOTE $*"; }\nstrih_bkshading_version_grade http://x',
+    r = _lib('ok() { echo "OK $*"; }\nbad() { echo "BAD $*"; }\nstrih_bkshading_version_grade http://x',
              env={"STRIH_BKSHADING_VERSION_JSON_FILE": str(f), "STRIH_BKSHADING_BIN": str(bin_)})
     assert r.returncode == 0, r.stderr
     assert want_line in r.stdout, r.stdout
@@ -187,5 +187,5 @@ def test_the_verify_row_grades_the_running_service_then_the_binary(tmp_path):
     pin = next(ln.split("=v")[1] for ln in (REPO / "scripts/shading-release.pin").read_text().splitlines()
                if ln.startswith("SHADING_RELEASE_TAG"))
     _grade(tmp_path, '{"version":"%s"}' % pin, "OK (bkshading-service) version %s" % pin)
-    _grade(tmp_path, '{"version":"1.8.6"}', "NOTE (bkshading-service) version '1.8.6'")
-    _grade(tmp_path, "", "NOTE (bkshading-service) version '0.0.1'")
+    _grade(tmp_path, '{"version":"1.8.6"}', "BAD (bkshading-service) version '1.8.6'")
+    _grade(tmp_path, "", "BAD (bkshading-service) version '0.0.1'")

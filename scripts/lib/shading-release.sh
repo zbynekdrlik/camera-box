@@ -199,10 +199,10 @@ strih_bkshading_service_install() {
   find "${dest}/web" -type f -exec chmod 0644 {} + || return 1
 }
 
-# strih_bkshading_version_grade BASE_URL -> verify item 31's version row through the caller's ok / note:
+# strih_bkshading_version_grade BASE_URL -> verify item 31's version row through the caller's ok / bad:
 # the running service (BASE_URL/api/version), else the installed binary, against the pin. A difference
-# is a NOTE with the reinstall line (a running service keeps the old binary until it restarts). Always
-# rc 0. STRIH_BKSHADING_VERSION_JSON_FILE reads the JSON from a file, STRIH_BKSHADING_BIN names the binary.
+# is a FAIL with the reinstall line (step 16c restarts a running service, so a difference is a real
+# defect, unlike an installed-only unit). Always rc 0. STRIH_BKSHADING_VERSION_JSON_FILE reads the JSON from a file, STRIH_BKSHADING_BIN names the binary.
 strih_bkshading_version_grade() {
   local base="${1:?service base url required}" bin="${STRIH_BKSHADING_BIN:-/opt/bkshading/bkshading}"
   local root want json have
@@ -222,6 +222,6 @@ except ValueError:
   if [ -n "$want" ] && [ "$have" = "$want" ]; then
     ok "(bkshading-service) version ${have}, the shading pin"
   else
-    note "(bkshading-service) version '${have:-unreadable}', the shading pin says '${want:-unreadable}' -- re-run setup-strih.sh step 16c, then restart bkshading-service"
+    bad "(bkshading-service) version '${have:-unreadable}', the shading pin says '${want:-unreadable}' -- re-run setup-strih.sh step 16c"
   fi
 }

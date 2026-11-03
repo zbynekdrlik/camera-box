@@ -886,8 +886,9 @@ step "16c" "bkshading shading-control service (issue 1353) -- the pinned shading
 if WHY="$(obs_box_step_applies 16c)"; then   # issue 1412: scripts/lib/obs-box-role.sh
 # issue 1353: the shading panel BACKEND is a systemd unit here. Issue 1487: binary + web/ come from the
 # pinned shading release (scripts/shading-release.pin), the strih deploy stages it in its tree, a run
-# from a checkout fetches it; no fallback. ENABLE-ONLY: a running service keeps its old inode, restart
-# it after a pin bump.
+# from a checkout fetches it; no fallback. Enable-only, but a RUNNING service on another binary restarts
+# after the unit is written, so a deploy never leaves the panel on the old version.
+BKSH_OLD="$(sha256sum /opt/bkshading/bkshading 2>/dev/null || true)"
 BKSH_DIR="$(shading_release_service "${HERE}/..")" || fail "the pinned shading release (above)"
 strih_bkshading_service_install "$BKSH_DIR" /opt/bkshading/bkshading || fail "bkshading service install from ${BKSH_DIR} failed (above)"
 echo "  installed bkshading service $(shading_pin_tag "${HERE}/..") -> /opt/bkshading/bkshading (web/ beside it)"
@@ -906,7 +907,10 @@ strih_bkshading_unit_text > /etc/systemd/system/bkshading-service.service \
   || fail "could not write /etc/systemd/system/bkshading-service.service"
 systemctl daemon-reload
 systemctl enable bkshading-service.service 2>/dev/null || warn "  could not enable bkshading-service.service"
-echo "  bkshading-service.service installed + enabled (NOT started -- supervisor deploys the running service)"
+if [ "$BKSH_OLD" != "$(sha256sum /opt/bkshading/bkshading)" ]; then
+  systemctl try-restart bkshading-service.service || fail "bkshading-service did not restart on the pinned release"
+fi
+echo "  bkshading-service.service installed + enabled (a stopped one stays stopped)"
 
 else echo "  SKIP: ${WHY}"; fi
 

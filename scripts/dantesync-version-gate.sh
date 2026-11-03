@@ -130,7 +130,7 @@ DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.20.0}"
 dantesync_version_from_version_output() {
   local text="$1"
   printf '%s\n' "$text" \
-    | grep -oE 'dantesync [0-9]+\.[0-9]+\.[0-9]+' \
+    | grep -oE '(dantesync|dsync) [0-9]+\.[0-9]+\.[0-9]+' \
     | tail -1 \
     | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true
 }
@@ -371,7 +371,7 @@ read_dantesync_version_output() {
   if [ "$win" = "1" ]; then
     cmd="\"${DANTESYNC_VERSION_GATE_WIN_EXE}\" --version"
   else
-    cmd="dantesync --version"
+    cmd="dsync --version 2>/dev/null || dantesync --version"   # dsync's nodes carry no dantesync binary
   fi
   sshpass -p "$(_dv_ssh_pass "$target" "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}")" ssh \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=no \

@@ -121,6 +121,16 @@ fn version_from_version_output_extracts_plain_output() {
     assert_eq!(out.trim(), "1.8.21");
 }
 
+// A node dsync took over carries only the `dsync` binary, whose output names itself.
+#[test]
+fn version_from_version_output_reads_a_dsync_node() {
+    let out = run_sourced(
+        r#"dantesync_version_from_version_output "$(printf 'dsync 1.27.0\n')""#,
+        &[],
+    );
+    assert_eq!(out.trim(), "1.27.0");
+}
+
 #[test]
 fn version_from_version_output_last_match_wins_amid_noise() {
     // Defensive robustness, not a real scenario: if SSH banner/MOTD noise ever precedes the real
