@@ -134,6 +134,30 @@ def test_the_service_is_extracted_from_the_proved_tarball(tmp_path):
     assert r.returncode == 0, "a second run over an extracted tree: " + r.stderr
 
 
+def _chown_logger(tmp_path):
+    """A `chown` first on PATH that logs its arguments, then runs the real one."""
+    d = tmp_path / "chownbin"
+    d.mkdir(exist_ok=True)
+    log = tmp_path / "chown.log"
+    (d / "chown").write_text('#!/bin/sh\nprintf "%%s\\n" "$*" >> %s\nexec /bin/chown "$@"\n' % log)
+    (d / "chown").chmod(0o755)
+    return d, log
+
+
+# 3.11.2026: setup-strih runs as root and extracted the service into the operator-owned staged tree as
+# root, so the next deploy's rsync and sweep (the operator) could not replace it (rsync rc 23, the
+# deploy stopped). The extracted tree takes the owner of the directory it lands in.
+def test_the_extracted_service_takes_the_owner_of_its_directory(tmp_path):
+    env = fake_release_env(tmp_path, {SERVICE: _service(tmp_path)})
+    d, log = _chown_logger(tmp_path)
+    env["PATH"] = "%s:/usr/bin:/bin" % d
+    r = _lib('shading_release_service "$1"', str(REPO), env=env)
+    assert r.returncode == 0, r.stderr
+    placed = r.stdout.strip()
+    assert ("-R --reference=%s %s" % (Path(placed).parent, placed)) in log.read_text().splitlines(), \
+        log.read_text() if log.exists() else "chown never ran"
+
+
 def test_a_service_of_another_version_is_refused(tmp_path):
     env = fake_release_env(tmp_path, {SERVICE: _service(tmp_path, version="1.0.0")})
     r = _lib('shading_release_service "$1"', str(REPO), env=env)
