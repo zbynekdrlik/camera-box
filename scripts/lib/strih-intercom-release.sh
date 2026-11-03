@@ -106,6 +106,12 @@ strih_intercom_release_ensure() {
     mv -f "${x}/${f}" "${dir}/${f}" || { rm -rf "$x"; echo "strih-intercom-release: cannot place ${f} in ${dir}" >&2; return 1; }
   done
   rm -rf "$x"
+  # Run as root by setup-strih inside the operator's staged tree: the files take the directory's owner,
+  # so the next deploy's rsync (the operator) can replace them (3.11.2026, rsync rc 23).
+  for f in "${STRIH_INTERCOM_FILES[@]}"; do
+    chown --reference="$dir" "${dir}/${f}" \
+      || { echo "strih-intercom-release: cannot give ${dir}/${f} the owner of ${dir}" >&2; return 1; }
+  done
   printf '%s\n' "$dir"
 }
 

@@ -181,6 +181,10 @@ shading_release_service() {
   mv -f "${x}/bkshading-service" "${dir}/bkshading-service" \
     || { rm -rf "$x"; echo "shading-release: cannot place the service in ${dir}" >&2; return 1; }
   rm -rf "$x"
+  # setup-strih runs this as root inside the operator's staged tree: the next deploy's rsync and sweep
+  # (the operator) must be able to replace it, so it takes the owner of the directory it lands in.
+  chown -R --reference="$dir" "${dir}/bkshading-service" \
+    || { echo "shading-release: cannot give ${dir}/bkshading-service the owner of ${dir}" >&2; return 1; }
   printf '%s\n' "${dir}/bkshading-service"
 }
 
