@@ -134,6 +134,6 @@ fn the_strih_build_links_the_pinned_tag_with_this_repos_release_profile() {
 #[test]
 fn the_python_job_fetches_the_pinned_source() {
     let ci = read(".github/workflows/ci.yml");
-    let job = &ci[ci.find("  python-tests:").unwrap()..ci.find("  bkshading:").unwrap()];
+    let job = &ci[ci.find("  python-tests:").unwrap()..ci.find("  build:").unwrap()];
     assert!(job.contains("run: cargo fetch"));
 }
