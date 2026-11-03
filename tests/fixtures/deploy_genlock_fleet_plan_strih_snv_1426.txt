@@ -16,13 +16,14 @@
 #   old build keeps running until the whole stage is on the box; every requested box is resolved
 #   before any box is changed):
 #     scripts/deploy-genlock-fleet.sh --run-id 4242 --boxes strih-snv
-#   strih-snv always gets the strih FULL build (obs-genlock-linux-x86_64-strih); --fast is Windows-only.
+#   strih-snv always gets the pinned obs release's strih bundle (obs-strih-linux-x86_64-v9.9.5.tar.zst); --fast is Windows-only.
 #   Every ssh below is 'sshpass -p $PW timeout 180 ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=12 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 newlevel@10.77.9.202 <cmd>'.
-# STEP 0 (resolve): the linux-genlock.yml run at abc123def4567890; download its 'obs-genlock-linux-x86_64-strih'
-#          artifact to /stage/bundle -- REFUSED unless its GENLOCK_BUILD_SHA.txt is abc123def4567890 and its
-#          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30. The planner adds
-#          bundle/GENLOCK_STATS_ABI.txt = the stats + output-stats versions of obs.h at abc123def4567890 (removed
-#          when either is unreadable; issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
+# STEP 0 (resolve, issue 1487): the pinned obs release (scripts/obs-release.pin, commit abc123def4567890): 'obs-strih-linux-x86_64-v9.9.5.tar.zst'
+#          + BUNDLE_MANIFEST.json from github.com/zbynekdrlik/obs, cached in <checkout>/obs-release/,
+#          unpacked to /stage/bundle -- REFUSED unless the tarball's sha256 is the pin's AND its .sha256's,
+#          the manifest is the pin's, every manifest file matches, and GENLOCK_BUILD_SHA.txt +
+#          OBS_RELEASE.txt name the pin. The planner adds bundle/GENLOCK_STATS_ABI.txt = the manifest's
+#          stats + output-stats versions (removed when either is unreadable; issue 1302).
 # STEP 1 (tree): the committed scripts/ systemd/ vendor/realtek-r8152 Cargo.toml + the program-audio sampler's
 #          vendored dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + the
 #          pinned intercom and shading releases, their sha256 verified (scripts/intercom-release.pin, scripts/shading-release.pin, issue 1487) + the
@@ -50,6 +51,7 @@
 #          OBS is never started while setup-strih.sh still runs)
 # STEP 7 (start): export XDG_RUNTIME_DIR=/run/user/$(id -u); touch '/tmp/genlock-stage-abc123def4567890/obs-start.marker'; systemctl --user reset-failed strih-obs.service 2>/dev/null; systemctl --user start strih-obs.service; obs_rc=$?; systemctl --user start strih-browser-keeper.service,bkshading-panel-app.service,companion-satellite.service,strih-satellite-watch.timer,dantesync-tray.service,strih-display-watch.service || echo "WARNING: [strih-snv start] the session apps (strih-browser-keeper.service,bkshading-panel-app.service,companion-satellite.service,strih-satellite-watch.timer,dantesync-tray.service,strih-display-watch.service) did not start -- verify-strih items 37-40 name why" >&2; exit "$obs_rc"
 # STEP 8 (verify, fail-closed, held for 90 s): /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == abc123def4567890,
+#          /opt/obs-genlock/OBS_RELEASE.txt tag == the pinned tag,
 #          /usr/lib/x86_64-linux-gnu/libobs.so.30 sha256 == the manifest's, strih-obs.service active with
 #          the SAME MainPID + NRestarts, 'render tick ENABLED' in the OBS log written after the start,
 #          and http://10.77.9.202:8899/bundle-state.json genlock_build_sha == abc123def4567890.

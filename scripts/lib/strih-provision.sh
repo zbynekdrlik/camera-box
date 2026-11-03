@@ -108,6 +108,11 @@ if ! declare -F strih_intercom_hub_cred_dropin_apply >/dev/null; then
   # shellcheck source=scripts/lib/strih-intercom-hub-unit.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-hub-unit.sh"
 fi
+# issue 1487: the forked OBS is the pinned release of zbynekdrlik/obs (scripts/obs-release.pin), step 4.
+if ! declare -F obs_release_bundle >/dev/null; then
+  # shellcheck source=scripts/lib/obs-release.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-release.sh"
+fi
 # issue 1439: verify item 9 on a box whose program audio is the console's VBAN into the obs-vban source.
 if ! declare -F strih_program_vban_grade >/dev/null; then
   # shellcheck source=scripts/lib/strih-program-vban.sh
@@ -380,8 +385,6 @@ strih_lx_program_audio_vban_json() {
   printf '{"port": %s, "stream_name": "%s", "receive_buffer_ms": %s}' "$vp" "$vs" "$vr"
 }
 
-# strih_lx_bundle_artifact -> the strih FULL-build CI artifact name (linux-genlock.yml strih job).
-strih_lx_bundle_artifact() { printf 'obs-genlock-linux-x86_64-strih'; }
 
 # strih_lx_dantesync_is_client_not_master MODE -> 0 iff MODE is a CLIENT mode (never server/master).
 # INTERNAL helper (issue 1317, this lane): retained as the pure CLIENT-args classifier that the

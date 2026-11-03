@@ -38,7 +38,9 @@ set -euo pipefail
 #   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv] [--yes]
 #
 #   --run-id   the ANCHOR CI run id (any of the three genlock workflows) -- its headSha is the ONE
-#              canonical version every box converges to.
+#              canonical version every Windows / imag box converges to. The setup-strih (Linux OBS)
+#              boxes take the pinned obs release instead (scripts/obs-release.pin, issue 1487), so a
+#              Linux-only run needs no --run-id (nor --sha in plan mode).
 #   --full     deploy the full windows-genlock bundle (obs.dll + data + obs-plugins) -- the default;
 #              required for any vendor/<plugin>/** or frontend change (fast has no deploy path for it).
 #   --fast     deploy only the libobs hot-swap dll (obs.dll) -- a libobs-only change (§5b).
@@ -810,22 +812,26 @@ main() {
   fi
   mode="full"; [ "$mode_fast" = 1 ] && mode="fast"
 
-  [ -n "$run_id" ] || { echo "ERROR: --run-id is required" >&2; usage >&2; exit 2; }
-
-  local boxes; boxes="$(fleet_normalize_boxes "$boxes_csv")" || exit 2
+  local boxes lx_boxes rest lx_sha; boxes="$(fleet_normalize_boxes "$boxes_csv")" || exit 2
+  { read -r lx_boxes; read -r rest; } < <(fleet_split_setup_strih "$boxes")   # issue 1426: every setup-strih box
+  # issue 1487: the setup-strih (Linux OBS) boxes take the pinned obs release, never an anchor build.
+  lx_sha="$(obs_pin_commit "$HERE/..")" || exit 3
+  [ -n "$run_id" ] || [ -n "$rest" ] || run_id="obs-$(obs_pin_tag "$HERE/..")"
+  [ -n "$run_id" ] || { echo "ERROR: --run-id is required (a Windows / imag box is in the list)" >&2; usage >&2; exit 2; }
 
   if [ "$plan" = 1 ]; then
     [ -n "$stage" ] || { echo "ERROR: --plan requires --stage (no network in plan mode)" >&2; exit 2; }
+    [ -n "$sha_override" ] || [ -n "$rest" ] || sha_override="$lx_sha"
     [ -n "$sha_override" ] || { echo "ERROR: --plan requires --sha (no network in plan mode)" >&2; exit 2; }
-    local sha="$sha_override" stats_abi
-    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")")" || exit 3
+    local sha="$sha_override" stats_abi=""
+    [ -z "$rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")")" || exit 3
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
       # issue 1317 part 3: strih-snv gets its OWN plan (setup-strih.sh + strih-obs.service), never the
       # imag on-box program (which restarts imag-obs.service, a unit strih-snv does not have); issue
       # 1426: so does every setup-strih box (strih-pp, stream-pp), routed by the predicate execute uses.
-      if fleet_box_runs_setup_strih "$b"; then emit_strih_lx_plan "$stage" "$sha" "$run_id" "$b"; continue; fi
+      if fleet_box_runs_setup_strih "$b"; then emit_strih_lx_plan "$stage" "$lx_sha" "$run_id" "$b"; continue; fi
       case "$b" in
         stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
         imag)            emit_imag_plan "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
@@ -849,11 +855,14 @@ main() {
   # drives it live (the ticket stays OPEN until then).
   command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI required for execute mode" >&2; exit 3; }
   command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required for execute mode" >&2; exit 3; }
-  local sha; sha="$(gh run view "$run_id" --repo "$GENLOCK_REPO" --json headSha -q .headSha 2>/dev/null)" \
-    || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
-  [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
-  echo "# anchor run $run_id -> canonical SHA $sha; deploying: $boxes (mode $mode; retention --yes=$yes)"
-  local stats_abi; stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")" 1)" || exit 3
+  local sha="$lx_sha" stats_abi=""
+  if [ -n "$rest" ]; then
+    sha="$(gh run view "$run_id" --repo "$GENLOCK_REPO" --json headSha -q .headSha 2>/dev/null)" \
+      || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
+    [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
+    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")" 1)" || exit 3
+  fi
+  echo "# anchor run $run_id -> canonical SHA $sha (the Linux OBS boxes: the pinned obs release $lx_sha); deploying: $boxes (mode $mode; retention --yes=$yes)"
 
   local workdir; workdir="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -861,16 +870,15 @@ main() {
 
   # detect requested box classes without a `local IFS=','` that would leak past a brace group
   # (a { …; } group is not a new scope) -- match the comma-list directly.
-  local want_win=0 want_imag=0 lx_boxes rest
+  local want_win=0 want_imag=0
   want_win="$(fleet_boxes_swap_obs_dll "$boxes")"
   case ",$boxes," in *,imag,*) want_imag=1 ;; esac
-  { read -r lx_boxes; read -r rest; } < <(fleet_split_setup_strih "$boxes")   # issue 1426: every setup-strih box
   # --- strih-snv (issue 1317 part 6, scripts/lib/strih-snv-deploy.sh), phase 1: resolve + download +
   # the provisioning tree -- no box is touched (exit 3). EVERY requested box resolves before any box
   # changes, so a missing Windows/imag build can never leave the production strih on another SHA.
   if [ -n "$lx_boxes" ]; then
-    strih_lx_prepare "$sha" "$workdir" "$HERE/.." "$GENLOCK_REPO" "$lx_boxes" || exit $?
-    genlock_stats_abi_stage "$STRIH_LX_PREP_WORK/bundle" "$stats_abi" || exit 3
+    strih_lx_prepare "$lx_sha" "$workdir" "$HERE/.." "$GENLOCK_REPO" "$lx_boxes" || exit $?
+    genlock_stats_abi_stage "$STRIH_LX_PREP_WORK/bundle" "$(obs_release_stats_abi "$STRIH_LX_PREP_WORK/bundle" || true)" || exit 3
   fi
 
   # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
@@ -919,7 +927,7 @@ main() {
   # --- strih-snv phase 2: the box steps (stage before stop, graceful stop, setup, fail-closed
   # read-back). A failure exits 4 naming the step and writes NO fleet-log line.
   if [ -n "$lx_boxes" ]; then
-    strih_lx_apply_all "$sha" "$lx_boxes" "$rest" "$run_id" "$mode" "$FLEET_LOG_DEFAULT" || exit $?
+    strih_lx_apply_all "$lx_sha" "$lx_boxes" "$rest" "$run_id" "$mode" "$FLEET_LOG_DEFAULT" || exit $?
   fi
 
   # --- Windows: the paste-programs, printed only now (after a verified strih-snv), so no operator

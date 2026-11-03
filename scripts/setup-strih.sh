@@ -178,9 +178,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-ART="$(strih_lx_bundle_artifact)"
-step 4 "Genlock bundle -> ${GENLOCK_DIR} (strih FULL artifact: ${ART})"
+ART="$(obs_release_tarball_name "$(obs_pin_tag "${HERE}/..")")" || fail "issue 1487: scripts/obs-release.pin is unreadable"
+step 4 "Genlock bundle -> ${GENLOCK_DIR} (the pinned obs release: ${ART})"
 mkdir -p "$GENLOCK_DIR"
+[ "${STRIH_LX_BUNDLE_SRC:-}" != pin ] || { STRIH_LX_BUNDLE_SRC="${HERE}/../obs-release/bundle-$$"; obs_release_bundle "${HERE}/.." "$STRIH_LX_BUNDLE_SRC" || fail "issue 1487: the pinned obs release did not fetch + verify (above) -- never another build"; }
 if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   # issue 1317: NEVER install a bundle built for a different Ubuntu release than the box runs -- a
   # 24.04-built bundle (noble ffmpeg/Qt sonames) would crash OBS at load on the 26.04 strih-snv box.
@@ -224,7 +225,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   # marker = unknown = the marker is removed.
   SABI="$(genlock_stats_abi_pair_from_marker 2>/dev/null < "${STRIH_LX_BUNDLE_SRC%/}/GENLOCK_STATS_ABI.txt" || true)"
   genlock_write_markers "$GENLOCK_DIR" "$GSHA" "$DSHA" "" "$SABI" || fail "genlock_write_markers failed"
-  echo "  installed genlock bundle to ${GENLOCK_DIR} (genlock ${GSHA}, distroav ${DSHA})"
+  echo "  installed genlock bundle to ${GENLOCK_DIR} (obs $(sed -n 's/^tag=//p' "$GENLOCK_DIR/OBS_RELEASE.txt" 2>/dev/null || true), commit ${GSHA}, distroav ${DSHA})"
   # issue 1317: install the bundle into its /usr prefix so the dynamic loader finds it -- the /opt
   # staged copy above is the marker home, but OBS is BUILT for /usr (libs -> /usr/lib/x86_64-linux-gnu,
   # the frontend -> /usr/bin/obs, data -> /usr/share/obs). Without this the loader has libobs.so.30 /
@@ -235,7 +236,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
     || fail "strih_install_bundle_prefix: installing the bundle into the /usr prefix failed -- OBS would not load"
   echo "  installed bundle into the /usr prefix (/usr/bin/obs + /usr/lib/x86_64-linux-gnu + ldconfig)"
 else
-  warn "  STRIH_LX_BUNDLE_SRC unset -- fetch the ${ART} CI artifact and re-run with STRIH_LX_BUNDLE_SRC=<dir>"
+  warn "  STRIH_LX_BUNDLE_SRC unset -- OBS not installed; STRIH_LX_BUNDLE_SRC=pin fetches + installs the pinned ${ART}"
   warn "  (deploy-genlock-fleet.sh --boxes ${BOX_NAME} does this over ssh once the box is reachable)"
 fi
 # chrome-sandbox setuid-root (issue 1317 F6): the CEF SUID sandbox helper must be owned root:root

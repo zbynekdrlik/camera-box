@@ -28,10 +28,13 @@
 # Two phases, so deploy-genlock-fleet.sh can resolve EVERY requested box before changing any:
 #
 #   strih_lx_prepare (exit 3 on failure, the box is never touched)
-#     resolve  -- the linux-genlock.yml run at the anchor's SAME SHA; the dial host must be a dotted
-#                 IPv4 (the fleet row is one; a hostname / flag-shaped override is refused up front);
-#     download -- the strih FULL artifact, REFUSED unless its GENLOCK_BUILD_SHA.txt is the canonical
-#                 SHA and its BUNDLE_MANIFEST.json carries the libobs.so.30 sha256 the read-back uses;
+#     resolve  -- issue 1487: the pinned obs release (scripts/obs-release.pin; SHA = its commit, never
+#                 an anchor CI run); the dial host must be a dotted IPv4 (the fleet row is one; a
+#                 hostname / flag-shaped override is refused up front);
+#     download -- the release's strih bundle via obs_release_bundle (scripts/lib/obs-release.sh): the
+#                 tarball proved against the pin + its .sha256, every manifest file checked, the
+#                 markers naming the pinned tag + commit; the manifest carries the libobs.so.30 sha256
+#                 the read-back uses;
 #     tree     -- the COMMITTED scripts/ systemd/ + vendor/realtek-r8152 (the rig NIC driver
 #                 source setup-strih step 1b builds through DKMS, issue 1391) + the vendored dock headers
 #                 the program-audio sampler step 16e builds its shim from (issue 1404; the list is
@@ -66,7 +69,8 @@
 #                  OBS is never started over an installer that is still running;
 #     start     -- systemctl --user start strih-obs.service (after touching a start marker), then the
 #                  issue-1399 session apps (strih-browser-keeper + bkshading-panel-app; the rc is OBS's);
-#     verify    -- REFUSE unless /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == the canonical SHA, the
+#     verify    -- REFUSE unless /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == the pinned obs commit and
+#                  /opt/obs-genlock/OBS_RELEASE.txt names the pinned tag, the
 #                  installed /usr/lib/x86_64-linux-gnu/libobs.so.30 bytes match the bundle manifest,
 #                  strih-obs.service is active with the SAME MainPID and NRestarts for a settle time
 #                  (a crash-looping Type=simple unit reads `active` between restarts), the OBS log
@@ -109,6 +113,11 @@ fi
 if ! declare -F strih_intercom_release_ensure >/dev/null; then
   # shellcheck source=scripts/lib/strih-intercom-release.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-release.sh"
+fi
+# issue 1487: the forked OBS these boxes run is the pinned release of zbynekdrlik/obs (scripts/obs-release.pin).
+if ! declare -F obs_release_bundle >/dev/null; then
+  # shellcheck source=scripts/lib/obs-release.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-release.sh"
 fi
 if ! declare -F shading_release_service >/dev/null; then
   # shellcheck source=scripts/lib/shading-release.sh
@@ -256,7 +265,7 @@ strih_lx_session_units() {
 # marker AND shows `render tick ENABLED`, else 0>`.
 strih_lx_remote_readback_cmd() {
   # shellcheck disable=SC2016  # expanded on the box, not here
-  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); L=$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -n 1); t=0; M=%s; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ] && LC_ALL=C grep -a -q "render tick ENABLED" "$L"; then t=1; fi; printf "installed=%%s active=%%s pid=%%s restarts=%%s lib=%%s tick=%%s\\n" "$(tr -d "[:space:]" 2>/dev/null < /opt/obs-genlock/GENLOCK_BUILD_SHA.txt)" "$(systemctl --user is-active strih-obs.service 2>/dev/null)" "$(systemctl --user show -p MainPID --value strih-obs.service 2>/dev/null)" "$(systemctl --user show -p NRestarts --value strih-obs.service 2>/dev/null)" "$(sha256sum /usr/lib/x86_64-linux-gnu/libobs.so.30 2>/dev/null | cut -d" " -f1)" "$t"\n' "'$1/obs-start.marker'"
+  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); L=$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -n 1); t=0; M=%s; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ] && LC_ALL=C grep -a -q "render tick ENABLED" "$L"; then t=1; fi; printf "installed=%%s obs_tag=%%s active=%%s pid=%%s restarts=%%s lib=%%s tick=%%s\\n" "$(tr -d "[:space:]" 2>/dev/null < /opt/obs-genlock/GENLOCK_BUILD_SHA.txt)" "$(sed -n "s/^tag=//p" /opt/obs-genlock/OBS_RELEASE.txt 2>/dev/null | head -n 1)" "$(systemctl --user is-active strih-obs.service 2>/dev/null)" "$(systemctl --user show -p MainPID --value strih-obs.service 2>/dev/null)" "$(systemctl --user show -p NRestarts --value strih-obs.service 2>/dev/null)" "$(sha256sum /usr/lib/x86_64-linux-gnu/libobs.so.30 2>/dev/null | cut -d" " -f1)" "$t"\n' "'$1/obs-start.marker'"
 }
 
 strih_lx_bundle_state_url() {
@@ -315,16 +324,21 @@ RUNNER
 
 # --- pure verdicts --------------------------------------------------------------------------------
 
-# strih_lx_deploy_verdict WANT INSTALLED ACTIVE BS_SHA WANT_LIB LIB TICK -> `OK` (rc 0) or
+# strih_lx_deploy_verdict WANT INSTALLED ACTIVE BS_SHA WANT_LIB LIB TICK [WANT_TAG TAG] -> `OK` (rc 0) or
 # `FAIL: <why>` lines (rc 1). Fail-closed: an empty value anywhere is a FAIL, never "unknown = fine".
 strih_lx_deploy_verdict() {
   local want="${1:-}" installed="${2:-}" active="${3:-}" bs="${4:-}" want_lib="${5:-}" lib="${6:-}" tick="${7:-}" bad=0
+  local want_tag="${8:-}" tag="${9:-}"
   if [ -z "$want" ]; then echo "FAIL: no canonical SHA to compare against"; return 1; fi
   if [ "$installed" != "$want" ]; then
     echo "FAIL: /opt/obs-genlock/GENLOCK_BUILD_SHA.txt=${installed:-<unreadable>} != canonical ${want}"; bad=1
   fi
   if [ -z "$want_lib" ] || [ "$lib" != "$want_lib" ]; then
     echo "FAIL: installed /usr/lib/x86_64-linux-gnu/libobs.so.30 sha256=${lib:-<unreadable>} != the bundle manifest's ${want_lib:-<none>}"; bad=1
+  fi
+  # issue 1487: the marker names the obs release tag too (OBS_RELEASE.txt) -- graded when the caller pins one.
+  if [ -n "$want_tag" ] && [ "$tag" != "$want_tag" ]; then
+    echo "FAIL: /opt/obs-genlock/OBS_RELEASE.txt tag=${tag:-<unreadable>} != the pinned obs release ${want_tag}"; bad=1
   fi
   if [ "$active" != "active" ]; then
     echo "FAIL: strih-obs.service is ${active:-<unreadable>}, not active"; bad=1
@@ -492,6 +506,9 @@ _strih_lx_field() {  # KEY LINE -> the value of KEY=<value> in a read-back line
   printf ' %s\n' "$2" | sed -n "s/.*[[:space:]]$1=\([^ ]*\).*/\1/p" | head -n 1
 }
 
+# strih_lx_repo_root -> this checkout's root (the pin files live under its scripts/).
+strih_lx_repo_root() { (cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd); }
+
 # strih_lx_obs_phase2_dir -> the dir holding the obs_phase2.py the rig-busy guard runs:
 # STRIH_LX_OBS_PHASE2_DIR, else this lib's scripts/ dir.
 strih_lx_obs_phase2_dir() {
@@ -565,23 +582,24 @@ strih_lx_prepare() {
   if [ "$st" -gt 0 ] && [ $(((vp - 1) * vs)) -lt "$st" ]; then
     _strih_lx_fail resolve 2 3 "STRIH_LX_VERIFY_SETTLE_SECS=$st cannot fit the read-back window (${vp} - 1) x ${vs} s -- the deploy would always be refused"; return
   fi
-  for tool in sshpass rsync curl tar jq timeout python3; do
+  for tool in sshpass rsync curl tar jq timeout python3 zstd; do
     command -v "$tool" >/dev/null 2>&1 || { _strih_lx_fail resolve 127 3 "$tool is required for the ${STRIH_LX_BOX} deploy"; return; }
   done
-  art="$(fleet_linux_bundle_artifact_for "${box_list[0]}")"
-  lrun="$(gh run list --repo "$gh_repo" --workflow linux-genlock.yml --json databaseId,headSha,conclusion --limit 50 2>/dev/null | fleet_pick_run_at_sha "$sha")" || true
-  [ -n "$lrun" ] || { _strih_lx_fail resolve 1 3 "no successful linux-genlock.yml run at $sha -- build the strih artifact at that commit first (a tag dispatch)"; return; }
+  # issue 1487: the pinned obs release (scripts/obs-release.pin), never this repo's linux-genlock.yml
+  # artifact. SHA is the pin's commit (deploy-genlock-fleet.sh passes obs_pin_commit); another is refused.
+  STRIH_LX_PREP_TAG="$(obs_pin_tag "$repo")" || { _strih_lx_fail resolve 2 3 "scripts/obs-release.pin has no tag"; return; }
+  art="the pinned obs release ${STRIH_LX_PREP_TAG}"
+  [ "$(obs_pin_commit "$repo" 2>/dev/null)" = "$sha" ] \
+    || { _strih_lx_fail resolve 2 3 "the deploy SHA $sha is not the pinned obs commit $(obs_pin_commit "$repo" 2>/dev/null) -- the Linux OBS boxes take only the pinned release"; return; }
 
-  mkdir -p "$w/bundle" "$w/repo" || { _strih_lx_fail download 1 3 "cannot create $w"; return; }
-  gh run download "$lrun" --repo "$gh_repo" -n "$art" -D "$w/bundle"; rc=$?
-  [ "$rc" = 0 ] || { _strih_lx_fail download "$rc" 3 "download of $art (run $lrun) failed"; return; }
-  [ -f "$w/bundle/bin/obs" ] || { _strih_lx_fail download 1 3 "$art has no bin/obs"; return; }
-  [ -d "$w/bundle/lib/x86_64-linux-gnu/obs-plugins" ] || { _strih_lx_fail download 1 3 "$art has no lib/x86_64-linux-gnu/obs-plugins"; return; }
+  mkdir -p "$w/repo" || { _strih_lx_fail download 1 3 "cannot create $w"; return; }
+  obs_release_bundle "$repo" "$w/bundle"; rc=$?
+  [ "$rc" = 0 ] || { _strih_lx_fail download "$rc" 3 "${art} did not fetch + verify (above) -- never another build"; return; }
   art_sha="$(tr -d '[:space:]' 2>/dev/null < "$w/bundle/GENLOCK_BUILD_SHA.txt")"
-  [ "$art_sha" = "$sha" ] || { _strih_lx_fail download 1 3 "$art (run $lrun) carries GENLOCK_BUILD_SHA ${art_sha:-<none>}, not the canonical $sha -- refusing to stage a foreign build"; return; }
+  [ "$art_sha" = "$sha" ] || { _strih_lx_fail download 1 3 "${art} carries GENLOCK_BUILD_SHA ${art_sha:-<none>}, not the pinned $sha -- refusing to stage a foreign build"; return; }
   STRIH_LX_PREP_LIBSHA="$(jq -r '.files[]? | select(.path == "lib/x86_64-linux-gnu/libobs.so.30") | .sha256' "$w/bundle/BUNDLE_MANIFEST.json" 2>/dev/null | head -n 1)"
-  [ -n "$STRIH_LX_PREP_LIBSHA" ] || { _strih_lx_fail download 1 3 "$art BUNDLE_MANIFEST.json has no lib/x86_64-linux-gnu/libobs.so.30 sha256 -- the read-back could not prove the installed bytes"; return; }
-  echo "# ${STRIH_LX_BOX}: $art (run $lrun) downloaded, GENLOCK_BUILD_SHA=$art_sha"
+  [ -n "$STRIH_LX_PREP_LIBSHA" ] || { _strih_lx_fail download 1 3 "${art} BUNDLE_MANIFEST.json has no lib/x86_64-linux-gnu/libobs.so.30 sha256 -- the read-back could not prove the installed bytes"; return; }
+  echo "# ${STRIH_LX_BOX}: ${art} unpacked + verified file by file, GENLOCK_BUILD_SHA=$art_sha"
 
   tree_rev="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null)" || tree_rev=""
   [ -n "$tree_rev" ] || { _strih_lx_fail tree 1 3 "$repo is not a git checkout"; return; }
@@ -793,13 +811,13 @@ _strih_lx_verify() {
     line="$(_strih_lx_ssh "$(strih_lx_remote_readback_cmd "$STRIH_LX_PREP_STAGE")" 2>/dev/null)" || line=""
     pid="$(_strih_lx_field pid "$line")"; restarts="$(_strih_lx_field restarts "$line")"
     bs="$(curl -s -m 8 "$url" 2>/dev/null | jq -r '.genlock_build_sha // empty' 2>/dev/null)" || bs=""
-    if ! verdict="$(strih_lx_deploy_verdict "$sha" "$(_strih_lx_field installed "$line")" "$(_strih_lx_field active "$line")" "$bs" "$STRIH_LX_PREP_LIBSHA" "$(_strih_lx_field lib "$line")" "$(_strih_lx_field tick "$line")")"; then
+    if ! verdict="$(strih_lx_deploy_verdict "$sha" "$(_strih_lx_field installed "$line")" "$(_strih_lx_field active "$line")" "$bs" "$STRIH_LX_PREP_LIBSHA" "$(_strih_lx_field lib "$line")" "$(_strih_lx_field tick "$line")" "${STRIH_LX_PREP_TAG:-}" "$(_strih_lx_field obs_tag "$line")")"; then
       have_first=0; continue
     fi
     if [ "$have_first" = 1 ]; then
       if verdict="$(strih_lx_stable_verdict "$first_pid" "$first_r" "$pid" "$restarts")"; then
         if [ $((SECONDS - first_t)) -ge "$settle" ]; then
-          echo "# ${STRIH_LX_BOX}: VERIFIED -- marker + libobs bytes = $sha, strih-obs active (MainPID $pid stable for $((SECONDS - first_t)) s, NRestarts $restarts), render tick ENABLED, :8899=$bs"
+          echo "# ${STRIH_LX_BOX}: VERIFIED -- marker + libobs bytes = $sha (obs ${STRIH_LX_PREP_TAG:-?}), strih-obs active (MainPID $pid stable for $((SECONDS - first_t)) s, NRestarts $restarts), render tick ENABLED, :8899=$bs"
           return 0
         fi
         verdict="FAIL: MainPID $pid stable for $((SECONDS - first_t)) s only (settle ${settle} s)"
@@ -823,7 +841,7 @@ strih_lx_plan_steps() {
   local lstage="$1" sha="$2" host="$3" run="$4" box="${5:-strih-snv}" stage art guard gstrih away=""
   local u="${STRIH_LX_USER:-newlevel}"
   stage="$(strih_lx_stage_dir "$sha")" || return 2
-  art="$(fleet_linux_bundle_artifact_for "$box")"
+  art="$(obs_release_tarball_name "$(obs_pin_tag "$(strih_lx_repo_root)" 2>/dev/null || echo v?)")"
   guard="$(strih_lx_guard_hosts "$box" "$host")" || { echo "strih_lx_plan_steps: no venue strih/stream host for ${box} (fact file STRIH_VENUE / obs-fleet rows)" >&2; return 2; }
   gstrih="${guard%% *}"
   if [ "$(obs_fleet_home_check "$box" 2>/dev/null)" = traveling ]; then
@@ -835,13 +853,14 @@ strih_lx_plan_steps() {
 #   old build keeps running until the whole stage is on the box; every requested box is resolved
 #   before any box is changed):
 #     scripts/deploy-genlock-fleet.sh --run-id ${run} --boxes ${box}
-#   ${box} always gets the strih FULL build (${art}); --fast is Windows-only.${away}
+#   ${box} always gets the pinned obs release's strih bundle (${art}); --fast is Windows-only.${away}
 #   Every ssh below is 'sshpass -p \$PW timeout 180 ssh ${STRIH_LX_SSH_OPTS} ${u}@${host} <cmd>'.
-# STEP 0 (resolve): the linux-genlock.yml run at ${sha}; download its '${art}'
-#          artifact to ${lstage}/bundle -- REFUSED unless its GENLOCK_BUILD_SHA.txt is ${sha} and its
-#          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30. The planner adds
-#          bundle/GENLOCK_STATS_ABI.txt = the stats + output-stats versions of obs.h at ${sha} (removed
-#          when either is unreadable; issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
+# STEP 0 (resolve, issue 1487): the pinned obs release (scripts/obs-release.pin, commit ${sha}): '${art}'
+#          + BUNDLE_MANIFEST.json from github.com/zbynekdrlik/obs, cached in <checkout>/obs-release/,
+#          unpacked to ${lstage}/bundle -- REFUSED unless the tarball's sha256 is the pin's AND its .sha256's,
+#          the manifest is the pin's, every manifest file matches, and GENLOCK_BUILD_SHA.txt +
+#          OBS_RELEASE.txt name the pin. The planner adds bundle/GENLOCK_STATS_ABI.txt = the manifest's
+#          stats + output-stats versions (removed when either is unreadable; issue 1302).
 # STEP 1 (tree): the committed scripts/ systemd/ vendor/realtek-r8152 Cargo.toml + the program-audio sampler's
 #          vendored dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + the
 #          pinned intercom and shading releases, their sha256 verified (scripts/intercom-release.pin, scripts/shading-release.pin, issue 1487) + the
@@ -869,6 +888,7 @@ strih_lx_plan_steps() {
 #          OBS is never started while setup-strih.sh still runs)
 # STEP 7 (start): $(strih_lx_remote_start_cmd "$stage" "$box")
 # STEP 8 (verify, fail-closed, held for ${STRIH_LX_VERIFY_SETTLE_SECS:-90} s): /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == ${sha},
+#          /opt/obs-genlock/OBS_RELEASE.txt tag == the pinned tag,
 #          /usr/lib/x86_64-linux-gnu/libobs.so.30 sha256 == the manifest's, strih-obs.service active with
 #          the SAME MainPID + NRestarts, 'render tick ENABLED' in the OBS log written after the start,
 #          and $(strih_lx_bundle_state_url "$host") genlock_build_sha == ${sha}.

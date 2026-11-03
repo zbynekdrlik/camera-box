@@ -2578,6 +2578,13 @@ main() {
     fi
   fi
 
+  # issue 1487: a Linux OBS box (strih_linux=1) runs the pinned obs release, so its OBS + DistroAV versions
+  # are graded against scripts/obs-release.pin, never vendor/README.md (a tree that box never runs). An
+  # unreadable pin field is an empty pin: the exact compare then refuses, never a pass.
+  if [ "$o_strih_linux" = "1" ]; then
+    p_obs="$(sed -n 's/^OBS_RELEASE_OBS_STUDIO_VERSION=//p' "${OBS_RELEASE_PIN_FILE:-$HERE/obs-release.pin}" 2>/dev/null | head -n 1 || true)"
+    p_distroav="$(sed -n 's/^OBS_RELEASE_DISTROAV_VERSION=//p' "${OBS_RELEASE_PIN_FILE:-$HERE/obs-release.pin}" 2>/dev/null | head -n 1 || true)"
+  fi
   compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin" \
     "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency" "$o_plugin" \
     "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes" "$o_burn" \
