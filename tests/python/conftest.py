@@ -34,3 +34,8 @@ import os
 os.environ["DSYNC_LEGACY_LINUX_UNIT"] = "/nonexistent/dantesync.service"
 os.environ["DSYNC_LEGACY_LINUX_BIN"] = "/nonexistent/dantesync"
 os.environ["DSYNC_LEGACY_LINUX_STATE"] = "/nonexistent/etc-dantesync"
+
+# issue 1404: the program-audio sampler pins each NDI receiver to an on-link address read from the
+# box's own avahi; no test reads dev1's live avahi (tests/python/test_program_audio_ndi_url_1404.py
+# turns it back on with its own resolver).
+os.environ["PROGRAM_AUDIO_NDI_PIN"] = "0"
