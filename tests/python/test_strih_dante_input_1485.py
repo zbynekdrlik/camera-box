@@ -174,7 +174,8 @@ def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
 
 def _status(t, f, **k):
     v = dict(clock="media", holdover="0", gm="001dc1fffe0a", polls="1", re_anchors="0", rx_packets="10", rx_loss="0",
-             rx_gaps="0", rx_late="0", socket_drops="0", blocks="5", underruns="0", overruns="0", delivered_frames=str(f))
+             rx_gaps="0", rx_late="0", socket_drops="0", blocks="5", underruns="0", overruns="0", delivered_frames=str(f),
+             rx_holes="0", rx_written_late="0", late_blocks="0", rebootstraps="0", max_process_us="80")
     v.update(k)
     return "%s: dante-input status: %s" % (t, " ".join("%s=%s" % i for i in v.items()))
 
@@ -211,11 +212,27 @@ def test_item9_passes_a_healthy_dante_source(tmp_path):
 
 # Live on strih-snv 3.11.2026 the v0.2.0 source ran ~200 underruns/s and ~9 overruns/s with a clean
 # network, and item 9 passed it: a counter that grows over the live window is a loss NOW.
-@pytest.mark.parametrize("key", ["rx_loss", "rx_gaps", "rx_late", "socket_drops", "underruns", "overruns"])
+@pytest.mark.parametrize("key", ["rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps",
+                                 "rx_written_late"])
 def test_item9_fails_a_counter_that_grows_over_the_live_window(tmp_path, key):
     r = _grade(tmp_path, [START, _status("12:00:10.000", 4800, **{key: "18024"})],
                nxt=_status("12:00:20.000", 999999, **{key: "28036"}))
     assert ("BAD (program-dante) live: %s +10012" % key) in r.stdout, r.stdout
+
+
+# obs 3.11.2026: these are timing only; a late packet that cost samples shows in rx_written_late.
+@pytest.mark.parametrize("key", ["rx_late", "overruns", "late_blocks"])
+def test_item9_names_a_timing_counter_without_failing_it(tmp_path, key):
+    r = _grade(tmp_path, [START, _status("12:00:10.000", 4800, **{key: "840"})],
+               nxt=_status("12:00:20.000", 999999, **{key: "1292"}))
+    assert "BAD" not in r.stdout, r.stdout
+    assert ("%s=1292" % key) in r.stdout, r.stdout
+
+
+def test_item9_fails_a_pre_v030_status_line_as_unreadable(tmp_path):
+    old = lambda t, f: _status(t, f).split(" rx_holes=")[0]
+    r = _grade(tmp_path, [START, old("12:00:10.000", 4800)], nxt=old("12:00:20.000", 999999))
+    assert "BAD (program-dante) rx_holes unreadable" in r.stdout, r.stdout
 
 
 def test_item9_keeps_a_counter_flat_over_the_window_as_history(tmp_path):
@@ -330,10 +347,23 @@ def test_a_clean_window_passes():
     assert r["counters"]["delivered_frames"]["delta"] == 300
 
 
-@pytest.mark.parametrize("key", ["rx_loss", "rx_gaps", "rx_late", "socket_drops", "underruns", "overruns", "re_anchors"])
+@pytest.mark.parametrize("key", ["rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps",
+                                 "rx_written_late", "re_anchors"])
 def test_any_loss_gap_late_drop_underrun_or_overrun_fails(key):
     r = CONT.decide(_window(**{key: "2"}), 1, 3)
     assert r["verdict"] == "FAIL" and r["failures"] == ["%s +2" % key], r
+
+
+@pytest.mark.parametrize("key", ["rx_late", "overruns", "late_blocks"])
+def test_a_timing_counter_is_reported_never_graded(key):
+    r = CONT.decide(_window(**{key: "2"}), 1, 3)
+    assert r["verdict"] == "PASS" and r["counters"][key]["delta"] == 2, r
+
+
+def test_a_line_before_obs_v030_is_unknown():
+    w = [l.split(" rx_holes=")[0] if "dante-input status:" in l else l for l in _window()]
+    r = CONT.decide(w, 1, 3)
+    assert r["verdict"] == "UNKNOWN" and any("rx_holes" in x for x in r["unknown_reasons"]), r
 
 
 def test_unknown_fails_too():

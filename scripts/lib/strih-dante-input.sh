@@ -172,7 +172,13 @@ strih_dante_input_status_verdict() {
   [ "$(strih_dante_input_field "$l2" holdover)" = 0 ] || bad="${bad}holdover=$(strih_dante_input_field "$l2" holdover); "
   [ "$(strih_dante_input_field "$l2" gm)" != none ] || bad="${bad}gm=none (no grandmaster); "
   local grew=""
-  for k in rx_loss rx_gaps rx_late socket_drops underruns overruns; do
+  # The obs project's field meanings (3.11.2026): these mean audio other than FOH sent. rx_late, overruns
+  # and late_blocks are timing only, named below; a late packet that cost samples shows in rx_written_late.
+  for k in rx_late overruns late_blocks; do
+    a="$(strih_dante_input_field "$l2" "$k")"
+    [[ "$a" =~ ^[0123456789]+$ ]] && [ "$a" != 0 ] && out="${out}${k}=${a} "
+  done
+  for k in rx_loss rx_holes underruns rx_gaps socket_drops rebootstraps rx_written_late; do
     a="$(strih_dante_input_field "$l2" "$k")"
     [[ "$a" =~ ^[0123456789]+$ ]] || { bad="${bad}${k} unreadable; "; continue; }
     [ "$a" = 0 ] || out="${out}${k}=${a} "

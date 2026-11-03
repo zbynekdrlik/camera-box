@@ -31,13 +31,16 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
 - **verify item 9** (`strih_program_audio_grade` dispatches): `(program-dante)` rows = the TOML, the OBS
   input kind, the `dante-input start: config=` line (`device_rate=96000 halved=true`), any
   `dante-input error:` line, and two `dante-input status:` lines 12 s apart (clock=media, holdover 0, a
-  grandmaster, delivered_frames advancing; non-zero loss counters named). The `(vban-leg) vban` arrival
+  grandmaster, delivered_frames advancing; any of the gate's loss counters GROWING between the two lines
+  FAILs, a total since the start that holds still is only named). The `(vban-leg) vban` arrival
   row is a NOTE on a Dante box. PipeWire stays purged (`dante:strih-obs` counts as a direct program).
 - **The E2E gate:** `program-audio-continuity.sh` also marks the strih OBS log (through `strih-log-read.sh`)
   when `$STRIH` is a Dante box, and folds `scripts/dante_input_continuity.py`'s window result into the
   `program_audio_continuity` block (`strih_dante`, the worse verdict, `strih Dante:` reasons, so the
-  report needs no second key): any rx_loss / rx_gaps / rx_late / socket_drops / underruns / overruns /
-  re_anchors increase, clock=free or holdover=1, or a `dante-input error:` in the window = FAIL; no
+  report needs no second key): any rx_loss / rx_holes / underruns (skipped blocks) / rx_gaps / socket_drops /
+  rebootstraps / rx_written_late / re_anchors increase (the obs project's meanings, 3.11.2026: audio other
+  than FOH sent; rx_late, overruns, late_blocks are timing only and reported; a line before obs v0.3.0 has
+  no rx_holes and reads UNKNOWN; in v0.2.0 `underruns` mixed late blocks with skips, so it proves nothing), clock=free or holdover=1, or a `dante-input error:` in the window = FAIL; no
   opening line, a restart, a counter backwards, no delivered frames = UNKNOWN = FAIL. The closing line is
   the second status line after the stop.
 - Clocks + latency: `.claude/rules/audio-clock-map.md` (Dante on strih-snv).

@@ -6,13 +6,17 @@ dante-input.so, a dstack dlink device named `strih-obs`). The device logs one st
 (`plugins/dante-input/ffi/src/status.rs` in zbynekdrlik/obs, the obs#1 log contract):
 
   dante-input status: clock=media holdover=0 gm=<hex>|none polls=N re_anchors=N rx_packets=N rx_loss=N
-    rx_gaps=N rx_late=N socket_drops=N blocks=N underruns=N overruns=N delivered_frames=N
+    rx_gaps=N rx_late=N socket_drops=N blocks=N underruns=N overruns=N delivered_frames=N rx_holes=N
+    rx_written_late=N late_blocks=N rebootstraps=N max_process_us=N   (the last five since obs v0.3.0)
 
 Counters are totals since the device started. Audio has the same zero-loss bar as video (ROZHODNUTE
 6359382787): over the window from the last status line at or before the START mark to the SECOND status
 line after the STOP mark (every block up to the stop is counted by then: the first one can land right
-after the stop), any increase of rx_loss, rx_gaps, rx_late, socket_drops, underruns, overruns or
-re_anchors FAILs, and so does a status line in the window that reads clock=free or holdover=1 (the
+after the stop), any increase of a counter that means audio other than FOH sent FAILs: rx_loss,
+rx_holes, underruns (skipped blocks), rx_gaps, socket_drops, rebootstraps, rx_written_late, re_anchors
+(the obs project's field meanings, 3.11.2026). rx_late, overruns and late_blocks are timing only and are
+reported, never graded: a late packet that cost samples shows in rx_written_late and rx_holes. A line
+from a release before v0.3.0 has no rx_holes and reads UNKNOWN. A status line FAILs too, and so does a status line in the window that reads clock=free or holdover=1 (the
 device left the media clock), and a `dante-input error:` line in the window. UNKNOWN fails too: no
 opening line, a counter that went backwards or a `dante-input start:` inside the window (the device
 restarted), delivered_frames that did not move (no audio reached OBS). Pure; the CLI reads a log slice.
@@ -27,8 +31,9 @@ import re
 import sys
 
 STATUS_MARKER = "dante-input status:"
-GATED = ("rx_loss", "rx_gaps", "rx_late", "socket_drops", "underruns", "overruns", "re_anchors")
-NAMED = ("rx_packets", "blocks", "delivered_frames")
+GATED = ("rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps", "rx_written_late",
+         "re_anchors")
+NAMED = ("rx_late", "overruns", "late_blocks", "rx_packets", "blocks", "delivered_frames")
 _FIELD_RE = re.compile(r"(?:^|\s)([a-z_]+)=(\S+)")
 _TS_RE = re.compile(r"^\d\d:\d\d:\d\d\.\d\d\d: ")
 
