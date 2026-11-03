@@ -93,6 +93,13 @@ def test_a_hybrid_box_keeps_its_e_cores_without_the_reserved_cpu(tmp_path):
     assert _cpus(tmp_path / "d", ecores="abc", reserved="15").stdout == "0-1"
 
 
+def test_the_sampler_set_works_whatever_lib_was_sourced_first(tmp_path):
+    # a caller that sourced the rx-pin lib before the program-audio lib still gets the reserved-cpu lib
+    rx = REPO / "scripts" / "lib" / "strih-dante-rx-pin.sh"
+    r = _bash(rx, '. "$1"; strih_program_audio_cpus', PA_LIB, env=_box(tmp_path))
+    assert r.returncode == 0 and r.stdout == "0-1", r.stdout + r.stderr
+
+
 def test_no_derivable_set_refuses_by_name(tmp_path):
     for name, kw in (("nomask", dict(isolated=None)), ("allobs", dict(isolated="0-15")),
                      ("garbage", dict(isolated="x")), ("online", dict(online=""))):

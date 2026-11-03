@@ -56,7 +56,7 @@ if ! declare -F strih_session_apps_put >/dev/null; then
   . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
 fi
 # issue 1485: the reserved Dante CPU (never the sampler's) + the cpulist / background-set helpers.
-if ! declare -F strih_dante_reserved_cpu >/dev/null; then
+if ! declare -F strih_dante_reserved_cpu_minus >/dev/null; then   # defined only by that lib
   # shellcheck source=scripts/lib/strih-dante-reserved-cpu.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-reserved-cpu.sh"
 fi
