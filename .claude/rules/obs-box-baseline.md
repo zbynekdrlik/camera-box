@@ -150,6 +150,13 @@ Rules for the facet:
 - **Re-runs stay quiet.** `obs_box_brightness_keys` reloads and re-triggers udev only when the rule
   text changed, and runs `usermod` only when the user is not yet in `video`. The strih-snv genlock
   deploy re-runs setup-strih every time.
+- **`x="$(cmd; printf x)"` (the keep-trailing-newlines trick) hides cmd's failure** (issue 1474
+  review, reproduced): the substitution's status is printf's, so neither errexit nor a `||` sees a
+  failed `cat` / `awk`, and a root writer then installs an EMPTY or partial file. When the captured
+  text is about to be WRITTEN, use `x="$(cmd && printf x)" || <fail>` (with pipefail for a pipeline)
+  and validate the result before the rename (`obs-box-lease-host.sh`). `obs_box_write_if_changed`'s
+  own `want="$(cat; printf x)"` reads its stdin pipe, whose producer's status the caller never sees
+  either: render into a variable first and pipe the variable when the renderer can fail.
 - **`obs_box_write_if_changed` details:** an exclusive `mktemp` sibling (never a predictable root
   temp inside a user-writable config dir); content, mode AND owner are all part of the unchanged check.
 

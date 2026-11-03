@@ -960,6 +960,8 @@ if WHY="$(obs_box_step_applies 16j-restreamer)"; then obs_box_stream_restreamer_
 # ---------------------------------------------------------------------------------------------
 step "16k" "Cambox log sink (issue 1394): journal-remote + the netconsole rsyslog instance, idle priority, enabled + running"
 if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_install || fail "issue 1394: the cambox log sink could not be provisioned (above)"; else echo "  SKIP: ${WHY}"; fi
+step "16l" "Rig-lease host (issue 1474): the dev1 line in /etc/hosts kept from dev1.local by a root timer -- stream role, snv"
+obs_box_lease_host_install || fail "issue 1474: the dev1 lease host line could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"

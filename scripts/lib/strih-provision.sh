@@ -88,6 +88,11 @@ if ! declare -F obs_box_step_applies >/dev/null; then
   # shellcheck source=scripts/lib/obs-box-role.sh
   . "$(dirname "${BASH_SOURCE[0]}")/obs-box-role.sh"
 fi
+# issue 1474: the dev1 rig-lease host line on the stream box (setup-strih step 16l, verify-strih).
+if ! declare -F obs_box_lease_host_install >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-lease-host.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-lease-host.sh"
+fi
 # issue 1412: step 4's prefix install never writes into a file a running OBS maps.
 if ! declare -F strih_bundle_tree_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-bundle-install.sh
