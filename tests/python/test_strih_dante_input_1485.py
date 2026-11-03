@@ -194,7 +194,8 @@ def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
 def _status(t, f, **k):
     v = dict(clock="media", holdover="0", gm="001dc1fffe0a", polls="1", re_anchors="0", rx_packets="10", rx_loss="0",
              rx_gaps="0", rx_late="0", socket_drops="0", blocks="5", underruns="0", overruns="0", delivered_frames=str(f),
-             rx_holes="0", rx_written_late="0", late_blocks="0", rebootstraps="0", max_process_us="80")
+             rx_holes="0", rx_written_late="0", late_blocks="0", rebootstraps="0", max_process_us="80",
+             obs_dropped="0", max_obs_us="40")
     v.update(k)
     return "%s: dante-input status: %s" % (t, " ".join("%s=%s" % i for i in v.items()))
 
@@ -244,7 +245,7 @@ def test_item9_passes_a_healthy_dante_source(tmp_path):
 # Live on strih-snv 3.11.2026 the v0.2.0 source ran ~200 underruns/s and ~9 overruns/s with a clean
 # network, and item 9 passed it: a counter that grows over the live window is a loss NOW.
 @pytest.mark.parametrize("key", ["rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps",
-                                 "rx_written_late"])
+                                 "rx_written_late", "obs_dropped"])
 def test_item9_fails_a_counter_that_grows_over_the_live_window(tmp_path, key):
     r = _grade(tmp_path, [START, _status("12:00:10.000", 4800, **{key: "18024"})],
                nxt=_status("12:00:20.000", 999999, **{key: "28036"}))
@@ -387,7 +388,7 @@ def test_a_clean_window_passes():
 
 
 @pytest.mark.parametrize("key", ["rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps",
-                                 "rx_written_late", "re_anchors"])
+                                 "rx_written_late", "re_anchors", "obs_dropped"])
 def test_any_loss_gap_late_drop_underrun_or_overrun_fails(key):
     r = CONT.decide(_window(**{key: "2"}), 1, 3)
     assert r["verdict"] == "FAIL" and r["failures"] == ["%s +2" % key], r

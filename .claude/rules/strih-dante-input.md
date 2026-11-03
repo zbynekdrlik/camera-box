@@ -40,7 +40,7 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   when `$STRIH` is a Dante box, and folds `scripts/dante_input_continuity.py`'s window result into the
   `program_audio_continuity` block (`strih_dante`, the worse verdict, `strih Dante:` reasons, so the
   report needs no second key): any rx_loss / rx_holes / underruns (skipped blocks) / rx_gaps / socket_drops /
-  rebootstraps / rx_written_late / re_anchors increase (the obs project's meanings, 3.11.2026: audio other
+  rebootstraps / rx_written_late / re_anchors / obs_dropped (v0.4.0) increase (the obs project's meanings, 3.11.2026: audio other
   than FOH sent; rx_late, overruns, late_blocks are timing only and reported; a line before obs v0.3.0 has
   no rx_holes and reads UNKNOWN; in v0.2.0 `underruns` mixed late blocks with skips, so it proves nothing), clock=free or holdover=1, or a `dante-input error:` in the window = FAIL; no
   opening line, a restart, a counter backwards, no delivered frames = UNKNOWN = FAIL. The closing line is

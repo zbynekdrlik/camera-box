@@ -8,6 +8,7 @@ dante-input.so, a dstack dlink device named `strih-obs`). The device logs one st
   dante-input status: clock=media holdover=0 gm=<hex>|none polls=N re_anchors=N rx_packets=N rx_loss=N
     rx_gaps=N rx_late=N socket_drops=N blocks=N underruns=N overruns=N delivered_frames=N rx_holes=N
     rx_written_late=N late_blocks=N rebootstraps=N max_process_us=N   (the last five since obs v0.3.0)
+    obs_dropped=N max_obs_us=N                                         (since obs v0.4.0: obs_dropped is loss)
 
 Counters are totals since the device started. Audio has the same zero-loss bar as video (ROZHODNUTE
 6359382787): over the window from the last status line at or before the START mark to the SECOND status
@@ -32,7 +33,7 @@ import sys
 
 STATUS_MARKER = "dante-input status:"
 GATED = ("rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps", "rx_written_late",
-         "re_anchors")
+         "re_anchors", "obs_dropped")
 NAMED = ("rx_late", "overruns", "late_blocks", "rx_packets", "blocks", "delivered_frames")
 _FIELD_RE = re.compile(r"(?:^|\s)([a-z_]+)=(\S+)")
 _TS_RE = re.compile(r"^\d\d:\d\d:\d\d\.\d\d\d: ")

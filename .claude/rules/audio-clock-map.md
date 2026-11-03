@@ -140,7 +140,7 @@ the obs release v0.2.0 deploy + the site file on strih-snv (issue 1487); live on
 | Path | Source clock -> crossings -> listener | Fixed latency (computed) |
 |---|---|---|
 | dasio TX -> hub device `strih-snv-intercom` (`foh_dante`) | DANTE -> dlink RX on DANTE MEDIA (= FLEET by the code above) -> hub resampler leg -> mix | device latency 10 ms (dlink's `LATENCY_NS`) + the hub's leg, stated by the intercom project |
-| FOH TX (`master-asio-dante`) -> OBS device `strih-obs` (obs release v0.3.0, `plugins/dante-input`) | DANTE 96 kHz -> dlink RX on DANTE MEDIA (= FLEET) -> dlink 2:1 to OBS's 48 kHz (`network_rate = 96000`, no `sample_rate`; the start line reads `device_rate=96000 halved=true`) -> the `dante_input` source on OBS's mix (FLEET) | device latency **10 ms** + the 2:1 filter's group delay (dlink, not stated yet) + the source's timeline, stated by the obs project |
+| FOH TX (`master-asio-dante`) -> OBS device `strih-obs` (obs release v0.4.0, `plugins/dante-input`) | DANTE 96 kHz -> dlink RX on DANTE MEDIA (= FLEET) -> dlink 2:1 to OBS's 48 kHz (`network_rate = 96000`, no `sample_rate`; the start line reads `device_rate=96000 halved=true`) -> the `dante_input` source on OBS's mix (FLEET) | device latency **10 ms** + the 2:1 filter's group delay (dlink, not stated yet) + the source's timeline, stated by the obs project |
 
 - **Crossing:** by the code, TX and RX are on one grandmaster, so no clock domain is crossed. That is
   computed from dstack's source and dstack#20, nothing here is measured. mbc and strih-snv reported the
@@ -153,7 +153,7 @@ the obs release v0.2.0 deploy + the site file on strih-snv (issue 1487); live on
   or inserted sample). The fixed latency is the 10 ms device latency, set once in the TOML at OBS start and
   never adapted. Graded: verify-strih item 9 `(program-dante)` (clock=media, holdover 0, the counters) and
   the E2E program-audio gate over the recording window (any rx_loss / rx_holes / underruns / rx_gaps /
-  socket_drops / rebootstraps / rx_written_late increase = FAIL, unknown = FAIL; rx_late, overruns and
+  socket_drops / rebootstraps / rx_written_late / obs_dropped increase = FAIL, unknown = FAIL; rx_late, overruns and
   late_blocks are timing only, the obs project's meanings, `.claude/rules/strih-dante-input.md`). Computed from the obs release's source and the TOML, not
   measured: the first live run states the measured A/V offset change against the VBAN R = 30 ms.
 - **Budget:** against the strih program's R = 30 ms (VBAN today) the 10 ms device latency is the smaller

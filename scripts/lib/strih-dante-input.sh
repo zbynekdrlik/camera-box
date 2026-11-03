@@ -184,7 +184,7 @@ strih_dante_input_status_verdict() {
     a="$(strih_dante_input_field "$l2" "$k")"
     [[ "$a" =~ ^[0123456789]+$ ]] && [ "$a" != 0 ] && out="${out}${k}=${a} "
   done
-  for k in rx_loss rx_holes underruns rx_gaps socket_drops rebootstraps rx_written_late; do
+  for k in rx_loss rx_holes underruns rx_gaps socket_drops rebootstraps rx_written_late obs_dropped; do
     a="$(strih_dante_input_field "$l2" "$k")"
     [[ "$a" =~ ^[0123456789]+$ ]] || { bad="${bad}${k} unreadable; "; continue; }
     [ "$a" = 0 ] || out="${out}${k}=${a} "
