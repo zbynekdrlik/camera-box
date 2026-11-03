@@ -117,10 +117,13 @@ strih_jxs_program_target() {
 # other key. `disable` keeps every key and sets only enabled false. setup runs as root in the desktop
 # user's tree, so FILE is opened O_NOFOLLOW and must be a regular file: rc 4 (nothing printed) for a
 # symlink or anything else; rc 3 when it is not a JSON object.
+# DEFAULT_CORES (5th, issue 1485): jxs_cores when the file has none or an empty one (the operator's
+# own value is kept). An empty jxs_cores puts the encoder on every ONLINE CPU, the reserved Dante CPU
+# included, so a Dante box passes the OBS mask without it (strih_jxs_output_default_cores).
 strih_jxs_output_render() {
-  python3 - "${1-}" "${2-}" "${3-}" "${4-}" <<'PY'
+  python3 - "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" <<'PY'
 import json, os, stat, sys
-path, target, sid, mode = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+path, target, sid, mode, cores = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 old = {}
 try:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -144,18 +147,29 @@ if mode == "disable":
 else:
     out = {"enabled": True, "jxs_target": target, "jxs_stream_id": sid,
            "jxs_bpp_min": old.get("jxs_bpp_min", 0), "jxs_bpp_max": old.get("jxs_bpp_max", 0),
-           "jxs_cores": old.get("jxs_cores", ""), "jxs_pace_mbps": old.get("jxs_pace_mbps", 0)}
+           "jxs_cores": old.get("jxs_cores", "") or cores, "jxs_pace_mbps": old.get("jxs_pace_mbps", 0)}
     for k, v in old.items():
         out.setdefault(k, v)
 print(json.dumps(out))
 PY
 }
 
+# strih_jxs_output_default_cores -> the OBS mask without the reserved Dante CPU on a box that declares
+# the Dante program (the same plan as strih_dante_rx_pin_install), else nothing. rc 0 always.
+strih_jxs_output_default_cores() {
+  local online base plan
+  strih_program_dante_declared || return 0
+  online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
+  base="$(head -n 1 "${STRIH_DANTE_RX_PIN_ROOT:-}/etc/strih-isolated-cpus.conf" 2>/dev/null || true)"
+  plan="$(strih_dante_rx_pin_plan "$online" "$base" 2>/dev/null)" || return 0
+  printf '%s\n' "${plan#* }"
+}
+
 # strih_jxs_provision OBS_CFG DESKTOP_USER USER_HOME CHECKOUT -> setup-strih step 6 (module doc). rc 1 + a
 # named line on a failed step; the caller fails the run.
 strih_jxs_provision() {
   local cfg="${1:?OBS config dir required}" user="${2:?desktop user required}" home="${3:?user home required}"
-  local src="${4:?checkout dir required}/scripts/obs_jxs_inputs.py" man target out rc st file
+  local src="${4:?checkout dir required}/scripts/obs_jxs_inputs.py" man target out rc st file cores
   [ -f "$src" ] || { echo "strih-jxs: ${src} not found next to the scripts (issue 1387)" >&2; return 1; }
   mkdir -p "$(dirname "$STRIH_JXS_SEEDER_BIN")" "$(dirname "$STRIH_JXS_SEED_MANIFEST")" || return 1
   st="$(strih_session_apps_put "$src" "$STRIH_JXS_SEEDER_BIN" 0755)" || return 1
@@ -195,13 +209,14 @@ strih_jxs_provision() {
   fi
   strih_user_home_dir "$home" "$user" "${file%/*}" || return 1
   rc=0
-  out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID")" || rc=$?
+  cores="$(strih_jxs_output_default_cores)"
+  out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID" "" "$cores")" || rc=$?
   if [ "$rc" = 3 ]; then
     # moved aside (a rename never follows a link at the destination; -T never moves INTO a directory)
     mv -T "$file" "${file}.bak-$(date +%Y%m%dT%H%M%S)" || return 1
     echo "  WARN: ${file} is not a JSON object -- moved aside, rewritten"
     rc=0
-    out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID")" || rc=$?
+    out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID" "" "$cores")" || rc=$?
   fi
   [ "$rc" = 0 ] && [ -n "$out" ] || { echo "strih-jxs: cannot render ${file} (rc ${rc}: 4 = not a regular file)" >&2; return 1; }
   printf '%s\n' "$out" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" "JPEG XS program output (-> ${target})"
