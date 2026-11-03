@@ -226,11 +226,16 @@ strih_dante_input_grade() {
   start="$(LC_ALL=C grep -a 'dante-input start: config=' "$log" | tail -n 1 || true)"
   if [ -z "$start" ]; then
     bad "(program-dante) no 'dante-input start: config=' line in ${log}: the device did not start (no dante-input.toml when OBS started, or the module is missing)"
-  elif [ "$(strih_dante_input_field "$start" device_rate)" = "$STRIH_DANTE_INPUT_NETWORK_RATE" ] \
-       && [ "$(strih_dante_input_field "$start" halved)" = true ]; then
-    ok "(program-dante) started: device_rate=$(strih_dante_input_field "$start" device_rate) halved=true sample_rate=$(strih_dante_input_field "$start" sample_rate) iface=$(strih_dante_input_field "$start" iface)"
   else
-    bad "(program-dante) start line reads device_rate=$(strih_dante_input_field "$start" device_rate) halved=$(strih_dante_input_field "$start" halved), wants ${STRIH_DANTE_INPUT_NETWORK_RATE} / true"
+    # the rate conversion: obs v0.4.1+ (dstack #90 `Rated`) logs converts=, v0.4.0 logged halved=
+    local conv_key=converts
+    [ -n "$(strih_dante_input_field "$start" converts)" ] || conv_key=halved
+    if [ "$(strih_dante_input_field "$start" device_rate)" = "$STRIH_DANTE_INPUT_NETWORK_RATE" ] \
+         && [ "$(strih_dante_input_field "$start" "$conv_key")" = true ]; then
+      ok "(program-dante) started: device_rate=$(strih_dante_input_field "$start" device_rate) ${conv_key}=true sample_rate=$(strih_dante_input_field "$start" sample_rate) iface=$(strih_dante_input_field "$start" iface)"
+    else
+      bad "(program-dante) start line reads device_rate=$(strih_dante_input_field "$start" device_rate) ${conv_key}=$(strih_dante_input_field "$start" "$conv_key"), wants ${STRIH_DANTE_INPUT_NETWORK_RATE} / true"
+    fi
   fi
   errs="$(LC_ALL=C grep -a -c 'dante-input error:' "$log" || true)"
   if [ "${errs:-0}" != 0 ]; then

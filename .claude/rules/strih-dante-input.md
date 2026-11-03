@@ -31,7 +31,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   `strih_scenes.py` switches `ASIO zvuk` to `dante_input` (no settings) keeping the operator's mixer
   state; an OBS without the kind registered keeps the input.
 - **verify item 9** (`strih_program_audio_grade` dispatches): `(program-dante)` rows = the TOML, the OBS
-  input kind, the `dante-input start: config=` line (`device_rate=96000 halved=true`), any
+  input kind, the `dante-input start: config=` line (`device_rate=96000` and `converts=true` from obs v0.4.1 on, dstack #90's `Rated` sinc
+  converter; `halved=true` on v0.4.0 and older, graded by whichever key the line carries), any
   `dante-input error:` line, and two `dante-input status:` lines 12 s apart (clock=media, holdover 0, a
   grandmaster, delivered_frames advancing; any of the gate's loss counters GROWING between the two lines
   FAILs, a total since the start that holds still is only named). The `(vban-leg) vban` arrival
