@@ -36,7 +36,8 @@ obs_box_write_if_changed() {
 # renderer run HERE (issue 1474): `want="$(CMD ARGS && printf x)"` keeps the exact bytes (trailing
 # newlines included, so verify's byte compare against the renderer stays identical) AND the renderer's
 # exit code. A renderer that fails (rc named) or renders nothing is refused: DEST untouched, rc 1, the
-# label on stderr; the caller adds `|| return 1` / `|| fail`.
+# label on stderr; the caller adds `|| return 1` / `|| fail`. errexit does not apply inside the renderer
+# (it runs left of `&&`), so a renderer must return non-zero itself on any failure.
 obs_box_write_if_changed_rendered() {
     local dest="${1:?obs_box_write_if_changed_rendered: DEST required}"
     local mode="${2:?obs_box_write_if_changed_rendered: MODE required}"
@@ -65,10 +66,11 @@ _obs_box_write_text() {
         echo "  ${label}: ${dest} unchanged"
         return 0
     fi
-    tmp="$(mktemp "${dest%/*}/.${dest##*/}.XXXXXX")" || fail "${label}: could not create a temp file next to ${dest}"
+    tmp="$(mktemp "${dest%/*}/.${dest##*/}.XXXXXX")" || { fail "${label}: could not create a temp file next to ${dest}"; return 1; }
     if ! { printf '%s' "$want" > "$tmp" && chmod "$mode" "$tmp" && chown "$owner" "$tmp" && mv -f "$tmp" "$dest"; }; then
         rm -f "$tmp"
         fail "${label}: could not write ${dest}"
+        return 1
     fi
     echo "  ${label}: ${dest} written"
 }

@@ -167,6 +167,9 @@ def _logical_lines(text):
         if line.endswith("\\"):
             cur += line[:-1] + " "
             continue
+        if line.rstrip().endswith(("|", "&&", "||")) and not line.lstrip().startswith("#"):
+            cur += line + " "
+            continue
         out.append((start, cur + line))
         cur = ""
     return out
@@ -178,6 +181,15 @@ def _calls():
             code = line.split(" #", 1)[0] if not line.lstrip().startswith("#") else ""
             if re.search(r"\bobs_box_write_if_changed(?:_rendered)?\b(?![(:])", code) and "() {" not in code:
                 yield path.relative_to(REPO), n, code
+
+
+def test_no_install_wrapper_is_fed_through_a_process_substitution():
+    bad = []
+    for path in sorted(SCRIPTS.rglob("*.sh")):
+        for n, line in _logical_lines(path.read_text()):
+            if re.search(r"\b(?:obs_box_write_if_changed\w*|_bg_put)\b", line) and "< <(" in line:
+                bad.append(f"{path.relative_to(REPO)}:{n}: {line.strip()}")
+    assert bad == [], "\n".join(bad)
 
 
 def test_every_call_is_checked_and_only_an_unfailing_producer_is_piped():
