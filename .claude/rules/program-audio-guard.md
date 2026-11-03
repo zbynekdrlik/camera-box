@@ -3,6 +3,7 @@ paths:
   - "scripts/program_audio.py"
   - "scripts/program_audio_ndi.py"
   - "scripts/program_audio_sampler.py"
+  - "scripts/program_audio_cg.py"
   - "scripts/program_audio_capture.py"
   - "scripts/program_audio_http.py"
   - "scripts/lib/strih-program-audio.sh"
@@ -29,6 +30,8 @@ paths:
   - "tests/python/test_program_audio_datestep_1404.py"
   - "tests/python/test_program_audio_http_1404.py"
   - "tests/python/test_strih_program_audio_1404.py"
+  - "tests/python/test_program_audio_cg_1404.py"
+  - "tests/python/test_program_audio_cg_fleet_1404.py"
 ---
 
 # The stream program-audio guard + the cam2 marker mirror (issue 1404)
@@ -52,7 +55,7 @@ Two read-only endpoints:
 | Route | Writer | Contract |
 |---|---|---|
 | dev1 `:8890/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| strih-snv `:8891/program-audio.json` | the `program-audio-sampler` `--user` service on strih-snv, which serves it itself | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, reason]}`; both ages recomputed by the endpoint per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
+| strih-snv `:8891/program-audio.json` | the `program-audio-sampler` `--user` service on strih-snv, which serves it itself | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, cg][, reason]}` (`cg`: the CG arm's block, below); both ages recomputed by the endpoint per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
@@ -105,9 +108,74 @@ Known limits:
 - **In-band music mixed UNDER a marker that still decodes reads MEASUREMENT.** The chain stands and
   the share stays in band. The measurement-clip-only rule for SongPlayer and the cg OBS (plan
   Task 5) is the control for it.
+- **Both limits bit live on 3.11.2026** (a CG song under the marker, 13.6-21.3 %, claimed by
+  Content ID). The control for audio from the CG chain is now the CG arm (next section), never a
+  re-tuned share threshold: the claimed windows sat inside the real measurement range.
 
 Re-calibrate only from real program audio. Use `analyse()` over 2 s windows of a stream recording
 or of a live NDI receive, and never tune the threshold to pass a single run.
+
+## The CG arm: the sampler listens to the CG chain itself (the 3.11.2026 Content ID claim)
+
+"Praise - Elevation Worship" (SME) was claimed on the E2E VOD "camera-box E2E 138687756"
+(2.11.2026 22:24-22:31Z). The song was played on the CG box (resolume-snv: Arena + SongPlayer + the cg
+OBS) outside the E2E and reached the stream program `mbc` 15-20 dB under the cam2 marker; every window
+read MEASUREMENT (design comment on issue 1404, 3.11.2026). Owner rule: only the cam2 sync signal may
+reach the stream. `scripts/program_audio_cg.py`:
+- **The one declaration.** The CG box `CG_BOX_DEFAULT` = `resolume-snv` (env `PROGRAM_AUDIO_CG_BOX`,
+  a fleet name), its audio-carrying NDI outputs `CG_NDI_OUTPUTS` = `SP-program` (SongPlayer's program
+  sender) + `cg-obs` (the cg OBS output), the NDI machine name = the row's declared computer name in
+  `OBS_FLEET_IDENTITY` (`RESOLUME-SNV`). So the sources are `RESOLUME-SNV (SP-program)` and
+  `RESOLUME-SNV (cg-obs)`. `PROGRAM_AUDIO_CG_SOURCES` (`|`-separated full names) overrides for ops and
+  tests. A box with no declared computer name is FATAL at start (UNKNOWN + exit 1), never a guess.
+- **The receivers:** one more audio-only `NdiAudioReceiver` per source (the same binding, mDNS only),
+  created before the stream one in `main()`. Each runs in its own `CgSourceMonitor` thread that only
+  captures and keeps each block's level with its arrival time. Read live from dev1 on 3.11.2026
+  (8 s, read-only): both senders deliver audio frames continuously (190 / 51 frames), SP-program
+  -35.1 dBFS, cg-obs -10.3 dBFS at that moment.
+- **The level** is the LOUDEST NDI block over the trailing 2 s (`block_level_dbfs` = 10 log10 of the
+  block's mean square over every sample and channel), not the stream-side `analyse()` level: no tone
+  line is removed (the measurement clip's 1 kHz bed is CG audio too) and a short phrase cannot hide in
+  a window average.
+- **The decision** (`overlay`, pure), applied by the sampler to EVERY window it writes, the no-audio
+  UNKNOWN included:
+  - the CG box away -> not graded (`cg.graded` false, `status` `away`), the window unchanged;
+  - home (or not probed yet: counted as home, fail closed) and any source at or over
+    `program_audio.SILENT_RMS_DBFS` (-60, never retyped) -> FOREIGN, reason
+    `cg-audio: '<source>' at <x> dBFS -- the CG box ... carries audio ...`. The sampler's `write()`
+    latches every FOREIGN, so the guard keeps exit 1 for its latch hold (30 s). A stream FOREIGN that
+    already has a reason keeps it;
+  - home and a source with no audio block for `CG_NO_AUDIO_S` (5 s = the sampler's
+    `NO_AUDIO_TIMEOUT_S`), an error frame / a broken capture, or a non-finite sample -> UNKNOWN over a
+    MEASUREMENT/SILENT window (`cg source not receivable while the CG box ... is home`), never over a
+    stream FOREIGN or UNKNOWN;
+  - otherwise the window's verdict and reason byte for byte.
+- **Home = `obs_fleet_is_home` semantics**, through the python twin in `scripts/obs_fleet_table.py`
+  (`fleet_is_home`: the `OBS_FLEET_HOME` force-list, `always` / `retired` / `traveling` = resolves AND
+  OBS-WS :4455 answers; parity with the bash lib pinned by `tests/python/test_program_audio_cg_fleet_1404.py`
+  through the lib's resolve/probe seams). A `HomeProbe` thread probes every 30 s, so a DNS lookup or a
+  TCP connect never stalls the consumer. Away at an event = not graded: the CG box then is not on our
+  LAN, so its audio cannot be on our mbc either. No identity check (`obs_fleet_poll_now`'s ssh
+  `hostname`) here: the probe runs every 30 s on a production box.
+- **The payload** carries the additive `cg` block (`box`, `home`, `graded`, `status` =
+  `silent` / `cg-audio` / `unreceivable` / `away`, `silent_below_dbfs`, one entry per source with
+  `level_dbfs`, `audio_age_s`, `connections`[, `error`]); without a CG arm (`run(cg=None)`, the loop
+  tests and the calibration CLI) no payload has a `cg` key.
+- **The guard** needs no new exit path: FOREIGN is exit 1, UNKNOWN exit 2. Its line now also shows the
+  sampler's FOREIGN reason (`reason=cg-audio: ...`); a spectral FOREIGN has none, so that line is
+  unchanged. The av-gate session start (`youtube_leg_e2e.py do_start`) refuses and the live watch
+  (`do_watch`) stops the broadcast on it: pinned through the REAL guard over payloads the REAL loop
+  wrote (`tests/python/test_program_audio_cg_1404.py`).
+- **Install:** setup-strih step 16e ships `program_audio_cg.py`, `obs_fleet_table.py` and
+  `scripts/lib/obs-fleet.sh` (DATA: the twin parses its `OBS_FLEET` and `OBS_FLEET_IDENTITY` blocks)
+  in the checkout layout; the closure test pins it.
+- **Consequence to keep in mind:** a measurement clip PLAYED on SongPlayer (the issue-1404 Task 5
+  clip, the opt-in CG_CHAIN profile) is CG audio too and reads FOREIGN `cg-audio` while the CG box is
+  home. The owner rule says only the cam2 marker may reach the stream; a CG segment that must carry
+  the clip on YouTube needs a decision on the ticket first, never a quiet exemption here.
+- **A guard run against a sampler older than the CG arm** still reads the old payload (no `cg`
+  block) as before: the arm protects only once the sampler on strih-snv runs this code (setup-strih
+  step 16e try-restarts it). Read the endpoint's `cg` block after a deploy.
 
 ## MEASUREMENT needs the QPSK marker itself (ROZHODNUTÉ 6026577906 + 6026826572)
 
