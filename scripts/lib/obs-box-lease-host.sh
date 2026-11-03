@@ -112,7 +112,7 @@ obs_box_lease_host_refresh() {
   # `&& printf x` (never `;`): the x only joins a SUCCESSFUL read / render, so a failure reaches the `||`.
   have="$(cat -- "$hosts" && printf x)" || { echo "camera-box-lease-host: cannot read ${hosts} -- nothing written" >&2; return 1; }
   have="${have%x}"
-  current="$(printf '%s' "$have" | grep -F -- "$OBS_BOX_LEASE_HOST_MARKER" | { read -r a _ || true; printf '%s' "${a-}"; })" || current=""
+  current="$(printf '%s' "$have" | LC_ALL=C grep -aF -- "$OBS_BOX_LEASE_HOST_MARKER" | { read -r a _ || true; printf '%s' "${a-}"; })" || current=""
   answer="$(timeout 10 getent ahostsv4 "$OBS_BOX_LEASE_HOST_MDNS" 2>/dev/null || true)"
   if ! ip="$(printf '%s\n' "$answer" | obs_box_lease_host_pick "$box" "$prefix" "$current")"; then
     echo "camera-box-lease-host: ${OBS_BOX_LEASE_HOST_MDNS} gave no address in ${box}/${prefix} (answer: $(printf '%s' "$answer" | awk '{print $1}' | sort -u | tr '\n' ' ')) -- ${hosts} left as it is" >&2
@@ -122,10 +122,10 @@ obs_box_lease_host_refresh() {
     || { echo "camera-box-lease-host: rendering ${hosts} failed -- nothing written" >&2; return 1; }
   want="${want%x}"
   # Refuse any result that is not "the unmanaged lines unchanged + the one managed line".
-  have_rest="$(printf '%s' "$have" | grep -vF -- "$OBS_BOX_LEASE_HOST_MARKER" || true)"
-  want_rest="$(printf '%s' "$want" | grep -vF -- "$OBS_BOX_LEASE_HOST_MARKER" || true)"
+  have_rest="$(printf '%s' "$have" | LC_ALL=C grep -avF -- "$OBS_BOX_LEASE_HOST_MARKER" || true)"
+  want_rest="$(printf '%s' "$want" | LC_ALL=C grep -avF -- "$OBS_BOX_LEASE_HOST_MARKER" || true)"
   if [ "$have_rest" != "$want_rest" ] \
-      || [ "$(printf '%s' "$want" | grep -cxF -- "$(obs_box_lease_host_line "$ip")" || true)" != 1 ]; then
+      || [ "$(printf '%s' "$want" | LC_ALL=C grep -acxF -- "$(obs_box_lease_host_line "$ip")" || true)" != 1 ]; then
     echo "camera-box-lease-host: the rendered ${hosts} would change unmanaged lines or lack the one managed line -- refused, nothing written" >&2
     return 1
   fi
