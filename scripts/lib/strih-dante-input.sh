@@ -163,7 +163,7 @@ strih_dante_input_install() {
   iface="$(_strih_dante_input_iface)" || { echo "dante-input: the leg's interface cannot be resolved (above)" >&2; return 1; }
   group="$(id -gn "$user" 2>/dev/null)" || { echo "dante-input: no user ${user}" >&2; return 1; }
   install -d -m 0755 -o "$user" -g "$group" "$(dirname "$dest")" || return 1
-  strih_dante_input_toml "$iface" "$ports" "$chans" | obs_box_write_if_changed "$dest" 0644 "${user}:${group}" "dante-input" || return 1
+  obs_box_write_if_changed_rendered "$dest" 0644 "${user}:${group}" "dante-input" strih_dante_input_toml "$iface" "$ports" "$chans" || return 1
   echo "  dante-input: ${STRIH_DANTE_INPUT_DEVICE} on ${iface}, $(printf '%s\n' "$chans" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
   strih_dante_rx_pin_install "$user" || { echo "dante-input: the Dante threads' CPU reservation failed (above)" >&2; return 1; }
   strih_dante_reserved_cpu_install "$user" || { echo "dante-input: the managers' default off the reserved CPU failed (above)" >&2; return 1; }

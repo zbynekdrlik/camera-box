@@ -154,11 +154,20 @@ Rules for the facet:
   review, reproduced): the substitution's status is printf's, so neither errexit nor a `||` sees a
   failed `cat` / `awk`, and a root writer then installs an EMPTY or partial file. When the captured
   text is about to be WRITTEN, use `x="$(cmd && printf x)" || <fail>` (with pipefail for a pipeline)
-  and validate the result before the rename (`obs-box-lease-host.sh`). `obs_box_write_if_changed`'s
-  own `want="$(cat; printf x)"` reads its stdin pipe, whose producer's status the caller never sees
-  either: render into a variable first and pipe the variable when the renderer can fail.
-- **`obs_box_write_if_changed` details:** an exclusive `mktemp` sibling (never a predictable root
-  temp inside a user-writable config dir); content, mode AND owner are all part of the unchanged check.
+  and validate the result before the rename (`obs-box-lease-host.sh`).
+- **A renderer goes through `obs_box_write_if_changed_rendered DEST MODE OWNER LABEL CMD [ARGS...]`,
+  never a pipe into the stdin form** (issue 1474 follow-up). A function at the end of a pipe (or fed
+  by `< <(render)`) cannot see its producer's status: a failed renderer's partial or empty text was
+  written, and pipefail reported it after the replace. The command form runs the renderer itself
+  (`"$@" && printf x`): a failed renderer (rc named) or an empty render is refused, DEST untouched,
+  rc 1; the exact bytes (trailing newlines) are kept. The stdin form refuses an empty input and is
+  fed ONLY `printf '%s\n' "$var"` of a text already captured with `|| return 1`, or a `< file`
+  redirect. Every call carries `|| return 1` / `|| fail` (a caller run as `fn || fail` has errexit
+  off). `tests/python/test_obs_box_write_rendered_1474.py` sweeps scripts/ for both rules.
+- **`obs_box_write_if_changed` details:** both forms live in `scripts/lib/obs-box-write.sh` (sourced by
+  the baseline, its own file for the line budget) over one core `_obs_box_write_text`; an exclusive
+  `mktemp` sibling (never a predictable root temp inside a user-writable config dir); content, mode
+  AND owner are all part of the unchanged check.
 
 ## lightdm waits for every display GPU (kiosk facet, issue 1454)
 

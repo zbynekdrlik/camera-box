@@ -371,8 +371,10 @@ obs_box_gpu_ready_install() {
     local wait_dest="${1:-$(obs_box_gpu_ready_wait_path)}" dropin_dest="${2:-$(obs_box_gpu_ready_dropin_path)}"
     local owner="${3:-root:root}"
     mkdir -p "${wait_dest%/*}" "${dropin_dest%/*}" || fail "gpu-ready: could not create ${wait_dest%/*} / ${dropin_dest%/*}"
-    obs_box_gpu_ready_wait_text | obs_box_write_if_changed "$wait_dest" 0755 "$owner" "gpu-ready (waiter, issue 1454)"
-    obs_box_gpu_ready_dropin_text | obs_box_write_if_changed "$dropin_dest" 0644 "$owner" "gpu-ready (lightdm drop-in, issue 1454)"
+    obs_box_write_if_changed_rendered "$wait_dest" 0755 "$owner" "gpu-ready (waiter, issue 1454)" obs_box_gpu_ready_wait_text \
+        || fail "gpu-ready: the waiter could not be installed (above)"
+    obs_box_write_if_changed_rendered "$dropin_dest" 0644 "$owner" "gpu-ready (lightdm drop-in, issue 1454)" obs_box_gpu_ready_dropin_text \
+        || fail "gpu-ready: the lightdm drop-in could not be installed (above)"
     if [ -z "${1:-}" ]; then
         systemctl daemon-reload || fail "gpu-ready: systemctl daemon-reload failed -- lightdm would start without the GPU wait"
     fi
@@ -626,7 +628,8 @@ obs_box_igpu_sink_modesetting() {
     local dest="${1:-$(obs_box_igpu_sink_conf_path)}" owner="${2:-root:root}"
     obs_box_amdgpu_ddx_remove
     mkdir -p "${dest%/*}" || fail "igpu-sink: could not create ${dest%/*}"
-    obs_box_igpu_sink_modesetting_conf | obs_box_write_if_changed "$dest" 0644 "$owner" "igpu-sink (OutputClass, belt and braces, issue 1418)"
+    obs_box_write_if_changed_rendered "$dest" 0644 "$owner" "igpu-sink (OutputClass, belt and braces, issue 1418)" \
+        obs_box_igpu_sink_modesetting_conf || fail "igpu-sink: ${dest} could not be installed (above)"
 }
 
 # obs_box_touchpad BOX -- the imag step 25 (#779) touchpad usability: tap-to-click + natural scroll +
@@ -766,9 +769,11 @@ obs_box_brightness_keys() {
     grp="$(id -gn "$DESKTOP_USER")" || fail "brightness keys: unknown desktop user ${DESKTOP_USER}"
     home="$(getent passwd "$DESKTOP_USER" | cut -d: -f6 || true)"
     [ -n "$home" ] || home="/home/${DESKTOP_USER}"
-    obs_box_brightness_helper_text | obs_box_write_if_changed /usr/local/bin/obs-box-brightness 0755 root:root "brightness helper"
+    obs_box_write_if_changed_rendered /usr/local/bin/obs-box-brightness 0755 root:root "brightness helper" obs_box_brightness_helper_text \
+        || fail "brightness keys: the helper could not be installed (above)"
     if cmp -s /etc/udev/rules.d/90-obs-box-backlight.rules <(obs_box_backlight_udev_rule); then rule_new=0; fi
-    obs_box_backlight_udev_rule | obs_box_write_if_changed /etc/udev/rules.d/90-obs-box-backlight.rules 0644 root:root "backlight udev rule"
+    obs_box_write_if_changed_rendered /etc/udev/rules.d/90-obs-box-backlight.rules 0644 root:root "backlight udev rule" obs_box_backlight_udev_rule \
+        || fail "brightness keys: the udev rule could not be installed (above)"
     # Reload + re-trigger only when the rule text changed: a re-run (every strih-snv genlock deploy runs
     # setup-strih) leaves udev alone, and the rule applies at every boot anyway.
     if [ "$rule_new" = 1 ]; then
@@ -791,5 +796,6 @@ obs_box_brightness_keys() {
     [ -f "$rc_src" ] || fail "brightness keys: no openbox rc.xml to merge into (${rc_src} missing -- is openbox installed?)"
     merged="$(obs_box_openbox_rc_with_brightness_keys < "$rc_src")" \
         || fail "brightness keys: ${rc_src} has no </keyboard> section -- add the two XF86MonBrightness keybinds by hand"
-    printf '%s\n' "$merged" | obs_box_write_if_changed "$rc_user" 0644 "${DESKTOP_USER}:${grp}" "openbox rc.xml brightness keys"
+    printf '%s\n' "$merged" | obs_box_write_if_changed "$rc_user" 0644 "${DESKTOP_USER}:${grp}" "openbox rc.xml brightness keys" \
+        || fail "brightness keys: ${rc_user} could not be written (above)"
 }

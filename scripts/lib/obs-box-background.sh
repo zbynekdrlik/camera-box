@@ -188,9 +188,9 @@ obs_box_background_slice() {
     obs="$(head -n1 "$conf" 2>/dev/null || true)"
     bg="$(obs_box_background_cpus "$online" "$obs")" \
         || fail "issue 1387: no CPU left for background work (online '${online}', OBS mask '${obs}' from ${conf})"
-    _bg_put() {  # PATH MODE LABEL (content on stdin)
+    _bg_put() {  # PATH MODE LABEL RENDERER [ARGS...] (issue 1474: a failed renderer writes nothing)
         local out
-        out="$(obs_box_write_if_changed "$1" "$2" "$owner" "$3")" || fail "issue 1387: could not write $1"
+        out="$(obs_box_write_if_changed_rendered "$1" "$2" "$owner" "$3" "${@:4}")" || fail "issue 1387: could not write $1"
         echo "$out"
         case "$out" in *" written") changed=1 ;; esac
     }
@@ -203,10 +203,10 @@ obs_box_background_slice() {
     rm -f "$tmp"
     install -d -m 0755 "${root}$(dirname "$(obs_box_background_dropin_path)")" "${root}$(dirname "$(obs_box_background_run_path)")" \
         "${root}$(dirname "$(obs_box_background_slice_path)")" || fail "issue 1387: could not create the unit directories"
-    _bg_put "${root}$(obs_box_background_slice_path)" 0644 "background slice" < <(obs_box_background_slice_text "$bg")
-    _bg_put "${root}$(obs_box_background_dropin_path)" 0644 "fbagent drop-in" < <(obs_box_background_dropin_text)
-    _bg_put "${root}$(obs_box_background_run_path)" 0755 "background runner" < <(obs_box_background_run_text)
-    _bg_put "${root}$(obs_box_background_sudoers_path)" 0440 "background sudoers" < <(obs_box_background_sudoers_text "$user")
+    _bg_put "${root}$(obs_box_background_slice_path)" 0644 "background slice" obs_box_background_slice_text "$bg"
+    _bg_put "${root}$(obs_box_background_dropin_path)" 0644 "fbagent drop-in" obs_box_background_dropin_text
+    _bg_put "${root}$(obs_box_background_run_path)" 0755 "background runner" obs_box_background_run_text
+    _bg_put "${root}$(obs_box_background_sudoers_path)" 0440 "background sudoers" obs_box_background_sudoers_text "$user"
     unset -f _bg_put
     if [ "$changed" = 1 ]; then systemctl daemon-reload || fail "issue 1387: systemctl daemon-reload failed"; fi
     systemctl enable --now "$(obs_box_background_slice_name)" >/dev/null || fail "issue 1387: could not enable the background slice"

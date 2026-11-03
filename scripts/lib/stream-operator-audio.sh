@@ -97,8 +97,9 @@ stream_operator_audio_install() {
   rm -f "$dump"
   strih_user_home_dir "$home" "$user" "${home}/.config/pipewire/pipewire.conf.d" || return 1
   strih_user_home_dir "$home" "$user" "${home}/.config/wireplumber/wireplumber.conf.d" || return 1
-  python3 "$mod" render-pipewire | obs_box_write_if_changed \
-    "${home}/.config/pipewire/pipewire.conf.d/${STREAM_OPERATOR_AUDIO_PW_DROPIN}" 0664 "$owner" "operator headphones clock" || return 1
+  obs_box_write_if_changed_rendered \
+    "${home}/.config/pipewire/pipewire.conf.d/${STREAM_OPERATOR_AUDIO_PW_DROPIN}" 0664 "$owner" "operator headphones clock" \
+    python3 "$mod" render-pipewire || return 1
   printf '%s\n' "$wp" | obs_box_write_if_changed \
     "${home}/.config/wireplumber/wireplumber.conf.d/${STREAM_OPERATOR_AUDIO_WP_DROPIN}" 0664 "$owner" "operator headphones device" || return 1
   for rel in "${STREAM_OPERATOR_AUDIO_LEFTOVERS[@]}"; do
