@@ -154,6 +154,17 @@ def test_another_binary_is_replaced_by_a_rename(tmp_path):
     assert "replaced dtray with v0.6.19" in r.stdout
 
 
+def test_a_binary_already_on_the_pin_is_kept_with_no_network(tmp_path):
+    # review round 1: the pin is the authority; a GitHub outage must not WARN a correct box
+    F.fake_dtray(tmp_path)
+    F.dtray_record(tmp_path).unlink()
+    e = F.dtray_env(tmp_path)
+    e["DTRAY_RELEASE_BASE"] = "file://%s/no-such-release" % tmp_path
+    r = _dt('dtray_install "%s" && echo rc=0 || echo "rc=$?"' % (tmp_path / "home"), env=e)
+    assert _rc(r) == 0 and "-- kept" in r.stdout, r.stderr
+    assert F.dtray_record(tmp_path).read_text().startswith("v0.6.19 ")
+
+
 def test_the_xdg_autostart_entry_is_removed(tmp_path):
     home = tmp_path / "home"
     desk = home / ".config" / "autostart" / "dtray.desktop"
@@ -240,6 +251,25 @@ def test_a_declared_marker_someone_else_wrote_is_never_claimed(tmp_path):
     assert (d / "strih-obs.device").exists(), "a foreign marker survives the box dropping the device"
 
 
+@pytest.mark.parametrize("bad", ["../etc/passwd=1:2:3:4-5", "a/b=1:2:3:4-5", ".hidden=1:2:3:4-5", "*=1:2:3:4-5"])
+def test_a_device_name_that_is_not_a_plain_name_is_refused(tmp_path, bad):
+    # review round 1: a name becomes a path under the markers dir; never write or delete outside it
+    r = _apply(tmp_path, "strih-obs=4440:8800:4455:47200-47231 " + bad)
+    assert _rc(r) == 1 and "not a plain device name" in r.stderr, r.stderr
+    assert not (tmp_path / "dstack-devices").exists() and not (tmp_path / "etc").exists()
+
+
+def test_a_tampered_record_never_deletes_outside_the_markers_dir(tmp_path):
+    victim = tmp_path / "victim.device"
+    victim.write_text("keep")
+    rec = tmp_path / "dtray-share" / "devices"
+    rec.parent.mkdir(parents=True)
+    rec.write_text("../victim\nstrih-obs\n")
+    r = _apply(tmp_path, "none")
+    assert _rc(r) == 1 and "not a plain device name" in r.stderr, r.stderr
+    assert victim.read_text() == "keep"
+
+
 def test_unreadable_facts_write_nothing(tmp_path):
     e = F.dtray_env(tmp_path)
     r = F.bash('unset DTRAY_DANTE_DEVICES; dtray_devices_apply && echo rc=0 || echo "rc=$?"', env=e,
@@ -283,6 +313,11 @@ def test_print_states_parse_dtrays_lines():
     # names compare case aside, as dtray does; a longer name sharing the prefix is not the device
     assert _states("STRIH-OBS: clock media ready\nstrih-obs-2: clock x\n", "strih-obs") == ["present strih-obs"]
     assert _states("strih-obs-2: clock x\n", "strih-obs") == ["unlisted strih-obs"]
+    # review round 1: only dtray's status form is present; trailing space / CR on the not-running line,
+    # an unreadable status or another text is never a false present
+    assert _states("strih-obs: expected, not running \r\n", "strih-obs") == ["not-running strih-obs"]
+    assert _states("strih-obs: status unreadable (timeout)\n", "strih-obs") == ["odd strih-obs"]
+    assert _states("strih-obs: expected, not running (no marker)\n", "strih-obs") == ["odd strih-obs"]
 
 
 def _row(tmp_path, devices, print_text=None, print_rc=0, hang=False, ic="v0.6.10", obs="v0.6.10", markers=True):
@@ -335,6 +370,12 @@ def test_row_fail_when_dtray_never_lists_a_marked_device(tmp_path):
     row = _row(tmp_path, SNV, "dstack: no devices on this PC\n")
     assert row.startswith("FAIL|(dtray-devices) ") and "strih-obs(not listed)" in row
     assert "strih-snv-intercom(not listed)" in row
+
+
+def test_row_fail_on_an_odd_status_line_even_below_the_threshold(tmp_path):
+    row = _row(tmp_path, SNV, PRINT_OK.replace("strih-obs: clock media ready; RX 2/2 connected; late +0",
+                                               "strih-obs: status unreadable (timeout)"))
+    assert row.startswith("FAIL|(dtray-devices) ") and "strih-obs(status: status unreadable (timeout))" in row, row
 
 
 def test_row_fail_on_a_failed_or_hung_print(tmp_path):
