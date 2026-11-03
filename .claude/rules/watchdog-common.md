@@ -113,4 +113,5 @@ TCP connect to :22, which logs a pre-auth line too.
 About 18 dev1 units on the same 5-minute timer hit the rig at one instant: each batch dropped 2-3 strih program
 frames (encode max 75-95 ms on an idle rig) and stepped cam3 + cam5 down. Every `OnUnitActiveSec=5min` timer carries
 `RandomizedDelaySec=2min` (`tests/python/test_watchdog_batch_spread_1387.py`); a new one takes it too. The strih
-bundle-state server runs at `Nice=19` on cores 0-1, off OBS's 2-15.
+bundle-state server runs at `Nice=19` on cores 0-1, off OBS's 2-15 (on strih-snv OBS runs on 2-14 and CPU 15
+holds the Dante receive threads, issue 1485, `strih-dante-input.md`).

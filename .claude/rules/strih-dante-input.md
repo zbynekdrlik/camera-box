@@ -4,6 +4,8 @@ paths:
   - "scripts/dante_input_continuity.py"
   - "scripts/lib/program-audio-continuity.sh"
   - "tests/python/test_strih_dante_input_1485.py"
+  - "scripts/lib/strih-dante-rx-pin.sh"
+  - "tests/python/test_strih_dante_rx_pin_1485.py"
 ---
 
 # strih-snv's program audio over Dante: the obs release's `dante_input` source (issue 1485)
@@ -43,4 +45,39 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   no rx_holes and reads UNKNOWN; in v0.2.0 `underruns` mixed late blocks with skips, so it proves nothing), clock=free or holdover=1, or a `dante-input error:` in the window = FAIL; no
   opening line, a restart, a counter backwards, no delivered frames = UNKNOWN = FAIL. The closing line is
   the second status line after the stop.
+- **The Dante threads' own CPU (`scripts/lib/strih-dante-rx-pin.sh`, 3.11.2026, the obs project's ask
+  beside their v0.4.0).** dlink's pump thread `dstack-engine` wakes every 0.33 ms; among ~10 runnable OBS
+  threads per CPU at SCHED_OTHER nice 0 its blocks finished up to 6.7 ms late against a 5 ms margin and
+  audio was skipped (underruns, rebootstraps). So on a Dante-program box only:
+  - **The CPU is derived:** the highest CPU that is online AND in `/etc/strih-isolated-cpus.conf`
+    (`strih_dante_rx_pin_plan`); strih-snv = CPU 15, OBS on 2-14. Its SMT sibling (14 on strih-snv,
+    written to the conf as `smt_siblings`) stays OBS's: the two threads get their own run queue (the
+    wake-up latency is the fault), not a whole physical core. Taking 14 too would cost OBS another CPU;
+    re-measure before doing it.
+  - **The mask file stays the full block.** The background slice (`rig-background.slice` = online minus
+    that file, 0-1) and the baseline `affinity` row read it unchanged. setup-strih step 13
+    (`strih_dante_input_install`) writes `/etc/strih-dante-rx-cpu.conf` (`reserved=`, `obs=`, `base=`,
+    `smt_siblings=`); `strih-obs-start.sh` launches OBS under `obs=` only while `base=` equals the mask in
+    use (a stale file is named and ignored; no file = every other box, unchanged).
+  - **nice -10 by a root helper, never a limits.d grant.** `/usr/local/sbin/strih-dante-rx-pin`, allowed
+    by ONE sudoers line with no arguments (`... NOPASSWD: /usr/local/sbin/strih-dante-rx-pin ""`, checked
+    by `visudo -cf` before the write), the obs-box-background-run pattern (issue 1387). A limits.d nice
+    grant is a session-wide rlimit like the retired `95-<box>-genlock-rtprio.conf` (obs-box-baseline.md)
+    and would let every thread of every process of the user lower its nice. No realtime policy anywhere;
+    rtprio stays off.
+  - **The helper:** the newest `obs` of the sudo caller (`pgrep -n -x -u $SUDO_UID`), only its tasks whose
+    `comm` is `dstack-engine` or `dstack-rx`; `taskset -p -c <cpu>` + `renice --priority -10` (absolute)
+    per thread, read back from `/proc`; waits up to 120 s for the threads (they start when OBS loads the
+    module); one log line (`obs pid P: dstack-engine tid T, dstack-rx tid U -> CPU 15 nice -10`, also to
+    the journal via `logger -t strih-dante-rx-pin`). Idempotent. No env seam (a root program takes no path
+    from its caller); its tests rewrite its `PATH=` / `PROC=` / `BUDGET_S=` / `CONF=` lines.
+  - **Every OBS start:** the launcher runs it in the background right after the launch (`sudo -n`), so an
+    OBS restart by the unit re-pins. A failure is a WARN in `/tmp/strih-obs-start.log`, never fatal.
+  - **Not exclusive:** other processes (dantesync, the hub, kernel threads) may still run on CPU 15; only
+    OBS is kept off it. A thread the two create later inherits their mask and nice.
+  - **verify item 9's `(program-dante) rx-pin` rows** (`strih_dante_rx_pin_grade`, in the lib; verify-strih
+    is at its line budget): FAIL when OBS's main `Cpus_allowed_list` still holds the reserved CPU, when a
+    thread is missing, runs on anything but exactly that CPU, or has nice > -10; no conf / no running OBS
+    FAIL too.
+  - Another box: step 13 removes our conf, helper and sudoers line if present, silent when absent.
 - Clocks + latency: `.claude/rules/audio-clock-map.md` (Dante on strih-snv).
