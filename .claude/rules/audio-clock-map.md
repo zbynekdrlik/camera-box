@@ -140,7 +140,7 @@ the obs release v0.2.0 deploy + the site file on strih-snv (issue 1487); live on
 | Path | Source clock -> crossings -> listener | Fixed latency (computed) |
 |---|---|---|
 | dasio TX -> hub device `strih-snv-intercom` (`foh_dante`) | DANTE -> dlink RX on DANTE MEDIA (= FLEET by the code above) -> hub resampler leg -> mix | device latency 10 ms (dlink's `LATENCY_NS`) + the hub's leg, stated by the intercom project |
-| FOH TX (`master-asio-dante`) -> OBS device `strih-obs` (obs release v0.4.2, `plugins/dante-input`) | DANTE 96 kHz -> dlink RX on DANTE MEDIA (= FLEET) -> dlink `Rated` sinc 96 -> 48 kHz (dstack #90; `network_rate = 96000`, no `sample_rate`; the start line reads `device_rate=96000 converts=true`) -> the `dante_input` source on OBS's mix (FLEET) | device latency **10 ms** + the converter's RX delay 1.3125 ms (measured by obs; v0.4.0's halving was 0.3125 ms; owner 3.11.2026: dlink 10 ms default is fine) + the source's timeline, stated by the obs project |
+| FOH TX (`master-asio-dante`) -> OBS device `strih-obs` (obs release v0.4.3, `plugins/dante-input`) | DANTE 96 kHz -> dlink RX on DANTE MEDIA (= FLEET) -> dlink `Rated` sinc 96 -> 48 kHz (dstack #90; `network_rate = 96000`, no `sample_rate`; the start line reads `device_rate=96000 converts=true`) -> the `dante_input` source on OBS's mix (FLEET) | device latency **10 ms** + the converter's RX delay 1.3125 ms (measured by obs; v0.4.0's halving was 0.3125 ms; owner 3.11.2026: dlink 10 ms default is fine) + the source's timeline, stated by the obs project |
 
 - **Crossing:** by the code, TX and RX are on one grandmaster, so no clock domain is crossed. That is
   computed from dstack's source and dstack#20, nothing here is measured. mbc and strih-snv reported the
