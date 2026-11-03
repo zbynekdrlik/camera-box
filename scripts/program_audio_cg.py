@@ -24,6 +24,11 @@ The decision (`overlay`, pure), applied to every window the sampler writes:
     reads the cg OBS's OBS-WS, and SongPlayer can play while that OBS is down; the probe also lags by
     up to HOME_PROBE_INTERVAL_S). The sampler's write() latches every FOREIGN (`last_foreign_ts_utc`),
     so the guard keeps refusing for its latch hold;
+    EXCEPT a source whose reading carries an ABSENT correlation (program_audio_cg_corr.judge, the
+    issue-1404 refinement after the owner cleaned mbc): its audio was MEASURED not to be in the stream
+    program over the lag-searched path, so it is no FOREIGN (status `not-in-program`). PRESENT names
+    the ncc and lag in the reason; UNDECIDED (not computable) stays FOREIGN with its why (fail closed);
+    a reading with no correlation (no program ring: `CgArm.state()` without one) is the strict rule;
   * the CG box home (obs_fleet_is_home semantics: a traveling box is home only when its host
     resolves AND its OBS-WS :4455 answers; not probed yet = home, fail closed) and a CG source with no
     audio frame for CG_NO_AUDIO_S (5 s, the sampler's own no-audio timeout) -> UNKNOWN over a
@@ -58,6 +63,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import obs_fleet_table as oft  # noqa: E402
 import program_audio as pa  # noqa: E402
+import program_audio_cg_corr as pcc  # noqa: E402
 
 CG_BOX_DEFAULT = "resolume-snv"
 CG_BOX_ENV = "PROGRAM_AUDIO_CG_BOX"
@@ -66,6 +72,7 @@ CG_SOURCES_ENV = "PROGRAM_AUDIO_CG_SOURCES"
 # program output (.claude/rules/cg-burn-node-role.md, resolume-cg-obs.md).
 CG_NDI_OUTPUTS = ("SP-program", "cg-obs")
 REASON_CG_AUDIO = "cg-audio"
+STATUS_NOT_IN_PROGRAM = "not-in-program"
 LEVEL_WINDOW_S = pa.WINDOW_S
 CG_NO_AUDIO_S = 5.0           # = program_audio_sampler.NO_AUDIO_TIMEOUT_S (pinned by a test)
 HOME_PROBE_INTERVAL_S = 30.0
@@ -115,6 +122,7 @@ class CgReading(NamedTuple):
     audio_age_s: float | None
     connections: int | None = None
     error: str | None = None
+    correlation: pcc.Correlation | None = None  # is it IN the stream program? None = not asked
 
 
 class CgState(NamedTuple):
@@ -127,6 +135,22 @@ class CgState(NamedTuple):
 
 def _loud(r: CgReading) -> bool:
     return pa.is_number(r.level_dbfs) and r.level_dbfs >= pa.SILENT_RMS_DBFS
+
+
+def _absent(r: CgReading) -> bool:
+    """Heard, and MEASURED not in the stream program (the correlation's ABSENT)."""
+    return r.correlation is not None and r.correlation.kind == pcc.ABSENT
+
+
+def _foreign_text(r: CgReading) -> str:
+    head = f"{r.source!r} at {r.level_dbfs:.1f} dBFS"
+    c = r.correlation
+    if c is None:
+        return head
+    if c.kind == pcc.PRESENT:
+        return (f"{head} is IN the stream program (ncc {c.ncc:.3f} >= {pcc.DETECT_NCC:g} at lag "
+                f"{c.lag_ms:+.0f} ms)")
+    return f"{head} not proven absent from the stream program ({c.why})"
 
 
 def _unreceivable(r: CgReading) -> str | None:
@@ -151,10 +175,10 @@ def overlay(verdict: str, reason: str | None, state: CgState | None) -> tuple[st
     """The window's (verdict, reason) after the CG arm (rules in the module doc)."""
     if state is None:
         return verdict, reason
-    loud = [r for r in state.readings if _loud(r)]
+    loud = [r for r in state.readings if _loud(r) and not _absent(r)]
     if loud:
         text = (f"{REASON_CG_AUDIO}: "
-                + ", ".join(f"{r.source!r} at {r.level_dbfs:.1f} dBFS" for r in loud)
+                + ", ".join(_foreign_text(r) for r in loud)
                 + f" -- the CG box {state.box} carries audio; only the cam2 marker may reach the stream")
         return "FOREIGN", (reason if verdict == "FOREIGN" and reason else text)
     if graded(state) and verdict in ("MEASUREMENT", "SILENT"):
@@ -177,8 +201,10 @@ def payload_block(state: CgState | None) -> dict | None:
     """The additive `cg` object of program-audio.json (None without a CG arm)."""
     if state is None:
         return None
-    if any(_loud(r) for r in state.readings):
+    if any(_loud(r) and not _absent(r) for r in state.readings):
         status = REASON_CG_AUDIO
+    elif any(_loud(r) for r in state.readings):
+        status = STATUS_NOT_IN_PROGRAM
     elif state.home is False:
         status = "away"
     elif not state.readings or any(_unreceivable(r) for r in state.readings):
@@ -193,9 +219,23 @@ def payload_block(state: CgState | None) -> dict | None:
         "silent_below_dbfs": pa.SILENT_RMS_DBFS,
         "sources": [{"name": r.source, "level_dbfs": _round1(r.level_dbfs),
                      "audio_age_s": _round1(r.audio_age_s), "connections": r.connections,
-                     **({"error": r.error} if r.error else {})}
+                     **({"error": r.error} if r.error else {}),
+                     **_correlation_fields(r.correlation)}
                     for r in state.readings],
     }
+
+
+def _correlation_fields(c: pcc.Correlation | None) -> dict:
+    """The additive per-source keys: `in_program` PRESENT / ABSENT / UNDECIDED (absent = not asked:
+    the source was not heard), its peak `ncc`, `lag_ms` and, undecided, `why`."""
+    if c is None:
+        return {}
+    out = {"in_program": c.kind,
+           "ncc": None if c.ncc is None else round(float(c.ncc), 3),
+           "lag_ms": None if c.lag_ms is None else round(float(c.lag_ms), 1)}
+    if c.why:
+        out["why"] = c.why
+    return out
 
 
 # ------------------------------------------------------------------ the thread side
@@ -220,6 +260,7 @@ class CgSourceMonitor:
         self._levels: deque[tuple[float, float]] = deque()
         self._last_audio: float | None = None
         self._error: str | None = None
+        self.ring = pcc.AudioRing(mono=True)  # the audio itself, for the in-program correlation
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -240,6 +281,8 @@ class CgSourceMonitor:
         if block is None or block.sample_rate <= 0 or block.samples.shape[0] == 0:
             return
         level = block_level_dbfs(block.samples)
+        self.ring.push(getattr(block, "timestamp", pa.NDI_TIMESTAMP_UNDEFINED), block.samples,
+                       block.sample_rate)
         t = self._mono()
         with self._lock:
             self._error = None
@@ -349,8 +392,11 @@ def close_arm(arm: "CgArm", log: Callable[[str], None]) -> None:
 def start_line(arm: "CgArm") -> str:
     """The sampler's one start line about the CG arm."""
     return (f"program-audio sampler: CG arm box={arm.box} sources={arm.sources} foreign at >= "
-            f"{pa.SILENT_RMS_DBFS:g} dBFS (the loudest block over {LEVEL_WINDOW_S:g} s, home or away), "
-            f"unknown after {CG_NO_AUDIO_S:g} s without audio while obs_fleet_is_home")
+            f"{pa.SILENT_RMS_DBFS:g} dBFS (the loudest block over {LEVEL_WINDOW_S:g} s, home or away) "
+            f"unless measured not in the stream program (whitened ncc < {pcc.DETECT_NCC:g} over "
+            f"{pcc.PASS_LO_HZ:g}-{pcc.PASS_HI_HZ:g} Hz, lag {pcc.LAG_MIN_MS:+g}..{pcc.LAG_MAX_MS:+g} ms, "
+            f"{pcc.PROGRAM_SEGMENT_S:g} s), unknown after {CG_NO_AUDIO_S:g} s without audio while "
+            "obs_fleet_is_home")
 
 
 class CgArm:
@@ -365,8 +411,19 @@ class CgArm:
     def sources(self) -> list[str]:
         return [m.source for m in self.monitors]
 
-    def state(self, now: float | None = None) -> CgState:
-        return CgState(self.box, self.home_probe.home, tuple(m.reading(now) for m in self.monitors))
+    def state(self, now: float | None = None, program: pcc.AudioRing | None = None) -> CgState:
+        """Every source's reading; with the stream program's ring, each source heard at or over the
+        silence bar also carries its in-program correlation (program_audio_cg_corr.judge)."""
+        readings = []
+        prog = None if program is None else program.snapshot()
+        for m in self.monitors:
+            r = m.reading(now)
+            if prog is not None and _loud(r):
+                cg_frames, cg_bad = m.ring.snapshot()
+                r = r._replace(correlation=pcc.judge(prog[0], cg_frames, program_bad_stamp=prog[1],
+                                                     cg_bad_stamp=cg_bad))
+            readings.append(r)
+        return CgState(self.box, self.home_probe.home, tuple(readings))
 
     def start(self) -> None:
         self.home_probe.start()
