@@ -299,7 +299,7 @@ def test_the_current_address_is_kept_while_dev1_still_announces_it(tmp_path):
 
 def test_a_crlf_foreign_dev1_line_is_named():
     r = _bash("obs_box_lease_host_foreign", stdin="10.77.9.109 dev1\r\n127.0.0.1 localhost\r\n")
-    assert r.stdout == "10.77.9.109 dev1\r\n"
+    assert r.stdout.splitlines() == ["10.77.9.109 dev1"]  # text=True folds the \r\n
 
 
 def test_the_service_is_sandboxed_but_can_write_etc():
