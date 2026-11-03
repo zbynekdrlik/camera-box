@@ -30,7 +30,7 @@ class Rig:
     """Fake tools on PATH: getent answers from files, systemctl/apt-get log their argv, curl prints a code."""
 
     def __init__(self, tmp, ahosts=GETENT_LIVE, hosts_answer="10.77.9.195     dev1\n", code="200",
-                 timer="enabled/active"):
+                 timer="enabled/active", nss_installed=True, apt_rc=0):
         self.tmp = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir()
@@ -45,8 +45,9 @@ class Rig:
               'case "$1" in is-enabled) echo %s;; is-active) echo %s;; start) [ -e %s/start-fails ] && exit 1;; esac\nexit 0\n'
               % (self.log, en, act, tmp))
         _exec(self.bin / "curl", '#!/bin/bash\necho "curl $*" >> %s\nprintf %s\n' % (self.log, code))
-        _exec(self.bin / "dpkg-query", '#!/bin/bash\nprintf "install ok installed"\n')
-        _exec(self.bin / "apt-get", '#!/bin/bash\necho "apt-get $*" >> %s\n' % self.log)
+        _exec(self.bin / "dpkg-query", '#!/bin/bash\n%s\n' % (
+            'printf "install ok installed"' if nss_installed else 'echo "no packages found" >&2; exit 1'))
+        _exec(self.bin / "apt-get", '#!/bin/bash\necho "apt-get $*" >> %s\nexit %d\n' % (self.log, apt_rc))
         self.sbin = tmp / "sbin"
         self.units = tmp / "units"
         self.sbin.mkdir()
@@ -207,7 +208,122 @@ def test_a_foreign_dev1_line_is_kept_and_named(tmp_path):
     assert "unmanaged line" in r.stderr and "10.77.9.109 dev1" in r.stderr
 
 
+# --- review round 1: a failed step never writes, edge inputs ---------------------------------------------
+def _hosts(tmp, text="127.0.0.1 localhost\n10.77.9.1 gw\n"):
+    hosts = tmp / "hosts"
+    hosts.write_text(text)
+    hosts.chmod(0o644)
+    return hosts
+
+
+def _unchanged(hosts, text, ino):
+    assert hosts.read_text() == text and hosts.stat().st_ino == ino
+
+
+def test_a_failing_render_never_truncates_the_hosts_file(tmp_path):
+    rig = Rig(tmp_path)
+    script = _script(tmp_path)
+    _exec(rig.bin / "awk", '#!/bin/bash\nexit 2\n')
+    hosts = _hosts(tmp_path)
+    ino = hosts.stat().st_ino
+    r = _run(script, hosts, rig)
+    assert r.returncode == 1 and "written" not in r.stdout, (r.stdout, r.stderr)
+    _unchanged(hosts, "127.0.0.1 localhost\n10.77.9.1 gw\n", ino)
+
+
+def test_a_render_that_drops_lines_is_refused(tmp_path):
+    rig = Rig(tmp_path)
+    script = _script(tmp_path)
+    _exec(rig.bin / "awk", '#!/bin/bash\ncat >/dev/null\nexit 0\n')  # prints nothing, exit 0
+    hosts = _hosts(tmp_path)
+    ino = hosts.stat().st_ino
+    r = _run(script, hosts, rig)
+    assert r.returncode == 1 and "refused" in r.stderr, r.stderr
+    _unchanged(hosts, "127.0.0.1 localhost\n10.77.9.1 gw\n", ino)
+
+
+def test_a_failed_write_leaves_no_temp_file_and_the_hosts_file_unchanged(tmp_path):
+    rig = Rig(tmp_path)
+    script = _script(tmp_path)
+    _exec(rig.bin / "mv", '#!/bin/bash\nexit 1\n')
+    hosts = _hosts(tmp_path)
+    ino = hosts.stat().st_ino
+    r = _run(script, hosts, rig)
+    assert r.returncode == 1 and "cannot write" in r.stderr
+    _unchanged(hosts, "127.0.0.1 localhost\n10.77.9.1 gw\n", ino)
+    assert not [p for p in tmp_path.iterdir() if ".lease-host." in p.name]
+
+
+def test_a_temp_file_a_killed_run_left_is_swept(tmp_path):
+    rig = Rig(tmp_path)
+    hosts = _hosts(tmp_path, "127.0.0.1 localhost\n" + STOPGAP)
+    stale = tmp_path / ".hosts.lease-host.AbC123"
+    stale.write_text("half")
+    keep = tmp_path / ".hosts.other"
+    keep.write_text("x")
+    assert _run(_script(tmp_path), hosts, rig).returncode == 0
+    assert not stale.exists() and keep.exists()
+
+
+def test_a_symlinked_or_relative_hosts_path_is_refused(tmp_path):
+    rig = Rig(tmp_path)
+    script = _script(tmp_path)
+    real = _hosts(tmp_path)
+    link = tmp_path / "hosts-link"
+    link.symlink_to(real)
+    r = _run(script, link, rig)
+    assert r.returncode == 1 and "symlink" in r.stderr and link.is_symlink()
+    r = subprocess.run(["bash", str(script), "hosts"], capture_output=True, text=True, cwd=tmp_path,
+                       env=dict(os.environ, **rig.env()), timeout=60)
+    assert r.returncode == 1 and "absolute" in r.stderr
+    assert real.read_text() == "127.0.0.1 localhost\n10.77.9.1 gw\n"
+
+
+def test_the_written_address_is_a_normalised_dotted_quad(tmp_path):
+    r = _pick("010.077.009.195 STREAM dev1.local\n")
+    assert r.returncode == 0 and r.stdout == "10.77.9.195\n"
+
+
+def test_the_current_address_is_kept_while_dev1_still_announces_it(tmp_path):
+    answer = "10.77.9.231 STREAM dev1.local\n10.77.9.195 STREAM\n"
+    r = _bash("obs_box_lease_host_pick 10.77.9.204 23 10.77.9.195", stdin=answer)
+    assert r.stdout == "10.77.9.195\n"
+    r = _bash("obs_box_lease_host_pick 10.77.9.204 23 10.77.9.7", stdin=answer)
+    assert r.stdout == "10.77.9.231\n"
+    rig = Rig(tmp_path, ahosts=answer)
+    hosts = _hosts(tmp_path, "127.0.0.1 localhost\n" + STOPGAP)
+    ino = hosts.stat().st_ino
+    assert _run(_script(tmp_path), hosts, rig).returncode == 0
+    _unchanged(hosts, "127.0.0.1 localhost\n" + STOPGAP, ino)
+
+
+def test_a_crlf_foreign_dev1_line_is_named():
+    r = _bash("obs_box_lease_host_foreign", stdin="10.77.9.109 dev1\r\n127.0.0.1 localhost\r\n")
+    assert r.stdout == "10.77.9.109 dev1\r\n"
+
+
+def test_the_service_is_sandboxed_but_can_write_etc():
+    svc = _bash("obs_box_lease_host_service_text").stdout
+    for line in ("ProtectSystem=full", "ReadWritePaths=/etc", "NoNewPrivileges=yes", "PrivateTmp=yes",
+                 "ProtectHome=yes"):
+        assert "\n%s\n" % line in svc, line
+
+
 # --- the install (setup-strih step 16l) ---------------------------------------------------------------
+def test_install_adds_nss_mdns_when_missing_and_fails_when_apt_fails(tmp_path):
+    a = tmp_path / "a"
+    a.mkdir()
+    rig = Rig(a, nss_installed=False)
+    r = _bash("obs_box_lease_host_install", env=rig.env())
+    assert r.returncode == 0 and "apt-get install -y libnss-mdns" in rig.calls(), r.stderr
+    b = tmp_path / "b"
+    b.mkdir()
+    rig = Rig(b, nss_installed=False, apt_rc=100)
+    r = _bash("obs_box_lease_host_install || echo RC=$?", env=rig.env())
+    assert "RC=1" in r.stdout and "libnss-mdns failed" in r.stderr
+    assert not list(rig.units.iterdir()) and "systemctl" not in rig.calls()
+
+
 def test_install_writes_the_files_enables_the_timer_and_refreshes_once(tmp_path):
     rig = Rig(tmp_path)
     r = _bash("obs_box_lease_host_install", env=rig.env())
