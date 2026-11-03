@@ -419,6 +419,7 @@ strih_home_ownership_grade "$USER_HOME"   # issue 1412: a root-owned ~/.config l
 if WHY="$(obs_box_step_applies 3-nvenc)"; then   # issue 1412: the stream role grades its own encoder
 { ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"; obs_box_strih_profile_grade "${USER_HOME}/.config/obs-studio/basic/profiles/$(strih_lx_obs_profile)"
 else obs_box_stream_encoder_grade "${USER_HOME}/.config/obs-studio/basic/profiles/$(strih_lx_obs_profile)"; obs_box_stream_dev_grade "$HERE"; obs_box_stream_restreamer_host_grade; fi
+obs_box_lease_host_grade   # issue 1474: dev1 (the rig-lease host) resolves on the box and answers 200
 
 # 12) single timesync authority (dantesync only).
 UNITS="$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null | awk '{print $1}')"
