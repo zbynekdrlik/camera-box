@@ -362,7 +362,7 @@ else
   AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/null || echo absent)"
   if systemctl is-active intercom-hub >/dev/null 2>&1; then   # hub active (M4+): the real program-feed rx off /api/state
     if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
-         | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp
+         | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="foh_dante"] or [p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp; issue 1485: a Dante box feeds from foh_dante, fohabl routed nowhere
       AUDIO_RX=1
     else
       AUDIO_RX=0
