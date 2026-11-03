@@ -158,6 +158,7 @@ def _install(tmp, box="strih-snv"):
     b = tmp / "bin"
     b.mkdir(exist_ok=True)
     stub(b, "visudo", "exit 0\n")
+    stub(b, "systemctl", 'printf "%%s\\n" "$*" >> "%s"\n' % (tmp / "systemctl.log"))
     env.update({"STRIH_DANTE_INPUT_TOML": str(tmp / "home" / ".camera-box" / "dante-input.toml"),
                 "STRIH_DANTE_INPUT_IFACE": "enp7s0.70", "STRIH_DANTE_INPUT_SITE_FILE": str(site),
                 "PATH": "%s:%s" % (b, os.environ["PATH"])})
@@ -181,13 +182,23 @@ def test_a_dante_box_writes_both_manager_defaults_off_the_reserved_cpu(tmp_path)
     assert obs == "2-14"
     assert "systemd + user managers default to CPUs 0-14 (CPU 15 only for the two dstack threads)" in r.stdout
     assert "at the latest the next boot; running processes keep their masks until they restart" in r.stdout
-    # re-run: nothing rewritten, and setup never re-executes a manager or moves a live process
+    # issue 1485, live 3.11.2026: a changed drop-in re-executes PID 1 and the operator's user manager
+    # (daemon-reexec reads system.conf.d / user.conf.d; no unit restarts), so new processes start off the
+    # reserved CPU without a reboot
+    log = tmp_path / "systemctl.log"
+    user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+    calls = log.read_text().splitlines()
+    assert "daemon-reexec" in calls, calls
+    assert "--user -M %s@ daemon-reexec" % user in calls, calls
+    assert "re-read: PID 1 + the user manager of %s re-executed (daemon-reexec)" % user in r.stdout
+    # re-run: nothing rewritten, no re-exec, and setup never moves a live process
+    log.write_text("")
     _, r = _install(tmp_path)
     assert r.returncode == 0 and r.stdout.count("dante-reserved-cpu: ") >= 3
     assert "dante-reserved-cpu: %s unchanged" % (root / SYSTEM_DROPIN) in r.stdout
     assert "dante-reserved-cpu: %s unchanged" % (root / USER_DROPIN) in r.stdout
+    assert "daemon-reexec" not in log.read_text()
     s = LIB.read_text()
-    assert "daemon-reexec" not in s.replace("never daemon-reexecs", "").replace("Never a daemon-reexec", "")
     assert "taskset -a -p" not in s.split("strih_dante_reserved_cpu_grade() {")[0]
 
 
