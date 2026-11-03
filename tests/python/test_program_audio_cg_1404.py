@@ -187,11 +187,21 @@ def test_an_empty_source_list_while_home_is_unknown():
     assert v == "UNKNOWN" and "no CG source declared" in r
 
 
-def test_away_is_not_graded_whatever_the_sources_say():
-    st = _state(_reading(SP, -10.0), _reading(CGOBS, None, None, 0), home=False)
+def test_away_an_unheard_source_is_not_graded():
+    st = _state(_reading(SP), _reading(CGOBS, None, None, 0), home=False)
     assert pcg.overlay("MEASUREMENT", None, st) == ("MEASUREMENT", None)
+    assert pcg.overlay("SILENT", None, st) == ("SILENT", None)
     block = pcg.payload_block(st)
     assert block["graded"] is False and block["home"] is False and block["status"] == "away"
+
+
+def test_cg_audio_actually_received_is_foreign_even_when_the_probe_reads_away():
+    """The home probe reads the cg OBS's OBS-WS; SongPlayer can play while that OBS is down, and the
+    probe lags by up to its interval. Audio the sampler really receives is on this LAN (review)."""
+    st = _state(_reading(SP, -25.0), _reading(CGOBS, None, None, 0), home=False)
+    v, r = pcg.overlay("MEASUREMENT", None, st)
+    assert v == "FOREIGN" and r.startswith("cg-audio: 'RESOLUME-SNV (SP-program)' at -25.0 dBFS")
+    assert pcg.payload_block(st)["status"] == "cg-audio"
 
 
 def test_not_probed_yet_counts_as_home():
@@ -441,7 +451,7 @@ def test_an_unheard_cg_source_makes_the_measurement_unknown(tmp_path):
 
 
 def test_away_the_loop_is_byte_identical_except_the_cg_block(tmp_path):
-    with_arm = _run(tmp_path / "a", _FakeArm(_state(_reading(SP, -5.0), home=False)))
+    with_arm = _run(tmp_path / "a", _FakeArm(_state(_reading(SP), _reading(CGOBS, None, None, 0), home=False)))
     without = []
     blocks = _tone_blocks(12.0)
     (tmp_path / "b").mkdir()
@@ -524,8 +534,12 @@ def test_the_guard_refuses_cg_audio_its_latch_and_an_unheard_source(tmp_path):
     _run(tmp_path / "clean", _FakeArm(_state()), seconds=6.0)
     assert _guard(_served_file(tmp_path, tmp_path / "clean", "clean.json"))[0] == 0
 
-    _run(tmp_path / "away", _FakeArm(_state(_reading(SP, -5.0), home=False)), seconds=6.0)
+    _run(tmp_path / "away", _FakeArm(_state(_reading(SP), _reading(CGOBS, None, None, 0), home=False)),
+         seconds=6.0)
     assert _guard(_served_file(tmp_path, tmp_path / "away", "away.json"))[0] == 0
+
+    _run(tmp_path / "away-loud", _FakeArm(_state(_reading(SP, -5.0), home=False)), seconds=6.0)
+    assert _guard(_served_file(tmp_path, tmp_path / "away-loud", "away-loud.json"))[0] == 1
 
 
 def _real_guard_fakes(tmp_path, payload_file):

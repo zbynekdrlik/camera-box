@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import socket
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -201,10 +202,35 @@ def fleet_is_home(name: str, resolve: Callable[[str], str] | None = None,
     if check != "traveling":
         return False
     host = fleet_host(name)
+    if resolve is None and os.environ.get("OBS_FLEET_RESOLVE_CMD"):
+        resolve = _seam_resolve
     if not host or not (resolve or _resolve)(host):
         return False
     port = int(os.environ.get("OBS_FLEET_HOME_PORT") or DEFAULT_HOME_PORT)
     if probe is not None:
         return bool(probe(host, port))
+    if os.environ.get("OBS_FLEET_STATUS_PROBE_CMD"):
+        return _seam_probe(host, port)
     timeout_s = float(os.environ.get("OBS_FLEET_STATUS_TIMEOUT") or DEFAULT_STATUS_TIMEOUT_S)
     return _status_probe(host, port, timeout_s)
+
+
+def _seam_resolve(host: str) -> str:
+    """obs-fleet.sh's OBS_FLEET_RESOLVE_CMD seam (`<cmd> <host>` -> its first output line, '' when
+    it prints nothing or cannot run: not resolvable, like the bash lib)."""
+    try:
+        r = subprocess.run([os.environ["OBS_FLEET_RESOLVE_CMD"], host], capture_output=True, text=True,
+                           timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    lines = r.stdout.splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def _seam_probe(host: str, port: int) -> bool:
+    """obs-fleet.sh's OBS_FLEET_STATUS_PROBE_CMD seam (`<cmd> <host> <port>`, exit 0 = answers)."""
+    try:
+        return subprocess.run([os.environ["OBS_FLEET_STATUS_PROBE_CMD"], host, str(port)],
+                              capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False

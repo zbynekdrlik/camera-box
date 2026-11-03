@@ -64,9 +64,9 @@ time" and "dev1's own wall-clock step" mean strih-snv's own.
   smallest offset over them: bridged or a restart, as before.
 * CG ARM (issue 1404, the 3.11.2026 Content ID claim): the sampler also receives, audio-only, the
   CG chain's own NDI senders (scripts/program_audio_cg.py: `RESOLUME-SNV (SP-program)` +
-  `RESOLUME-SNV (cg-obs)`, from the one declaration there). While the CG box is home, any of them at
-  or over the -60 dBFS silence bar turns the window FOREIGN (`cg-audio`, latched), and one not heard
-  turns a MEASUREMENT/SILENT window UNKNOWN; away = not graded. The payload carries a `cg` block.
+  `RESOLUME-SNV (cg-obs)`, from the one declaration there). Any of them heard at or over the
+  -60 dBFS silence bar turns the window FOREIGN (`cg-audio`, latched); while the CG box is home, one
+  not heard turns a MEASUREMENT/SILENT window UNKNOWN. The payload carries a `cg` block.
 
 Usage (systemd/program-audio-sampler.strih-snv.service, installed by setup-strih step 16e):
   program_audio_sampler.py [--source "STREAM-SNV (stream)"] [--serve-dir DIR] [--lib PATH]
@@ -357,7 +357,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
 
     def with_cg(verdict, reason):
         """The window's (verdict, reason, CG state) after the CG arm (issue 1404, the 3.11.2026
-        claim): CG audio = FOREIGN `cg-audio`, a CG source not heard while home = UNKNOWN."""
+        claim): CG audio heard = FOREIGN `cg-audio`, a CG source not heard while home = UNKNOWN."""
         if cg is None:
             return verdict, reason, None
         st = cg.state()
@@ -887,31 +887,24 @@ def main(argv=None) -> int:
     try:
         # The CG receivers first (issue 1404, the CG arm: audio-only, the same binding), then the
         # stream program's own; a receiver that cannot be created closes the ones before it.
-        cg_receivers = []
+        cg = None
         try:
-            for name in cg_names:
-                cg_receivers.append(pan.NdiAudioReceiver(name, lib_path=args.lib))
+            cg = pcg.open_arm(cg_box, cg_names, lambda name: pan.NdiAudioReceiver(name, lib_path=args.lib))
             receiver = pan.NdiAudioReceiver(args.source, lib_path=args.lib)
         except (OSError, RuntimeError) as exc:
-            for r in cg_receivers:
-                r.close()
+            if cg is not None:
+                pcg.close_arm(cg, log)
             set_unknown(f"sampler cannot receive: {exc}")
             log(f"program-audio sampler: FATAL cannot create the NDI receiver: {exc}")
             return 1
-        cg = pcg.CgArm(cg_box, [pcg.CgSourceMonitor(r, n) for r, n in zip(cg_receivers, cg_names)],
-                       pcg.HomeProbe(cg_box))
-        log(f"program-audio sampler: CG arm box={cg_box} sources={cg.sources} "
-            f"foreign at >= {pa.SILENT_RMS_DBFS:g} dBFS (the loudest block over {pcg.LEVEL_WINDOW_S:g} s), "
-            f"unknown after {pcg.CG_NO_AUDIO_S:g} s without audio while home, graded only while "
-            "obs_fleet_is_home")
+        log(pcg.start_line(cg))
         http = None
         if args.http_port:
             try:
                 server = pah.make_server(args.http_bind, args.http_port, args.serve_dir)
             except OSError as exc:
                 receiver.close()
-                for r in cg_receivers:
-                    r.close()
+                pcg.close_arm(cg, log)
                 set_unknown(f"sampler cannot serve http on {args.http_bind}:{args.http_port}: {exc}")
                 log(f"program-audio sampler: FATAL cannot serve http on {args.http_bind}:{args.http_port}: {exc}")
                 return 1
@@ -932,8 +925,8 @@ def main(argv=None) -> int:
         # next capture call (design issue 1404 comment 6037613222).
         cap = pac.CaptureThread(receiver, timeout_ms=CAPTURE_TIMEOUT_MS)
         cap.start()
-        cg.start()
         try:
+            cg.start()
             run(receiver, args.serve_dir, source=args.source, decoder=decoder, capture=cap,
                 should_stop=lambda: stop["signal"] is not None, cg=cg)
         finally:
@@ -943,13 +936,7 @@ def main(argv=None) -> int:
                 log("program-audio sampler: ERROR the capture thread is still inside the NDI capture call -- "
                     "the receiver is left to the process exit (destroying it under a running capture "
                     "would crash the SDK)")
-            stopped = cg.stop()
-            for m in cg.monitors:
-                if m in stopped:
-                    m.receiver.close()
-                else:
-                    log(f"program-audio sampler: ERROR the CG capture thread of {m.source!r} is still inside "
-                        "the NDI capture call -- its receiver is left to the process exit")
+            pcg.close_arm(cg, log)
             set_unknown("sampler stopped")
             if http is not None:
                 pah.stop(*http)

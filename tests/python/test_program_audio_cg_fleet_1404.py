@@ -105,6 +105,24 @@ def test_the_live_home_check_matches_the_bash_lib(clean_env, tmp_path, name, res
         assert probed == []
 
 
+@pytest.mark.parametrize("resolves, answers", [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize("name", NAMES)
+def test_the_python_twin_honours_the_bash_seams_too(clean_env, tmp_path, name, resolves, answers):
+    """OBS_FLEET_RESOLVE_CMD / OBS_FLEET_STATUS_PROBE_CMD steer BOTH sides, so an ops or test override
+    reads the same in python and bash (review)."""
+    resolve_cmd = _stub(tmp_path, "resolve", 'echo 10.0.0.9' if resolves else 'exit 0')
+    probe_cmd = _stub(tmp_path, "probe", f'echo "$1 $2" >> "{tmp_path}/probed"; exit {0 if answers else 1}')
+    clean_env.setenv("OBS_FLEET_RESOLVE_CMD", resolve_cmd)
+    clean_env.setenv("OBS_FLEET_STATUS_PROBE_CMD", probe_cmd)
+    env = _env(OBS_FLEET_RESOLVE_CMD=resolve_cmd, OBS_FLEET_STATUS_PROBE_CMD=probe_cmd)
+    bash_home = _bash("obs_fleet_is_home", name, env)[1] == 0
+    bash_probed = (tmp_path / "probed").read_text() if (tmp_path / "probed").exists() else ""
+    (tmp_path / "probed").unlink(missing_ok=True)
+    assert oft.fleet_is_home(name) == bash_home
+    py_probed = (tmp_path / "probed").read_text() if (tmp_path / "probed").exists() else ""
+    assert py_probed == bash_probed
+
+
 def test_the_traveling_cg_box_is_probed_on_its_obs_ws_port(clean_env):
     seen = []
     assert oft.fleet_is_home("resolume-snv", resolve=lambda h: "10.77.9.201",

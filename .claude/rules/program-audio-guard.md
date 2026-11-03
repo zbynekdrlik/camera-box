@@ -32,6 +32,7 @@ paths:
   - "tests/python/test_strih_program_audio_1404.py"
   - "tests/python/test_program_audio_cg_1404.py"
   - "tests/python/test_program_audio_cg_fleet_1404.py"
+  - "tests/python/test_program_audio_cg_main_1404.py"
 ---
 
 # The stream program-audio guard + the cam2 marker mirror (issue 1404)
@@ -128,8 +129,17 @@ reach the stream. `scripts/program_audio_cg.py`:
   `OBS_FLEET_IDENTITY` (`RESOLUME-SNV`). So the sources are `RESOLUME-SNV (SP-program)` and
   `RESOLUME-SNV (cg-obs)`. `PROGRAM_AUDIO_CG_SOURCES` (`|`-separated full names) overrides for ops and
   tests. A box with no declared computer name is FATAL at start (UNKNOWN + exit 1), never a guess.
+  The cg OBS's third output `RESOLUME-SNV (CG OVERLAY)` is NOT declared: read 3.11.2026 it connects
+  and delivers no audio frame at all, so it would read unreceivable for good.
+- **strih-snv finds them by mDNS** (the sampler's private empty NDI config): `avahi-browse -tpr
+  _ndi._tcp` on strih-snv, 3.11.2026, lists `RESOLUME-SNV (SP-program)` :5961, `(cg-obs)` :5962 and
+  `(CG OVERLAY)` :5963 at 10.77.9.201 (and 10.77.7.107). After a deploy, read the endpoint's `cg`
+  block: both sources must show `connections` 1 and a small `audio_age_s`.
 - **The receivers:** one more audio-only `NdiAudioReceiver` per source (the same binding, mDNS only),
-  created before the stream one in `main()`. Each runs in its own `CgSourceMonitor` thread that only
+  created before the stream one in `main()` through `program_audio_cg.open_arm` (a failed receiver
+  closes the ones before it), started inside the run's `try`, and stopped + closed by `close_arm`
+  (a receiver whose capture thread is still in the SDK call is never closed). The wiring is pinned
+  by `tests/python/test_program_audio_cg_main_1404.py` with fakes for every SDK piece. Each runs in its own `CgSourceMonitor` thread that only
   captures and keeps each block's level with its arrival time. Read live from dev1 on 3.11.2026
   (8 s, read-only): both senders deliver audio frames continuously (190 / 51 frames), SP-program
   -35.1 dBFS, cg-obs -10.3 dBFS at that moment.
@@ -139,13 +149,15 @@ reach the stream. `scripts/program_audio_cg.py`:
   a window average.
 - **The decision** (`overlay`, pure), applied by the sampler to EVERY window it writes, the no-audio
   UNKNOWN included:
-  - the CG box away -> not graded (`cg.graded` false, `status` `away`), the window unchanged;
-  - home (or not probed yet: counted as home, fail closed) and any source at or over
-    `program_audio.SILENT_RMS_DBFS` (-60, never retyped) -> FOREIGN, reason
-    `cg-audio: '<source>' at <x> dBFS -- the CG box ... carries audio ...`. The sampler's `write()`
-    latches every FOREIGN, so the guard keeps exit 1 for its latch hold (30 s). A stream FOREIGN that
-    already has a reason keeps it;
-  - home and a source with no audio block for `CG_NO_AUDIO_S` (5 s = the sampler's
+  - any source HEARD at or over `program_audio.SILENT_RMS_DBFS` (-60, never retyped) -> FOREIGN,
+    reason `cg-audio: '<source>' at <x> dBFS -- the CG box ... carries audio ...`, home or away
+    (review): audio the sampler really receives is on this LAN, the home probe reads only the cg
+    OBS's OBS-WS (SongPlayer can play while that OBS is down) and lags up to 30 s. The sampler's
+    `write()` latches every FOREIGN, so the guard keeps exit 1 for its latch hold (30 s). A stream
+    FOREIGN that already has a reason keeps it;
+  - the CG box away -> the not-receivable rule below is not graded (`cg.graded` false, `status`
+    `away`), the window otherwise unchanged;
+  - home (or not probed yet: counted as home, fail closed) and a source with no audio block for `CG_NO_AUDIO_S` (5 s = the sampler's
     `NO_AUDIO_TIMEOUT_S`), an error frame / a broken capture, or a non-finite sample -> UNKNOWN over a
     MEASUREMENT/SILENT window (`cg source not receivable while the CG box ... is home`), never over a
     stream FOREIGN or UNKNOWN;
@@ -153,7 +165,8 @@ reach the stream. `scripts/program_audio_cg.py`:
 - **Home = `obs_fleet_is_home` semantics**, through the python twin in `scripts/obs_fleet_table.py`
   (`fleet_is_home`: the `OBS_FLEET_HOME` force-list, `always` / `retired` / `traveling` = resolves AND
   OBS-WS :4455 answers; parity with the bash lib pinned by `tests/python/test_program_audio_cg_fleet_1404.py`
-  through the lib's resolve/probe seams). A `HomeProbe` thread probes every 30 s, so a DNS lookup or a
+  through the lib's resolve/probe seams, which the twin reads too: `OBS_FLEET_RESOLVE_CMD`,
+  `OBS_FLEET_STATUS_PROBE_CMD`). A `HomeProbe` thread probes every 30 s, so a DNS lookup or a
   TCP connect never stalls the consumer. Away at an event = not graded: the CG box then is not on our
   LAN, so its audio cannot be on our mbc either. No identity check (`obs_fleet_poll_now`'s ssh
   `hostname`) here: the probe runs every 30 s on a production box.

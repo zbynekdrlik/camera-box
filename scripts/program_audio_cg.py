@@ -18,17 +18,22 @@ so a source is `<identity> (<output>)` = `RESOLUME-SNV (SP-program)` / `RESOLUME
 `PROGRAM_AUDIO_CG_SOURCES` (`|`-separated full NDI names) overrides the list for ops and tests.
 
 The decision (`overlay`, pure), applied to every window the sampler writes:
-  * the CG box AWAY (obs_fleet_is_home semantics: a traveling box is home only when its host
-    resolves AND its OBS-WS :4455 answers) -> the arm is not graded; the payload names it;
-  * home (or not yet probed: fail closed) and any CG source's loudest audio block over the trailing
-    LEVEL_WINDOW_S at or over program_audio.SILENT_RMS_DBFS (-60) -> FOREIGN, reason
-    `cg-audio: '<source>' at <x> dBFS ...`. The sampler's write() latches every FOREIGN
-    (`last_foreign_ts_utc`), so the guard keeps refusing for its latch hold;
-  * home and a CG source with no audio frame for CG_NO_AUDIO_S (5 s, the sampler's own no-audio
-    timeout) -> UNKNOWN over a MEASUREMENT/SILENT window (the guard fails closed, exit 2): a CG source
-    we cannot hear cannot be proven silent. A stream FOREIGN or UNKNOWN keeps its own verdict.
-  * nothing to say (away, or every source heard and under the bar) -> the window's verdict and
-    reason unchanged, byte for byte.
+  * any CG source's loudest audio block over the trailing LEVEL_WINDOW_S at or over
+    program_audio.SILENT_RMS_DBFS (-60) -> FOREIGN, reason `cg-audio: '<source>' at <x> dBFS ...`,
+    home or away: audio the sampler really RECEIVES from a CG sender is on this LAN (the home probe
+    reads the cg OBS's OBS-WS, and SongPlayer can play while that OBS is down; the probe also lags by
+    up to HOME_PROBE_INTERVAL_S). The sampler's write() latches every FOREIGN (`last_foreign_ts_utc`),
+    so the guard keeps refusing for its latch hold;
+  * the CG box home (obs_fleet_is_home semantics: a traveling box is home only when its host
+    resolves AND its OBS-WS :4455 answers; not probed yet = home, fail closed) and a CG source with no
+    audio frame for CG_NO_AUDIO_S (5 s, the sampler's own no-audio timeout) -> UNKNOWN over a
+    MEASUREMENT/SILENT window (the guard fails closed, exit 2): a CG source we cannot hear cannot be
+    proven silent. A stream FOREIGN or UNKNOWN keeps its own verdict. AWAY, this rule is not graded
+    (a traveling box at another venue is not receivable at all); the payload names it;
+  * nothing to say -> the window's verdict and reason unchanged, byte for byte.
+
+The CG box's third NDI output, `RESOLUME-SNV (CG OVERLAY)`, is NOT declared: read 3.11.2026 from dev1 it
+connects and delivers no audio frame at all, so it would read unreceivable for good.
 
 The level is NOT the stream-side `analyse()` level: no tone line is removed (any CG audio is
 foreign, the measurement clip's 1 kHz bed included), and it is the LOUDEST NDI block (10 log10 of
@@ -137,12 +142,14 @@ def _unreceivable(r: CgReading) -> str | None:
 
 
 def graded(state: CgState | None) -> bool:
+    """Whether the not-receivable rule applies: the CG box is home or not probed yet. CG audio
+    actually received is FOREIGN either way."""
     return state is not None and state.home is not False
 
 
 def overlay(verdict: str, reason: str | None, state: CgState | None) -> tuple[str, str | None]:
     """The window's (verdict, reason) after the CG arm (rules in the module doc)."""
-    if not graded(state):
+    if state is None:
         return verdict, reason
     loud = [r for r in state.readings if _loud(r)]
     if loud:
@@ -150,7 +157,7 @@ def overlay(verdict: str, reason: str | None, state: CgState | None) -> tuple[st
                 + ", ".join(f"{r.source!r} at {r.level_dbfs:.1f} dBFS" for r in loud)
                 + f" -- the CG box {state.box} carries audio; only the cam2 marker may reach the stream")
         return "FOREIGN", (reason if verdict == "FOREIGN" and reason else text)
-    if verdict in ("MEASUREMENT", "SILENT"):
+    if graded(state) and verdict in ("MEASUREMENT", "SILENT"):
         deaf = [(r.source, why) for r in state.readings if (why := _unreceivable(r))]
         if not state.readings:
             deaf = [("(none)", "no CG source declared")]
@@ -170,10 +177,10 @@ def payload_block(state: CgState | None) -> dict | None:
     """The additive `cg` object of program-audio.json (None without a CG arm)."""
     if state is None:
         return None
-    if state.home is False:
-        status = "away"
-    elif any(_loud(r) for r in state.readings):
+    if any(_loud(r) for r in state.readings):
         status = REASON_CG_AUDIO
+    elif state.home is False:
+        status = "away"
     elif not state.readings or any(_unreceivable(r) for r in state.readings):
         status = "unreceivable"
     else:
@@ -310,6 +317,40 @@ class HomeProbe:
 
     def stop(self) -> None:
         self._stop.set()
+
+
+def open_arm(box: str, names: list[str], make_receiver: Callable[[str], object]) -> "CgArm":
+    """Create one receiver per CG source (`make_receiver(name)`, the sampler passes the audio-only
+    NdiAudioReceiver) and the arm over them, NOT started. A receiver that fails to create closes the
+    ones made before it and the error propagates."""
+    receivers = []
+    try:
+        for name in names:
+            receivers.append(make_receiver(name))
+    except BaseException:
+        for r in receivers:
+            r.close()
+        raise
+    return CgArm(box, [CgSourceMonitor(r, n) for r, n in zip(receivers, names)], HomeProbe(box))
+
+
+def close_arm(arm: "CgArm", log: Callable[[str], None]) -> None:
+    """Stop the arm and close each receiver whose capture thread left the SDK call (never one under
+    a running capture: that would crash the SDK; such a receiver is left to the process exit)."""
+    stopped = arm.stop()
+    for m in arm.monitors:
+        if m in stopped:
+            m.receiver.close()
+        else:
+            log(f"program-audio sampler: ERROR the CG capture thread of {m.source!r} is still inside the NDI "
+                "capture call -- its receiver is left to the process exit")
+
+
+def start_line(arm: "CgArm") -> str:
+    """The sampler's one start line about the CG arm."""
+    return (f"program-audio sampler: CG arm box={arm.box} sources={arm.sources} foreign at >= "
+            f"{pa.SILENT_RMS_DBFS:g} dBFS (the loudest block over {LEVEL_WINDOW_S:g} s, home or away), "
+            f"unknown after {CG_NO_AUDIO_S:g} s without audio while obs_fleet_is_home")
 
 
 class CgArm:
