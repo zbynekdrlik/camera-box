@@ -26,7 +26,7 @@ HUB_UNIT = SCRIPTS / "lib" / "strih-intercom-hub-unit.sh"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
 LEAKY = ("STRIH_DANTE_RX_PIN_ROOT", "STRIH_DANTE_RX_PIN_OWNER", "STRIH_DANTE_PTP_INTERCOM_PIN",
          "STRIH_DANTE_PTP_OBS_PIN", "STRIH_HUB_AMBIENT_CAPS", "STRIH_HUB_BOUNDING_CAPS", "STRIH_HUB_JOURNAL_FILE",
-         "STRIH_BOXES_DIR", "STRIH_LX_IP", "STRIH_NIC_IFACE", "STRIH_HUB_INVOCATION_ID")
+         "STRIH_BOXES_DIR", "STRIH_LX_IP", "STRIH_NIC_IFACE", "STRIH_HUB_INVOCATION_ID", "STRIH_HUB_JOURNAL_EUID")
 ROWS = 'ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; note() { echo "NOTE $*"; }\n'
 
 # the dstack lines as the obs release forwards them into the OBS log (the obs project, 4.11.2026)
@@ -164,13 +164,13 @@ def _owner():
     return "%s:%s" % (u, g)
 
 
-def _root(tmp, live="1024", obs="v0.6.23"):
+def _root(tmp, live="1024", obs="v0.6.23", intercom="v0.6.23"):
     root = tmp / "root"
     proc = root / "proc" / "sys" / "net" / "ipv4" / "ip_unprivileged_port_start"
     proc.parent.mkdir(parents=True)
     proc.write_text(live + "\n")
     return root, proc, root / "etc" / "sysctl.d" / "60-strih-dante-ptp-port.conf", \
-        dict(_pins(tmp, obs=obs), STRIH_DANTE_RX_PIN_ROOT=str(root), STRIH_DANTE_RX_PIN_OWNER=_owner())
+        dict(_pins(tmp, obs=obs, intercom=intercom), STRIH_DANTE_RX_PIN_ROOT=str(root), STRIH_DANTE_RX_PIN_OWNER=_owner())
 
 
 def test_the_dropin_text():
@@ -197,10 +197,24 @@ def test_below_the_threshold_install_grants_nothing_and_takes_ours_back(tmp_path
     r = _bash(". scripts/lib/obs-box-write.sh; strih_dante_ptp_port_install", env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert not f.exists() and proc.read_text() == "1024\n", r.stdout
-    assert "no 319 bind right yet" in r.stdout and "v0.6.19 is below v0.6.23" in r.stdout
+    assert "no 319 bind right yet" in r.stdout and "obs v0.6.19" in r.stdout and "below v0.6.23" in r.stdout
     _, proc2, f2, env2 = _root(tmp_path / "fresh", obs="v0.6.19")
     r = _bash(". scripts/lib/obs-box-write.sh; strih_dante_ptp_port_install", env=env2)
     assert r.returncode == 0 and not f2.exists() and proc2.read_text() == "1024\n", r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("obs,intercom", [("v0.6.23", "v0.6.19"), ("v0.6.19", "v0.6.23"), ("", "")])
+def test_the_bind_right_waits_for_every_dstack_on_the_box(tmp_path, obs, intercom):
+    """Review round 2 (red finding): the sysctl is box-wide, so the hub (an unprivileged operator process)
+    gets 319 too; an old hub dlink would start its follower beside dsync. Both pins must be READY."""
+    _, proc, f, env = _root(tmp_path, live="319", obs=obs, intercom=intercom)
+    f.parent.mkdir(parents=True)
+    f.write_text(DROPIN)
+    r = _bash(". scripts/lib/obs-box-write.sh; strih_dante_ptp_port_install", env=env)
+    assert r.returncode == 0 and not f.exists() and proc.read_text() == "1024\n", r.stdout + r.stderr
+    assert "no 319 bind right yet" in r.stdout, r.stdout
+    r = _bash("strih_dante_ptp_port_grade", env=env)
+    assert r.stdout.startswith("NOTE (program-dante) ptp-port: not set, "), r.stdout
 
 
 def test_install_fails_by_name_when_the_running_value_cannot_be_set(tmp_path):
@@ -243,7 +257,7 @@ def test_removing_ours_leaves_a_value_someone_else_set(tmp_path):
 def test_the_ptp_port_row_below_the_threshold(tmp_path):
     _, _, f, env = _root(tmp_path, live="1024", obs="v0.6.19")
     r = _bash("strih_dante_ptp_port_grade", env=env)
-    assert r.stdout.startswith("NOTE (program-dante) ptp-port: not set, the obs pin's dstack v0.6.19"), r.stdout
+    assert r.stdout.startswith("NOTE (program-dante) ptp-port: not set, the pins' dstack (intercom v0.6.23, obs v0.6.19)"), r.stdout
     f.parent.mkdir(parents=True)
     f.write_text(DROPIN)
     r = _bash("strih_dante_ptp_port_grade", env=env)
@@ -378,6 +392,27 @@ def test_an_unreadable_journal_is_named_never_read_as_no_line(tmp_path):
     assert r.returncode == 0, r.stderr
     assert r.stdout.startswith("BAD (intercom-dante) media clock: the hub's journal could not be read (rc 1"), r.stdout
     assert "no 'media clock source' line" not in r.stdout
+
+
+def test_a_seam_file_without_a_trailing_newline_is_still_read(tmp_path):
+    j = tmp_path / "journal.txt"
+    j.write_text("INFO dstack::clock::linked: media clock source source=Internal from=Service")
+    env = dict(_pins(tmp_path), STRIH_HUB_JOURNAL_FILE=str(j))
+    r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
+    assert r.stdout.startswith("OK (intercom-dante) media clock: source=Internal"), r.stdout + r.stderr
+
+
+def test_a_journal_read_as_non_root_says_so(tmp_path):
+    """journalctl exits 0 with only a permission hint for a user who may not read the system journal."""
+    b = tmp_path / "bin"
+    b.mkdir()
+    (b / "journalctl").write_text("#!/bin/sh\necho 'Hint: You are currently not seeing messages from other users' >&2\n")
+    (b / "journalctl").chmod(0o755)
+    env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="abc123", STRIH_HUB_JOURNAL_EUID="1000",
+               PATH="%s:%s" % (b, os.environ["PATH"]))
+    r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
+    assert r.stdout.startswith("BAD (intercom-dante) media clock: "), r.stdout
+    assert "run verify-strih as root" in r.stdout, r.stdout
 
 
 def test_the_journal_is_read_for_the_current_invocation_only(tmp_path):
