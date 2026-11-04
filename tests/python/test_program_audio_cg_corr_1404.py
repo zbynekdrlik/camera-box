@@ -398,6 +398,52 @@ def test_the_arm_correlates_each_heard_source_against_the_program():
     assert v == "FOREIGN" and CGOBS in r and SP not in r
 
 
+# E2E 41742028800 (4.11.2026 00:57-01:01): ten isolated windows read PRESENT at |ncc| 0.071-0.083 and
+# lags that jumped (+2734, -998, +623 ms) while mbc carried only the marker -- the null, not the song. A
+# real CG in the program correlates at ONE lag window after window (the segments overlap). So a PRESENT
+# under STRONG_NCC counts only when the previous window found the same lag; a strong one counts at once.
+def _c(kind, ncc, lag):
+    return pcc.Correlation(kind, ncc, lag, 0)
+
+
+@pytest.mark.parametrize("ncc,lag", [(0.083, 2734.0), (0.071, -998.0), (0.072, 623.0)])
+def test_an_isolated_weak_present_window_is_not_foreign(ncc, lag):
+    c = pcc.confirm(None, _c(pcc.PRESENT, ncc, lag))
+    assert c.kind == pcc.ABSENT and "unconfirmed" in (c.why or ""), c
+
+
+def test_a_weak_present_at_the_same_lag_twice_is_present():
+    first = pcc.confirm(None, _c(pcc.PRESENT, 0.072, 600.0))
+    assert first.kind == pcc.ABSENT
+    second = pcc.confirm(_c(pcc.PRESENT, 0.072, 600.0), _c(pcc.PRESENT, 0.075, 601.5))
+    assert second.kind == pcc.PRESENT and second.lag_ms == 601.5
+
+
+def test_a_weak_present_at_another_lag_stays_unconfirmed():
+    c = pcc.confirm(_c(pcc.PRESENT, 0.08, 600.0), _c(pcc.PRESENT, 0.08, 2734.0))
+    assert c.kind == pcc.ABSENT
+
+
+def test_a_strong_present_counts_at_once_and_absent_or_undecided_pass_through():
+    assert pcc.confirm(None, _c(pcc.PRESENT, pcc.STRONG_NCC, 600.0)).kind == pcc.PRESENT
+    assert pcc.confirm(None, _c(pcc.PRESENT, -0.2, 600.0)).kind == pcc.PRESENT
+    a = _c(pcc.ABSENT, 0.03, 10.0)
+    assert pcc.confirm(_c(pcc.PRESENT, 0.08, 10.0), a) == a
+    u = pcc.Correlation(pcc.UNDECIDED, why="x")
+    assert pcc.confirm(None, u) == u
+
+
+def test_the_arm_confirms_a_song_24_db_under_the_marker_in_the_second_window():
+    song = music_like()
+    cg = _monitor(CGOBS, np.stack([song, song], axis=1) * 0.3)
+    arm = pcg.CgArm("resolume-snv", [cg], _Probe())
+    ring = _program_ring(program_with(song, rel_db=-24.0))
+    assert arm.state(now=100.0, program=ring).readings[0].correlation.kind == pcc.ABSENT
+    st = arm.state(now=102.0, program=ring)
+    assert st.readings[0].correlation.kind == pcc.PRESENT
+    assert pcg.overlay("MEASUREMENT", None, st)[0] == "FOREIGN"
+
+
 def test_the_arm_without_a_program_ring_is_the_strict_rule():
     m = _monitor(CGOBS, np.stack([music_like()] * 2, axis=1) * 0.3)
     st = pcg.CgArm("resolume-snv", [m], _Probe()).state(now=100.0)
