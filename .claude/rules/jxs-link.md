@@ -1125,6 +1125,29 @@ FAILs naming it; a clean one PASSes; a source that stopped writing and no source
 The OBS indicator reads DEGRADED from the same counters. Pytest:
 `tests/python/test_strih_jxs_verify_1387.py` (the lines rendered from the SHIPPED C format string).
 
+## A dead program output after a reboot is caught (4.11.2026, issue 1387)
+
+strih-snv rebooted at 20:48; `strih-obs.service` started OBS 4 s before the 10 GbE rig NIC had a
+carrier, the output logged `cannot start the sender ... Network is unreachable` / `did not start`
+once, and stream-snv's program stayed black ~30 min. No check noticed: nobody runs verify after a
+reboot, and the stream's `JXS PGM src` kept writing `fps=0.00 frames=0 lost_slices=0` windows, which
+item 49 read as PASS.
+- **The launcher waits for the rig address:** `strih_wait_rig_address` in `strih-obs-start.sh` polls
+  `ip -o -4 addr show` for ` <STRIH_IP>/` (the dantesync ExecStartPre condition) once a second, at most
+  `STRIH_RIG_NET_WAIT_S` (120 s), before OBS launches; a timeout is a WARN and OBS starts anyway. The
+  IP comes from the box-facts drop-in (`STRIH_RIG_IP`). A `--user` unit cannot order on the system
+  `network-online.target`, so the launcher waits itself.
+- **verify item 49 (same line):** `(obs-net-wait)` = the drop-in byte for byte; `(jxs-output-start)`
+  (strih role, enabled jxs-output.json) = the newest of `started --` / `did not start:` / obs v0.4.14's
+  `cannot start the sender to ... -- retried every 2 s` (INACTIVE while it retries) / `-- the sender is
+  restarted`: only `started --` passes; the lost-slices row FAILs a running source whose newest window
+  has `frames=0`.
+- **The deploy read-back** carries `jxs=off|started|failed|retrying|restarting|pending`
+  (`strih_lx_remote_jxs_state_cmd`, the log newer than the start marker); `strih_lx_deploy_verdict`'s
+  12th argument refuses all but `off` / `started`, so the poll waits for the start.
+- The handover `jxs` item already read the stream side (a stream link at frames=0 = FORGOT).
+- Tests: `tests/python/test_strih_obs_net_wait_1387.py`.
+
 ## The EVENT contract grades every JPEG XS link (1.11.2026, item `jxs_live`)
 
 - **Why:** on the SNV event morning the cameras were moved and rebooted after the rig was set up,
