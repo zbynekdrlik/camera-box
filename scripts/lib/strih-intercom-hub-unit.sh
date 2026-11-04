@@ -135,6 +135,65 @@ strih_intercom_hub_crash_loop() {
   strih_intercom_hub_loop_verdict "$s1" "$s2"
 }
 
+# strih_intercom_hub_install_fingerprint [BIN] [UNIT] [DROPIN_DIR] [TOML] -> one `<sha256|absent>  <path>`
+# line per file the hub loads at its start: the binary, the unit, every DROPIN_DIR/*.conf and the routing
+# TOML (defaults: the installed paths), sorted by path. A missing file reads `absent`, a removed drop-in
+# leaves the list. Read-only, always rc 0.
+strih_intercom_hub_install_fingerprint() {
+  local bin="${1:-/usr/local/bin/intercom-hub}" unit="${2:-/etc/systemd/system/intercom-hub.service}"
+  local dir="${3:-/etc/systemd/system/intercom-hub.service.d}" toml="${4:-/etc/intercom-hub/intercom.toml}"
+  local f s
+  local -a files=("$bin" "$unit" "$toml")
+  for f in "$dir"/*.conf; do [ -e "$f" ] && files+=("$f"); done
+  for f in "${files[@]}"; do
+    s="$(sha256sum -- "$f" 2>/dev/null | cut -d' ' -f1 || true)"
+    printf '%s  %s\n' "${s:-absent}" "$f"
+  done | LC_ALL=C sort -k2
+}
+
+# strih_intercom_hub_restart_if_changed BEFORE [fingerprint args] -> setup-strih's `13-hub-live` block for a
+# RUNNING hub (issue 1485, 4.11.2026: a new pinned release was installed and the old process kept running).
+# BEFORE = the fingerprint setup took before it wrote any hub file. Changed + active = `systemctl
+# try-restart intercom-hub` (never a start of a stopped hub) and the crash-loop probe; unchanged = the hub
+# is never touched (issue 1418); no BEFORE = nothing restarted, named. rc 1 + a named line when the restart
+# fails or the hub crash-loops after it; rc 0 otherwise.
+strih_intercom_hub_restart_if_changed() {
+  local before="${1-}" now l changed="" loop
+  shift || true
+  if [ -z "$before" ]; then
+    echo "  intercom-hub.service: no install fingerprint from before step 13 -- not restarted"
+    return 0
+  fi
+  now="$(strih_intercom_hub_install_fingerprint "$@")"
+  if [ "$now" = "$before" ]; then
+    echo "  intercom-hub.service: binary, unit, drop-ins and routing file unchanged -- the running hub is left alone"
+    return 0
+  fi
+  while IFS= read -r l; do   # an `if`, never `&&`: a false last test would end the loop rc 1 under set -e
+    if [ -n "$l" ] && [[ $'\n'"${before}"$'\n' != *$'\n'"${l}"$'\n'* ]]; then
+      changed="${changed}${changed:+, }${l#*  }"
+    fi
+  done <<<"$now"
+  while IFS= read -r l; do
+    if [ -n "$l" ] && [[ $'\n'"${now}"$'\n' != *"  ${l#*  }"$'\n'* ]]; then
+      changed="${changed}${changed:+, }${l#*  } (removed)"
+    fi
+  done <<<"$before"
+  if ! systemctl is-active --quiet intercom-hub; then
+    echo "  intercom-hub.service is not running -- nothing to restart (changed: ${changed})"
+    return 0
+  fi
+  if ! systemctl try-restart intercom-hub; then
+    echo "strih-intercom-hub-unit: systemctl try-restart intercom-hub failed after ${changed} changed" >&2
+    return 1
+  fi
+  if loop="$(strih_intercom_hub_crash_loop)"; then
+    echo "strih-intercom-hub-unit: intercom-hub.service ${loop} after the restart on ${changed}" >&2
+    return 1
+  fi
+  echo "  intercom-hub.service restarted: ${changed} changed, the running hub loads the new install"
+}
+
 # strih_intercom_hub_hdmi_leg_grade STATE_URL -> verify item 9's rows for the hub's HDMI audio legs
 # (issue 1424 part 3, the strih-pp vestibule on HDMI-1) through the caller's ok / bad / note: one row per
 # `alsa_hdmi` participant on the hub's /api/state. PASS = resolved to its hw PCM, aplay running, blocks

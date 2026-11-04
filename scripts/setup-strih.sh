@@ -642,7 +642,7 @@ fi
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
 # issue 1487: the pinned intercom release, verified, before step 12's purge decision reads its routing file.
-if WHY="$(obs_box_step_applies 13)"; then IH_BUNDLE="$(strih_intercom_release_ensure "${HERE}/..")" || fail "the pinned intercom release (above)"; fi
+if WHY="$(obs_box_step_applies 13)"; then IH_BUNDLE="$(strih_intercom_release_ensure "${HERE}/..")" || fail "the pinned intercom release (above)"; IH_BEFORE="$(strih_intercom_hub_install_fingerprint)"; fi   # issue 1485: a running hub restarts on a change
 step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344); stream role: the locked operator PipeWire (issue 1465); a strih box that needs none: PipeWire purged (issue 1440)"
 # Root cause (design 20.9., live diagnosis issuecomment-5751113173): the OBS program (${AUDIO_NAME}) is a NETWORK
 # stream (fohabl-strih VBAN), NOT the MiniFuse (the operator TALKBACK mic, the hub reads it). The hub writes the
@@ -679,9 +679,9 @@ if strih_program_dante_declared; then echo "  the OBS program-audio input = the 
 [ -n "${STRIH_PW_PURGED:-}" ] || echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
-step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the strih role when stopped, never restarted)"
+step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the strih role when stopped; issue 1485: restarted when its install changed)"
 # The strih intercom hub IS the interkom (the N-1 mix for the VBAN camboxes + the phones) since 20.9.2026:
-# unit + routing TOML + drop-ins, enabled; STARTED on the strih role after step 14, never restarted here.
+# unit + routing TOML + drop-ins, enabled; STARTED (stopped) or RESTARTED (its install changed) on the strih role after step 14.
 if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs no hub (lib: strih_intercom_hub_remove)
   # issue 1487: binary, unit and routing file come from the ONE bundle of the pinned intercom release.
   strih_intercom_hub_binary_install /usr/local/bin/intercom-hub "$IH_BUNDLE" "${HERE}/.." || fail "intercom-hub install from ${IH_BUNDLE} failed (above)"
@@ -766,12 +766,14 @@ else echo "  SKIP: ${WHY}"; fi
 
 # issue 1418: start a stopped hub on the strih role only now -- its LoadCredential needs the room secret
 # the Janus provisioning just wrote. `systemctl start` returns before that exec-time load, so the crash-loop probe
-# (verify item 16's) confirms it. A running hub is never restarted.
+# (verify item 16's) confirms it. A running hub is restarted only when its install changed (issue 1485).
 if WHY="$(obs_box_step_applies 13-hub-live)"; then
   if ! systemctl is-active --quiet intercom-hub; then
     systemctl start intercom-hub || fail "intercom-hub.service would not start -- journalctl -u intercom-hub (issue 1418: the interkom runs on it)"
     if IH_LOOP="$(strih_intercom_hub_crash_loop)"; then fail "intercom-hub.service ${IH_LOOP} after the start -- journalctl -u intercom-hub"; fi
     echo "  intercom-hub.service started (it was not running)"
+  else   # issue 1485: a running hub whose binary / unit / drop-in / routing file changed is try-restarted
+    strih_intercom_hub_restart_if_changed "${IH_BEFORE:-}" || fail "intercom-hub.service did not come back from its restart on the new install (above) -- journalctl -u intercom-hub"
   fi
 else
   echo "  intercom-hub.service not started here: ${WHY}"
