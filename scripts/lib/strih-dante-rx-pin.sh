@@ -405,14 +405,17 @@ _strih_dante_rx_pin_rows() {
 }
 
 # _strih_dante_rx_pin_emit LABEL [PENDING] -> the verdict lines on stdin through the caller's ok / bad;
-# PENDING=1 turns each bad line into a `restart pending` note (the hub has not run its drop-in yet).
+# PENDING=1 turns each bad line a restart cures (a mask or nice the drop-in sets at the next start) into a
+# `restart pending` note (the hub has not run its drop-in yet); a missing thread or CPU stays a FAIL.
 _strih_dante_rx_pin_emit() {
-  local line
+  local line cure
   while IFS= read -r line; do
+    cure=0
+    case "$line" in *" runs on "* | *" has nice "* | *" main affinity "*) cure=1 ;; esac
     case "$line" in
       ok\ *) ok "${1} ${line#ok }" ;;
       bad\ *)
-        if [ "${2:-0}" = 1 ]; then
+        if [ "${2:-0}" = 1 ] && [ "$cure" = 1 ]; then
           note "${1} rx-pin: restart pending -- the hub started before its drop-in was written (setup never restarts a running hub); restart intercom-hub.service, until then: ${line#bad rx-pin: }"
         else
           bad "${1} ${line#bad }"

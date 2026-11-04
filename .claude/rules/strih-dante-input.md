@@ -163,8 +163,9 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
       rx-pin` = the drop-in as rendered, the hub's main affinity off its CPU, both threads exactly on
       `hub=` at nice -10 or lower; no running hub / no `hub=` FAIL; a hub that started before its drop-in
       was written (the drop-in's mtime newer than btime + the process's start time; setup never restarts
-      a running hub) turns its thread rows into `restart pending` NOTEs, so a deploy's acceptance verify
-      does not fail on it, until the hub restarts; facts without the hub device but a
+      a running hub) turns the rows a restart cures (the main mask, a thread's CPU or nice) into `restart
+      pending` NOTEs, so a deploy's acceptance verify does not fail on it, until the hub restarts; a missing
+      thread or a missing `hub=` stays a FAIL (review round 2); facts without the hub device but a
       `hub=` or our drop-in on the box FAIL. `(intercom-dante) reserved-cpu` = the same /proc scan as CPU
       15's, on CPU 14, allowing only the hub's two threads (a `hub-mix` or a crossed thread there is named);
       the scan of CPU 15 now also names the hub's threads if they sit there. Both scans share the
