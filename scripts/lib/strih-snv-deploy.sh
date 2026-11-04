@@ -277,7 +277,7 @@ strih_lx_remote_readback_cmd() {
 # `started` (`started --`), `failed` (`did not start:`), `pending` (none yet). Pure printer.
 strih_lx_remote_jxs_state_cmd() {
   # shellcheck disable=SC2016  # expanded on the box, not here
-  printf '%s' 'J=off; C="$HOME/.config/obs-studio/plugin_config/distroav/jxs-output.json"; if [ -f "$C" ] && grep -q -E "\"enabled\"[[:space:]]*:[[:space:]]*true" "$C" 2>/dev/null; then J=pending; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ]; then S="$(LC_ALL=C grep -a -E "jxs-output.*(: started -- | did not start: )" "$L" 2>/dev/null | tail -n 1 || true)"; case "$S" in *" did not start: "*) J=failed ;; *": started -- "*) J=started ;; esac; fi; fi;'
+  printf '%s' 'J=off; C="$HOME/.config/obs-studio/plugin_config/distroav/jxs-output.json"; if [ -f "$C" ] && grep -q -E "\"enabled\"[[:space:]]*:[[:space:]]*true" "$C" 2>/dev/null; then J=pending; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ]; then S="$(LC_ALL=C grep -a -E "jxs-output.*(: started -- | did not start: | -- retried every | -- the sender is restarted)" "$L" 2>/dev/null | tail -n 1 || true)"; case "$S" in *" did not start: "*) J=failed ;; *" -- retried every "*) J=retrying ;; *" -- the sender is restarted"*) J=restarting ;; *": started -- "*) J=started ;; esac; fi; fi;'
 }
 
 strih_lx_bundle_state_url() {
@@ -372,6 +372,8 @@ strih_lx_deploy_verdict() {
       off | started) ;;
       failed) echo "FAIL: the JPEG XS program output did not start (the newest jxs-output start line of the OBS log reads 'did not start') -- the stream box gets no JPEG XS program; read that line, then StartOutput it or restart strih-obs.service"; bad=1 ;;
       pending) echo "FAIL: the JPEG XS program output has not started yet (jxs-output.json enabled, no start line in the OBS log since this start)"; bad=1 ;;
+      retrying) echo "FAIL: the JPEG XS program output is retrying its sender start (obs v0.4.14, INACTIVE meanwhile) -- the stream box gets no JPEG XS program; read its 'cannot start the sender' line"; bad=1 ;;
+      restarting) echo "FAIL: the JPEG XS program output's sender is restarted and has not started again -- the stream box gets no JPEG XS program"; bad=1 ;;
       *) echo "FAIL: the JPEG XS program output state is ${12:-<unreadable>}"; bad=1 ;;
     esac
   fi

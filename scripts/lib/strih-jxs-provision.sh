@@ -382,8 +382,10 @@ STRIH_JXS_OUTPUT_NAME="camera-box JPEG XS program"
 
 # strih_jxs_output_start_row USER_HOME LOG -> verify item 49's `(jxs-output-start)` row (the caller's ok / bad /
 # note), strih role with an ENABLED jxs-output.json only (nothing printed otherwise; `(jxs-output)` grades the
-# file). The newest start line of the OBS log decides: `started --` = PASS, `did not start: <reason>` with no
-# later start = FAIL naming the reason, none = NOTE. Always rc 0.
+# file). The newest start-state line of the OBS log decides: `started --` = PASS; FAIL for `did not start:
+# <reason>` (the one-shot output before obs v0.4.14), `cannot start the sender to ... -- retried every 2 s`
+# (v0.4.14 retrying: the output is INACTIVE meanwhile) and `-- the sender is restarted` (a live sender death)
+# with no later start; none = NOTE. Always rc 0.
 strih_jxs_output_start_row() {
   local home="${1-}" log="${2-}" name="$STRIH_JXS_OUTPUT_NAME" last t reason
   [ "$(strih_box_fact STRIH_ROLE 2>/dev/null)" = strih ] || return 0
@@ -392,13 +394,23 @@ strih_jxs_output_start_row() {
     note "(jxs-output-start) no OBS log to read the program output's start from (issue 1387)"
     return 0
   fi
-  last="$(LC_ALL=C grep -a -F -e "jxs-output '${name}': started -- " -e "jxs-output: '${name}' did not start: " "$log" | tail -n 1 || true)"
+  last="$(LC_ALL=C grep -a -E "jxs-output '${name}': (started -- |cannot start the sender to .* -- retried every |.* -- the sender is restarted)|jxs-output: '${name}' did not start: " "$log" | tail -n 1 || true)"
   t="${last%%: *}"
   case "$last" in
     *" did not start: "*)
       reason="${last#*" did not start: "}"
       reason="${reason% (issue 1387)}"
       bad "(jxs-output-start) '${name}' did not start at ${t}: ${reason} -- and no later start: the program link is down (the stream box gets no JPEG XS program); start it with StartOutput '${name}' over obs-websocket, or restart strih-obs.service (issue 1387)"
+      ;;
+    *" -- retried every "*)
+      reason="${last#*"': cannot start the sender to "}"
+      reason="${reason%% -- retried every *}"
+      bad "(jxs-output-start) '${name}' is retrying since ${t} (cannot start the sender to ${reason}), INACTIVE: the stream box gets no JPEG XS program until it starts; fix the cause (the rig network, the target) (issue 1387)"
+      ;;
+    *" -- the sender is restarted"*)
+      reason="${last#*"jxs-output '${name}': "}"
+      reason="${reason%% -- the sender is restarted*}"
+      bad "(jxs-output-start) '${name}': the sender is restarted since ${t} (${reason}) and has not started again: the program link is down (issue 1387)"
       ;;
     *": started -- "*)
       ok "(jxs-output-start) '${name}' started at ${t} (the newest start line of the OBS log)"

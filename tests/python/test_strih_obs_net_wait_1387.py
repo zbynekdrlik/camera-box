@@ -232,6 +232,12 @@ def test_a_disabled_output_or_the_stream_role_is_not_graded_here(tmp_path):
     assert _start_row(tmp_path / "b", [LINE_FAILED], box="stream-snv") == []
 
 
+def test_the_lib_names_the_output_as_the_seeder_and_the_plugin_do():
+    import obs_jxs_inputs
+    r = _run(f'. "{PROVISION}"\nprintf "%s" "$STRIH_JXS_OUTPUT_NAME"')
+    assert r.stdout == obs_jxs_inputs.OUTPUT_NAME == OUTPUT, r.stdout
+
+
 def test_verify_strih_runs_the_start_row_on_the_item_49_line_within_budget():
     v = VERIFY.read_text()
     assert len(v.splitlines()) <= 1000
