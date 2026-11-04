@@ -216,7 +216,7 @@ PY
 # them), else rc 1 + a named line: a missing lib must never read as "not a Dante box" (review finding 9).
 _strih_jxs_dante_lib() {
   local f
-  for f in strih_program_dante_declared strih_dante_rx_pin_plan strih_dante_reserved_cpu; do
+  for f in strih_program_dante_declared strih_dante_rx_pin_plan strih_dante_reserved_cpu _strih_dante_cpulist_has; do
     declare -F "$f" >/dev/null || { echo "strih-jxs: ${f} is not defined -- source scripts/lib/strih-provision.sh (issue 1485)" >&2; return 1; }
   done
 }
