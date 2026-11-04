@@ -174,7 +174,8 @@ def _install(tmp, box="strih-snv"):
 def test_a_dante_box_writes_both_manager_defaults_off_the_reserved_cpu(tmp_path):
     root, r = _install(tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    want = _bash(LIB, "strih_dante_reserved_cpu_manager_text 0-14 15").stdout
+    # strih-snv: OBS's CPU 15 + the hub's CPU 14 (its own Dante device, comment 6634395906)
+    want = _bash(LIB, "strih_dante_reserved_cpu_manager_text 0-13 15 14").stdout
     for rel in (SYSTEM_DROPIN, USER_DROPIN):
         f = root / rel
         assert f.read_text() == want, rel
@@ -182,8 +183,9 @@ def test_a_dante_box_writes_both_manager_defaults_off_the_reserved_cpu(tmp_path)
     # OBS's own launch mask (obs= of the rx-pin conf) is a subset of the manager default
     conf = (root / "etc" / "strih-dante-rx-cpu.conf").read_text()
     obs = [l.split("=", 1)[1] for l in conf.splitlines() if l.startswith("obs=")][0]
-    assert obs == "2-14"
-    assert "systemd + user managers default to CPUs 0-14 (CPU 15 only for the two dstack threads)" in r.stdout
+    assert obs == "2-13"
+    assert ("systemd + user managers default to CPUs 0-13 (CPU 15 only for OBS's two dstack threads, CPU 14 only "
+            "for the hub's)") in r.stdout
     assert "at the latest the next boot; running processes keep their masks until they restart" in r.stdout
     # issue 1485, live 3.11.2026: a changed drop-in re-executes PID 1 and the operator's user manager
     # (daemon-reexec reads system.conf.d / user.conf.d; no unit restarts), so new processes start off the
@@ -392,7 +394,7 @@ def test_grade_reads_the_live_proc_without_a_fork_per_task():
 def test_item9_runs_the_reserved_cpu_rows_and_step13_installs_and_removes_them():
     s = DI_LIB.read_text()
     body = s[s.index("strih_dante_input_grade() {"):s.index("strih_program_audio_declared()")]
-    assert "  strih_dante_reserved_cpu_grade\n  strih_dante_rx_pin_grade\n  return 0\n}" in body
+    assert '  strih_dante_reserved_cpu_grade\n  strih_dante_rx_pin_grade "$(_strih_dante_hub_flag)"\n  return 0\n}' in body
     inst = s[s.index("strih_dante_input_install() {"):s.index("strih_dante_input_field() {")]
     assert inst.index("strih_dante_rx_pin_remove") < inst.index("strih_dante_reserved_cpu_remove")
     assert inst.index('strih_dante_rx_pin_install "$user"') < inst.index("strih_dante_reserved_cpu_install")

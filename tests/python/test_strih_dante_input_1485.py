@@ -17,7 +17,7 @@ import sys
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from strih_dante_rx_pin_fakes_1485 import fake_proc, pgrep_stub, stub  # noqa: E402
+from strih_dante_rx_pin_fakes_1485 import HUB_PID, fake_proc, hub_proc, pgrep_stub, stub, systemctl_stub  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
@@ -177,6 +177,7 @@ def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
     (tmp_path / "online").write_text("0-15\n")
     (tmp_path / "bin").mkdir()
     stub(tmp_path / "bin", "visudo", "exit 0\n")
+    systemctl_stub(tmp_path / "bin")   # the hub drop-in's daemon-reload + the managers' re-exec
     env = {"STRIH_DANTE_INPUT_TOML": str(dest), "STRIH_DANTE_INPUT_IFACE": "enp7s0.70",
            "STRIH_DANTE_INPUT_SITE_FILE": str(site), "STRIH_DANTE_RX_PIN_ROOT": str(root),
            "STRIH_DANTE_RX_PIN_OWNER": "%s:%s" % (user, group), "OBS_BOX_ONLINE_CPUS": str(tmp_path / "online"),
@@ -192,7 +193,8 @@ def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
     assert r.returncode == 0, r.stderr
     assert tomllib.loads(dest.read_text())["iface"] == "enp7s0.70"
     assert "written" in r.stdout
-    assert "reserved=15\nobs=2-14\n" in rx_conf.read_text(), "the Dante threads' CPU comes with the device"
+    assert "reserved=15\nobs=2-13\n" in rx_conf.read_text(), "the Dante threads' CPU comes with the device"
+    assert rx_conf.read_text().endswith("\nhub=14\n"), "the hub's own Dante device gets the next CPU"
     sysctl = root / "etc" / "sysctl.d" / "60-strih-dante-ptp-port.conf"
     assert "net.ipv4.ip_unprivileged_port_start = 319\n" in sysctl.read_text(), "the OBS dante-input binds 319"
     assert port.read_text() == "319\n", "set live, no restart"
@@ -245,12 +247,17 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     # the rx-pin rows (strih-dante-rx-pin.sh) over a pinned fake OBS
     root = tmp_path / "rxroot"
     (root / "etc").mkdir(parents=True, exist_ok=True)
-    (root / "etc" / "strih-dante-rx-cpu.conf").write_text("reserved=15\nobs=2-14\nbase=2-15\n")
+    # strih-snv: OBS's CPU 15 + the hub's CPU 14 (its own Dante device, comment 6634395906)
+    (root / "etc" / "strih-dante-rx-cpu.conf").write_text("reserved=15\nobs=2-13\nbase=2-15\nhub=14\n")
+    hub_dropin = root / "etc" / "systemd" / "system" / "intercom-hub.service.d" / "60-strih-dante-rx-pin.conf"
+    hub_dropin.parent.mkdir(parents=True, exist_ok=True)
+    hub_dropin.write_text(_bash("strih_dante_rx_pin_hub_dropin_text").stdout)
     # the reserved-cpu rows (strih-dante-reserved-cpu.sh): both manager defaults as setup writes them
     dropin = ("# issue 1485: written by camera-box setup-strih step 13 on a Dante-program box; every run rewrites it.\n"
               "# CPU 15 is reserved for the strih OBS's dstack-engine + dstack-rx threads (/etc/strih-dante-rx-cpu.conf);\n"
+              "# CPU 14 for the intercom hub's own dstack-engine + dstack-rx threads (hub=, the same conf);\n"
               "# every unit and forked process starts off it. Affinity only: the rx-pin helper still moves the two threads there.\n"
-              "[Manager]\nCPUAffinity=0-14\n")
+              "[Manager]\nCPUAffinity=0-13\n")
     for mgr in ("system", "user"):
         (root / "etc" / "systemd" / ("%s.conf.d" % mgr)).mkdir(parents=True, exist_ok=True)
         (root / "etc" / "systemd" / ("%s.conf.d" % mgr) / "50-strih-dante-reserved-cpu.conf").write_text(dropin)
@@ -260,10 +267,13 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     (root / "proc" / "sys" / "net" / "ipv4").mkdir(parents=True, exist_ok=True)
     (root / "proc" / "sys" / "net" / "ipv4" / "ip_unprivileged_port_start").write_text("319\n")
     (tmp_path / "rxonline").write_text("0-15\n")
-    proc = fake_proc(tmp_path, threads={4242: ("obs", "2-14", 0), 4300: ("dstack-engine", "15", -10),
+    proc = fake_proc(tmp_path, threads={4242: ("obs", "2-13", 0), 4300: ("dstack-engine", "15", -10),
                                         4301: ("dstack-rx", "15", -10)})
+    hub_proc(tmp_path, threads={HUB_PID: ("intercom-hub", "0-13", 0), 5160: ("dstack-engine", "14", -10),
+                                5161: ("dstack-rx", "14", -10)})
     (tmp_path / "rxbin").mkdir(exist_ok=True)
     pgrep_stub(tmp_path / "rxbin")
+    systemctl_stub(tmp_path / "rxbin")
     return _bash(body, "scn", "127.0.0.1", "unused", log,
                  env=dict({"STRIH_DANTE_INPUT_KIND_FILE": str(kf), "STRIH_DANTE_INPUT_TOML": str(dest),
                            "STRIH_DANTE_INPUT_WAIT_S": "0", "STRIH_DANTE_RX_PIN_ROOT": str(root),
@@ -280,8 +290,10 @@ def test_item9_passes_a_healthy_dante_source(tmp_path):
     assert "BAD" not in r.stdout, r.stdout
     assert "OK (program-dante) live: delivered_frames 4800 -> 999999" in r.stdout
     assert "OK (program-dante) rx-pin: dstack-rx tid 4301 on CPU 15 at nice -10" in r.stdout
-    assert "OK (program-dante) reserved-cpu: systemd + user managers default to CPUAffinity=0-14" in r.stdout
-    assert "OK (program-dante) reserved-cpu: of 3 tasks only OBS's" in r.stdout
+    assert "OK (program-dante) reserved-cpu: systemd + user managers default to CPUAffinity=0-13" in r.stdout
+    assert "OK (program-dante) reserved-cpu: of 6 tasks only OBS's" in r.stdout
+    assert "OK (intercom-dante) reserved-cpu: of 6 tasks only the intercom hub's" in r.stdout
+    assert "OK (intercom-dante) rx-pin: dstack-rx tid 5161 on CPU 14 at nice -10" in r.stdout
     assert "OK (program-dante) media clock: source=Internal" in r.stdout, r.stdout
     assert "OK (program-dante) ptp-port: unprivileged processes may bind UDP 319" in r.stdout, r.stdout
 

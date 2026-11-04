@@ -75,7 +75,8 @@ def test_a_fresh_dante_box_gets_the_encoder_cores_at_step_13(tmp_path):
     root, r = rc._install(tmp_path)                     # step 13 (strih_dante_input_install), after step 11
     assert r.returncode == 0, r.stdout + r.stderr
     d = _out(home)
-    assert d["jxs_cores"] == "2-14" and d["jxs_cores_derived"] == "2-14", d
+    # strih-snv: OBS's CPU 15 and the hub's CPU 14 are reserved (comment 6634395906)
+    assert d["jxs_cores"] == "2-13" and d["jxs_cores_derived"] == "2-13", d
     assert d["jxs_target"] == "10.77.9.204:7100" and d["enabled"] is True   # nothing else touched
 
 
@@ -96,10 +97,10 @@ def test_step_13_leaves_a_box_without_the_file_alone(tmp_path):
 
 def test_a_derived_value_is_re_derived_when_the_reserved_cpu_moves(tmp_path):
     _write_out(tmp_path / "home", jxs_cores="2-14", jxs_cores_derived="2-14")
-    r = _reconcile(tmp_path, _env(tmp_path, "2-13"))    # the OBS mask shrank: CPU 13 is reserved now
+    r = _reconcile(tmp_path, _env(tmp_path, "2-13"))    # the OBS mask shrank: CPUs 13 + 12 are reserved now
     assert r.returncode == 0, r.stdout + r.stderr
     d = _out(tmp_path / "home")
-    assert d["jxs_cores"] == "2-12" and d["jxs_cores_derived"] == "2-12", d
+    assert d["jxs_cores"] == "2-11" and d["jxs_cores_derived"] == "2-11", d
 
 
 def test_an_operators_own_value_is_kept_and_warned_only_when_it_holds_the_reserved_cpu(tmp_path):

@@ -227,7 +227,8 @@ def test_the_default_cores_are_the_obs_mask_without_the_reserved_cpu_on_a_dante_
     online.write_text("0-15\n")
     env = {"STRIH_DANTE_RX_PIN_ROOT": str(root), "OBS_BOX_ONLINE_CPUS": str(online)}
     r = _bash('strih_box_load strih-snv >/dev/null; strih_jxs_output_default_cores', env=env, baseline=True)
-    assert r.returncode == 0 and r.stdout.strip() == "2-14", r.stdout + r.stderr
+    # issue 1485: strih-snv reserves CPU 15 (OBS's Dante threads) and 14 (the hub's own Dante device)
+    assert r.returncode == 0 and r.stdout.strip() == "2-13", r.stdout + r.stderr
     r = _bash('strih_box_load strih-pp >/dev/null; strih_jxs_output_default_cores', env=env, baseline=True)
     assert r.returncode == 0 and r.stdout.strip() == "", r.stdout + r.stderr
 

@@ -56,3 +56,24 @@ def stub(bindir, name, body):
 
 def pgrep_stub(bindir, pid=OBS_PID):
     return stub(bindir, "pgrep", 'echo "$*" >> "${PGREP_LOG:-/dev/null}"\n%s\n' % (("echo %d" % pid) if pid else "exit 1"))
+
+
+# The intercom hub (4.11.2026, comment 6634395906): its own Dante device's two threads, the SCHED_FIFO
+# hub-mix thread and a tokio worker that must never move. 5150 = the unit's MainPID.
+HUB_PID = 5150
+HUB_THREADS = {5150: "intercom-hub", 5160: "dstack-engine", 5161: "dstack-rx", 5162: "hub-mix", 5163: "tokio-rt-worker"}
+
+
+def hub_proc(proc_root, main_cpus="0-13", threads=None):
+    """The hub's threads under the same fake /proc (`proc_root` = the dir that holds `proc`)."""
+    if threads is None:
+        threads = {tid: (comm, main_cpus, 0) for tid, comm in HUB_THREADS.items()}
+    return fake_proc(proc_root, main_cpus=main_cpus, threads=threads, pid=HUB_PID)
+
+
+def systemctl_stub(bindir, mainpid=HUB_PID, log=None):
+    """`systemctl show -p MainPID --value intercom-hub` answers MAINPID (0 = the hub does not run); every
+    other call is logged and succeeds."""
+    return stub(bindir, "systemctl",
+                'printf "%%s\\n" "$*" >> "%s"\n'
+                'if [ "$*" = "show -p MainPID --value intercom-hub" ]; then echo %d; fi\n' % (log or "/dev/null", mainpid))

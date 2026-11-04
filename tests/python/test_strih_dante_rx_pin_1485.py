@@ -276,7 +276,7 @@ def test_grade_fails_each_fault_by_name(tmp_path):
 def test_item9_dante_branch_runs_the_rx_pin_rows():
     s = (REPO / "scripts" / "lib" / "strih-dante-input.sh").read_text()
     body = s[s.index("strih_dante_input_grade() {"):s.index("strih_program_audio_declared()")]
-    assert "  strih_dante_rx_pin_grade\n  return 0\n}" in body
+    assert '  strih_dante_rx_pin_grade "$(_strih_dante_hub_flag)"\n  return 0\n}' in body
     inst = s[s.index("strih_dante_input_install() {"):s.index("strih_dante_input_field() {")]
     assert inst.index("strih_dante_rx_pin_remove") < inst.index("strih_dante_rx_pin_install \"$user\"")
     assert "rx_pin" not in (REPO / "scripts" / "verify-strih.sh").read_text(), "the rows live in the lib"
