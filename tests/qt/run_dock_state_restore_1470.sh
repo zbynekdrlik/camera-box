@@ -15,7 +15,9 @@ set -euo pipefail
 #   4. the state an OBS saves after running case 1 (Qt's own saveState) -> `default-hidden`, seed =
 #      `redocked`, the dock visible + docked right, every other dock unchanged;
 #   5. a probe dock seeded into stream-snv, whose right area already exists -> the probe joins that
-#      area visible + docked, the A/V-sync dock and every other dock stay where they were.
+#      area visible + docked, the A/V-sync dock and every other dock stay where they were;
+#   6. issue 1436: the LUFS meter seeded after the A/V-sync dock into stream-pp -> both in the right
+#      area, visible + docked, each under its own first-seed marker, every other dock unchanged.
 # Needs g++, pkg-config + Qt6 Widgets dev files and python3; a missing tool FAILS (never a skip).
 #
 #   bash tests/qt/run_dock_state_restore_1470.sh
@@ -26,6 +28,7 @@ SEED="${ROOT}/scripts/obs_dock_state.py"
 FIX="${ROOT}/tests/python/fixtures/obs_dock_state_1470"
 DOCK="net.nagater.obs-audio-video-sync-dock..main"
 PROBE="camera-box.probe.dock"   # case 5: a plugin dock the layouts never held
+LUFS="net.nagater.obs-loudness-dock..main"   # case 6: the LUFS meter (issue 1436)
 
 for tool in g++ pkg-config python3; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: ${tool} is not installed (issue 1470 Qt proof)" >&2; exit 1; }
@@ -128,6 +131,19 @@ expect "$PRB" "restore=ok" "stream-snv probe: Qt restores the seeded state"
 expect "$PRB" "${PROBE} visible=1 floating=0 area=2" "stream-snv probe: the probe joins the right area, visible"
 expect "$PRB" "$DOCKED" "stream-snv probe: the A/V-sync dock stays visible + docked right"
 same_others "$SNV" "$PRB" "stream-snv probe: every other dock unchanged"
+
+# 6. issue 1436: the LUFS meter seeded after the A/V-sync dock on stream-pp (setup step 16g's order)
+#    -> both visible + docked right, the meter under its own marker, every other dock unchanged.
+cp "${FIX}/stream-pp.user.ini" "${WORK}/lufs.ini"
+seed_cli seed "${WORK}/lufs.ini" >/dev/null
+got="$(python3 "$SEED" seed --ini "${WORK}/lufs.ini" --dock "$LUFS" --marker LoudnessDockSeeded || true)"
+if [ "$got" = seeded ]; then echo "ok:   stream-pp LUFS meter: seed = seeded"; else fail "stream-pp LUFS meter seed printed '${got}', want seeded"; fi
+if grep -qx 'LoudnessDockSeeded=true' "${WORK}/lufs.ini" && grep -qx 'AvsyncDockSeeded=true' "${WORK}/lufs.ini"; then echo "ok:   stream-pp LUFS meter: both first-seed markers in user.ini"; else fail "stream-pp LUFS meter: a first-seed marker is missing"; fi
+LFS="$(restore "${WORK}/lufs.ini" "$LUFS")"
+expect "$LFS" "restore=ok" "stream-pp LUFS meter: Qt restores the seeded state"
+expect "$LFS" "${LUFS} visible=1 floating=0 area=2" "stream-pp LUFS meter: the meter is visible + docked right"
+expect "$LFS" "$DOCKED" "stream-pp LUFS meter: the A/V-sync dock stays visible + docked right"
+if [ "$(others "$PP0" | grep -v "^${LUFS} ")" = "$(others "$LFS" | grep -v "^${LUFS} ")" ]; then echo "ok:   stream-pp LUFS meter: every other dock unchanged"; else fail "stream-pp LUFS meter: another dock moved"; fi
 
 if [ "$FAILS" -ne 0 ]; then echo "issue 1470 Qt dock-state proof: ${FAILS} FAILED" >&2; exit 1; fi
 echo "issue 1470 Qt dock-state proof: all checks passed"

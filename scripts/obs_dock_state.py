@@ -24,6 +24,8 @@ behaviour, never seen in a captured layout.
 
   python3 scripts/obs_dock_state.py check --ini ~/.config/obs-studio/user.ini --dock <object name>
   python3 scripts/obs_dock_state.py seed  --ini ~/.config/obs-studio/user.ini --dock <object name>
+  (both take `--marker KEY`: the dock's own first-seed key, default AvsyncDockSeeded; issue 1436
+  seeds the LUFS meter under LoudnessDockSeeded)
 
 `check` prints one token: visible | hidden | default-hidden | absent | no-state | no-ini | unreadable
 (hidden = closed by the operator; default-hidden = OBS's hidden + floating default, before the first seed).
@@ -305,6 +307,15 @@ def _read_lines(path):
 # loses it together with the layout. OBS's config save keeps a section it does not know.
 MARKER_SECTION = "CameraBox"
 MARKER_KEY = "AvsyncDockSeeded"
+# Each seeded dock carries its OWN key (issue 1436: `LoudnessDockSeeded` for the LUFS meter), so one dock's
+# first seed never turns another dock's hidden + floating default into "the operator's". A plain ini key only.
+_MARKER_KEY_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9]*\Z")
+
+
+def _check_marker(marker):
+    if not _MARKER_KEY_RE.match(marker or ""):
+        raise ValueError("marker %r is not a plain [CameraBox] key" % (marker,))
+    return marker
 
 
 def _section_of(lines):
@@ -318,32 +329,33 @@ def _section_of(lines):
     return out
 
 
-def _marked(lines):
+def _marked(lines, marker=MARKER_KEY):
     sections = _section_of(lines)
     for line, section in zip(lines, sections):
-        if section == MARKER_SECTION and line.rstrip("\r\n").strip() == MARKER_KEY + "=true":
+        if section == MARKER_SECTION and line.rstrip("\r\n").strip() == marker + "=true":
             return True
     return False
 
 
-def _with_marker(lines, ending):
-    """LINES with `[CameraBox] AvsyncDockSeeded=true`: an existing key line of the section is replaced
+def _with_marker(lines, ending, marker=MARKER_KEY):
+    """LINES with `[CameraBox] <marker>=true` (default AvsyncDockSeeded): an existing key line of the section is replaced
     (never a second copy: libobs and configparser read duplicates differently), else the key goes in
     right after the section header, else a new section at the end; every new line ends ENDING."""
     sections = _section_of(lines)
     for i, (line, section) in enumerate(zip(lines, sections)):
-        if section == MARKER_SECTION and line.split("=", 1)[0].strip() == MARKER_KEY:
-            return lines[:i] + [MARKER_KEY + "=true" + (line[len(line.rstrip("\r\n")):] or ending)] + lines[i + 1:]
+        if section == MARKER_SECTION and line.split("=", 1)[0].strip() == marker:
+            return lines[:i] + [marker + "=true" + (line[len(line.rstrip("\r\n")):] or ending)] + lines[i + 1:]
     for i, (line, section) in enumerate(zip(lines, sections)):
         if section == MARKER_SECTION and _SECTION_RE.match(line.rstrip("\r\n")):
-            return lines[:i + 1] + [MARKER_KEY + "=true" + ending] + lines[i + 1:]
+            return lines[:i + 1] + [marker + "=true" + ending] + lines[i + 1:]
     out = list(lines)
     if out and not out[-1].endswith(("\n", "\r")):
         out[-1] += ending
-    return out + [ending, "[" + MARKER_SECTION + "]" + ending, MARKER_KEY + "=true" + ending]
+    return out + [ending, "[" + MARKER_SECTION + "]" + ending, marker + "=true" + ending]
 
 
-def check_ini(path, name):
+def check_ini(path, name, marker=MARKER_KEY):
+    _check_marker(marker)
     if not os.path.exists(path):
         return "no-ini"
     try:
@@ -354,7 +366,7 @@ def check_ini(path, name):
         state = dock_state(_decode(value), name)
     except (DockStateError, OSError, UnicodeDecodeError):
         return "unreadable"
-    if state == "default-hidden" and _marked(lines):
+    if state == "default-hidden" and _marked(lines, marker):
         return "hidden"
     return state
 
@@ -377,10 +389,11 @@ def _replace(path, lines):
         raise
 
 
-def seed_ini(path, name):
+def seed_ini(path, name, marker=MARKER_KEY):
     """seeded | redocked | present | no-state | no-ini. Raises DockStateError (unreadable) or PermissionError
     (a symlinked user.ini). Every seed decision (seeded / redocked / present) leaves the first-seed marker
     in user.ini; once it is there, OBS's hidden + floating default is kept as the operator's."""
+    _check_marker(marker)
     if os.path.islink(path):
         raise PermissionError("%s is a symlink -- refusing to write it" % path)
     if not os.path.exists(path):
@@ -393,14 +406,14 @@ def seed_ini(path, name):
     if value is None:
         return "no-state"
     blob = _decode(value)
-    marked = _marked(lines)
+    marked = _marked(lines, marker)
     action = seed_action(blob, name, marked)
     ending = lines[idx][len(lines[idx].rstrip("\r\n")):] or "\n"
     if action != "keep":
         lines[idx] = "DockState=" + base64.b64encode(seed(blob, name)).decode("ascii") + ending
     if action == "keep" and marked:
         return "present"
-    _replace(path, lines if marked else _with_marker(lines, ending))
+    _replace(path, lines if marked else _with_marker(lines, ending, marker))
     return {"insert": "seeded", "redock": "redocked"}.get(action, "present")
 
 
@@ -409,12 +422,16 @@ def main(argv=None):
     ap.add_argument("action", choices=("check", "seed"))
     ap.add_argument("--ini", required=True, help="the OBS user.ini")
     ap.add_argument("--dock", required=True, help="the dock's object name")
+    ap.add_argument("--marker", default=MARKER_KEY,
+                    help="this dock's first-seed key in [CameraBox] (default %(default)s; issue 1436)")
     a = ap.parse_args(argv)
+    if not _MARKER_KEY_RE.match(a.marker):
+        ap.error("--marker %r is not a plain [CameraBox] key" % a.marker)
     if a.action == "check":
-        print(check_ini(a.ini, a.dock))
+        print(check_ini(a.ini, a.dock, a.marker))
         return 0
     try:
-        print(seed_ini(a.ini, a.dock))
+        print(seed_ini(a.ini, a.dock, a.marker))
         return 0
     except PermissionError as e:
         print("refused: %s" % e, file=sys.stderr)
