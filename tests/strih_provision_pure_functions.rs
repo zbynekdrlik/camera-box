@@ -170,7 +170,7 @@ fn profile_facts_carry_the_windows_light_profile_shape() {
         "fps=30",
         "color_format=NV12",
         "out_mode=Advanced",
-        "rec_encoder=obs_nvenc_hevc_tex",
+        "rec_encoder=obs_nvenc_hevc_soft",
         "rec_path=/srv/_REC",
         "rec_format=mkv",
         "rec_split_min=15",

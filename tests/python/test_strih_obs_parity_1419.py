@@ -62,7 +62,7 @@ STRIH_KEYS = {
     ("Output", "MaxRetries"): "25",
     ("Output", "FilenameFormatting"): "%CCYY-%MM-%DD %hh-%mm-%ss",
     ("AdvOut", "RecType"): "Standard",
-    ("AdvOut", "RecEncoder"): "obs_nvenc_hevc_tex",
+    ("AdvOut", "RecEncoder"): "obs_nvenc_hevc_soft",
     ("AdvOut", "RecFilePath"): "/srv/_REC",
     ("AdvOut", "RecFormat2"): "mkv",
     ("AdvOut", "RecSplitFileType"): "Time",
