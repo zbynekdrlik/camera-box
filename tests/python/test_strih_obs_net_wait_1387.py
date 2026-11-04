@@ -46,14 +46,23 @@ def _run(script, *args, env=None, cwd=None):
 
 # --- the launcher waits for the rig address ------------------------------------------------------------
 
-def _fake_tools(tmp_path, appear_after):
-    """`ip` prints the rig address from its Nth call on (0 = at once, -1 = never); `sleep` only logs."""
+def _fake_tools(tmp_path, appear_after, route_after=None):
+    """`ip -o -4 addr show` lists the rig address from its Nth call on (0 = at once, -1 = never);
+    `ip -4 route show` lists its connected route (`src <ip>`) from the Nth ADDRESS call on (default the
+    same N: NetworkManager adds the noprefixroute address before the route); `sleep` only logs."""
+    route_after = appear_after if route_after is None else route_after
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
     (tmp_path / "calls").write_text("0")
     (bin_ / "ip").write_text(
         "#!/bin/bash\n"
-        f'c=$(cat "{tmp_path}/calls"); echo $((c + 1)) > "{tmp_path}/calls"\n'
+        f'c=$(cat "{tmp_path}/calls")\n'
+        'case "$*" in\n'
+        f'  *route*) if [ {route_after} -ge 0 ] && [ "$c" -gt {route_after} ]; then\n'
+        '      echo "10.77.8.0/23 dev enp7s0 proto kernel scope link src 10.77.9.202 metric 100"; fi\n'
+        '    echo "default via 10.77.8.1 dev enp7s0 proto static metric 100"; exit 0 ;;\n'
+        'esac\n'
+        f'echo $((c + 1)) > "{tmp_path}/calls"\n'
         'echo "1: lo    inet 127.0.0.1/8 scope host lo"\n'
         f'if [ {appear_after} -ge 0 ] && [ "$c" -ge {appear_after} ]; then\n'
         '  echo "2: enp7s0    inet 10.77.9.202/23 brd 10.77.9.255 scope global noprefixroute enp7s0"\n'
@@ -64,9 +73,19 @@ def _fake_tools(tmp_path, appear_after):
     return {"PATH": f"{bin_}:{os.environ['PATH']}"}
 
 
-def _wait(tmp_path, ip, bound, appear_after):
+def _wait(tmp_path, ip, bound, appear_after, route_after=None):
     return _run(f'. "{START}"\nset +e\nstrih_wait_rig_address "$1" "$2"\necho "RC=$?"', ip, bound,
-                env=_fake_tools(tmp_path, appear_after))
+                env=_fake_tools(tmp_path, appear_after, route_after))
+
+
+def test_an_address_without_its_route_is_not_up(tmp_path):
+    """ENETUNREACH is a missing ROUTE: NetworkManager adds a noprefixroute address before the prefix route
+    (review finding), so the address alone must not end the wait."""
+    r = _wait(tmp_path / "a", "10.77.9.202", 5, 0, route_after=-1)
+    assert r.stdout.splitlines()[-1:] == ["RC=1"], r.stdout + r.stderr
+    r = _wait(tmp_path / "b", "10.77.9.202", 120, 0, route_after=2)
+    assert r.stdout.splitlines()[-1:] == ["RC=0"], r.stdout + r.stderr
+    assert "after 2 s" in r.stdout, r.stdout
 
 
 def test_an_address_already_up_returns_at_once(tmp_path):
@@ -323,6 +342,32 @@ def test_the_read_back_refuses_a_retrying_or_restarting_output():
     for jxs in ("retrying", "restarting"):
         out = _verdict(*BASE, jxs)
         assert out.splitlines()[-1:] == ["RC=1"] and jxs.rstrip("ing") in out and "JPEG XS" in out, (jxs, out)
+
+
+def test_the_composed_read_back_runs_on_the_box_and_prints_the_field(tmp_path):
+    """The WHOLE read-back command (the snippet passed through the outer printf) run as the box runs it,
+    with the box tools stubbed: the line ends in the jxs= field the poll reads (review finding)."""
+    home = _home(tmp_path)
+    logs = home / ".config/obs-studio/logs"
+    logs.mkdir(parents=True)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "obs-start.marker").write_text("")
+    log = logs / "2026-11-04 20-49-01.txt"
+    log.write_text("\n".join([LINE_CREATED, LINE_FAILED]) + "\n")
+    t = os.stat(stage / "obs-start.marker").st_mtime
+    os.utime(log, (t + 10, t + 10))
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    for tool in ("systemctl", "curl", "sha256sum"):
+        (bin_ / tool).write_text("#!/bin/bash\nexit 1\n")
+        (bin_ / tool).chmod(0o755)
+    cmd = _run(f'. "{DEPLOY}"\nstrih_lx_remote_readback_cmd "$1"', stage).stdout
+    r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=30,
+                       env={"HOME": str(home), "PATH": f"{bin_}:/usr/bin:/bin"})
+    assert r.returncode == 0, r.stderr
+    line = r.stdout.strip().splitlines()[-1]
+    assert line.startswith("installed=") and line.endswith(" jxs=failed"), line
 
 
 def test_the_read_back_line_carries_the_field_and_the_verify_poll_grades_it():
