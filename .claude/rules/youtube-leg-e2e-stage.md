@@ -261,15 +261,25 @@ recording lacks. What sits between them (read on stream-snv, finding 6628405129)
 The stage therefore records the input (`start --tap-inpoint`, passed by the lib):
 - `scripts/youtube_leg_tap.py` on the stream box over the session's ssh: the stream OBS's own
   `GetStreamServiceSettings` gives the URL (`youtube_leg_obs.py stream-service`, only restreamer's local
-  inpoint, a foreign key never printed); `ffmpeg -c copy -map 0 -copyts -f matroska`; through
+  inpoint, a foreign key never printed); `ffmpeg -c copy -map 0 -f matroska` (no `-copyts`: the tool reads it like a VOD starting at 0); through
   `obs-box-background-run` when sudo allows it, always `chrt --idle 0` + `taskset` = online minus every
   `/etc/*-isolated-cpus.conf` mask minus CPU 15 (stream-snv: 0-1,12-14,16-19); no free CPU = no capture.
-  Started right after StartStream, before the ready wait; ended by the full `stop` after the session stop
-  (it ends by itself at the publisher's EOF, else INT then KILL of its group); never by `--stream-only`.
-- `measure` judges it AFTER the VOD verdict with the same tool, windows, recording, markers and probe
-  (`--vod <capture on dev2> --out <stage>/inpoint`, the recording's tick map copied in), bounded by
-  `YOUTUBE_LEG_INPOINT_TIMEOUT_S` (1500 s), then deletes the capture on the stream box; a capture never
-  measured stays until the next run's start sweeps day-old dirs.
+  Started once the broadcast is `ready` (restreamer's input carries our media; StartRecord comes after);
+  ended by the full `stop` after the session stop and OUTSIDE the stage lock (45 s bound, so StopStream
+  90 + session 90 + tap stays under the lib's `timeout 240`), never by `--stream-only`: it ends by itself
+  at the publisher's EOF, else INT, then KILL. The capture is found by `pgrep -u <me> -f <its absolute
+  output path>`, never by the launched pid: with the helper that pid is root's sudo, which (`use_pty`)
+  runs the command in another session. A capture that survives the KILL is reported failed, never
+  stopped, and purge then keeps it. No `ionice` of our own on the plain path: a held write would hold
+  the socket read and grow restreamer's unbounded per-subscriber channel.
+- `measure` FOLDS the blocking block first (`points.restreamer_input` = pending), then judges the
+  capture with the same tool, windows, recording, markers and probe (`--vod <capture on dev2> --out
+  <stage>/inpoint`, the recording's tick map copied in, so the recording is not decoded again), then
+  folds again with the point and the cleanup's events. Its bound = `YOUTUBE_LEG_INPOINT_TIMEOUT_S`
+  (1500 s) cut to what is left of `YOUTUBE_LEG_MEASURE_BUDGET_S` (3600 s for the whole measure step, so
+  the job timeout never eats the report); under 300 s left, or a verdict tool that ran over its own
+  bound = the point is not started. The capture on the stream box is deleted once dev2 has it;
+  cleanup()'s `purge-tap` deletes one the gate never measured.
 - The block's `points` (`scripts/youtube_leg_points.py`): `restreamer_input` (per window A/V capture
   minus recording, `audio_lag_jump_details` as [recording time s, ms]) and `restreamer_output`
   (`measured: false` + why). The VOD windows carry `audio_lag_jump_details` too, so the same step reads

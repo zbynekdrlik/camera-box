@@ -8,11 +8,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_youtube_leg_e2e_1404 import PASS_RESULT, _measure_inputs, _run, _state, scripted_fakes  # noqa: E402
+from test_youtube_leg_e2e_1404 import (PASS_RESULT, STREAM_PATH, _measure_inputs, _run, _state,  # noqa: E402
+                                       scripted_fakes)
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
 import e2e_report_youtube as rep  # noqa: E402
+import youtube_leg_e2e as yle  # noqa: E402
 import youtube_leg_obs as ylo  # noqa: E402
 import youtube_leg_points as ylp  # noqa: E402
 
@@ -47,12 +49,13 @@ def _start(fk, tmp_path, *extra):
 
 # ------------------------------------------------------------------ start / stop
 
-def test_tap_inpoint_starts_the_capture_after_startstream_before_the_ready_wait(tmp_path):
+def test_tap_inpoint_starts_the_capture_once_the_broadcast_is_live(tmp_path):
+    # `ready` needs our media on restreamer's input, and StartRecord (the windows) comes after it
     fk = _fakes(tmp_path)
     d, r = _start(fk, tmp_path, "--tap-inpoint")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert fk.names() == ["guard", "session.start", "obs.stream-start", "obs.stream-service", "tap.start",
-                          "session.wait-ready"]
+    assert fk.names() == ["guard", "session.start", "obs.stream-start", "session.wait-ready", "obs.stream-service",
+                          "tap.start"]
     tap = _state(d)["tap"]
     assert tap["started"] is True and tap["cpus"] == "0-1,12-14,16-19" and tap["url"] == URL
     call = [c for c in fk.calls() if c[0] == "tap"][0][1:]
@@ -193,7 +196,10 @@ def test_an_unpulled_capture_is_kept_on_the_stream_box(tmp_path):
     assert _run(fk, d, *args).returncode == 0
     p = json.loads(verdict.read_text())["youtube_leg"]["points"]["restreamer_input"]
     assert p["measured"] is False and "pull" in p["reason"]
-    assert "tap.purge" not in fk.names()  # kept for the diagnosis; the next run's start sweeps it
+    assert "tap.purge" not in fk.names()  # the gate never had it; cleanup()'s purge-tap deletes it
+    assert _run(fk, d, "purge-tap").returncode == 0 and _run(fk, d, "purge-tap").returncode == 0
+    assert fk.names().count("tap.purge") == 1  # once
+    assert _state(d)["tap"]["purged"] is True
 
 
 def test_no_capture_is_reported_as_not_measured(tmp_path):
@@ -262,4 +268,87 @@ def test_the_lib_starts_the_stage_with_the_restreamer_input_tap():
     fn = lib[lib.index("youtube_leg_start() {"):]
     fn = fn[:fn.index("\n}\n")]
     assert "start --tap-inpoint --title" in fn
+
+
+def test_cleanup_deletes_a_capture_the_gate_never_measured():
+    lib = (REPO / "scripts" / "lib" / "youtube-leg.sh").read_text()
+    fn = lib[lib.index("youtube_leg_cleanup_stop() {"):]
+    fn = fn[:fn.index("\n}\n")]
+    line = fn[fn.index("purge-tap)") - 300:fn.index("purge-tap)")]
+    assert 'AV_GATE_SSH_PASSWORD="$pw" timeout 90' in line  # bounded, the password in the env only
+    assert fn[fn.index("purge-tap)"):].split("\n")[0].rstrip().endswith("&")  # in the background
+
+
+# ------------------------------------------------------------------ the point never costs the verdict
+
+def test_the_point_gets_only_what_the_measure_budget_left():
+    assert yle.point_bound(1500, 3600, 1000) == 1500
+    assert yle.point_bound(1500, 3600, 2900) == 3600 - 2900 - yle.POINT_SLACK_S
+    assert yle.point_bound(1500, 3600, 3600 - yle.POINT_SLACK_S - yle.POINT_MIN_S + 1) is None
+
+
+def test_an_exhausted_measure_budget_skips_the_point(tmp_path):
+    fk = _fakes(tmp_path)
+    d = _stopped_with_tap(fk, tmp_path)
+    fk.script("verdict", "verdict", 0, PASS_RESULT)
+    args, verdict = _measure_inputs(tmp_path, fk)
+    assert _run(fk, d, *args, "--measure-budget", "100").returncode == 0
+    p = json.loads(verdict.read_text())["youtube_leg"]["points"]["restreamer_input"]
+    assert p["measured"] is False and "measure budget" in p["reason"]
+    assert len([c for c in fk.calls() if c[0] == "verdict"]) == 1
+
+
+def test_a_verdict_tool_that_ran_over_its_bound_skips_the_point(tmp_path):
+    fk = _fakes(tmp_path)
+    d = _stopped_with_tap(fk, tmp_path)
+    fk.script("verdict", "verdict", 0, {"sleep": 4})
+    args, verdict = _measure_inputs(tmp_path, fk)
+    assert _run(fk, d, *args, "--tool-timeout", "1").returncode == 1
+    b = json.loads(verdict.read_text())["youtube_leg"]
+    assert b["verdict"] == "UNKNOWN" and "never ran" in b["points"]["restreamer_input"]["reason"]
+    assert len([c for c in fk.calls() if c[0] == "verdict"]) == 1
+
+
+def test_the_blocking_block_is_folded_before_the_point_starts(tmp_path, monkeypatch):
+    vj = tmp_path / "verdict.json"
+    vj.write_text(json.dumps({"overall_pass": True}))
+    seen = {}
+
+    def fake_measure(ctx, stage):
+        return "PASS", [], PASS_RESULT, 0, [("w01-CAM5", 1.0, 30.0)], []
+
+    def fake_point(ctx, stage, windows, t_start):
+        seen["folded"] = json.loads(vj.read_text())["youtube_leg"]  # what is on disk when the point starts
+        raise RuntimeError("the point crashed")
+
+    monkeypatch.setattr(yle, "install_cleanup", lambda: None)  # no signal handlers in the pytest process
+    monkeypatch.setattr(yle, "_measure", fake_measure)
+    monkeypatch.setattr(yle, "_measure_input_point", fake_point)
+    rc = yle.main(["--dir", str(tmp_path / "yl"), "--host", "h", "measure", "--verdict-json", str(vj)])
+    assert rc == 0  # a crashed point never changes the exit
+    assert seen["folded"]["verdict"] == "PASS"
+    assert seen["folded"]["points"]["restreamer_input"]["reason"] == ylp.PENDING
+    assert json.loads(vj.read_text())["youtube_leg"]["verdict"] == "PASS"
+
+
+def test_the_point_reuses_the_recordings_early_tick_map(tmp_path):
+    fk = _fakes(tmp_path)
+    d = _stopped_with_tap(fk, tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
+    assert _run(fk, d, "prefetch", "--stream-path", STREAM_PATH).returncode == 0  # the early decode
+    fk.script("verdict", "verdict", 0, PASS_RESULT)
+    fk.script("verdict", "verdict", 0, dict(INPUT_RESULT, overall="PASS", reasons=[]))
+    assert _run(fk, d, *args).returncode == 0
+    seeded = Path(d) / "inpoint" / "ticks-rec-1.tsv"  # copied into the point's dir on dev2, fetched back
+    assert seeded.read_text() == (Path(d) / "verdict" / "ticks-rec-1.tsv").read_text()
+    assert [c for c in fk.calls() if c[0] == "prime"] and \
+        len([c for c in fk.calls() if c[0] == "prime"]) == 1  # the recording is decoded once
+
+
+def test_a_malformed_lag_jump_detail_never_breaks_the_blocking_digest():
+    assert ylp.lag_jump_details({"details": {"lag_jumps": [[1.5, 2.0], [1], "x", [True, 2.0], None]}}) == [[1.5, 2.0]]
+    assert ylp.lag_jump_details({"details": "garbage"}) == []
+    assert ylp.lag_jump_details(None) == []
+    assert yle.summarize({"windows": [{"name": "w", "audio": {"lag_jumps": 1, "details": {"lag_jumps": 5}}}]})[0][
+        "audio_lag_jump_details"] == []
 

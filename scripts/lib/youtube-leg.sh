@@ -30,9 +30,9 @@
 # mutation, so the shared rig-busy guard runs right before it (.claude/rules/rig-mutation-broadcast-guard.md).
 # Issue 1387: the start also records restreamer's INPUT on the stream box (`--tap-inpoint`, an ffmpeg
 # copy of restreamer's local inpoint at idle priority off the OBS cores, scripts/youtube_leg_tap.py), and
-# the gate judges it like the VOD as a REPORT-ONLY point (the block's `points`) and deletes it once the
-# measurement host has it; a capture never measured ends by itself with the stream and is swept a day
-# later by the next run's start.
+# the gate judges it like the VOD as a REPORT-ONLY point (the block's `points`) after the blocking verdict
+# is folded and deletes it once the measurement host has it; cleanup()'s `purge-tap` deletes one the gate
+# never measured.
 
 youtube_leg_enabled() {
   [ "${E2E_EXECUTE_VERDICT:-0}" = 1 ]
@@ -123,6 +123,10 @@ youtube_leg_cleanup_stop() {
   # a no-op after a gate that measured (it deleted it already)
   (timeout 120 python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" --user "$user" \
     purge) >>"$d/cleanup-stop.log" 2>&1 &
+  # issue 1387: a restreamer-input capture the gate never measured (~1 GB) is deleted on the stream box;
+  # a no-op when the gate deleted it already, or when no capture ran
+  (AV_GATE_SSH_PASSWORD="$pw" timeout 90 python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" \
+    --user "$user" purge-tap) >>"$d/cleanup-stop.log" 2>&1 &
   return 0
 }
 

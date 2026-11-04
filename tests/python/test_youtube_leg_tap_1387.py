@@ -39,6 +39,18 @@ def test_no_mask_or_no_free_cpu_or_a_bad_list_is_no_capture():
         tap.cpulist_expand("5-2")
 
 
+def test_the_cpu_set_is_the_background_slices_set_without_cpu_15():
+    # parity with the box baseline's own derivation (scripts/lib/obs-box-background.sh, the set
+    # rig-background.slice runs on), sourced under the setup scripts' strict mode
+    lib = REPO / "scripts" / "lib" / "obs-box-background.sh"
+    for online, mask in (("0-19", "2-11"), ("0-15", "2-11"), ("0-7", "0-3"), ("0-3,8-11", "1-2"), ("0-23", "0-11,13")):
+        r = subprocess.run(["bash", "-c", 'set -euo pipefail; . "$1"; obs_box_background_cpus "$2" "$3"', "t",
+                            str(lib), online, mask], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        want = tap.cpulist_expand(r.stdout.strip()) - {15}
+        assert tap.tap_cpus(online, [mask]) == (tap.cpulist_compress(want) if want else None), (online, mask)
+
+
 def test_only_restreamers_local_inpoint_is_recorded():
     assert tap.local_inpoint_url("rtmp://127.0.0.1:1234/live", "stream-snv") == URL
     assert tap.local_inpoint_url("rtmp://localhost:1234/live/", "stream-pp") == "rtmp://localhost:1234/live/stream-pp"
@@ -48,10 +60,12 @@ def test_only_restreamers_local_inpoint_is_recorded():
     assert tap.local_inpoint_url(None, "k") is None
 
 
-def test_the_capture_is_a_copy_with_its_timestamps_kept():
+def test_the_capture_is_a_copy():
     argv = tap.capture_argv(URL, "inpoint.mkv")
     assert argv[0] == "ffmpeg" and argv[argv.index("-i") + 1] == URL
-    assert argv[argv.index("-c") + 1] == "copy" and "-copyts" in argv and argv[argv.index("-map") + 1] == "0"
+    assert argv[argv.index("-c") + 1] == "copy" and argv[argv.index("-map") + 1] == "0"
+    # no -copyts: both tracks shift by the same start offset, the tool reads it like a VOD starting at 0
+    assert "-copyts" not in argv
     assert argv[argv.index("-f") + 1] == "matroska"  # a killed ffmpeg still leaves a readable file
     assert not any(a.startswith(("-c:", "-vf", "-af", "-ar", "-b:", "-preset")) for a in argv)  # nothing re-encoded
 
@@ -63,14 +77,18 @@ def test_the_capture_always_runs_at_idle_priority_pinned():
         assert p[i:i + 3] == ["chrt", "--idle", "0"] and p[p.index("taskset") + 1:p.index("taskset") + 3] == ["-c", "0-1,12-14,16-19"]
     assert tap.priority_prefix("0-1", True)[:3] == ["sudo", "-n", tap.BACKGROUND_RUN]  # rig-background.slice
     p = tap.priority_prefix("0-1", False)
-    assert p[:6] == ["nice", "-n", "19", "ionice", "-c", "3"]
+    assert p[:3] == ["nice", "-n", "19"] and "ionice" not in p  # a held write would grow restreamer's channel
 
 
-def test_a_stage_key_is_never_shell_text():
-    with pytest.raises(ValueError):
-        tap.start_script("a b", ["x"])
-    with pytest.raises(ValueError):
-        tap.stop_script("../x")
+def test_a_stage_key_is_never_shell_text_nor_a_parent_dir():
+    for bad in ("a b", "../x", "..", ".", "x;y", ""):
+        with pytest.raises(ValueError):
+            tap.stop_script(bad)
+    assert "recording-e2e-77" in tap.purge_script("recording-e2e-77")
+
+
+def test_the_url_kept_in_the_block_carries_no_stream_key():
+    assert tap.redact_url(URL) == "rtmp://127.0.0.1:1234/live/<key>"
 
 
 # ------------------------------------------------------------------ the remote bash, run for real
@@ -164,16 +182,17 @@ def test_start_records_restreamers_input_off_the_obs_cores_and_stop_signals_it(b
     assert out["cpus"] == "0-1,12-14,16-19" and "SCHED_IDLE" in out["priority"]
     calls = _argv(box)
     names = [c[0] for c in calls]
-    assert names == ["ionice", "chrt", "taskset", "ffmpeg"]  # nice 19 is the real one, first
-    assert calls[1][1:3] == ["--idle", "0"] and calls[2][1:3] == ["-c", "0-1,12-14,16-19"]
-    ff = calls[3]
-    assert ff[ff.index("-i") + 1] == URL and ff[ff.index("-c") + 1] == "copy" and "-copyts" in ff
+    assert names == ["chrt", "taskset", "ffmpeg"]  # nice 19 is the real one, first
+    assert calls[0][1:3] == ["--idle", "0"] and calls[1][1:3] == ["-c", "0-1,12-14,16-19"]
+    ff = calls[2]
+    assert ff[ff.index("-i") + 1] == URL and ff[ff.index("-c") + 1] == "copy"
+    assert ff[-1] == f"{cap}/inpoint.mkv"  # an absolute path: the stop finds the capture by it
+    assert out["url"] == "rtmp://127.0.0.1:1234/live/<key>"
     assert json.loads((box["d"] / "ssh.log").read_text().splitlines()[0])[1] == "pw"
     rc, out, r = _tap(box, "stop", "--grace", "1")
     assert rc == 0, r.stdout + r.stderr
     assert out["how"] == "signalled" and out["bytes"] > 0 and out["path"].endswith("/inpoint.mkv")
     assert (box["d"] / "ffmpeg.int").read_text() == "finalized"  # SIGINT: ffmpeg writes its file's end
-    assert not (cap / "tap.pid").exists()
 
 
 def test_a_capture_that_ended_with_the_stream_is_not_signalled(box):
@@ -224,3 +243,60 @@ def test_a_day_old_capture_of_a_killed_run_is_swept_at_the_next_start(box):
     assert _tap(box, "start", "--url", URL)[0] == 0
     assert not old.exists()
     _tap(box, "purge")
+
+
+# sudo with Defaults use_pty: the command runs in ANOTHER session than sudo's own pid, while the parent
+# waits; `-n -l <helper>` = the sudoers rule allows the helper
+SUDO = r'''#!{py}
+import json, os, sys
+argv = sys.argv[1:]
+open(os.path.join(os.environ["FAKE_DIR"], "argv.log"), "a").write(json.dumps(["sudo"] + argv) + "\n")
+if argv[:2] == ["-n", "-l"]:
+    sys.exit(0)
+assert argv[0] == "-n" and argv[1].endswith("/obs-box-background-run"), argv
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    os.execvp(argv[2], argv[2:])
+os.execv({py!r}, [{py!r}, "-c", "import os; os.wait()"])  # the waiting parent, without the capture path
+'''
+
+
+def test_the_helper_path_runs_in_another_session_and_the_stop_still_ends_the_capture(box, tmp_path):
+    helper = box["root"] / "usr/local/sbin/obs-box-background-run"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("#!/bin/sh\nexit 0\n")
+    helper.chmod(0o755)
+    (tmp_path / "bin" / "sudo").write_text(SUDO.format(py=sys.executable))
+    (tmp_path / "bin" / "sudo").chmod(0o755)
+    rc, out, r = _tap(box, "start", "--url", URL)
+    assert rc == 0, r.stdout + r.stderr
+    assert out["priority"] == "rig-background.slice + SCHED_IDLE"
+    assert [c[0] for c in _argv(box)] == ["sudo", "sudo", "chrt", "taskset", "ffmpeg"]  # the probe, the launch
+    rc, out, r = _tap(box, "stop", "--grace", "1")
+    assert rc == 0 and out["how"] == "signalled", r.stdout + r.stderr  # found by owner + path, not sudo's pid
+    assert (box["d"] / "ffmpeg.int").read_text() == "finalized"
+
+
+def test_a_capture_that_survives_the_stop_is_never_reported_stopped(box, tmp_path):
+    assert _tap(box, "start", "--url", URL)[0] == 0
+    noop = tmp_path / "bin" / "pkill"  # a signal that reaches nothing (another user's process, a sudo session)
+    noop.write_text("#!/bin/sh\nexit 0\n")
+    noop.chmod(0o755)
+    rc, out, _ = _tap(box, "stop", "--grace", "1", timeout=120)
+    assert rc == 2 and "survived INT and KILL" in out["reason"]
+    rc, out, _ = _tap(box, "purge", timeout=120)
+    assert rc == 2 and "not deleted" in out["reason"]
+    assert (box["home"] / "youtube-leg-tap-1387" / "recording-e2e-77" / "inpoint.mkv").exists()
+    noop.unlink()
+    assert _tap(box, "purge")[0] == 0
+
+
+def test_a_control_byte_in_ffmpegs_log_never_breaks_the_stop(box):
+    assert _tap(box, "start", "--url", URL, mode="eof")[0] == 0
+    log = box["home"] / "youtube-leg-tap-1387" / "recording-e2e-77" / "ffmpeg.log"
+    log.write_bytes(b'[flv] "bad"\x01\x1b[31m tag \\ size\n')
+    time.sleep(3.0)
+    rc, out, r = _tap(box, "stop", "--grace", "5")
+    assert rc == 0, r.stdout + r.stderr
+    assert out["how"] == "ended" and "bad" in out["ffmpeg_log"] and "\x01" not in out["ffmpeg_log"]

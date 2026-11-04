@@ -23,17 +23,23 @@ if _HERE not in sys.path:
 from youtube_leg_tap import OUTPUT_UNTAPPED  # noqa: E402
 
 INPUT, OUTPUT = "restreamer_input", "restreamer_output"
-LABELS = {INPUT: "vstup restreamera (lokálne RTMP na stream boxe)",
-          OUTPUT: "výstup restreamera (delivery VPS → YouTube)",
-          "vod": "YouTube VOD"}
 SUB = "inpoint"  # the point's dir on the measurement host and in the dev1 stage dir
 CAPTURE_NAME = "inpoint-capture.mkv"
+PENDING = "not judged yet (the YouTube verdict is folded first, the point after it)"
+
+
+def _num(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
 def lag_jump_details(audio):
-    """[[recording time s, step ms], ...] of one window's audio block, [] when none / unread."""
-    det = ((audio or {}).get("details") or {}).get("lag_jumps") or []
-    return [[t, ms] for t, ms in det if isinstance(t, (int, float)) and isinstance(ms, (int, float))]
+    """[[recording time s, step ms], ...] of one window's audio block; [] when none, unread or malformed
+    (it also feeds the BLOCKING block's window digest, so it never raises)."""
+    d = audio.get("details") if isinstance(audio, dict) else None
+    det = d.get("lag_jumps") if isinstance(d, dict) else None
+    if not isinstance(det, list):
+        return []
+    return [[e[0], e[1]] for e in det if isinstance(e, (list, tuple)) and len(e) == 2 and _num(e[0]) and _num(e[1])]
 
 
 def point_digest(result, tool_exit):

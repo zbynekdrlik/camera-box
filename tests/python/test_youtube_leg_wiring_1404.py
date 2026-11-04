@@ -125,9 +125,9 @@ def test_start_runs_the_rig_busy_guard_first_then_goes_live_and_spawns_the_watch
     assert r.returncode == 0 and r.stdout.endswith("END\n"), r.stdout + r.stderr
     assert order.read_text() == "guard:the YouTube stage StartStream\n"
     names = fk.names()
-    # issue 1387: the lib starts with --tap-inpoint, so the stream OBS's service is read right after
-    # StartStream (this fake names no URL: no capture starts, the stage goes live all the same)
-    assert names[:5] == ["guard", "session.start", "obs.stream-start", "obs.stream-service", "session.wait-ready"]
+    # issue 1387: the lib starts with --tap-inpoint, so the stream OBS's service is read once the broadcast
+    # is live (this fake names no URL: no capture starts, the stage is live all the same)
+    assert names[:5] == ["guard", "session.start", "obs.stream-start", "session.wait-ready", "obs.stream-service"]
     assert not any(n.startswith("tap.") for n in names)
     assert "obs.stream-stop" in names and "session.stop" in names
     st = json.loads((tmp_path / "youtube-leg" / "state.json").read_text())

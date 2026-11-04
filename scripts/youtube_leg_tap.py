@@ -6,7 +6,7 @@ has none. Between them sit restreamer (on the stream box: RTMP inpoint :1234, 1 
 its per-session delivery VPS (`rs_delivery`, its own RTMP pusher re-timing every 2 s chunk) and
 YouTube. This tool records what restreamer RECEIVES: one more RTMP player on restreamer's own
 inpoint (the stream-headphone monitor plays the same URL), `ffmpeg -c copy` into a Matroska file, so
-the capture holds the FLV tags restreamer got, timestamps kept (`-copyts`), nothing transcoded. The
+the capture holds the FLV tags restreamer got (both tracks shifted by one start offset), nothing transcoded. The
 YouTube stage then judges that file with the same tool as the VOD (scripts/youtube_leg_e2e.py, the
 `points` of its block): REPORT-ONLY, it never changes the YouTube verdict.
 
@@ -19,7 +19,9 @@ allows it (nice 19, ionice idle), always under `chrt --idle 0`, pinned to the CP
 (/etc/*-isolated-cpus.conf) leaves free, never CPU 15 (RESERVED_CPUS). No free CPU = no capture.
 
   youtube_leg_tap.py --host H --user U --key K start --url rtmp://127.0.0.1:1234/live/<key>
-  youtube_leg_tap.py --host H --user U --key K stop [--grace S]
+  youtube_leg_tap.py --host H --user U --key K stop [--grace S]   (ends by itself at the publisher's EOF,
+                                                                  else INT, then KILL; never reports a
+                                                                  capture that survived as stopped)
   youtube_leg_tap.py --host H --user U --key K purge
 
 stdout = ONE JSON object (`ok` true / false + `reason`); exit 0 OK, 2 refused / failed. The capture
@@ -39,19 +41,22 @@ import sys
 EXIT_OK, EXIT_FAIL = 0, 2
 BASE = "youtube-leg-tap-1387"
 CAPTURE = "inpoint.mkv"
-RESERVED_CPUS = (15,)  # the owner's rule for a measurement on a broadcast box: never on CPU 15
+# the dispatch rule for this measurement (4.11.2026): never on CPU 15, the CPU strih-snv reserves for its
+# Dante RX threads; a literal on purpose, also on a box that reserves none (a stream box today)
+RESERVED_CPUS = (15,)
 BACKGROUND_RUN = "/usr/local/sbin/obs-box-background-run"
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
             "-o", "ConnectTimeout=10"]
 STEP_TIMEOUT_S = 60
-STOP_GRACE_S = 15   # ffmpeg ends by itself when the publisher stops; this long before it is signalled
+STOP_GRACE_S = 10   # ffmpeg ends by itself when the publisher stops; this long before it is signalled
 STALE_MIN = 1440
 RW_TIMEOUT_US = 10_000_000  # no data for 10 s = the capture ends (a vanished publisher never hangs it)
 LOCAL_INPOINTS = re.compile(r"^rtmp://(127\.0\.0\.1|localhost):1234/[A-Za-z0-9_.-]+/?$")
-KEY_OK = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+KEY_OK = re.compile(r"^(?!\.+$)[A-Za-z0-9_.-]{1,64}$")  # never "." or "..": the key names a dir rm -rf removes
 OUTPUT_UNTAPPED = ("restreamer's output exists only on its per-session delivery VPS (rs_delivery pushes the "
                    "chunks from S3 to YouTube); camera-box cannot record it without a change in restreamer")
 MARK = "TAP-RESULT "
+LOG_MARK = "TAP-LOG "
 
 
 # ------------------------------------------------------------------ pure builders
@@ -113,18 +118,27 @@ def local_inpoint_url(server, key):
 
 
 def capture_argv(url, out):
-    """The capture: a copy of every stream restreamer received, its timestamps kept."""
+    """The capture: a copy of every stream restreamer received (no `-copyts`: ffmpeg shifts both tracks by
+    the same start offset, so the A/V relation stays and the tool reads it like a VOD that starts at 0)."""
     return ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning", "-rw_timeout", str(RW_TIMEOUT_US),
-            "-i", url, "-map", "0", "-c", "copy", "-copyts", "-f", "matroska", out]
+            "-i", url, "-map", "0", "-c", "copy", "-f", "matroska", out]
+
+
+def redact_url(url):
+    """The URL without its stream key (the block is uploaded with the run's artifacts)."""
+    return url.rsplit("/", 1)[0] + "/<key>" if isinstance(url, str) and "/" in url else url
 
 
 def priority_prefix(cpus, helper):
     """Idle priority off the OBS CPUs: rig-background.slice through the box's helper when sudo allows
-    it, else nice 19 + ionice idle; SCHED_IDLE and the CPU pin either way."""
+    it (the box's own nice 19 + ionice idle), else nice 19; SCHED_IDLE and the CPU pin either way. No
+    ionice of our own: a write held back behind a backup would hold the socket read, and restreamer's
+    per-subscriber channel is unbounded, so its memory would grow instead (the page cache absorbs a
+    ~2.4 MB/s copy)."""
     pin = ["chrt", "--idle", "0", "taskset", "-c", cpus]
     if helper:
         return ["sudo", "-n", BACKGROUND_RUN] + pin
-    return ["nice", "-n", "19", "ionice", "-c", "3"] + pin
+    return ["nice", "-n", "19"] + pin
 
 
 def _dir_expr(key):
@@ -141,7 +155,7 @@ def probe_script():
             "for f in \"$R\"/etc/*-isolated-cpus.conf; do [ -r \"$f\" ] && printf 'obs=%s\\n' \"$(head -n 1 \"$f\")\"; done\n"
             f"if [ -x \"$R{BACKGROUND_RUN}\" ] && sudo -n -l \"$R{BACKGROUND_RUN}\" >/dev/null 2>&1; then echo helper=1; "
             "else echo helper=0; fi\n"
-            "command -v ffmpeg >/dev/null 2>&1 && echo ffmpeg=1 || echo ffmpeg=0\n")
+            "command -v ffmpeg >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1 && echo ffmpeg=1 || echo ffmpeg=0\n")
 
 
 def parse_probe(text):
@@ -157,43 +171,63 @@ def parse_probe(text):
     return facts
 
 
-def start_script(key, argv):
-    """Sweep a day-old leftover, start the capture detached in its own session, prove it still runs."""
+# The capture's own process, found by its owner + its output path: with sudo's helper the launched pid is
+# root's sudo, which (Defaults use_pty) runs the command in ANOTHER session, so neither that pid nor its
+# process group reaches ffmpeg. ffmpeg runs as the caller (setpriv), its argv ends with the path.
+_MINE = 'pgrep -u "$(id -u)" -f -- "$D/' + CAPTURE + '"'
+
+
+def start_script(key, argv_head):
+    """Sweep a day-old leftover, start the capture detached in its own session (its output path
+    absolute, appended to `argv_head`), prove it still runs."""
     d = _dir_expr(key)
-    cmd = " ".join(shlex.quote(a) for a in argv)
+    cmd = " ".join(shlex.quote(a) for a in argv_head) + f' "$D/{CAPTURE}"'
     return (f"set -euo pipefail\nD={d}\nmkdir -p \"$(dirname \"$D\")\"\n"
             f"find \"$(dirname \"$D\")\" -mindepth 1 -maxdepth 1 -type d -mmin +{STALE_MIN} -exec rm -rf -- {{}} + || true\n"
             "rm -rf -- \"$D\"\nmkdir -p \"$D\"\ncd \"$D\"\n"
             f"setsid nohup {cmd} > \"$D/ffmpeg.log\" 2>&1 < /dev/null &\n"
-            "echo \"$!\" > \"$D/tap.pid\"\nsleep 2\n"
-            "if [ -d \"/proc/$(cat \"$D/tap.pid\")\" ]; then "
+            "sleep 2\n"
+            f"if {_MINE} > /dev/null; then "
             f"printf '{MARK}%s\\n' \"{{\\\"running\\\":true,\\\"path\\\":\\\"$D/{CAPTURE}\\\"}}\"; "
-            "else tail -c 400 \"$D/ffmpeg.log\" >&2 || true; rm -f \"$D/tap.pid\"; "
+            "else tail -c 400 \"$D/ffmpeg.log\" >&2 || true; "
             f"printf '{MARK}%s\\n' '{{\"running\":false}}'; fi\n")
 
 
+def _end_capture(grace):
+    """bash: wait `grace` s for the capture to end by itself, else INT, then KILL; sets $how and leaves
+    `survived` when even the KILL did not end it (never reported as stopped)."""
+    return (f"how=absent\nif [ -e \"$D/{CAPTURE}\" ]; then how=ended; fi\n"  # a capture that already ended
+            f"if {_MINE} > /dev/null; then how=ended\n"
+            f"  for i in $(seq 1 {int(grace)}); do {_MINE} > /dev/null || break; sleep 1; done\n"
+            f"  if {_MINE} > /dev/null; then how=signalled; pkill -INT -u \"$(id -u)\" -f -- \"$D/{CAPTURE}\" || true\n"
+            f"    for i in $(seq 1 10); do {_MINE} > /dev/null || break; sleep 1; done\n"
+            f"    if {_MINE} > /dev/null; then how=killed; pkill -KILL -u \"$(id -u)\" -f -- \"$D/{CAPTURE}\" || true\n"
+            f"      sleep 1; ! {_MINE} > /dev/null || how=survived; fi\n"
+            "  fi\nfi\n")
+
+
 def stop_script(key, grace=STOP_GRACE_S):
-    """Wait for the capture to end by itself (the publisher stopped), else INT then KILL its group."""
+    """End the capture (see _end_capture) and report how, its size and the tail of ffmpeg's log (on its own
+    line, printable characters only: a control byte never breaks the result line)."""
     d = _dir_expr(key)
-    g = int(grace)
-    return (f"set -uo pipefail\nD={d}\nhow=absent\n"
-            "if [ -f \"$D/tap.pid\" ]; then p=\"$(cat \"$D/tap.pid\")\"; how=ended\n"
-            f"  for i in $(seq 1 {g}); do [ -d \"/proc/$p\" ] || break; sleep 1; done\n"
-            "  if [ -d \"/proc/$p\" ]; then how=signalled; kill -INT -- \"-$p\" 2>/dev/null || true\n"
-            "    for i in $(seq 1 10); do [ -d \"/proc/$p\" ] || break; sleep 1; done\n"
-            "    if [ -d \"/proc/$p\" ]; then how=killed; kill -KILL -- \"-$p\" 2>/dev/null || true; fi\n"
-            "  fi\n  rm -f \"$D/tap.pid\"\nfi\n"
-            f"b=\"$(stat -c %s \"$D/{CAPTURE}\" 2>/dev/null || echo 0)\"\n"
-            "log=\"$(tail -c 300 \"$D/ffmpeg.log\" 2>/dev/null | tr -d '\\\\\"' | tr '\\n\\r\\t' '   ' || true)\"\n"
-            f"printf '{MARK}{{\"how\":\"%s\",\"bytes\":%s,\"path\":\"%s\",\"log\":\"%s\"}}\\n' "
-            f"\"$how\" \"$b\" \"$D/{CAPTURE}\" \"$log\"\n")
+    return (f"set -uo pipefail\nD={d}\n" + _end_capture(grace)
+            + f"b=\"$(stat -c %s \"$D/{CAPTURE}\" 2>/dev/null || echo 0)\"\n"
+            f"printf '{LOG_MARK}%s\\n' \"$(tail -c 300 \"$D/ffmpeg.log\" 2>/dev/null | tr -cd '[:print:]' || true)\"\n"
+            f"printf '{MARK}{{\"how\":\"%s\",\"bytes\":%s,\"path\":\"%s\"}}\\n' \"$how\" \"$b\" \"$D/{CAPTURE}\"\n")
 
 
 def purge_script(key):
     d = _dir_expr(key)
-    return (f"set -uo pipefail\nD={d}\n"
-            "if [ -f \"$D/tap.pid\" ]; then kill -KILL -- \"-$(cat \"$D/tap.pid\")\" 2>/dev/null || true; fi\n"
-            f"rm -rf -- \"$D\"\nprintf '{MARK}%s\\n' '{{\"purged\":true}}'\n")
+    return (f"set -uo pipefail\nD={d}\n" + _end_capture(0)
+            + f"if [ \"$how\" != survived ]; then rm -rf -- \"$D\"; fi\n"
+            f"printf '{MARK}{{\"how\":\"%s\"}}\\n' \"$how\"\n")
+
+
+def parse_log(text):
+    for line in reversed((text or "").splitlines()):
+        if line.startswith(LOG_MARK):
+            return line[len(LOG_MARK):]
+    return ""
 
 
 def parse_result(text):
@@ -240,34 +274,38 @@ def do_start(box, key, url):
     r = box.run(probe_script(), "the CPU probe")
     facts = parse_probe(r.stdout)
     if not facts["ffmpeg"]:
-        raise Refused(f"ffmpeg is not installed on {box.host}")
+        raise Refused(f"ffmpeg or pgrep is not installed on {box.host}")
     cpus = tap_cpus(facts["online"], facts["obs"])
     if not cpus:
         raise Refused(f"no CPU outside the OBS mask {facts['obs'] or '(none read)'} and CPU 15 on {box.host} "
                       f"(online {facts['online'] or '?'}): never captured on the OBS cores")
-    prefix = priority_prefix(cpus, facts["helper"])
-    argv = prefix + capture_argv(url, CAPTURE)
+    argv = priority_prefix(cpus, facts["helper"]) + capture_argv(url, CAPTURE)[:-1]  # the path: start_script
     r = box.run(start_script(key, argv), "the capture start")
     res = parse_result(r.stdout)
     if not res or not res.get("running"):
         raise Refused(f"the capture of {url} did not keep running: {(r.stderr or r.stdout).strip()[-300:]}")
-    return {"started": True, "path": res.get("path"), "url": url, "cpus": cpus,
-            "priority": "rig-background.slice + SCHED_IDLE" if facts["helper"] else "nice 19 + ionice idle + SCHED_IDLE"}
+    return {"started": True, "path": res.get("path"), "url": redact_url(url), "cpus": cpus,
+            "priority": "rig-background.slice + SCHED_IDLE" if facts["helper"] else "nice 19 + SCHED_IDLE"}
 
 
 def do_stop(box, key, grace=STOP_GRACE_S):
-    r = box.run(stop_script(key, grace), "the capture stop", timeout=grace + 40)
+    r = box.run(stop_script(key, grace), "the capture stop", timeout=grace + 30)  # under the E2E's 45 s bound of the stop
     res = parse_result(r.stdout)
     if res is None:
         raise Refused(f"the capture stop gave no result: {(r.stderr or r.stdout).strip()[-300:]}")
+    if res.get("how") == "survived":
+        raise Refused(f"the capture on {box.host} survived INT and KILL ({res.get('path')})")
     return {"stopped": True, "how": res.get("how"), "bytes": res.get("bytes"), "path": res.get("path"),
-            "ffmpeg_log": res.get("log") or ""}
+            "ffmpeg_log": parse_log(r.stdout)}
 
 
 def do_purge(box, key):
     r = box.run(purge_script(key), "the capture purge")
-    if parse_result(r.stdout) is None:
+    res = parse_result(r.stdout)
+    if res is None:
         raise Refused(f"the capture purge gave no result: {(r.stderr or r.stdout).strip()[-300:]}")
+    if res.get("how") == "survived":
+        raise Refused(f"the capture on {box.host} survived INT and KILL: not deleted")
     return {"purged": True}
 
 
