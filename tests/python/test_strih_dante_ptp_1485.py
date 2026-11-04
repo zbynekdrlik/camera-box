@@ -99,6 +99,14 @@ def test_the_real_pins_are_read():
     ([], "absent - -"),
     ([NOT_STARTED], "absent - port 319 needs CAP_NET_BIND_SERVICE or root"),
     (["x: media clock source source=Weird"], "odd:Weird - -"),
+    # dstack v0.6.31 (live strih-snv hub, 4.11.2026): the switch line carries a re-align phrase, and a
+    # "waits to agree" line before it names the CANDIDATE source, which is not yet in use.
+    ([SERVICE, "x INFO dstack::clock::linked: media clock: the new source waits to agree with the one in use "
+      "source=Internal from=Service offset_ns=Some(-441612)"], "service None -"),
+    ([SERVICE, "x INFO dstack::clock::linked: media clock: the new source waits to agree with the one in use "
+      "source=Internal from=Service offset_ns=Some(-441612)",
+      "x INFO dstack::clock::linked: media clock source changed with a re-align source=Internal from=Service "
+      "offset_ns=Some(-455303) waited=60"], "internal Service -"),
 ])
 def test_the_last_source_line_decides(lines, want):
     r = _bash("strih_dante_media_clock_verdict", stdin="\n".join(lines) + "\n")
