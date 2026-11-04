@@ -118,6 +118,30 @@ def test_the_drop_in_hands_the_rig_address_to_the_launcher():
     assert 'Environment="STRIH_RIG_IP=10.77.9.202"\n' in r.stdout, r.stdout
 
 
+def _dropin_row(tmp_path, text):
+    home = tmp_path / "home"
+    d = home / ".config/systemd/user/strih-obs.service.d"
+    d.mkdir(parents=True)
+    if text is not None:
+        (d / "10-box-facts.conf").write_text(text)
+    body = (f'. "{PROVISION}"\nok() {{ echo "PASS $1"; }}; bad() {{ echo "FAIL $1"; }}; note() {{ echo "NOTE $1"; }}\n'
+            'strih_box_load strih-snv\nstrih_obs_dropin_verify_row "$1"')
+    r = _run(body, home)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.splitlines()
+
+
+def test_verify_grades_the_drop_in_that_carries_the_rig_address(tmp_path):
+    good = ('[Service]\nEnvironment="STRIH_OBS_PROFILE=strih-snv"\nEnvironment="STRIH_OBS_COLLECTION=strih-snv"\n'
+            'Environment="STRIH_RIG_IP=10.77.9.202"\n')
+    rows = _dropin_row(tmp_path / "a", good)
+    assert len(rows) == 1 and rows[0].startswith("PASS (obs-net-wait)") and "10.77.9.202" in rows[0], rows
+    old = good.replace('Environment="STRIH_RIG_IP=10.77.9.202"\n', "")
+    rows = _dropin_row(tmp_path / "b", old)
+    assert len(rows) == 1 and rows[0].startswith("FAIL (obs-net-wait)") and "setup-strih.sh step 8" in rows[0], rows
+    assert _dropin_row(tmp_path / "c", None)[0].startswith("FAIL (obs-net-wait)")
+
+
 # --- verify item 49: the program output's start ----------------------------------------------------------
 
 def _home(tmp_path, enabled=True):
@@ -183,6 +207,7 @@ def test_verify_strih_runs_the_start_row_on_the_item_49_line_within_budget():
     i = v.index('strih_jxs_config_verify_row "$USER_HOME"')
     line = v[v.rindex("\n", 0, i):v.index("\n", i)]
     assert 'strih_jxs_output_start_row "$USER_HOME" "$LOG"' in line, line
+    assert 'strih_obs_dropin_verify_row "$USER_HOME"' in line, line
 
 
 # --- verify item 49: a running source that receives nothing ----------------------------------------------
