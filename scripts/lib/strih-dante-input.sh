@@ -155,7 +155,8 @@ strih_dante_input_install() {
       echo "  dante-input: no ${STRIH_DANTE_INPUT_DEVICE} Dante device on this box (STRIH_DANTE_DEVICES) -- no ${dest}"
     fi
     strih_dante_rx_pin_remove
-    strih_dante_reserved_cpu_remove
+    strih_dante_reserved_cpu_remove "$user"
+    _strih_dante_input_jxs_cores "$home" "$user" || return 1
     return 0
   fi
   ports="$(strih_dante_input_ports "$(strih_lx_dante_devices)")" || return 1
@@ -167,6 +168,15 @@ strih_dante_input_install() {
   echo "  dante-input: ${STRIH_DANTE_INPUT_DEVICE} on ${iface}, $(printf '%s\n' "$chans" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
   strih_dante_rx_pin_install "$user" || { echo "dante-input: the Dante threads' CPU reservation failed (above)" >&2; return 1; }
   strih_dante_reserved_cpu_install "$user" || { echo "dante-input: the managers' default off the reserved CPU failed (above)" >&2; return 1; }
+  _strih_dante_input_jxs_cores "$home" "$user"
+}
+
+# _strih_dante_input_jxs_cores HOME USER -> the strih JPEG XS program encoder's cores re-derived now that
+# step 11's OBS mask exists (strih-jxs-provision.sh; step 6 ran before it). rc 1 named on a failure.
+_strih_dante_input_jxs_cores() {
+  declare -F strih_jxs_output_cores_reconcile >/dev/null \
+    || { echo "dante-input: strih_jxs_output_cores_reconcile is not defined -- source scripts/lib/strih-provision.sh" >&2; return 1; }
+  strih_jxs_output_cores_reconcile "$1" "$2" || { echo "dante-input: the JPEG XS program encoder's cores (above)" >&2; return 1; }
 }
 
 # strih_dante_input_field LINE KEY -> the value of KEY=<value> in a dante-input line.
@@ -233,8 +243,9 @@ strih_dante_input_grade() {
     bad "(program-dante) no 'dante-input start: config=' line in ${log}: the device did not start (no dante-input.toml when OBS started, or the module is missing)"
   else
     # the rate conversion: obs v0.4.1+ (dstack #90 `Rated`) logs converts=, v0.4.0 logged halved=
-    local conv_key=converts
-    [ -n "$(strih_dante_input_field "$start" converts)" ] || conv_key=halved
+    local conv_key=halved
+    # decided by the key being PRESENT, never by its value (an empty converts= is graded as converts)
+    [[ " ${start}" =~ [[:space:]]converts= ]] && conv_key=converts
     if [ "$(strih_dante_input_field "$start" device_rate)" = "$STRIH_DANTE_INPUT_NETWORK_RATE" ] \
          && [ "$(strih_dante_input_field "$start" "$conv_key")" = true ]; then
       ok "(program-dante) started: device_rate=$(strih_dante_input_field "$start" device_rate) ${conv_key}=true sample_rate=$(strih_dante_input_field "$start" sample_rate) iface=$(strih_dante_input_field "$start" iface)"

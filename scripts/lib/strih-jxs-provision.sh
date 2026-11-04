@@ -25,7 +25,11 @@
 #   verify-strih item 49 (strih_jxs_config_verify_row, next to the lost-slices row): `(jxs-seed)`,
 #     `(jxs-inputs)` + `(jxs-place)` + (strih) `(jxs-output-live)` over obs-websocket
 #     (obs_jxs_inputs.py --verify against the facts' render and the derived target; an unreachable
-#     websocket FAILs while an obs process runs), `(jxs-output)` (the file the output is made from).
+#     websocket FAILs while an obs process runs), `(jxs-output)` (the file the output is made from),
+#     and on a Dante box `(jxs-cores)` (an empty jxs_cores or one holding the reserved CPU FAILs).
+#   setup-strih step 13 (strih_jxs_output_cores_reconcile, called by strih_dante_input_install after the
+#     managers' default): the program encoder's jxs_cores re-derived now that baseline step 11 wrote the
+#     OBS mask (step 6 runs before it, so a FRESH Dante box got none, issue 1485 review).
 # Tests: tests/python/test_strih_jxs_provision_1387.py, tests/python/test_obs_jxs_inputs_1387.py.
 
 # Overridable (test seams); the defaults are the box paths.
@@ -117,13 +121,62 @@ strih_jxs_program_target() {
 # other key. `disable` keeps every key and sets only enabled false. setup runs as root in the desktop
 # user's tree, so FILE is opened O_NOFOLLOW and must be a regular file: rc 4 (nothing printed) for a
 # symlink or anything else; rc 3 when it is not a JSON object.
-# DEFAULT_CORES (5th, issue 1485): jxs_cores when the file has none or an empty one (the operator's
-# own value is kept). An empty jxs_cores puts the encoder on every ONLINE CPU, the reserved Dante CPU
-# included, so a Dante box passes the OBS mask without it (strih_jxs_output_default_cores).
+# DEFAULT_CORES (5th, issue 1485): the derived jxs_cores. An empty jxs_cores puts the encoder on every
+# ONLINE CPU, the reserved Dante CPU included, so a Dante box passes the OBS mask without it
+# (strih_jxs_output_default_cores). The value written is recorded as `jxs_cores_derived`, and the file's
+# jxs_cores is re-derived while it is empty or still equals that record; an operator's own value is kept,
+# a WARNING on stderr when it holds RESERVED (6th, the reserved Dante CPU; empty = none). An empty
+# derived value drops the record (a box that stopped taking the Dante program). MODE `cores` changes
+# only these two keys of an existing FILE (setup-strih step 13). The WARNING is decided in bash with the
+# ONE cpulist check (`_strih_dante_cpulist_has`, the verify row's), never a second parser here.
 strih_jxs_output_render() {
-  python3 - "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" <<'PY'
+  local _o _rc=0
+  { _o="$(_strih_jxs_output_render_py "$@" 2>&1 1>&3)" || _rc=$?; } 3>&1
+  _strih_jxs_operator_cores_warn "${1-}" "${6-}" "$_o"
+  return "$_rc"
+}
+
+# _strih_jxs_operator_cores_warn FILE RESERVED STDERR -> the render's stderr passed on, its `OPERATOR-CORES
+# <value>` line turned into the WARNING when the value holds RESERVED (`_strih_dante_cpulist_has`, which
+# reads anything it cannot parse as holding it). Always rc 0.
+_strih_jxs_operator_cores_warn() {
+  local file="${1-}" res="${2-}" line v
+  while IFS= read -r line; do
+    case "$line" in
+      'OPERATOR-CORES '*)
+        v="${line#OPERATOR-CORES }"
+        if [ -n "$res" ] && declare -F _strih_dante_cpulist_has >/dev/null && _strih_dante_cpulist_has "$v" "$res"; then
+          echo "  WARNING: ${file}: the operator's jxs_cores '${v}' holds the reserved Dante CPU ${res} -- the JPEG XS program encoder can run there (issue 1485); kept, remove it to get the derived set" >&2
+        fi
+        ;;
+      '') ;;
+      *) printf '%s\n' "$line" >&2 ;;
+    esac
+  done <<<"${3-}"
+  return 0
+}
+
+_strih_jxs_output_render_py() {
+  python3 - "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" "${6-}" <<'PY'
 import json, os, stat, sys
-path, target, sid, mode, cores = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
+path, target, mode, cores, reserved = sys.argv[1], sys.argv[2], sys.argv[4], sys.argv[5], sys.argv[6]
+sid = int(sys.argv[3] or 0)
+
+
+def with_cores(out, old):
+    stored = old.get("jxs_cores", "") or ""
+    derived = old.get("jxs_cores_derived")
+    if stored == "" or (isinstance(derived, str) and stored == derived):
+        out["jxs_cores"] = cores
+        if cores:
+            out["jxs_cores_derived"] = cores
+        else:
+            out.pop("jxs_cores_derived", None)
+    elif reserved:
+        print("OPERATOR-CORES %s" % stored, file=sys.stderr)  # the caller decides the WARNING (bash)
+    return out
+
+
 old = {}
 try:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -144,20 +197,37 @@ if fd is not None:
         sys.exit(3)
 if mode == "disable":
     out = dict(old, enabled=False)
+elif mode == "cores":
+    if fd is None:
+        sys.exit(5)  # nothing to patch
+    out = with_cores(dict(old), old)
 else:
     out = {"enabled": True, "jxs_target": target, "jxs_stream_id": sid,
            "jxs_bpp_min": old.get("jxs_bpp_min", 0), "jxs_bpp_max": old.get("jxs_bpp_max", 0),
-           "jxs_cores": old.get("jxs_cores", "") or cores, "jxs_pace_mbps": old.get("jxs_pace_mbps", 0)}
+           "jxs_cores": old.get("jxs_cores", ""), "jxs_pace_mbps": old.get("jxs_pace_mbps", 0)}
     for k, v in old.items():
         out.setdefault(k, v)
+    out = with_cores(out, old)
 print(json.dumps(out))
 PY
 }
 
+# _strih_jxs_dante_lib -> rc 0 when the Dante libs this one calls are sourced (strih-provision.sh sources
+# them), else rc 1 + a named line: a missing lib must never read as "not a Dante box" (review finding 9).
+_strih_jxs_dante_lib() {
+  local f
+  for f in strih_program_dante_declared strih_dante_rx_pin_plan strih_dante_reserved_cpu _strih_dante_cpulist_has; do
+    declare -F "$f" >/dev/null || { echo "strih-jxs: ${f} is not defined -- source scripts/lib/strih-provision.sh (issue 1485)" >&2; return 1; }
+  done
+}
+
 # strih_jxs_output_default_cores -> the OBS mask without the reserved Dante CPU on a box that declares
-# the Dante program (the same plan as strih_dante_rx_pin_install), else nothing. rc 0 always.
+# the Dante program (the same plan as strih_dante_rx_pin_install), else nothing; nothing too while the
+# OBS mask is not written yet (step 6 on a fresh box: step 13 derives it, strih_jxs_output_cores_reconcile).
+# rc 1 only when the Dante libs are not sourced.
 strih_jxs_output_default_cores() {
   local online base plan
+  _strih_jxs_dante_lib || return 1
   strih_program_dante_declared || return 0
   online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
   base="$(head -n 1 "${STRIH_DANTE_RX_PIN_ROOT:-}/etc/strih-isolated-cpus.conf" 2>/dev/null || true)"
@@ -169,7 +239,7 @@ strih_jxs_output_default_cores() {
 # named line on a failed step; the caller fails the run.
 strih_jxs_provision() {
   local cfg="${1:?OBS config dir required}" user="${2:?desktop user required}" home="${3:?user home required}"
-  local src="${4:?checkout dir required}/scripts/obs_jxs_inputs.py" man target out rc st file cores
+  local src="${4:?checkout dir required}/scripts/obs_jxs_inputs.py" man target out rc st file cores res
   [ -f "$src" ] || { echo "strih-jxs: ${src} not found next to the scripts (issue 1387)" >&2; return 1; }
   mkdir -p "$(dirname "$STRIH_JXS_SEEDER_BIN")" "$(dirname "$STRIH_JXS_SEED_MANIFEST")" || return 1
   st="$(strih_session_apps_put "$src" "$STRIH_JXS_SEEDER_BIN" 0755)" || return 1
@@ -209,17 +279,44 @@ strih_jxs_provision() {
   fi
   strih_user_home_dir "$home" "$user" "${file%/*}" || return 1
   rc=0
-  cores="$(strih_jxs_output_default_cores)"
-  out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID" "" "$cores")" || rc=$?
+  cores="$(strih_jxs_output_default_cores)" || return 1
+  res="$(strih_dante_reserved_cpu)"
+  out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID" "" "$cores" "$res")" || rc=$?
   if [ "$rc" = 3 ]; then
     # moved aside (a rename never follows a link at the destination; -T never moves INTO a directory)
     mv -T "$file" "${file}.bak-$(date +%Y%m%dT%H%M%S)" || return 1
     echo "  WARN: ${file} is not a JSON object -- moved aside, rewritten"
     rc=0
-    out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID" "" "$cores")" || rc=$?
+    out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID" "" "$cores" "$res")" || rc=$?
   fi
   [ "$rc" = 0 ] && [ -n "$out" ] || { echo "strih-jxs: cannot render ${file} (rc ${rc}: 4 = not a regular file)" >&2; return 1; }
   printf '%s\n' "$out" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" "JPEG XS program output (-> ${target})" || return 1
+}
+
+# strih_jxs_output_cores_reconcile USER_HOME USER -> setup-strih step 13 (strih_dante_input_install, after
+# the managers' default): the program output's jxs_cores re-derived from the OBS mask baseline step 11 has
+# written by now (render mode `cores`: only jxs_cores + jxs_cores_derived change). The strih role with an
+# existing file only; a Dante box whose set cannot be derived here fails by name (rc 1). Prints the
+# write's one line.
+strih_jxs_output_cores_reconcile() {
+  local home="${1:?user home required}" user="${2:?desktop user required}" file cores res out rc=0
+  _strih_jxs_dante_lib || return 1
+  [ "$(strih_box_fact STRIH_ROLE)" = strih ] || return 0
+  file="${home}/.config/obs-studio/${STRIH_JXS_OUTPUT_REL}"
+  if [ -L "$file" ]; then
+    echo "strih-jxs: ${file} is a symlink -- refusing to read or write through it as root (issue 1387)" >&2
+    return 1
+  fi
+  [ -f "$file" ] || return 0
+  cores="$(strih_jxs_output_default_cores)" || return 1
+  if [ -z "$cores" ] && strih_program_dante_declared; then
+    echo "strih-jxs: the JPEG XS program encoder's jxs_cores cannot be derived on this Dante box (no OBS mask in ${STRIH_DANTE_RX_PIN_ROOT:-}/etc/strih-isolated-cpus.conf beside the online CPUs) -- ${file} left as it is (issue 1485)" >&2
+    return 1
+  fi
+  res="$(strih_dante_reserved_cpu)"
+  out="$(strih_jxs_output_render "$file" "" 0 cores "$cores" "$res")" || rc=$?
+  [ "$rc" = 0 ] && [ -n "$out" ] || { echo "strih-jxs: cannot patch jxs_cores of ${file} (rc ${rc})" >&2; return 1; }
+  printf '%s\n' "$out" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" "JPEG XS program output cores (${cores:-every CPU})" || return 1
 }
 
 # _strih_jxs_output_state FILE -> enabled | disabled | absent | unreadable (a symlink or anything that is
@@ -314,7 +411,46 @@ strih_jxs_config_verify_row() {
   else
     bad "(jxs-output) ${file} reads '${have:-unreadable}', not 'true ${target} ${STRIH_JXS_PROGRAM_STREAM_ID}' (enabled, target, stream id) -- re-run setup-strih.sh step 6, then restart OBS (issue 1387)"
   fi
+  case "$have" in "true "*) _strih_jxs_cores_row "$file" ;; esac
   return 0
+}
+
+# _strih_jxs_cores_row FILE -> verify item 49's `(jxs-cores)` row on a Dante box (issue 1485): an empty
+# jxs_cores (the encoder on every online CPU) or one holding the reserved Dante CPU FAILs.
+_strih_jxs_cores_row() {
+  local file="${1-}" cores res
+  if ! _strih_jxs_dante_lib 2>/dev/null || ! declare -F _strih_dante_cpulist_has >/dev/null; then
+    bad "(jxs-cores) the Dante libs are not sourced -- the encoder's cores are not graded (issue 1485)"
+    return 0
+  fi
+  strih_program_dante_declared || return 0
+  cores="$(_strih_jxs_output_key "$file" jxs_cores)"
+  res="$(strih_dante_reserved_cpu)"
+  if [ -z "$cores" ]; then
+    bad "(jxs-cores) ${file}: jxs_cores is empty -- the JPEG XS program encoder runs on every online CPU, the reserved Dante CPU ${res:-?} included; re-run setup-strih.sh (step 13 derives it), then Stop/StartOutput (issue 1485)"
+  elif [ -n "$res" ] && _strih_dante_cpulist_has "$cores" "$res"; then
+    bad "(jxs-cores) ${file}: jxs_cores '${cores}' holds the reserved Dante CPU ${res} -- remove it (or empty it and re-run setup-strih.sh step 13), then Stop/StartOutput (issue 1485)"
+  else
+    ok "(jxs-cores) ${file}: jxs_cores '${cores}' stays off the reserved Dante CPU ${res:-?} -- a running output takes a changed value at its next Stop/StartOutput"
+  fi
+}
+
+# _strih_jxs_output_key FILE KEY -> the string value of KEY (empty when absent, not a string, or the file
+# unreadable). O_NOFOLLOW: verify runs as root.
+_strih_jxs_output_key() {
+  python3 - "${1-}" "${2-}" <<'PY' 2>/dev/null || true
+import json, os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        sys.exit(0)
+    with os.fdopen(fd, encoding="utf-8-sig") as fh:
+        d = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(0)
+v = d.get(sys.argv[2]) if isinstance(d, dict) else None
+print(v if isinstance(v, str) else "")
+PY
 }
 
 # _strih_jxs_output_fields FILE -> `<enabled> <jxs_target> <jxs_stream_id>` (JSON spellings), or absent |

@@ -433,15 +433,8 @@ def test_a_strong_present_counts_at_once_and_absent_or_undecided_pass_through():
     assert pcc.confirm(None, u) == u
 
 
-def test_the_arm_confirms_a_song_24_db_under_the_marker_in_the_second_window():
-    song = music_like()
-    cg = _monitor(CGOBS, np.stack([song, song], axis=1) * 0.3)
-    arm = pcg.CgArm("resolume-snv", [cg], _Probe())
-    ring = _program_ring(program_with(song, rel_db=-24.0))
-    assert arm.state(now=100.0, program=ring).readings[0].correlation.kind == pcc.ABSENT
-    st = arm.state(now=102.0, program=ring)
-    assert st.readings[0].correlation.kind == pcc.PRESENT
-    assert pcg.overlay("MEASUREMENT", None, st)[0] == "FOREIGN"
+# The arm's cross-window memory (advancing rings, a frozen ring, the forget branches):
+# tests/python/test_program_audio_cg_confirm_1404.py.
 
 
 def test_the_arm_without_a_program_ring_is_the_strict_rule():

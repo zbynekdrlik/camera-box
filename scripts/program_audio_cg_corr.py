@@ -28,9 +28,11 @@ loud marker can never correlate and the comparison is the same band on both side
     live cg-obs mixed into the live program 18 dB under the program level, 600 ms late: |NCC|
     0.117-0.313 (median 0.19 over 20); 24 dB under: median 0.12 (min 0.026, a quiet passage); the
     mix 50 ppm fast: median 0.16. DETECT_NCC = 0.07 = 1.6 x the null maximum. A song whose passages
-    sit more than ~24 dB under the program level can read ABSENT in a window; one PRESENT window
-    latches FOREIGN for the guard's hold, and a song has loud passages. Re-calibrate only from real
-    audio (the rule file has the recipe), never to pass a single run.
+    sit more than ~24 dB under the program level can read ABSENT in a window. A PRESENT counts at
+    once only at |ncc| >= STRONG_NCC; a weaker one needs an earlier window at its lag (`confirm`,
+    the live null reached 0.083 on 4.11.2026), and a confirmed PRESENT latches FOREIGN for the
+    guard's hold. Re-calibrate only from real audio (the rule file has the recipe), never to pass a
+    single run.
   * Cost: ~32 ms of CPU per heard CG source per 2 s window on dev1 (one thread). Never a BLAS call
     (np.dot): its worker threads spun to 15x that CPU under load.
   * Mono CG (the channel mean) against EACH program channel, the best one: the measurement track
@@ -56,9 +58,14 @@ The program segment is the trailing PROGRAM_SEGMENT_S of program audio whose CG 
 the whole lag range is already buffered; a frame missing in either ring is zeros, and either
 segment covered less than MIN_COVERAGE is not computable.
 
-The decision (`judge`), per CG source the CG arm hears at or over the silence bar:
-  PRESENT     peak |NCC| >= DETECT_NCC                -> the CG audio IS in the program (FOREIGN)
-  ABSENT      peak |NCC| <  DETECT_NCC                -> it is not (the window keeps its verdict)
+The decision (`judge` per window, then `confirm` across windows), per CG source the CG arm hears at
+or over the silence bar:
+  PRESENT     peak |NCC| >= STRONG_NCC                -> the CG audio IS in the program (FOREIGN)
+              DETECT_NCC <= |NCC| < STRONG_NCC, and one of the last CONFIRM_WINDOWS earlier windows
+              (ended within CONFIRM_SPAN_S before it) peaked within LAG_AGREE_MS of its lag: a
+              PRESENT, or a non-overlapping ABSENT at |NCC| >= AGREE_FLOOR_NCC   -> the same (FOREIGN)
+  ABSENT      peak |NCC| <  DETECT_NCC, or a weak PRESENT no earlier window agrees with
+              (`unconfirmed`)                         -> it is not (the window keeps its verdict)
   UNDECIDED   not computable: no timestamps, too little CG or program audio buffered, coverage
               under MIN_COVERAGE, the CG segment under MIN_CG_DBFS (a near-silent CG never decides),
               the program segment digitally silent or its band empty, a non-finite sample
@@ -94,7 +101,10 @@ MIN_CG_DBFS = -80.0         # only an effectively empty CG segment never decides
 MIN_BAND_DBFS = -90.0       # a side with less than this in the correlation band has nothing to compare
 DETECT_NCC = 0.07           # the PRESENT threshold on |ncc|: ~1.7 x the live null maximum (module doc)
 STRONG_NCC = 0.12           # a PRESENT at or over this counts at once; under it only when the previous window agreed (confirm)
-LAG_AGREE_MS = 5.0          # two windows "agree" when their PRESENT lags are within this
+LAG_AGREE_MS = 5.0          # two windows "agree" when their peak lags are within this
+AGREE_FLOOR_NCC = 0.04      # an earlier window vouches for a weak PRESENT only at |ncc| >= this (any kind)
+CONFIRM_WINDOWS = 2         # the earlier windows a weak PRESENT may agree with
+CONFIRM_SPAN_S = 5.0        # ... each ended at most this long before it (2 windows of 2 s + slack)
 RING_S = PROGRAM_SEGMENT_S + (LAG_MAX_MS - LAG_MIN_MS) / 1e3 + MAX_SEGMENT_AGE_S + 1.0
 RING_MAX_RATE_HZ = 192000   # the sample cap assumes at most this rate: a healthy ring never reaches it
 RING_MAX_SAMPLES = int(RING_S * RING_MAX_RATE_HZ)  # a frozen / backward sender stamp cannot grow a ring past this
@@ -112,27 +122,68 @@ class Correlation(NamedTuple):
     lag_ms: float | None = None
     channel: int | None = None
     why: str | None = None
+    seg_end: int | None = None  # the judged program segment's end stamp (100 ns); None = not computed
 
 
 def _undecided(why: str) -> Correlation:
     return Correlation(UNDECIDED, why=why)
 
 
-def confirm(prev: "Correlation | None", cur: Correlation) -> Correlation:
+def _earlier(p: Correlation, cur: Correlation) -> bool:
+    """`p` was judged on an EARLIER program segment than `cur`, at most CONFIRM_SPAN_S before it. With
+    either end unknown (a hand-made Correlation) the order is taken as given."""
+    if p.seg_end is None or cur.seg_end is None:
+        return True
+    return 0 < cur.seg_end - p.seg_end <= CONFIRM_SPAN_S * UNITS
+
+
+def _agrees(p: Correlation, cur: Correlation) -> bool:
+    """`p` peaked at `cur`'s lag. A window whose segment OVERLAPS `cur`'s (less than PROGRAM_SEGMENT_S
+    apart: the next window shares 2 s of program, so its null peak can repeat at one lag) vouches only
+    when it was PRESENT itself; a disjoint one of any kind at |ncc| >= AGREE_FLOOR_NCC."""
+    if p.ncc is None or p.lag_ms is None or abs(p.lag_ms - cur.lag_ms) > LAG_AGREE_MS:
+        return False
+    overlaps = (p.seg_end is not None and cur.seg_end is not None
+                and cur.seg_end - p.seg_end < PROGRAM_SEGMENT_S * UNITS)
+    if overlaps or p.kind != ABSENT:
+        return p.kind == PRESENT
+    return abs(p.ncc) >= AGREE_FLOOR_NCC
+
+
+def confirm(prev, cur: Correlation) -> Correlation:
     """The decision across windows (E2E 41742028800, 4.11.2026: isolated PRESENT windows at |ncc|
     0.071-0.083 with jumping lags while the program carried only the marker). A real CG in the program
-    correlates at ONE lag window after window (the 4 s segments overlap by 2 s), the null at a random
-    one. So a PRESENT with |ncc| >= STRONG_NCC counts at once; a weaker one only when `prev` (the same
-    source's previous window, raw) was PRESENT within LAG_AGREE_MS; otherwise it reads ABSENT
-    `unconfirmed`. ABSENT and UNDECIDED pass through unchanged. Pure."""
+    peaks at ONE lag window after window (the 4 s segments overlap by 2 s), also in a window where it
+    dips under DETECT_NCC; the null peaks at a random lag. So a PRESENT with |ncc| >= STRONG_NCC counts
+    at once; a weaker one only when one of the last CONFIRM_WINDOWS earlier windows of `prev` (the
+    same source's raw correlations, `_earlier`) peaked within LAG_AGREE_MS of its lag: a PRESENT, or a
+    disjoint ABSENT at |ncc| >= AGREE_FLOOR_NCC (`_agrees`; review of 3662dfa599: an ABSENT at the same
+    lag must vouch too, or a song dipping every other window never reads FOREIGN); otherwise it reads
+    ABSENT `unconfirmed`. A window
+    never agrees with itself (the same segment end). `prev` is None, one Correlation or a sequence
+    (oldest first). ABSENT and UNDECIDED pass through unchanged. Pure."""
     if cur.kind != PRESENT or cur.ncc is None or abs(cur.ncc) >= STRONG_NCC:
         return cur
-    if (prev is not None and prev.kind == PRESENT and prev.lag_ms is not None and cur.lag_ms is not None
-            and abs(prev.lag_ms - cur.lag_ms) <= LAG_AGREE_MS):
+    hist = [] if prev is None else [prev] if isinstance(prev, Correlation) else list(prev)
+    earlier = [p for p in hist if _earlier(p, cur)][-CONFIRM_WINDOWS:]
+    if cur.lag_ms is not None and any(_agrees(p, cur) for p in earlier):
         return cur
-    return cur._replace(kind=ABSENT, why=f"unconfirmed: |ncc| {abs(cur.ncc):.3f} < {STRONG_NCC:g} and no "
-                                          f"PRESENT within {LAG_AGREE_MS:g} ms of lag {cur.lag_ms:+.0f} ms "
-                                          "in the previous window")
+    return cur._replace(kind=ABSENT, why=f"unconfirmed: |ncc| {abs(cur.ncc):.3f} < {STRONG_NCC:g} and none "
+                                          f"of the last {CONFIRM_WINDOWS} windows peaked within "
+                                          f"{LAG_AGREE_MS:g} ms of lag {cur.lag_ms:+.0f} ms at |ncc| >= "
+                                          f"{AGREE_FLOOR_NCC:g}")
+
+
+def remember(hist, raw: Correlation) -> tuple:
+    """The source's memory after `raw` (pure): a computed window (PRESENT / ABSENT with its segment end)
+    is added; a window on a segment already held REPLACES it (a frozen program ring, a repeated read:
+    the memory never advances on the same segment); an UNDECIDED carries no lag and is not kept. At
+    most CONFIRM_WINDOWS + 1 windows are kept, newest last."""
+    hist = tuple(hist or ())
+    if raw.kind not in (PRESENT, ABSENT) or raw.seg_end is None or raw.lag_ms is None:
+        return hist
+    kept = tuple(p for p in hist if p.seg_end != raw.seg_end)
+    return (kept + (raw,))[-(CONFIRM_WINDOWS + 1):]
 
 
 class AudioRing:
@@ -336,4 +387,4 @@ def judge(program_frames, cg_frames, *, program_bad_stamp: bool = False,
         return _undecided("no energy in the correlation band")
     ncc, k, ch = best
     lag_ms = (lag_max / 1e4) - k * 1e3 / CORR_FS
-    return Correlation(PRESENT if abs(ncc) >= DETECT_NCC else ABSENT, ncc, lag_ms, ch)
+    return Correlation(PRESENT if abs(ncc) >= DETECT_NCC else ABSENT, ncc, lag_ms, ch, seg_end=p1)

@@ -28,8 +28,8 @@
 #   strih_dante_reserved_cpu (strih-dante-rx-pin.sh) -> the reserved CPU from the conf, empty without one
 #   strih_dante_reserved_cpu_minus LIST CPU     -> LIST without CPU, compressed (pure; rc 1 when empty)
 #   strih_dante_reserved_cpu_manager_text CPUS RESERVED -> the drop-in (pure)
-#   strih_dante_reserved_cpu_install            setup-strih step 13 after strih_dante_rx_pin_install (root)
-#   strih_dante_reserved_cpu_remove             the same step on any other box (root; silent when absent)
+#   strih_dante_reserved_cpu_install [USER]     setup-strih step 13 after strih_dante_rx_pin_install (root)
+#   strih_dante_reserved_cpu_remove [USER]      the same step on any other box (root; silent when absent)
 #   strih_dante_reserved_cpu_offenders PROC RES OBS_PID -> `comm pid/tid` per task allowed on RES
 #   strih_dante_reserved_cpu_grade              verify-strih item 9's `(program-dante) reserved-cpu` rows
 #
@@ -102,25 +102,44 @@ strih_dante_reserved_cpu_install() {
   done < <(strih_dante_reserved_cpu_manager_paths)
   echo "  dante-reserved-cpu: systemd + user managers default to CPUs ${cpus} (CPU ${res} only for the two dstack threads) -- a manager takes it when it re-reads its configuration, at the latest the next boot; running processes keep their masks until they restart"
   [ "$changed" = 1 ] || return 0
-  if systemctl daemon-reexec && { [ -z "$user" ] || systemctl --user -M "${user}@" daemon-reexec; }; then
-    echo "  dante-reserved-cpu: re-read: PID 1${user:+ + the user manager of ${user}} re-executed (daemon-reexec)"
-  else
-    echo "  WARNING: dante-reserved-cpu: a daemon-reexec failed -- the new default applies at the next boot" >&2
-  fi
+  _strih_dante_reserved_cpu_reexec "$user"
 }
 
-# strih_dante_reserved_cpu_remove -> remove OUR two drop-ins (a box without the Dante program); a file of
-# the same name without our header is left and named. Prints only when it touched something.
+# _strih_dante_reserved_cpu_reexec [USER] -> PID 1 and USER's user manager re-read system.conf.d /
+# user.conf.d (daemon-reexec restarts no unit), each bounded by `timeout 30`; each failure is its own
+# WARNING naming the manager (the next boot applies it), never a failure. No USER = PID 1 only. rc 0.
+_strih_dante_reserved_cpu_reexec() {
+  local user="${1-}" done=""
+  if timeout 30 systemctl daemon-reexec; then
+    done="PID 1"
+  else
+    echo "  WARNING: dante-reserved-cpu: PID 1 daemon-reexec failed or timed out -- the system manager's new default applies at the next boot" >&2
+  fi
+  if [ -n "$user" ]; then
+    if timeout 30 systemctl --user -M "${user}@" daemon-reexec; then
+      done="${done:+${done} + }the user manager of ${user}"
+    else
+      echo "  WARNING: dante-reserved-cpu: the user manager of ${user}: daemon-reexec failed or timed out -- its new default applies at the next boot" >&2
+    fi
+  fi
+  [ -z "$done" ] || echo "  dante-reserved-cpu: re-read: ${done} re-executed (daemon-reexec)"
+  return 0
+}
+
+# strih_dante_reserved_cpu_remove [USER] -> remove OUR two drop-ins (a box without the Dante program); a
+# file of the same name without our header is left and named. When one was removed, PID 1 and USER's user
+# manager re-read their configuration, as on install. Prints only when it touched something.
 strih_dante_reserved_cpu_remove() {
-  local f
+  local user="${1-}" f removed=0
   while IFS= read -r f; do
     [ -e "$f" ] || continue
     if head -n 1 "$f" 2>/dev/null | grep -qxF "$STRIH_DANTE_RESERVED_CPU_HEADER"; then
-      rm -f "$f" && echo "  dante-reserved-cpu: removed ${f} (this box takes no Dante program)"
+      rm -f "$f" && echo "  dante-reserved-cpu: removed ${f} (this box takes no Dante program)" && removed=1
     else
       echo "  WARNING: ${f} is not ours (no camera-box header) -- left alone" >&2
     fi
   done < <(strih_dante_reserved_cpu_manager_paths)
+  [ "$removed" = 0 ] || _strih_dante_reserved_cpu_reexec "$user"
   return 0
 }
 
