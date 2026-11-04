@@ -255,24 +255,31 @@ IN the program.
     CG in the program correlates at ONE lag window after window (the 4 s segments overlap by 2 s). So a
     PRESENT with |ncc| >= `STRONG_NCC` 0.12 counts at once; a weaker one only when one of the same
     source's last `CONFIRM_WINDOWS` (2) earlier raw windows, ended at most `CONFIRM_SPAN_S` (5 s)
-    before it, peaked within `LAG_AGREE_MS` 5 ms of its lag at |ncc| >= `AGREE_FLOOR_NCC` 0.04, of ANY
-    kind; else it reads ABSENT `unconfirmed`.
+    before it, peaked within `LAG_AGREE_MS` 5 ms of its lag: a PRESENT, or an ABSENT at |ncc| >=
+    `AGREE_FLOOR_NCC` 0.04 whose segment does NOT overlap this one (>= `PROGRAM_SEGMENT_S` 4 s apart:
+    the next window shares 2 s of program, so a null peak can repeat at its lag); else it reads ABSENT
+    `unconfirmed`.
     - **Why any kind (review of 3662dfa599):** keyed on a previous PRESENT, a song whose |ncc| at its
       one lag went 0.09 / 0.05 / 0.08 / 0.06 / 0.10 never read FOREIGN: each ABSENT window broke the
-      chain. Now the 0.05 window vouches and the third window reads FOREIGN.
+      chain. Now the third window reads FOREIGN (the first, 4 s back, vouches), and an ABSENT 4 s
+      back vouches too.
     - **The memory** (`remember`, kept per source in `CgArm.state`): the computed windows with their
       judged segment end (`Correlation.seg_end`). A window on a segment already held replaces it and
       never agrees with itself, so a frozen program ring (the sampler's no-audio UNKNOWN path calls the
       arm every window) or a repeated read never self-confirms. An UNDECIDED carries no lag and is not
-      kept (it is FOREIGN on its own). A source that goes silent, and every source when the arm runs
-      without a program ring, forgets its memory.
+      kept (it is FOREIGN on its own). A quiet window (the source under the silence bar) keeps the
+      memory: a song passage under the bar is the loudness twin of the ABSENT dip, and the memory
+      ages by the segment end stamps anyway. Every source forgets it when the arm runs without a
+      program ring.
     - **The null chance of a same-lag agreement:** a null window peaks at a uniform lag of the 32001
-      lags of -1000..+3000 ms at 8 kHz; +-5 ms is 81 of them, so p = 0.0025 per earlier window, at most
-      0.005 for the 2 windows (the floor ignored). With the floor, 15 of the 992 windows of the
-      4.11.2026 long null (below) reached |ncc| >= 0.04 (1.5 %): 2 x 0.015 x 0.0025 = ~8e-5 per weak
-      null PRESENT. At the live weak-PRESENT rate of E2E 41742028800 (10 in ~120 windows) that is
-      ~6e-6 per window, ~0.2 % of 300-window runs. Unmeasured: the segments overlap by 2 s, so a null peak driven by the shared 2 s
-      could repeat at one lag (the live null's lags jumped; measure before lowering the floor).
+      lags of -1000..+3000 ms at 8 kHz; +-5 ms is 81 of them, p = 0.0025 per independent earlier
+      window. Only the window 4 s back is independent (disjoint segment); the overlapping one vouches
+      only as a PRESENT (the old rule's exposure). Measured on the 4.11.2026 long null (below): 15 of
+      992 windows at |ncc| >= 0.04 (1.5 %) = ~4e-5 per weak null PRESENT; at the live weak-PRESENT rate
+      of E2E 41742028800 (10 in ~120 windows) ~3e-6 per window, ~0.1 % of 300-window runs. WORST case
+      (the busy rig's null clearing the floor every time, unmeasured: that run kept no per-window
+      ncc/lag): 0.0025 per weak PRESENT, ~2e-4 per window, ~6 % of 300-window runs. If a live replay
+      shows the vouching rate over ~1 %, raise `AGREE_FLOOR_NCC`; never lower it without one.
     - Cost: a CG under ~-20 dB in the program is caught one or two windows (2-4 s) later; the synthetic
       song 24 dB under the marker is caught within its first three windows on advancing rings.
     - Tests: `tests/python/test_program_audio_cg_confirm_1404.py` (the shapes, the floor, the span, the

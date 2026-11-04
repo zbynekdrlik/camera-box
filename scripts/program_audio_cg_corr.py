@@ -62,8 +62,8 @@ The decision (`judge` per window, then `confirm` across windows), per CG source 
 or over the silence bar:
   PRESENT     peak |NCC| >= STRONG_NCC                -> the CG audio IS in the program (FOREIGN)
               DETECT_NCC <= |NCC| < STRONG_NCC, and one of the last CONFIRM_WINDOWS earlier windows
-              (ended within CONFIRM_SPAN_S before it, of ANY kind) peaked within LAG_AGREE_MS of its
-              lag at |NCC| >= AGREE_FLOOR_NCC                                    -> the same (FOREIGN)
+              (ended within CONFIRM_SPAN_S before it) peaked within LAG_AGREE_MS of its lag: a
+              PRESENT, or a non-overlapping ABSENT at |NCC| >= AGREE_FLOOR_NCC   -> the same (FOREIGN)
   ABSENT      peak |NCC| <  DETECT_NCC, or a weak PRESENT no earlier window agrees with
               (`unconfirmed`)                         -> it is not (the window keeps its verdict)
   UNDECIDED   not computable: no timestamps, too little CG or program audio buffered, coverage
@@ -138,8 +138,16 @@ def _earlier(p: Correlation, cur: Correlation) -> bool:
 
 
 def _agrees(p: Correlation, cur: Correlation) -> bool:
-    return (p.kind in (PRESENT, ABSENT) and p.ncc is not None and p.lag_ms is not None
-            and abs(p.ncc) >= AGREE_FLOOR_NCC and abs(p.lag_ms - cur.lag_ms) <= LAG_AGREE_MS)
+    """`p` peaked at `cur`'s lag. A window whose segment OVERLAPS `cur`'s (less than PROGRAM_SEGMENT_S
+    apart: the next window shares 2 s of program, so its null peak can repeat at one lag) vouches only
+    when it was PRESENT itself; a disjoint one of any kind at |ncc| >= AGREE_FLOOR_NCC."""
+    if p.ncc is None or p.lag_ms is None or abs(p.lag_ms - cur.lag_ms) > LAG_AGREE_MS:
+        return False
+    overlaps = (p.seg_end is not None and cur.seg_end is not None
+                and cur.seg_end - p.seg_end < PROGRAM_SEGMENT_S * UNITS)
+    if overlaps or p.kind != ABSENT:
+        return p.kind == PRESENT
+    return abs(p.ncc) >= AGREE_FLOOR_NCC
 
 
 def confirm(prev, cur: Correlation) -> Correlation:
@@ -148,9 +156,10 @@ def confirm(prev, cur: Correlation) -> Correlation:
     peaks at ONE lag window after window (the 4 s segments overlap by 2 s), also in a window where it
     dips under DETECT_NCC; the null peaks at a random lag. So a PRESENT with |ncc| >= STRONG_NCC counts
     at once; a weaker one only when one of the last CONFIRM_WINDOWS earlier windows of `prev` (the
-    same source's raw correlations, any kind, `_earlier`) peaked within LAG_AGREE_MS of its lag at
-    |ncc| >= AGREE_FLOOR_NCC (review of 3662dfa599: an ABSENT at the same lag must vouch too, or a song
-    dipping every other window never reads FOREIGN); otherwise it reads ABSENT `unconfirmed`. A window
+    same source's raw correlations, `_earlier`) peaked within LAG_AGREE_MS of its lag: a PRESENT, or a
+    disjoint ABSENT at |ncc| >= AGREE_FLOOR_NCC (`_agrees`; review of 3662dfa599: an ABSENT at the same
+    lag must vouch too, or a song dipping every other window never reads FOREIGN); otherwise it reads
+    ABSENT `unconfirmed`. A window
     never agrees with itself (the same segment end). `prev` is None, one Correlation or a sequence
     (oldest first). ABSENT and UNDECIDED pass through unchanged. Pure."""
     if cur.kind != PRESENT or cur.ncc is None or abs(cur.ncc) >= STRONG_NCC:

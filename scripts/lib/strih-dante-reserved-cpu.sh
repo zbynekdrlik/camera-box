@@ -109,18 +109,21 @@ strih_dante_reserved_cpu_install() {
 # user.conf.d (daemon-reexec restarts no unit), each bounded by `timeout 30`; each failure is its own
 # WARNING naming the manager (the next boot applies it), never a failure. No USER = PID 1 only. rc 0.
 _strih_dante_reserved_cpu_reexec() {
-  local user="${1-}" ok=1
-  if ! timeout 30 systemctl daemon-reexec; then
-    ok=0
+  local user="${1-}" done=""
+  if timeout 30 systemctl daemon-reexec; then
+    done="PID 1"
+  else
     echo "  WARNING: dante-reserved-cpu: PID 1 daemon-reexec failed or timed out -- the system manager's new default applies at the next boot" >&2
   fi
-  if [ -n "$user" ] && ! timeout 30 systemctl --user -M "${user}@" daemon-reexec; then
-    echo "  WARNING: dante-reserved-cpu: the user manager of ${user}: daemon-reexec failed or timed out -- its new default applies at the next boot" >&2
-    [ "$ok" = 1 ] && echo "  dante-reserved-cpu: re-read: PID 1 re-executed (daemon-reexec)"
-    return 0
+  if [ -n "$user" ]; then
+    if timeout 30 systemctl --user -M "${user}@" daemon-reexec; then
+      done="${done:+${done} + }the user manager of ${user}"
+    else
+      echo "  WARNING: dante-reserved-cpu: the user manager of ${user}: daemon-reexec failed or timed out -- its new default applies at the next boot" >&2
+    fi
   fi
-  [ "$ok" = 1 ] || return 0
-  echo "  dante-reserved-cpu: re-read: PID 1${user:+ + the user manager of ${user}} re-executed (daemon-reexec)"
+  [ -z "$done" ] || echo "  dante-reserved-cpu: re-read: ${done} re-executed (daemon-reexec)"
+  return 0
 }
 
 # strih_dante_reserved_cpu_remove [USER] -> remove OUR two drop-ins (a box without the Dante program); a

@@ -156,7 +156,7 @@ strih_dante_input_install() {
     fi
     strih_dante_rx_pin_remove
     strih_dante_reserved_cpu_remove "$user"
-    _strih_dante_input_jxs_cores "$home" "$user"
+    _strih_dante_input_jxs_cores "$home" "$user" || return 1
     return 0
   fi
   ports="$(strih_dante_input_ports "$(strih_lx_dante_devices)")" || return 1

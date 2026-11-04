@@ -441,8 +441,10 @@ class CgArm:
                 hist = self._last.get(m.source, ())
                 r = r._replace(correlation=pcc.confirm(hist, raw))
                 self._last[m.source] = pcc.remember(hist, raw)
-            else:
+            elif prog is None:
                 self._last.pop(m.source, None)
+            # a quiet window keeps the memory: it ages by the judged segments' end stamps
+            # (CONFIRM_SPAN_S), and a passage under the silence bar must not reset a song's lag chain
             readings.append(r)
         return CgState(self.box, self.home_probe.home, tuple(readings))
 

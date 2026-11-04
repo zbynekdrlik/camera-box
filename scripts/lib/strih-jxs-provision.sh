@@ -127,24 +127,40 @@ strih_jxs_program_target() {
 # jxs_cores is re-derived while it is empty or still equals that record; an operator's own value is kept,
 # a WARNING on stderr when it holds RESERVED (6th, the reserved Dante CPU; empty = none). An empty
 # derived value drops the record (a box that stopped taking the Dante program). MODE `cores` changes
-# only these two keys of an existing FILE (setup-strih step 13).
+# only these two keys of an existing FILE (setup-strih step 13). The WARNING is decided in bash with the
+# ONE cpulist check (`_strih_dante_cpulist_has`, the verify row's), never a second parser here.
 strih_jxs_output_render() {
+  local _o _rc=0
+  { _o="$(_strih_jxs_output_render_py "$@" 2>&1 1>&3)" || _rc=$?; } 3>&1
+  _strih_jxs_operator_cores_warn "${1-}" "${6-}" "$_o"
+  return "$_rc"
+}
+
+# _strih_jxs_operator_cores_warn FILE RESERVED STDERR -> the render's stderr passed on, its `OPERATOR-CORES
+# <value>` line turned into the WARNING when the value holds RESERVED (`_strih_dante_cpulist_has`, which
+# reads anything it cannot parse as holding it). Always rc 0.
+_strih_jxs_operator_cores_warn() {
+  local file="${1-}" res="${2-}" line v
+  while IFS= read -r line; do
+    case "$line" in
+      'OPERATOR-CORES '*)
+        v="${line#OPERATOR-CORES }"
+        if [ -n "$res" ] && declare -F _strih_dante_cpulist_has >/dev/null && _strih_dante_cpulist_has "$v" "$res"; then
+          echo "  WARNING: ${file}: the operator's jxs_cores '${v}' holds the reserved Dante CPU ${res} -- the JPEG XS program encoder can run there (issue 1485); kept, remove it to get the derived set" >&2
+        fi
+        ;;
+      '') ;;
+      *) printf '%s\n' "$line" >&2 ;;
+    esac
+  done <<<"${3-}"
+  return 0
+}
+
+_strih_jxs_output_render_py() {
   python3 - "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" "${6-}" <<'PY'
 import json, os, stat, sys
 path, target, mode, cores, reserved = sys.argv[1], sys.argv[2], sys.argv[4], sys.argv[5], sys.argv[6]
 sid = int(sys.argv[3] or 0)
-
-
-def holds(cpulist, cpu):
-    # a cpulist that does not parse counts as holding it (fail closed: the WARNING is shown)
-    try:
-        for item in cpulist.split(","):
-            a, _, b = item.strip().partition("-")
-            if int(a) <= int(cpu) <= int(b or a):
-                return True
-    except ValueError:
-        return True
-    return False
 
 
 def with_cores(out, old):
@@ -156,10 +172,8 @@ def with_cores(out, old):
             out["jxs_cores_derived"] = cores
         else:
             out.pop("jxs_cores_derived", None)
-    elif reserved and holds(str(stored), reserved):
-        print("  WARNING: %s: the operator's jxs_cores '%s' holds the reserved Dante CPU %s -- the JPEG XS "
-              "program encoder can run there (issue 1485); kept, remove it to get the derived set"
-              % (path, stored, reserved), file=sys.stderr)
+    elif reserved:
+        print("OPERATOR-CORES %s" % stored, file=sys.stderr)  # the caller decides the WARNING (bash)
     return out
 
 
@@ -397,7 +411,7 @@ strih_jxs_config_verify_row() {
   else
     bad "(jxs-output) ${file} reads '${have:-unreadable}', not 'true ${target} ${STRIH_JXS_PROGRAM_STREAM_ID}' (enabled, target, stream id) -- re-run setup-strih.sh step 6, then restart OBS (issue 1387)"
   fi
-  [ "$target" = none ] || _strih_jxs_cores_row "$file"
+  case "$have" in "true "*) _strih_jxs_cores_row "$file" ;; esac
   return 0
 }
 
@@ -417,7 +431,7 @@ _strih_jxs_cores_row() {
   elif [ -n "$res" ] && _strih_dante_cpulist_has "$cores" "$res"; then
     bad "(jxs-cores) ${file}: jxs_cores '${cores}' holds the reserved Dante CPU ${res} -- remove it (or empty it and re-run setup-strih.sh step 13), then Stop/StartOutput (issue 1485)"
   else
-    ok "(jxs-cores) ${file}: jxs_cores '${cores}' stays off the reserved Dante CPU ${res:-?}"
+    ok "(jxs-cores) ${file}: jxs_cores '${cores}' stays off the reserved Dante CPU ${res:-?} -- a running output takes a changed value at its next Stop/StartOutput"
   fi
 }
 
