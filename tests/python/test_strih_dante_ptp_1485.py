@@ -26,7 +26,8 @@ HUB_UNIT = SCRIPTS / "lib" / "strih-intercom-hub-unit.sh"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
 LEAKY = ("STRIH_DANTE_RX_PIN_ROOT", "STRIH_DANTE_RX_PIN_OWNER", "STRIH_DANTE_PTP_INTERCOM_PIN",
          "STRIH_DANTE_PTP_OBS_PIN", "STRIH_HUB_AMBIENT_CAPS", "STRIH_HUB_BOUNDING_CAPS", "STRIH_HUB_JOURNAL_FILE",
-         "STRIH_BOXES_DIR", "STRIH_LX_IP", "STRIH_NIC_IFACE", "STRIH_HUB_INVOCATION_ID", "STRIH_HUB_JOURNAL_EUID")
+         "STRIH_BOXES_DIR", "STRIH_LX_IP", "STRIH_NIC_IFACE", "STRIH_HUB_INVOCATION_ID", "STRIH_HUB_JOURNAL_EUID",
+         "STRIH_HUB_JOURNAL_GROUPS")
 ROWS = 'ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; note() { echo "NOTE $*"; }\n'
 
 # the dstack lines as the obs release forwards them into the OBS log (the obs project, 4.11.2026)
@@ -410,10 +411,31 @@ def test_a_journal_read_as_non_root_says_so(tmp_path):
     (b / "journalctl").write_text("#!/bin/sh\necho 'Hint: You are currently not seeing messages from other users' >&2\n")
     (b / "journalctl").chmod(0o755)
     env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="abc123", STRIH_HUB_JOURNAL_EUID="1000",
-               PATH="%s:%s" % (b, os.environ["PATH"]))
+               STRIH_HUB_JOURNAL_GROUPS="newlevel sudo", PATH="%s:%s" % (b, os.environ["PATH"]))
     r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
     assert r.stdout.startswith("BAD (intercom-dante) media clock: "), r.stdout
     assert "run verify-strih as root" in r.stdout, r.stdout
+
+
+def test_a_non_root_journal_read_below_the_threshold_is_a_note(tmp_path):
+    """Review round 3: today's pins are below v0.6.23 and verify-strih supports a non-root run."""
+    env = dict(_pins(tmp_path, intercom="v0.6.19"), STRIH_HUB_INVOCATION_ID="abc123", STRIH_HUB_JOURNAL_EUID="1000",
+               STRIH_HUB_JOURNAL_GROUPS="newlevel sudo")
+    r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
+    assert r.stdout.startswith("NOTE (intercom-dante) media clock: "), r.stdout
+    assert "not readable as" in r.stdout and "below v0.6.23" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("group", ["systemd-journal", "adm"])
+def test_a_journal_group_member_reads_the_journal(tmp_path, group):
+    b = tmp_path / "bin"
+    b.mkdir()
+    (b / "journalctl").write_text('#!/bin/sh\nprintf "INFO dstack::clock::linked: media clock source source=Internal from=None\\n"\n')
+    (b / "journalctl").chmod(0o755)
+    env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="abc123", STRIH_HUB_JOURNAL_EUID="1000",
+               STRIH_HUB_JOURNAL_GROUPS="newlevel %s sudo" % group, PATH="%s:%s" % (b, os.environ["PATH"]))
+    r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
+    assert r.stdout.startswith("OK (intercom-dante) media clock: source=Internal"), r.stdout + r.stderr
 
 
 def test_the_journal_is_read_for_the_current_invocation_only(tmp_path):
