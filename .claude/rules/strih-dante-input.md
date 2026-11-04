@@ -32,7 +32,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   state; an OBS without the kind registered keeps the input.
 - **verify item 9** (`strih_program_audio_grade` dispatches): `(program-dante)` rows = the TOML, the OBS
   input kind, the `dante-input start: config=` line (`device_rate=96000` and `converts=true` from obs v0.4.1 on, dstack #90's `Rated` sinc
-  converter; `halved=true` on v0.4.0 and older, graded by whichever key the line carries), any
+  converter; `halved=true` on v0.4.0 and older, graded by whichever key the line carries: `converts=`
+  PRESENT decides, also with an empty value), any
   `dante-input error:` line, and two `dante-input status:` lines 12 s apart (clock=media, holdover 0, a
   grandmaster, delivered_frames advancing; any of the gate's loss counters GROWING between the two lines
   FAILs, a total since the start that holds still is only named). The `(vban-leg) vban` arrival
@@ -90,10 +91,13 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
       (pinned by a test that widens a narrowed mask) and OBS's `taskset -c 2-14` is a subset.
     - **A manager takes it when it re-reads its configuration, at the latest at the next boot** (PID 1
       may already on a daemon-reload; not verified on a box, so nothing relies on it). Every process
-      started after that inherits it; running processes keep their masks until they restart. Setup never
-      daemon-reexecs and never moves a live process; after a deploy the supervisor reboots strih-snv (or
-      moves the running ones: `taskset -a -p -c 0-14 <pid>`), then reads `grep Cpus_allowed_list
-      /proc/1/status` and verify item 9.
+      started after that inherits it; running processes keep their masks until they restart. When a
+      drop-in was written (install) or removed (another box), step 13 re-executes PID 1 and the
+      operator's user manager (`daemon-reexec`, no unit restarts; each under `timeout 30`; a failure is
+      a WARNING naming THAT manager, the next boot applies it; no user = PID 1 only). Setup never moves
+      a live process; after a deploy the supervisor reboots strih-snv (or moves the running ones:
+      `taskset -a -p -c 0-14 <pid>`), then reads `grep Cpus_allowed_list /proc/1/status` and verify
+      item 9.
     - **The sampler is placed off it too** (`strih_program_audio_cpus`, `program-audio-guard.md`).
     - **verify item 9's `(program-dante) reserved-cpu` rows** (`strih_dante_reserved_cpu_grade`, before
       the rx-pin rows): the two drop-ins byte-identical to the render, and a /proc scan (bash builtins,
@@ -114,7 +118,18 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   - Another box: step 13 removes our conf, helper and sudoers line if present, silent when absent.
   - **The strih JPEG XS program encoder too (3.11.2026):** `jxs_cores` empty = every ONLINE CPU (vstack's
     `affinity::online_cores`, an explicit sched_setaffinity, so the OBS mask does not bound it): its
-    `jxs-feed` / `jxs-send` threads ran on CPU 15. Setup step 6 now writes the OBS mask without the reserved
-    CPU into an EMPTY `jxs_cores` of `jxs-output.json` (`strih_jxs_output_default_cores`, the rx-pin plan);
-    an operator value is kept. The output reads the file at its next start (or Stop/StartOutput over WS).
+    `jxs-feed` / `jxs-send` threads ran on CPU 15. The OBS mask without the reserved CPU
+    (`strih_jxs_output_default_cores`, the rx-pin plan) goes into `jxs_cores` of `jxs-output.json`:
+    - **step 13 derives it** (`strih_jxs_output_cores_reconcile`, called by `strih_dante_input_install`
+      after the managers' default; render mode `cores` changes only the two keys below). Step 6 runs
+      before baseline step 11 writes `/etc/strih-isolated-cpus.conf`, so on a FRESH box it writes `""`
+      (review of the 1485 commits). A Dante box whose set cannot be derived at step 13 fails by name;
+    - **the derived value is recorded** as `jxs_cores_derived` and re-derived while `jxs_cores` is empty
+      or still equals it (the reserved CPU moved = a new set). An operator's own value is kept, a
+      WARNING when it holds the reserved CPU. A box that stops taking the Dante program gets the derived
+      value cleared (`""`, the record dropped);
+    - **verify item 49 `(jxs-cores)`** (strih-jxs-provision.sh, a Dante box with a program target):
+      an empty `jxs_cores` or one holding the reserved CPU FAILs;
+    - the Dante libs not sourced is an error by name, never "not a Dante box";
+    - the output reads the file at its next start (or Stop/StartOutput over WS).
 - Clocks + latency: `.claude/rules/audio-clock-map.md` (Dante on strih-snv).
