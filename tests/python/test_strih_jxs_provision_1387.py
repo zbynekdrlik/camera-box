@@ -205,34 +205,6 @@ def test_the_render_keeps_the_operators_keys_and_refuses_garbage(tmp_path):
     assert _bash('strih_jxs_output_render "$1" t 100', f).returncode == 3
 
 
-# issue 1485, live 3.11.2026: an empty jxs_cores put the program encoder (jxs-feed / jxs-send) on EVERY
-# online CPU, the reserved Dante CPU 15 included. On a Dante box the default is the OBS mask without it.
-def test_the_render_fills_empty_cores_with_the_given_default_and_keeps_an_operator_value(tmp_path):
-    f = tmp_path / "jxs-output.json"
-    f.write_text(LIVE_OUTPUT)
-    out = json.loads(_bash('strih_jxs_output_render "$1" 10.77.9.204:7100 100 "" 2-14', f).stdout)
-    assert out["jxs_cores"] == "2-14"
-    f.write_text('{"jxs_cores": "4-7"}')
-    out = json.loads(_bash('strih_jxs_output_render "$1" 10.77.9.204:7100 100 "" 2-14', f).stdout)
-    assert out["jxs_cores"] == "4-7"
-    f.write_text(LIVE_OUTPUT)
-    assert _bash('strih_jxs_output_render "$1" 10.77.9.204:7100 100', f).stdout == LIVE_OUTPUT
-
-
-def test_the_default_cores_are_the_obs_mask_without_the_reserved_cpu_on_a_dante_box_only(tmp_path):
-    root = tmp_path / "root"
-    (root / "etc").mkdir(parents=True)
-    (root / "etc" / "strih-isolated-cpus.conf").write_text("2-15\n")
-    online = tmp_path / "online"
-    online.write_text("0-15\n")
-    env = {"STRIH_DANTE_RX_PIN_ROOT": str(root), "OBS_BOX_ONLINE_CPUS": str(online)}
-    r = _bash('strih_box_load strih-snv >/dev/null; strih_jxs_output_default_cores', env=env, baseline=True)
-    # issue 1485: strih-snv reserves CPU 15 (OBS's Dante threads) and 14 (the hub's own Dante device)
-    assert r.returncode == 0 and r.stdout.strip() == "2-13", r.stdout + r.stderr
-    r = _bash('strih_box_load strih-pp >/dev/null; strih_jxs_output_default_cores', env=env, baseline=True)
-    assert r.returncode == 0 and r.stdout.strip() == "", r.stdout + r.stderr
-
-
 # --- setup-strih step 6, end to end on temp paths -------------------------------------------------------
 
 def _seams(tmp_path):

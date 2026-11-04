@@ -335,7 +335,6 @@ def test_below_the_threshold_the_capability_row_is_a_note(tmp_path, ambient, bou
     'strih_intercom_audio_dropin newlevel 1000 pipewire',
     'strih_intercom_audio_dropin newlevel 1000 no-pipewire',
     'strih_intercom_hub_cred_dropin_text',
-    'strih_dante_rx_pin_hub_dropin_text',   # the hub's own Dante CPU (comment 6634395906): ExecStartPost only
     'ndi_discovery_dropin_content',
     'strih_public_dropin_text',
 ])

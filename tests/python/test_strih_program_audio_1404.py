@@ -131,7 +131,6 @@ class Box:
             "STRIH_PROGRAM_AUDIO_SYSFS": str(self.sys),
             "OBS_BOX_ONLINE_CPUS": str(self.tmp / "online"),
             "STRIH_PROGRAM_AUDIO_ISOLATED_CONF": str(self.tmp / "isolated.conf"),
-            "STRIH_DANTE_RX_PIN_ROOT": str(self.tmp / "rxroot"),
             "STRIH_PROGRAM_AUDIO_PYTHON": sys.executable,
             "STRIH_PROGRAM_AUDIO_CURL": str(self.bin / "curl"),
             "STRIH_PROGRAM_AUDIO_RETRY_SLEEP": "0",
@@ -318,7 +317,7 @@ def test_changed_sources_rebuild_the_shim_and_restart_a_running_sampler(tmp_path
 
 def test_no_cpu_atom_installs_the_background_set_never_every_cpu(tmp_path):
     """issue 1485: the AMD strih-snv has no cpu_atom; the unit used to drop its affinity and run on 0-15,
-    the reserved Dante CPU 15 included."""
+    beside OBS. The background set (online minus the OBS mask) keeps it off the OBS cores."""
     box = Box(tmp_path, ecores=None)
     assert box.install().returncode == 0
     unit = (box.home / ".config/systemd/user" / UNIT).read_text()
