@@ -197,7 +197,9 @@ find_pid() {
     if [ "$MODE" = obs ]; then
         pgrep -n -x -u "$SUDO_UID" obs 2>/dev/null || true
     else
-        p="$(systemctl show -p MainPID --value intercom-hub 2>/dev/null || true)"
+        # systemd exports MAINPID to ExecStartPost; a hand run as root asks systemd for it
+        p="${MAINPID:-}"
+        case "$p" in '' | 0 | *[!0123456789]*) p="$(systemctl show -p MainPID --value intercom-hub 2>/dev/null || true)" ;; esac
         case "$p" in '' | 0 | *[!0123456789]*) ;; *) printf '%s\n' "$p" ;; esac
     fi
 }
@@ -277,11 +279,12 @@ strih_dante_rx_pin_install() {
     strih_dante_rx_pin_conf_text "$cpu" "$rest" "$base" "${sib:-unread}" "$hub" || return 1
   obs_box_write_if_changed_rendered "$(strih_dante_rx_pin_helper_path)" 0755 "$owner" "dante-rx-pin helper" strih_dante_rx_pin_helper_text || return 1
   obs_box_write_if_changed_rendered "$(strih_dante_rx_pin_sudoers_path)" 0440 "$owner" "dante-rx-pin sudoers" strih_dante_rx_pin_sudoers_text "$user" || return 1
-  echo "  dante-rx-pin: CPU ${cpu} reserved for ${STRIH_DANTE_RX_PIN_THREADS// / + } at nice ${STRIH_DANTE_RX_PIN_NICE}; OBS on ${rest} (from ${base}); SMT siblings of CPU ${cpu}: ${sib:-unread} (the sibling stays OBS's) -- applied at OBS's next start"
   if [ -n "$hub" ]; then
+    echo "  dante-rx-pin: CPU ${cpu} reserved for ${STRIH_DANTE_RX_PIN_THREADS// / + } at nice ${STRIH_DANTE_RX_PIN_NICE}; OBS on ${rest} (from ${base}); SMT siblings of CPU ${cpu}: ${sib:-unread} (CPU ${hub} is the hub's own) -- applied at OBS's next start"
     _strih_dante_rx_pin_hub_dropin_install "$owner" || return 1
-    echo "  dante-rx-pin: CPU ${hub} reserved for the intercom hub's ${STRIH_DANTE_RX_PIN_THREADS// / + } at nice ${STRIH_DANTE_RX_PIN_NICE} (its own Dante device; ExecStartPost of $(strih_dante_rx_pin_hub_dropin_path)) -- applied at the hub's next start"
+    echo "  dante-rx-pin: CPU ${hub} reserved for the intercom hub's ${STRIH_DANTE_RX_PIN_THREADS// / + } at nice ${STRIH_DANTE_RX_PIN_NICE} (its own Dante device; ExecStartPost of $(strih_dante_rx_pin_hub_dropin_path)) -- applied at the hub's next start: restart intercom-hub.service (setup never restarts a running hub)"
   else
+    echo "  dante-rx-pin: CPU ${cpu} reserved for ${STRIH_DANTE_RX_PIN_THREADS// / + } at nice ${STRIH_DANTE_RX_PIN_NICE}; OBS on ${rest} (from ${base}); SMT siblings of CPU ${cpu}: ${sib:-unread} (the sibling stays OBS's) -- applied at OBS's next start"
     _strih_dante_rx_pin_hub_dropin_remove || return 1
   fi
 }
@@ -401,13 +404,20 @@ _strih_dante_rx_pin_rows() {
   return 0
 }
 
-# _strih_dante_rx_pin_emit LABEL -> the verdict lines on stdin through the caller's ok / bad.
+# _strih_dante_rx_pin_emit LABEL [PENDING] -> the verdict lines on stdin through the caller's ok / bad;
+# PENDING=1 turns each bad line into a `restart pending` note (the hub has not run its drop-in yet).
 _strih_dante_rx_pin_emit() {
   local line
   while IFS= read -r line; do
     case "$line" in
       ok\ *) ok "${1} ${line#ok }" ;;
-      bad\ *) bad "${1} ${line#bad }" ;;
+      bad\ *)
+        if [ "${2:-0}" = 1 ]; then
+          note "${1} rx-pin: restart pending -- the hub started before its drop-in was written (setup never restarts a running hub); restart intercom-hub.service, until then: ${line#bad rx-pin: }"
+        else
+          bad "${1} ${line#bad }"
+        fi
+        ;;
     esac
   done
 }
@@ -425,7 +435,7 @@ strih_dante_rx_pin_hub_pid() {
 # with a `hub=` in the conf or our drop-in left = a FAIL (the facts no longer declare it). Through the
 # caller's ok / bad. Read-only, any user. Always rc 0.
 strih_dante_rx_pin_grade() {
-  local proc="${STRIH_DANTE_RX_PIN_PROC:-/proc}" hubwant="${1:-0}" out mask rows hub f
+  local proc="${STRIH_DANTE_RX_PIN_PROC:-/proc}" hubwant="${1:-0}" out mask rows hub f pid pending=0
   out="$(_strih_dante_rx_pin_rows "$proc" "$(pgrep -n -x obs 2>/dev/null || true)")"
   mask="$(printf '%s\n' "$out" | head -n 1)"
   rows="$(printf '%s\n' "$out" | tail -n +2)"
@@ -439,14 +449,39 @@ strih_dante_rx_pin_grade() {
     fi
     return 0
   fi
+  pid="$(strih_dante_rx_pin_hub_pid)"
   if cmp -s "$f" <(strih_dante_rx_pin_hub_dropin_text); then
     ok "(intercom-dante) rx-pin: ${f} runs the helper after every hub start"
+    # a hub that started before its drop-in was written (setup never restarts a running hub) has not
+    # run it yet: its rows are a NOTE until it restarts, like the managers' reboot-pending NOTE
+    ! _strih_dante_rx_pin_hub_pending "$proc" "$pid" "$f" || pending=1
   else
     bad "(intercom-dante) rx-pin: ${f} missing or different -- re-run setup-strih.sh step 13, then restart intercom-hub"
   fi
-  out="$(_strih_dante_rx_pin_rows "$proc" "$(strih_dante_rx_pin_hub_pid)")"
+  out="$(_strih_dante_rx_pin_rows "$proc" "$pid")"
   mask="$(printf '%s\n' "$out" | head -n 1)"
   rows="$(printf '%s\n' "$out" | tail -n +2)"
-  _strih_dante_rx_pin_emit "(intercom-dante)" < <(strih_dante_rx_pin_verdict "$hub" "$mask" "$rows" hub)
+  _strih_dante_rx_pin_emit "(intercom-dante)" "$pending" < <(strih_dante_rx_pin_verdict "$hub" "$mask" "$rows" hub)
   return 0
+}
+
+# _strih_dante_rx_pin_hub_pending PROC PID DROPIN -> rc 0 when the hub process PID started before DROPIN
+# was last written: DROPIN's mtime newer than btime (PROC/stat) + the process's start time (stat field 22,
+# clock ticks since boot). rc 1 otherwise, also when anything is unreadable (never "pending" by default).
+_strih_dante_rx_pin_hub_pending() {
+  local proc="${1:?proc}" pid="${2-}" f="${3:?dropin}" bt="" k v stat start hz mt
+  [ -n "$pid" ] || return 1
+  while read -r k v; do
+    case "$k" in btime) bt="$v" ;; esac
+  done 2>/dev/null < "${proc}/stat" || true
+  # the main thread's stat: its start time is the process's
+  stat="$(cat "${proc}/${pid}/task/${pid}/stat" 2>/dev/null || true)"
+  stat="${stat##*) }"
+  # shellcheck disable=SC2086  # split the stat fields on purpose
+  start="$(set -- $stat; printf '%s' "${20:-}")"
+  hz="$(getconf CLK_TCK 2>/dev/null || true)"
+  mt="$(stat -c %Y "$f" 2>/dev/null || true)"
+  case "${bt}:${start}:${hz}:${mt}" in *[!0123456789:]* | :* | *::* | *:) return 1 ;; esac
+  [ "$hz" -gt 0 ] || return 1
+  [ "$mt" -gt "$((bt + start / hz))" ]
 }

@@ -54,10 +54,10 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   threads per CPU at SCHED_OTHER nice 0 its blocks finished up to 6.7 ms late against a 5 ms margin and
   audio was skipped (underruns, rebootstraps). So on a Dante-program box only:
   - **The CPU is derived:** the highest CPU that is online AND in `/etc/strih-isolated-cpus.conf`
-    (`strih_dante_rx_pin_plan`); strih-snv = CPU 15, OBS on 2-14. Its SMT sibling (14 on strih-snv,
-    written to the conf as `smt_siblings`) stays OBS's: the two threads get their own run queue (the
-    wake-up latency is the fault), not a whole physical core. Taking 14 too would cost OBS another CPU;
-    re-measure before doing it.
+    (`strih_dante_rx_pin_plan`); a one-CPU box = that CPU, OBS on the rest. Its SMT sibling (written to
+    the conf as `smt_siblings`) stays OBS's: the two threads get their own run queue (the wake-up latency
+    is the fault), not a whole physical core. strih-snv has TWO reserved CPUs since 4.11.2026 (15 for OBS,
+    14 for the hub's own Dante device, OBS on 2-13, the managers on 0-13): the two-CPU bullet below.
   - **The mask file stays the full block.** The background slice (`rig-background.slice` = online minus
     that file, 0-1) and the baseline `affinity` row read it unchanged. setup-strih step 13
     (`strih_dante_input_install`) writes `/etc/strih-dante-rx-cpu.conf` (`reserved=`, `obs=`, `base=`,
@@ -83,8 +83,9 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     rebootstrap in every 10-15 min window (moved live to 0-1: a 15.5-min window clean). Now:
     - **ONE manager-level default, a Dante box only:** step 13 (`strih_dante_reserved_cpu_install`,
       right after the rx pin) writes `/etc/systemd/system.conf.d/` AND `/etc/systemd/user.conf.d/`
-      `50-strih-dante-reserved-cpu.conf` = `[Manager] CPUAffinity=<online minus reserved>` (0-14), so
-      every unit and every forked process of both managers starts off CPU 15, units we do not own
+      `50-strih-dante-reserved-cpu.conf` = `[Manager] CPUAffinity=<online minus every reserved CPU>` (0-14
+      on a one-CPU box, 0-13 on strih-snv), so every unit and every forked process of both managers starts
+      off the reserved CPU(s), units we do not own
       included (the camboxes' `cambox-housekeeping-cpus.sh` precedent, plus the user manager). Rejected: a per-unit `CPUAffinity=` drop-in (every new unit must remember it, foreign
       units stay on 15) and a cpuset `AllowedCPUs=` (a cpuset BOUNDS sched_setaffinity, so the helper
       could no longer put the dstack threads there).
@@ -98,7 +99,7 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
       operator's user manager (`daemon-reexec`, no unit restarts; each under `timeout 30`; a failure is
       a WARNING naming THAT manager, the next boot applies it; no user = PID 1 only). Setup never moves
       a live process; after a deploy the supervisor reboots strih-snv (or moves the running ones:
-      `taskset -a -p -c 0-14 <pid>`), then reads `grep Cpus_allowed_list /proc/1/status` and verify
+      `taskset -a -p -c <the managers' set> <pid>`, 0-13 on strih-snv), then reads `grep Cpus_allowed_list /proc/1/status` and verify
       item 9.
     - **The sampler is placed off it too** (`strih_program_audio_cpus`, `program-audio-guard.md`).
     - **verify item 9's `(program-dante) reserved-cpu` rows** (`strih_dante_reserved_cpu_grade`, before
@@ -124,7 +125,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
       `<obs cpu> <obs mask> <hub cpu>`: the highest = OBS's (15), the next one down that is online and in
       OBS's mask = the hub's (14), OBS on 2-13. A box without the hub device keeps ONE CPU, byte-identical
       (no `hub=`, no hub drop-in; a drop-in of ours left there is removed). The SMT sibling of 15 is now
-      the hub's CPU 14 (one physical core for both engines; re-measure if a core-level collision shows).
+      the hub's CPU 14 (`thread_siblings_list` 14-15 read on strih-snv 4.11.2026: one physical core for
+      both engines; the clean live case 4 of comment 6634395906 was exactly that layout).
     - **The ONE source:** the plan, persisted as `hub=` in `/etc/strih-dante-rx-cpu.conf`, read by
       `strih_dante_reserved_hub_cpu` and `strih_dante_reserved_cpus` (`15 14`). Everything else reads
       those: the managers' drop-ins (`CPUAffinity=` online minus both = 0-13, a third comment line), the
@@ -150,10 +152,19 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
       line. `HUB_BUDGET_S=30`: the threads appear ~0.2 s after the hub's start (measured on strih-snv
       4.11.2026), and ExecStartPost holds the unit in `activating` until it returns, so the budget stays
       far under the unit's 90 s start timeout. Every other hub thread (`hub-mix` SCHED_FIFO 10, tokio,
-      the dstack tx / mdns threads) stays on the managers' default.
+      the dstack tx / mdns threads) stays on the managers' default. MAINPID comes from systemd's own
+      environment of ExecStartPost (a hand run as root asks `systemctl show`). Cost: a hub whose Dante
+      device never starts (facts that declare it beside a routing file that does not) holds every start
+      30 s in `activating`, then logs the FAIL and runs on; the facts and the pinned release's TOML are
+      kept in step by the hub's own `(intercom-dante)` rows of item 16. Limit: a pump thread dstack
+      recreated later from another thread inherits that thread's mask (0-13) and stays unpinned until the
+      next hub start (OBS the same); none is recreated today (the threads are the device's lifetime).
     - **verify item 9 (no verify-strih line changed, the rows come from the libs):** `(intercom-dante)
       rx-pin` = the drop-in as rendered, the hub's main affinity off its CPU, both threads exactly on
-      `hub=` at nice -10 or lower; no running hub / no `hub=` FAIL; facts without the hub device but a
+      `hub=` at nice -10 or lower; no running hub / no `hub=` FAIL; a hub that started before its drop-in
+      was written (the drop-in's mtime newer than btime + the process's start time; setup never restarts
+      a running hub) turns its thread rows into `restart pending` NOTEs, so a deploy's acceptance verify
+      does not fail on it, until the hub restarts; facts without the hub device but a
       `hub=` or our drop-in on the box FAIL. `(intercom-dante) reserved-cpu` = the same /proc scan as CPU
       15's, on CPU 14, allowing only the hub's two threads (a `hub-mix` or a crossed thread there is named);
       the scan of CPU 15 now also names the hub's threads if they sit there. Both scans share the

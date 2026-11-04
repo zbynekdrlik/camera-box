@@ -432,11 +432,11 @@ _strih_jxs_cores_row() {
   cores="$(_strih_jxs_output_key "$file" jxs_cores)"
   res="$(strih_dante_reserved_cpus)"
   if [ -z "$cores" ]; then
-    bad "(jxs-cores) ${file}: jxs_cores is empty -- the JPEG XS program encoder runs on every online CPU, the reserved Dante CPU ${res:-?} included; re-run setup-strih.sh (step 13 derives it), then Stop/StartOutput (issue 1485)"
+    bad "(jxs-cores) ${file}: jxs_cores is empty -- the JPEG XS program encoder runs on every online CPU, the reserved Dante CPU(s) ${res:-?} included; re-run setup-strih.sh (step 13 derives it), then Stop/StartOutput (issue 1485)"
   elif held="$(_strih_jxs_cores_held "$cores" "$res")"; then
     bad "(jxs-cores) ${file}: jxs_cores '${cores}' holds the reserved Dante CPU(s) ${held} -- remove it (or empty it and re-run setup-strih.sh step 13), then Stop/StartOutput (issue 1485)"
   else
-    ok "(jxs-cores) ${file}: jxs_cores '${cores}' stays off the reserved Dante CPU ${res:-?} -- a running output takes a changed value at its next Stop/StartOutput"
+    ok "(jxs-cores) ${file}: jxs_cores '${cores}' stays off the reserved Dante CPU(s) ${res:-?} -- a running output takes a changed value at its next Stop/StartOutput"
   fi
 }
 

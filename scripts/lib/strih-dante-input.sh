@@ -72,7 +72,8 @@ strih_program_dante_declared() {
 }
 
 # strih_dante_hub_declared -> rc 0 when the LOADED box takes its program from the Dante device AND its
-# intercom hub runs its own Dante device (a `<box>-intercom=` entry in STRIH_DANTE_DEVICES): then each
+# intercom hub runs its own Dante device (an `*-intercom=` entry in STRIH_DANTE_DEVICES, the same match
+# item 16's (intercom-dante) rows use; the facts are per box, strih-snv's is `strih-snv-intercom=`): then each
 # dstack engine gets its own reserved CPU (strih-dante-rx-pin.sh; comment 6634395906, 4.11.2026).
 strih_dante_hub_declared() {
   local v
