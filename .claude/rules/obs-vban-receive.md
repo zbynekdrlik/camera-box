@@ -672,7 +672,14 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
 - **Traps:** `nft list` prints touching ports of an interval set merged (`4440-4441`) and a `skuid` as a
   number, and the read-back compares text: the render merges them and resolves avahi's uid. No conntrack
   (its hooks would see every NDI packet). avahi is dropped by uid, never configured (an avahi restart risks
-  the NDI announcement). UDP 319/320 and 31900 stay shut: dantesync is the only PTP owner.
+  the NDI announcement). dsync's own 31900 stays shut.
+- **PTP in process (ROZHODNUTÉ 6628785864, owner 4.11.2026):** the dstack devices follow Dante PTP themselves
+  (dsync's follower in dstack v0.6.23: UDP 319 + 320 on INADDR_ANY, joined to 224.0.1.129 on the leg, receive
+  only). One input rule admits exactly that group to 319/320 from the /24 (`STRIH_DANTE_PTP_GROUP` /
+  `_PORTS`), before the drop; no output rule (it never sends; IGMP already passes). The dsync service stays
+  the only writer of the system clock. Linux's default `IP_MULTICAST_ALL` also hands the group to dsync's own
+  INADDR_ANY:319 sockets; its gm_allowlist keeps it on video-clock.lan (the clock watchdog pages a foreign
+  grandmaster). Who may bind 319: `.claude/rules/strih-dante-input.md`.
 - **`rp_filter=2` on the leg:** an inbound multicast's reverse lookup has no `from` match and resolves
   through the rig NIC.
 - **Unproven until the first live run:** `man nm-settings-nmcli` says `ipv4.route-table` affects device-routes
