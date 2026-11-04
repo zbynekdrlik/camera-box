@@ -504,9 +504,20 @@ def _mutations(s):
 
 # --- issue 1485: the Dante variant of the leg -------------------------------------------------------------
 
-def _dante_text(sender="10.77.7.30", port="6980,6981"):
-    r = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, STRIH_VLAN_IF, sender, port, STRIH_LEG_ADDR,
-              STRIH_DEVICES, env={"STRIH_DANTE_AVAHI_UID": "111"})
+# ROZHODNUTE 6628785864: the leg's PTP rule exists once a pinned device's dstack follows PTP in process
+# (strih_dante_ptp_leg_open); the pins come from STRIH_DANTE_PTP_*_PIN files, ready by default.
+def _pin_env(tmp_dir, intercom="v0.6.23", obs="v0.6.23"):
+    ic, ob = Path(tmp_dir) / "intercom.pin", Path(tmp_dir) / "obs.pin"
+    ic.write_text("INTERCOM_RELEASE_DSTACK_VERSION=%s\n" % intercom)
+    ob.write_text("OBS_RELEASE_DSTACK_VERSION=%s\n" % obs)
+    return {"STRIH_DANTE_PTP_INTERCOM_PIN": str(ic), "STRIH_DANTE_PTP_OBS_PIN": str(ob)}
+
+
+def _dante_text(sender="10.77.7.30", port="6980,6981", intercom="v0.6.23", obs="v0.6.23"):
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        r = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, STRIH_VLAN_IF, sender, port, STRIH_LEG_ADDR,
+                  STRIH_DEVICES, env=dict(_pin_env(d, intercom, obs), STRIH_DANTE_AVAHI_UID="111"))
     assert r.returncode == 0, r.stderr
     return r.stdout
 
@@ -575,6 +586,15 @@ def test_the_ptp_group_reaches_the_in_process_follower():
                    'counter accept'], ptp
     drop = next(i for i, x in enumerate(rules) if x.strip() == 'iifname "enp7s0.70" counter drop')
     assert rules.index(ptp[0]) < drop, "the accept sits before the leg's drop"
+
+
+@pytest.mark.parametrize("intercom,obs,opened", [("v0.6.19", "v0.6.19", False), ("v0.6.23", "v0.6.19", True),
+                                                 ("v0.6.19", "v0.6.23", True), ("", "garbage", False)])
+def test_the_ptp_rule_follows_the_pins(intercom, obs, opened):
+    """Review round 1 (🔴): below dstack v0.6.23 a device that could reach 319 would start its old follower
+    beside dsync, so the rule appears only once either pinned device follows PTP in process."""
+    t = _dante_text(intercom=intercom, obs=obs)
+    assert bool(re.search(r"udp dport \{ 319, 320 \}", t)) is opened, t
 
 
 def test_a_box_without_devices_never_opens_the_ptp_ports():

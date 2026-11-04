@@ -26,7 +26,7 @@ HUB_UNIT = SCRIPTS / "lib" / "strih-intercom-hub-unit.sh"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
 LEAKY = ("STRIH_DANTE_RX_PIN_ROOT", "STRIH_DANTE_RX_PIN_OWNER", "STRIH_DANTE_PTP_INTERCOM_PIN",
          "STRIH_DANTE_PTP_OBS_PIN", "STRIH_HUB_AMBIENT_CAPS", "STRIH_HUB_BOUNDING_CAPS", "STRIH_HUB_JOURNAL_FILE",
-         "STRIH_BOXES_DIR", "STRIH_LX_IP", "STRIH_NIC_IFACE")
+         "STRIH_BOXES_DIR", "STRIH_LX_IP", "STRIH_NIC_IFACE", "STRIH_HUB_INVOCATION_ID")
 ROWS = 'ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; note() { echo "NOTE $*"; }\n'
 
 # the dstack lines as the obs release forwards them into the OBS log (the obs project, 4.11.2026)
@@ -68,6 +68,15 @@ def test_a_component_is_ready_from_dstack_v0_6_23_on(tmp_path, ver, ready):
     r = _bash('if strih_dante_ptp_pin_ready obs; then echo READY; else echo BELOW; fi', env=_pins(tmp_path, obs=ver))
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == ("READY" if ready else "BELOW")
+
+
+def test_dtray_and_the_ptp_threshold_share_the_one_version_rule():
+    """Review round 1: one vX.Y.Z order (release_version_cmp), never a copied comparator."""
+    for lib in ("strih-dante-ptp.sh", "dtray.sh"):
+        assert "release_version_cmp" in (SCRIPTS / "lib" / lib).read_text(), lib
+    r = _bash('. scripts/lib/dtray.sh\nfor p in "v0.6.13 v0.6.13" "v0.6.19 v0.6.13" "v0.6.10 v0.6.13" "x v0.6.13"; do '
+              'set -- $p; if dtray_version_ge "$1" "$2"; then echo 0; else echo $?; fi; done')
+    assert r.stdout.split() == ["0", "0", "1", "2"], r.stdout + r.stderr
 
 
 def test_the_real_pins_are_read():
@@ -155,13 +164,13 @@ def _owner():
     return "%s:%s" % (u, g)
 
 
-def _root(tmp, live="1024"):
+def _root(tmp, live="1024", obs="v0.6.23"):
     root = tmp / "root"
     proc = root / "proc" / "sys" / "net" / "ipv4" / "ip_unprivileged_port_start"
     proc.parent.mkdir(parents=True)
     proc.write_text(live + "\n")
     return root, proc, root / "etc" / "sysctl.d" / "60-strih-dante-ptp-port.conf", \
-        {"STRIH_DANTE_RX_PIN_ROOT": str(root), "STRIH_DANTE_RX_PIN_OWNER": _owner()}
+        dict(_pins(tmp, obs=obs), STRIH_DANTE_RX_PIN_ROOT=str(root), STRIH_DANTE_RX_PIN_OWNER=_owner())
 
 
 def test_the_dropin_text():
@@ -177,6 +186,21 @@ def test_install_writes_the_dropin_and_sets_the_running_value(tmp_path):
     assert "it binds at OBS's next start" in r.stdout
     r = _bash(". scripts/lib/obs-box-write.sh; strih_dante_ptp_port_install", env=env)
     assert r.returncode == 0 and "unchanged" in r.stdout, r.stdout + r.stderr
+
+
+def test_below_the_threshold_install_grants_nothing_and_takes_ours_back(tmp_path):
+    """Review round 1 (red finding): with the obs pin below v0.6.23 the OBS still runs the old dlink, whose
+    follower would start beside dsync once it can bind 319. So step 13 sets nothing and removes ours."""
+    _, proc, f, env = _root(tmp_path, live="319", obs="v0.6.19")
+    f.parent.mkdir(parents=True)
+    f.write_text(DROPIN)
+    r = _bash(". scripts/lib/obs-box-write.sh; strih_dante_ptp_port_install", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not f.exists() and proc.read_text() == "1024\n", r.stdout
+    assert "no 319 bind right yet" in r.stdout and "v0.6.19 is below v0.6.23" in r.stdout
+    _, proc2, f2, env2 = _root(tmp_path / "fresh", obs="v0.6.19")
+    r = _bash(". scripts/lib/obs-box-write.sh; strih_dante_ptp_port_install", env=env2)
+    assert r.returncode == 0 and not f2.exists() and proc2.read_text() == "1024\n", r.stdout + r.stderr
 
 
 def test_install_fails_by_name_when_the_running_value_cannot_be_set(tmp_path):
@@ -214,6 +238,16 @@ def test_removing_ours_leaves_a_value_someone_else_set(tmp_path):
     f.write_text(DROPIN)
     r = _bash("strih_dante_ptp_port_remove", env=env)
     assert r.returncode == 0 and not f.exists() and proc.read_text() == "80\n"
+
+
+def test_the_ptp_port_row_below_the_threshold(tmp_path):
+    _, _, f, env = _root(tmp_path, live="1024", obs="v0.6.19")
+    r = _bash("strih_dante_ptp_port_grade", env=env)
+    assert r.stdout.startswith("NOTE (program-dante) ptp-port: not set, the obs pin's dstack v0.6.19"), r.stdout
+    f.parent.mkdir(parents=True)
+    f.write_text(DROPIN)
+    r = _bash("strih_dante_ptp_port_grade", env=env)
+    assert r.stdout.startswith("BAD (program-dante) ptp-port: ") and "is set but" in r.stdout, r.stdout
 
 
 @pytest.mark.parametrize("dropin,live,want", [
@@ -327,6 +361,38 @@ def test_the_hub_media_clock_is_graded_on_a_box_with_the_hub_device(tmp_path):
     assert r.stdout.startswith("BAD (intercom-dante) media clock: source=Service"), r.stdout
 
 
+def test_a_hub_that_is_not_running_is_a_note_not_a_second_fail(tmp_path):
+    env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="")
+    r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
+    assert r.returncode == 0 and r.stdout.startswith("NOTE (intercom-dante) media clock: the hub is not running"), r.stdout
+
+
+def test_an_unreadable_journal_is_named_never_read_as_no_line(tmp_path):
+    """Review round 1: a journalctl that times out or is refused must not read as 'no media clock line'."""
+    b = tmp_path / "bin"
+    b.mkdir()
+    (b / "journalctl").write_text("#!/bin/sh\necho 'Failed to open journal' >&2\nexit 1\n")
+    (b / "journalctl").chmod(0o755)
+    env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="abc123", PATH="%s:%s" % (b, os.environ["PATH"]))
+    r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("BAD (intercom-dante) media clock: the hub's journal could not be read (rc 1"), r.stdout
+    assert "no 'media clock source' line" not in r.stdout
+
+
+def test_the_journal_is_read_for_the_current_invocation_only(tmp_path):
+    b = tmp_path / "bin"
+    b.mkdir()
+    log = tmp_path / "args"
+    (b / "journalctl").write_text('#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\n'
+                                  'printf "noise\\nINFO dstack::clock::linked: media clock source source=Internal from=None\\n"\n' % log)
+    (b / "journalctl").chmod(0o755)
+    env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="abc123", PATH="%s:%s" % (b, os.environ["PATH"]))
+    r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
+    assert r.stdout.startswith("OK (intercom-dante) media clock: source=Internal"), r.stdout + r.stderr
+    assert "_SYSTEMD_INVOCATION_ID=abc123" in log.read_text().splitlines()
+
+
 def test_a_box_without_the_hub_device_prints_nothing(tmp_path):
     r = _hub_clock(tmp_path, "strih-pp", [])
     assert r.returncode == 0 and r.stdout == "END\n", r.stdout + r.stderr
@@ -351,9 +417,9 @@ def test_item_9_grades_the_media_clock_and_the_port():
     s = (SCRIPTS / "lib" / "strih-dante-input.sh").read_text()
     g = _between(s, "strih_dante_input_grade() {", "\n}\n")
     assert 'strih_dante_media_clock_grade "(program-dante)" obs < "$log"' in g
-    assert "strih_dante_ptp_port_grade" in g
-    # after the readable-log check (the early return), so a missing log is graded once by that row
+    # the clock row after the readable-log check (the early return); the port row reads no log, before it
     assert g.index("no readable OBS log") < g.index("strih_dante_media_clock_grade")
+    assert g.index("strih_dante_ptp_port_grade") < g.index("no readable OBS log")
 
 
 def test_item_16_grades_the_hub_media_clock():
