@@ -258,6 +258,22 @@ def test_the_grade_is_quiet_on_pid_1_with_every_online_cpu(tmp_path):
     assert "NOTE" not in r.stdout, r.stdout
 
 
+# review round 2: PID 1 at boot holds every POSSIBLE CPU; a box with CPUs offline (SMT off) is not narrowed.
+def test_a_pid_1_mask_wider_than_the_online_cpus_is_not_narrowed(tmp_path):
+    root, _, env = _box(tmp_path, which=())
+    env.update(_pid1(root, "0-31", online="0-15"))
+    r = _bash(GRADE, env=env)
+    assert "NOTE" not in r.stdout, r.stdout
+
+
+def test_a_missing_online_list_keeps_the_pid_1_check_silent(tmp_path):
+    root, _, env = _box(tmp_path, which=())
+    env.update(_pid1(root, "0-13"))
+    (root / "online").unlink()
+    r = _bash(GRADE, env=env)
+    assert "NOTE" not in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
 def test_a_non_root_grade_names_an_unreadable_sudoers_dir(tmp_path):
     if os.geteuid() == 0:
         raise AssertionError("run this test as a non-root user: root reads a 0750 dir anyway")
