@@ -558,11 +558,28 @@ def test_a_range_touching_a_common_port_is_never_lost():
     assert "8700-8710" in r.stdout, r.stdout
 
 
-@pytest.mark.parametrize("port", ["319", "320", "31900"])
-def test_the_ptp_ports_stay_shut(port):
-    """dantesync is the only PTP owner: neither UDP 319/320 nor dsync's own 31900 ever passes the leg."""
+def test_dsyncs_own_port_stays_shut():
+    """dsync's own 31900 never passes the leg (only the PTP group's 319/320 since ROZHODNUTE 6628785864)."""
     rules = "\n".join(x for x in _dante_text().splitlines() if not x.lstrip().startswith("#"))
-    assert not re.search(r"\b%s\b" % port, rules)
+    assert not re.search(r"\b31900\b", rules)
+
+
+def test_the_ptp_group_reaches_the_in_process_follower():
+    """ROZHODNUTE 6628785864 (owner 4.11.2026; this test replaced `test_the_ptp_ports_stay_shut`, whose
+    premise "dantesync is the only PTP owner" the owner superseded): every dstack device follows Dante PTP
+    in process, dsync's follower binds 319 + 320 and joins 224.0.1.129 on the leg. Exactly that group,
+    from the audio /24, to exactly those two ports; nothing else names 319 or 320, and nothing goes out."""
+    rules = [x for x in _dante_text().splitlines() if not x.lstrip().startswith("#")]
+    ptp = [x for x in rules if re.search(r"\b(319|320)\b", x)]
+    assert ptp == ['        iifname "enp7s0.70" ip saddr 10.77.7.0/24 ip daddr 224.0.1.129 udp dport { 319, 320 } '
+                   'counter accept'], ptp
+    drop = next(i for i, x in enumerate(rules) if x.strip() == 'iifname "enp7s0.70" counter drop')
+    assert rules.index(ptp[0]) < drop, "the accept sits before the leg's drop"
+
+
+def test_a_box_without_devices_never_opens_the_ptp_ports():
+    t = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, LEG_IF, SENDER, "6980", LEG_ADDR, "none").stdout
+    assert not re.search(r"\b(319|320)\b", t)
 
 
 def test_avahi_is_dropped_before_the_output_accept():

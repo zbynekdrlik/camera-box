@@ -67,6 +67,9 @@ def _box(tmp, ecores=None, isolated="2-15", online="0-15", reserved="15"):
         iso.write_text(isolated + "\n")
     if reserved is not None:
         (root / "etc" / "strih-dante-rx-cpu.conf").write_text("reserved=%s\nobs=2-14\nbase=2-15\n" % reserved)
+    # the kernel's unprivileged-port threshold step 13 sets on a Dante box (strih-dante-ptp.sh, ROZHODNUTE 6628785864)
+    (root / "proc" / "sys" / "net" / "ipv4").mkdir(parents=True, exist_ok=True)
+    (root / "proc" / "sys" / "net" / "ipv4" / "ip_unprivileged_port_start").write_text("1024\n")
     return {"STRIH_PROGRAM_AUDIO_SYSFS": str(sysfs), "OBS_BOX_ONLINE_CPUS": str(tmp / "online"),
             "STRIH_PROGRAM_AUDIO_ISOLATED_CONF": str(iso), "STRIH_DANTE_RX_PIN_ROOT": str(root),
             "STRIH_DANTE_RX_PIN_OWNER": _owner()}
