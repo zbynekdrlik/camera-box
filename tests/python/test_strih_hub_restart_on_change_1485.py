@@ -143,6 +143,18 @@ def test_no_record_and_a_hub_started_before_the_install_is_restarted(tmp_path):
     assert "started before" in r.stdout, r.stdout
 
 
+def test_a_matching_record_wins_over_an_old_start_time(tmp_path):
+    """Review round 3: with a record of the current invocation, the start time is never read -- a hub
+    that loaded the current install is left alone however long ago it started."""
+    _box(tmp_path)
+    r = _run(tmp_path, 'strih_intercom_hub_record_loaded "${FP[@]}"')
+    assert r.returncode == 0, r.stderr
+    r = _run(tmp_path, 'B="$(strih_intercom_hub_install_fingerprint "${FP[@]}")"\n'
+                       'strih_intercom_hub_restart_if_changed "$B" "${FP[@]}"\necho "RC=$?"', env={"FAKE_START": "@1"})
+    assert "RC=0" in r.stdout and "try-restart" not in _calls(tmp_path), r.stdout + r.stderr
+    assert "left alone" in r.stdout, r.stdout
+
+
 def test_no_record_and_an_unreadable_start_time_records_nothing(tmp_path):
     r = _changed_run(tmp_path, lambda b: None, env={"FAKE_START": ""})
     assert "RC=0" in r.stdout and "try-restart" not in _calls(tmp_path), r.stdout + r.stderr
