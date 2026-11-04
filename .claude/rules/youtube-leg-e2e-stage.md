@@ -264,7 +264,10 @@ The stage therefore records the input (`start --tap-inpoint`, passed by the lib)
   inpoint, a foreign key never printed); `ffmpeg -c copy -map 0 -f matroska` (no `-copyts`: the tool reads it like a VOD starting at 0); through
   `obs-box-background-run` when sudo allows it, always `chrt --idle 0` + `taskset` = online minus every
   `/etc/*-isolated-cpus.conf` mask minus CPU 15 (stream-snv: 0-1,12-14,16-19); no free CPU = no capture.
-  Started once the broadcast is `ready` (restreamer's input carries our media; StartRecord comes after);
+  Started once the broadcast is `ready` (restreamer's input carries our media; StartRecord comes after),
+  before the lib spawns the channel guard watch, so its calls are short (stream-service 15 s, start 30 s:
+  probe 10 + start 15, the start waits up to 2 + 4 s for the capture to show; a failed start kills any
+  late capture and removes its dir); the stream key is redacted from every reason and log tail;
   ended by the full `stop` after the session stop and OUTSIDE the stage lock (45 s bound, so StopStream
   90 + session 90 + tap stays under the lib's `timeout 240`), never by `--stream-only`: it ends by itself
   at the publisher's EOF, else INT, then KILL. The capture is found by `pgrep -u <me> -f <its absolute
@@ -278,13 +281,17 @@ The stage therefore records the input (`start --tap-inpoint`, passed by the lib)
   folds again with the point and the cleanup's events. Its bound = `YOUTUBE_LEG_INPOINT_TIMEOUT_S`
   (1500 s) cut to what is left of `YOUTUBE_LEG_MEASURE_BUDGET_S` (3600 s for the whole measure step, so
   the job timeout never eats the report); under 300 s left, or a verdict tool that ran over its own
-  bound = the point is not started. The capture on the stream box is deleted once dev2 has it;
+  bound = the point is not started; the capture's pull spends that budget too (the bound is read again
+  after it). The capture on the stream box is deleted once dev2 has it;
   cleanup()'s `purge-tap` deletes one the gate never measured.
 - The block's `points` (`scripts/youtube_leg_points.py`): `restreamer_input` (per window A/V capture
   minus recording, `audio_lag_jump_details` as [recording time s, ms]) and `restreamer_output`
   (`measured: false` + why). The VOD windows carry `audio_lag_jump_details` too, so the same step reads
   the same recording time at every point. REPORT-ONLY: nothing in `points` changes `verdict`.
 - The per-point page adds "Kde vzniká zvukový schod (len report, neblokuje)" without a pass/fail glyph.
+- First live run (supervisor): read restreamer's RSS on stream-snv (`ps -o rss= -p $(pgrep -x Restreamer)`)
+  before, during and after the capture; it must stay flat (its per-subscriber channel is unbounded and the
+  helper path keeps the box's own ionice idle). Not measured yet (4.11.2026).
 - Reading it: a step at the input = born in the stream OBS output path before restreamer; absent at the
   input but in the VOD = after restreamer's input (the pusher's re-timing or YouTube), and only
   restreamer can expose its output to split those two.

@@ -203,9 +203,16 @@ def test_a_capture_that_ended_with_the_stream_is_not_signalled(box):
     assert not (box["d"] / "ffmpeg.int").exists()
 
 
-def test_a_capture_that_dies_at_once_is_refused_by_name(box):
+def test_a_capture_that_dies_at_once_is_refused_by_name_and_leaves_nothing(box):
     rc, out, _ = _tap(box, "start", "--url", URL, mode="die")
     assert rc == 2 and "did not keep running" in out["reason"] and "Input/output error" in out["reason"]
+    assert "stream-snv" not in out["reason"] and "live/<key>" in out["reason"]  # the key never in the block
+    assert not (box["home"] / "youtube-leg-tap-1387" / "recording-e2e-77").exists()
+
+
+def test_a_stream_key_is_redacted_from_any_text():
+    assert tap.redact_text(f"{URL}: Input/output error") == "rtmp://127.0.0.1:1234/live/<key>: Input/output error"
+    assert tap.redact_text("no url here") == "no url here" and tap.redact_text(None) == ""
 
 
 def test_no_cpu_outside_the_obs_mask_starts_nothing(box):

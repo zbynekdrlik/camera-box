@@ -70,7 +70,9 @@ WINDOW_MIN_S = 10.0
 GUARD_TIMEOUT_S, STEP_TIMEOUT_S = 20, 90
 # issue 1387, the restreamer-input capture (report-only). The stop's bound keeps a whole `stop` (StopStream
 # 90 + the session stop 90 + this) under the lib's `timeout 240`.
-TAP_START_TIMEOUT_S, TAP_STOP_TIMEOUT_S = 90, 45
+# The start runs while the broadcast is already live and before the lib spawns the channel guard watch, so
+# both of its calls are short: at most ~45 s without the guard (a few s normally).
+TAP_SERVICE_TIMEOUT_S, TAP_START_TIMEOUT_S, TAP_STOP_TIMEOUT_S = 15, 30, 45
 POINT_MIN_S = 300          # less time than this left in the measure budget: the point is not started
 POINT_SLACK_S = 120        # the point's fetch-back + the host cleanup after its bound
 OURS_TOLERANCE_S = 120.0  # a leftover stream is ours when its own start is this close to our publish
@@ -255,7 +257,7 @@ def _stop_stream_and_session(ctx, stage, why, stream_only, record_stopped):
 def _tap_start(ctx, stage):
     """Issue 1387 (report-only): record what restreamer receives, from right after StartStream. A
     failure is recorded on the state, never fails the stage."""
-    rc, d, _ = run_json(ctx.obs + ["stream-service"], STEP_TIMEOUT_S)
+    rc, d, _ = run_json(ctx.obs + ["stream-service"], TAP_SERVICE_TIMEOUT_S)
     if rc != 0 or not d.get("url"):
         tap = {"started": False, "reason": f"no restreamer inpoint URL: {d.get('reason')}"}
     else:
@@ -795,8 +797,14 @@ def _measure_input_point(ctx, stage, windows, t_start):
     try:
         host = ctx.measure_host(stage)
         host.check()
-        host.pull(a.user, os.environ.get("AV_GATE_SSH_PASSWORD", ""), a.host, tap["path"], ylp.CAPTURE_NAME)
+        left = a.measure_budget - (time.monotonic() - t_start) - POINT_SLACK_S - POINT_MIN_S
+        host.pull(a.user, os.environ.get("AV_GATE_SSH_PASSWORD", ""), a.host, tap["path"], ylp.CAPTURE_NAME,
+                  timeout=max(30.0, min(ylh.PULL_TIMEOUT_S, left)))  # the pull spends the point's budget too
         _tap_purge(ctx, stage)  # the host has it now
+        bound = point_bound(a.inpoint_timeout, a.measure_budget, time.monotonic() - t_start)
+        if bound is None:
+            return ylp.not_measured(f"the capture's pull used the {a.measure_budget:.0f} s measure budget: "
+                                    "the point was not started")
         args = _verdict_args(a, st, windows, host, host.path(recording_name(a.stream_path)),
                              vod=host.path(ylp.CAPTURE_NAME), out=ylp.SUB)
         t0 = time.monotonic()
@@ -830,8 +838,10 @@ def read_decode_reads(verdict_dir):
 
 
 def _write_and_fold(ctx, stage, block):
-    with open(os.path.join(stage.dir, "youtube-leg-block.json"), "w") as f:
+    path = os.path.join(stage.dir, "youtube-leg-block.json")
+    with open(path + ".tmp", "w") as f:  # written twice per run: never a truncated file for the per-point page
         json.dump(block, f, indent=1)
+    os.replace(path + ".tmp", path)
     try:
         return fold(ctx.a.verdict_json, block)
     except (OSError, ValueError) as e:

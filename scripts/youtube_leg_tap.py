@@ -15,7 +15,7 @@ camera-box), so it cannot be tapped without a change in restreamer: OUTPUT_UNTAP
 
 A measurement must never cost the broadcast a frame (owner rule 1.11.2026): the capture is a copy
 only, runs in rig-background.slice through /usr/local/sbin/obs-box-background-run when the box
-allows it (nice 19, ionice idle), always under `chrt --idle 0`, pinned to the CPUs the OBS mask
+allows it (the helper's own nice 19 + ionice idle; else nice 19 only), always under `chrt --idle 0`, pinned to the CPUs the OBS mask
 (/etc/*-isolated-cpus.conf) leaves free, never CPU 15 (RESERVED_CPUS). No free CPU = no capture.
 
   youtube_leg_tap.py --host H --user U --key K start --url rtmp://127.0.0.1:1234/live/<key>
@@ -48,6 +48,9 @@ BACKGROUND_RUN = "/usr/local/sbin/obs-box-background-run"
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
             "-o", "ConnectTimeout=10"]
 STEP_TIMEOUT_S = 60
+PROBE_TIMEOUT_S, START_TIMEOUT_S = 10, 15  # the start runs while the broadcast is live, before the guard watch
+START_LATE_S = 4
+KEY_IN_TEXT = re.compile(r"(rtmp://[^\s/]+/[^\s/]+/)[^\s:'\"]+")
 STOP_GRACE_S = 10   # ffmpeg ends by itself when the publisher stops; this long before it is signalled
 STALE_MIN = 1440
 RW_TIMEOUT_US = 10_000_000  # no data for 10 s = the capture ends (a vanished publisher never hangs it)
@@ -124,6 +127,11 @@ def capture_argv(url, out):
             "-i", url, "-map", "0", "-c", "copy", "-f", "matroska", out]
 
 
+def redact_text(text):
+    """Any rtmp URL in a log line or an error without its stream key (ffmpeg names its input URL)."""
+    return KEY_IN_TEXT.sub(r"\1<key>", text or "")
+
+
 def redact_url(url):
     """The URL without its stream key (the block is uploaded with the run's artifacts)."""
     return url.rsplit("/", 1)[0] + "/<key>" if isinstance(url, str) and "/" in url else url
@@ -174,6 +182,8 @@ def parse_probe(text):
 # The capture's own process, found by its owner + its output path: with sudo's helper the launched pid is
 # root's sudo, which (Defaults use_pty) runs the command in ANOTHER session, so neither that pid nor its
 # process group reaches ffmpeg. ffmpeg runs as the caller (setpriv), its argv ends with the path.
+# `pgrep -f` reads a regex (the `.` matches any character, harmless) and also matches dev2's
+# `scp -f <path>` server for the same file: stop/purge run before or after the pull, never during it.
 _MINE = 'pgrep -u "$(id -u)" -f -- "$D/' + CAPTURE + '"'
 
 
@@ -186,10 +196,15 @@ def start_script(key, argv_head):
             f"find \"$(dirname \"$D\")\" -mindepth 1 -maxdepth 1 -type d -mmin +{STALE_MIN} -exec rm -rf -- {{}} + || true\n"
             "rm -rf -- \"$D\"\nmkdir -p \"$D\"\ncd \"$D\"\n"
             f"setsid nohup {cmd} > \"$D/ffmpeg.log\" 2>&1 < /dev/null &\n"
-            "sleep 2\n"
-            f"if {_MINE} > /dev/null; then "
+            # 2 s for ffmpeg to connect; the helper's scope can take longer to come up, so a capture
+            # not seen yet is looked for up to START_LATE_S more before the start gives up
+            f"sleep 2; up=0; for i in $(seq 0 {START_LATE_S}); do if {_MINE} > /dev/null; then up=1; break; fi; "
+            "sleep 1; done\n"
+            "if [ \"$up\" = 1 ]; then "
             f"printf '{MARK}%s\\n' \"{{\\\"running\\\":true,\\\"path\\\":\\\"$D/{CAPTURE}\\\"}}\"; "
-            "else tail -c 400 \"$D/ffmpeg.log\" >&2 || true; "
+            "else tail -c 400 \"$D/ffmpeg.log\" | tr -cd '[:print:]\\n' >&2 || true; "
+            # a failed start leaves nothing behind: no capture that comes up late, untracked, and no dir
+            f"pkill -KILL -u \"$(id -u)\" -f -- \"$D/{CAPTURE}\" || true; rm -rf -- \"$D\"; "
             f"printf '{MARK}%s\\n' '{{\"running\":false}}'; fi\n")
 
 
@@ -271,7 +286,7 @@ class Box:
 def do_start(box, key, url):
     if not url:
         raise Refused("no restreamer inpoint URL (the stream OBS does not publish to restreamer on this box)")
-    r = box.run(probe_script(), "the CPU probe")
+    r = box.run(probe_script(), "the CPU probe", timeout=PROBE_TIMEOUT_S)
     facts = parse_probe(r.stdout)
     if not facts["ffmpeg"]:
         raise Refused(f"ffmpeg or pgrep is not installed on {box.host}")
@@ -280,10 +295,11 @@ def do_start(box, key, url):
         raise Refused(f"no CPU outside the OBS mask {facts['obs'] or '(none read)'} and CPU 15 on {box.host} "
                       f"(online {facts['online'] or '?'}): never captured on the OBS cores")
     argv = priority_prefix(cpus, facts["helper"]) + capture_argv(url, CAPTURE)[:-1]  # the path: start_script
-    r = box.run(start_script(key, argv), "the capture start")
+    r = box.run(start_script(key, argv), "the capture start", timeout=START_TIMEOUT_S)
     res = parse_result(r.stdout)
     if not res or not res.get("running"):
-        raise Refused(f"the capture of {url} did not keep running: {(r.stderr or r.stdout).strip()[-300:]}")
+        raise Refused(f"the capture of {redact_url(url)} did not keep running: "
+                      f"{redact_text((r.stderr or r.stdout).strip()[-300:])}")
     return {"started": True, "path": res.get("path"), "url": redact_url(url), "cpus": cpus,
             "priority": "rig-background.slice + SCHED_IDLE" if facts["helper"] else "nice 19 + SCHED_IDLE"}
 
@@ -296,7 +312,7 @@ def do_stop(box, key, grace=STOP_GRACE_S):
     if res.get("how") == "survived":
         raise Refused(f"the capture on {box.host} survived INT and KILL ({res.get('path')})")
     return {"stopped": True, "how": res.get("how"), "bytes": res.get("bytes"), "path": res.get("path"),
-            "ffmpeg_log": parse_log(r.stdout)}
+            "ffmpeg_log": redact_text(parse_log(r.stdout))}
 
 
 def do_purge(box, key):
