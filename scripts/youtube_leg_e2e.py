@@ -262,8 +262,9 @@ def _tap_start(ctx, stage):
         tap = {"started": False, "reason": f"no restreamer inpoint URL: {d.get('reason')}"}
     else:
         rc, d, _ = run_json(ctx.tap + ["start", "--url", d["url"]], TAP_START_TIMEOUT_S)
+        # attempted: a start that ran over its bound may still have left a capture on the box (purge-tap)
         tap = ({k: v for k, v in d.items() if k != "ok"} if rc == 0 and d.get("started")
-               else {"started": False, "reason": d.get("reason")})
+               else {"started": False, "attempted": True, "reason": d.get("reason")})
     note = (f"the restreamer-input capture runs on {tap.get('cpus')} ({tap.get('priority')})" if tap.get("started")
             else f"no restreamer-input capture (report-only point): {tap.get('reason')}")
     _set(stage, note, tap=tap)
@@ -293,7 +294,7 @@ def _tap_stop(ctx, stage, why):
 def _tap_purge(ctx, stage):
     """Delete the capture on the stream box once (after the measurement host has it, or in cleanup())."""
     tap = stage.read().get("tap") or {}
-    if not tap.get("started") or tap.get("purged"):
+    if not (tap.get("started") or tap.get("attempted")) or tap.get("purged"):
         return
     rc, d, _ = run_json(ctx.tap + ["purge"], STEP_TIMEOUT_S)
     with stage.locked() as st:

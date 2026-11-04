@@ -77,7 +77,10 @@ def test_a_tap_that_cannot_start_never_fails_the_stage(tmp_path):
     d, r = _start(fk, tmp_path, "--tap-inpoint")
     assert r.returncode == 0
     st = _state(d)
-    assert st["phase"] == "live" and st["tap"] == {"started": False, "reason": "no CPU outside the OBS mask"}
+    assert st["phase"] == "live" and st["tap"] == {"started": False, "attempted": True,
+                                                   "reason": "no CPU outside the OBS mask"}
+    # a refused (or timed-out) start may still have left a capture: cleanup's purge-tap removes it
+    assert _run(fk, d, "purge-tap").returncode == 0 and fk.names().count("tap.purge") == 1
 
 
 def test_a_stream_obs_not_publishing_to_restreamer_is_never_tapped(tmp_path):
