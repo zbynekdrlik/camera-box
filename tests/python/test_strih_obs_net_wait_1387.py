@@ -52,7 +52,7 @@ def _fake_tools(tmp_path, appear_after, route_after=None):
     same N: NetworkManager adds the noprefixroute address before the route); `sleep` only logs."""
     route_after = appear_after if route_after is None else route_after
     bin_ = tmp_path / "bin"
-    bin_.mkdir(exist_ok=True)
+    bin_.mkdir(parents=True, exist_ok=True)
     (tmp_path / "calls").write_text("0")
     (bin_ / "ip").write_text(
         "#!/bin/bash\n"
