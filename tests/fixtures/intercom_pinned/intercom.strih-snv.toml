@@ -31,26 +31,27 @@ cmc_port = 8801
 flows_port = 4456
 process_id = 1
 rx_port_base = 47100
+network_rate = 96000
 
 [[dlink.subscribe]]
 rx = "REPRO L"
-tx_channel = "REPRO 0dB L 07"
-tx_device = "foh-abl-yamaha-accelerator"
+tx_channel = "Repro 0db L"
+tx_device = "master-asio-dante"
 
 [[dlink.subscribe]]
 rx = "REPRO R"
-tx_channel = "REPRO 0dB R 08"
-tx_device = "foh-abl-yamaha-accelerator"
+tx_channel = "Repro 0db R"
+tx_device = "master-asio-dante"
 
 [[dlink.subscribe]]
 rx = "CLICK 3doba"
-tx_channel = "09"
-tx_device = "foh-abl-yamaha-accelerator"
+tx_channel = "Click 3doba"
+tx_device = "band-asio-dante"
 
 [[dlink.subscribe]]
 rx = "GUIDE"
-tx_channel = "GUIDE track 32"
-tx_device = "foh-abl-yamaha-accelerator"
+tx_channel = "Guide 2 iem"
+tx_device = "band-asio-dante"
 
 [[participant]]
 name = "cam1"
@@ -1379,82 +1380,82 @@ dst = "cam6"
 out_ch = 2
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 1
 dst = "cutters"
 out_ch = 1
 gain_db = -8.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 1
 dst = "cutters"
 out_ch = 3
 gain_db = -8.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 1
 dst = "speakers"
 out_ch = 1
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
 gain_db = -8.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 2
 dst = "cutters"
 out_ch = 4
 gain_db = -8.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 2
 dst = "speakers"
 out_ch = 2
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "cutters"
 out_ch = 1
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "cutters"
 out_ch = 2
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "cutters"
 out_ch = 3
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "cutters"
 out_ch = 4
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "speakers"
 out_ch = 1
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 4
 dst = "speakers"
 out_ch = 2

@@ -3,6 +3,11 @@ paths:
   - "scripts/program_audio.py"
   - "scripts/program_audio_ndi.py"
   - "scripts/program_audio_sampler.py"
+  - "scripts/program_audio_cg.py"
+  - "scripts/program_audio_cg_corr.py"
+  - "scripts/program_audio_ndi_url.py"
+  - "tests/python/test_program_audio_cg_corr_1404.py"
+  - "tests/python/test_program_audio_ndi_url_1404.py"
   - "scripts/program_audio_capture.py"
   - "scripts/program_audio_http.py"
   - "scripts/lib/strih-program-audio.sh"
@@ -29,6 +34,9 @@ paths:
   - "tests/python/test_program_audio_datestep_1404.py"
   - "tests/python/test_program_audio_http_1404.py"
   - "tests/python/test_strih_program_audio_1404.py"
+  - "tests/python/test_program_audio_cg_1404.py"
+  - "tests/python/test_program_audio_cg_fleet_1404.py"
+  - "tests/python/test_program_audio_cg_main_1404.py"
 ---
 
 # The stream program-audio guard + the cam2 marker mirror (issue 1404)
@@ -52,7 +60,7 @@ Two read-only endpoints:
 | Route | Writer | Contract |
 |---|---|---|
 | dev1 `:8890/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| strih-snv `:8891/program-audio.json` | the `program-audio-sampler` `--user` service on strih-snv, which serves it itself | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, reason]}`; both ages recomputed by the endpoint per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
+| strih-snv `:8891/program-audio.json` | the `program-audio-sampler` `--user` service on strih-snv, which serves it itself | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, cg][, reason]}` (`cg`: the CG arm's block, below); both ages recomputed by the endpoint per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
@@ -105,9 +113,283 @@ Known limits:
 - **In-band music mixed UNDER a marker that still decodes reads MEASUREMENT.** The chain stands and
   the share stays in band. The measurement-clip-only rule for SongPlayer and the cg OBS (plan
   Task 5) is the control for it.
+- **Both limits bit live on 3.11.2026** (a CG song under the marker, 13.6-21.3 %, claimed by
+  Content ID). The control for audio from the CG chain is now the CG arm (next section), never a
+  re-tuned share threshold: the claimed windows sat inside the real measurement range.
 
 Re-calibrate only from real program audio. Use `analyse()` over 2 s windows of a stream recording
 or of a live NDI receive, and never tune the threshold to pass a single run.
+
+## The CG arm: the sampler listens to the CG chain itself (the 3.11.2026 Content ID claim)
+
+"Praise - Elevation Worship" (SME) was claimed on the E2E VOD "camera-box E2E 138687756"
+(2.11.2026 22:24-22:31Z). The song was played on the CG box (resolume-snv: Arena + SongPlayer + the cg
+OBS) outside the E2E and reached the stream program `mbc` 15-20 dB under the cam2 marker; every window
+read MEASUREMENT (design comment on issue 1404, 3.11.2026). Owner rule: only the cam2 sync signal may
+reach the stream. `scripts/program_audio_cg.py`:
+- **The one declaration.** The CG box `CG_BOX_DEFAULT` = `resolume-snv` (env `PROGRAM_AUDIO_CG_BOX`,
+  a fleet name), its audio-carrying NDI outputs `CG_NDI_OUTPUTS` = `SP-program` (SongPlayer's program
+  sender) + `cg-obs` (the cg OBS output), the NDI machine name = the row's declared computer name in
+  `OBS_FLEET_IDENTITY` (`RESOLUME-SNV`). So the sources are `RESOLUME-SNV (SP-program)` and
+  `RESOLUME-SNV (cg-obs)`. `PROGRAM_AUDIO_CG_SOURCES` (`|`-separated full names) overrides for ops and
+  tests. A box with no declared computer name is FATAL at start (UNKNOWN + exit 1), never a guess.
+  The cg OBS's third output `RESOLUME-SNV (CG OVERLAY)` is NOT declared: read 3.11.2026 it connects
+  and delivers no audio frame at all, so it would read unreceivable for good.
+- **strih-snv finds them by mDNS** (the sampler's private empty NDI config): `avahi-browse -tpr
+  _ndi._tcp` on strih-snv, 3.11.2026, lists `RESOLUME-SNV (SP-program)` :5961, `(cg-obs)` :5962 and
+  `(CG OVERLAY)` :5963 at 10.77.9.201 (and 10.77.7.107). After a deploy, read the endpoint's `cg`
+  block: both sources must show `connections` 1 and a small `audio_age_s`.
+- **The receivers:** one more audio-only `NdiAudioReceiver` per source (the same binding, mDNS only),
+  created before the stream one in `main()` through `program_audio_cg.open_arm` (a failed receiver
+  closes the ones before it), started inside the run's `try`, and stopped + closed by `close_arm`
+  (a receiver whose capture thread is still in the SDK call is never closed). The wiring is pinned
+  by `tests/python/test_program_audio_cg_main_1404.py` with fakes for every SDK piece. Each runs in its own `CgSourceMonitor` thread that only
+  captures and keeps each block's level with its arrival time. Read live from dev1 on 3.11.2026
+  (8 s, read-only): both senders deliver audio frames continuously (190 / 51 frames), SP-program
+  -35.1 dBFS, cg-obs -10.3 dBFS at that moment.
+- **The level** is the LOUDEST NDI block over the trailing 2 s (`block_level_dbfs` = 10 log10 of the
+  block's mean square over every sample and channel), not the stream-side `analyse()` level: no tone
+  line is removed (the measurement clip's 1 kHz bed is CG audio too) and a short phrase cannot hide in
+  a window average.
+- **The decision** (`overlay`, pure), applied by the sampler to EVERY window it writes, the no-audio
+  UNKNOWN included:
+  - any source HEARD at or over `program_audio.SILENT_RMS_DBFS` (-60, never retyped) and not MEASURED
+    absent from the stream program (the in-program test, the next section) -> FOREIGN,
+    reason `cg-audio: '<source>' at <x> dBFS -- the CG box ... carries audio ...`, home or away
+    (review): audio the sampler really receives is on this LAN, the home probe reads only the cg
+    OBS's OBS-WS (SongPlayer can play while that OBS is down) and lags up to 30 s. The sampler's
+    `write()` latches every FOREIGN, so the guard keeps exit 1 for its latch hold (30 s). A stream
+    FOREIGN that already has a reason keeps it;
+  - the CG box away -> the not-receivable rule below is not graded (`cg.graded` false, `status`
+    `away`), the window otherwise unchanged;
+  - home (or not probed yet: counted as home, fail closed) and a source with no audio block for `CG_NO_AUDIO_S` (5 s = the sampler's
+    `NO_AUDIO_TIMEOUT_S`), an error frame / a broken capture, or a non-finite sample -> UNKNOWN over a
+    MEASUREMENT/SILENT window (`cg source not receivable while the CG box ... is home`), never over a
+    stream FOREIGN or UNKNOWN;
+  - otherwise the window's verdict and reason byte for byte.
+- **Home = `obs_fleet_is_home` semantics**, through the python twin in `scripts/obs_fleet_table.py`
+  (`fleet_is_home`: the `OBS_FLEET_HOME` force-list, `always` / `retired` / `traveling` = resolves AND
+  OBS-WS :4455 answers; parity with the bash lib pinned by `tests/python/test_program_audio_cg_fleet_1404.py`
+  through the lib's resolve/probe seams, which the twin reads too: `OBS_FLEET_RESOLVE_CMD`,
+  `OBS_FLEET_STATUS_PROBE_CMD`). A `HomeProbe` thread probes every 30 s, so a DNS lookup or a
+  TCP connect never stalls the consumer. Away at an event = not graded: the CG box then is not on our
+  LAN, so its audio cannot be on our mbc either. No identity check (`obs_fleet_poll_now`'s ssh
+  `hostname`) here: the probe runs every 30 s on a production box.
+- **The payload** carries the additive `cg` block (`box`, `home`, `graded`, `status` =
+  `silent` / `cg-audio` / `unreceivable` / `away`, `silent_below_dbfs`, one entry per source with
+  `level_dbfs`, `audio_age_s`, `connections`[, `error`]); without a CG arm (`run(cg=None)`, the loop
+  tests and the calibration CLI) no payload has a `cg` key.
+- **The guard** needs no new exit path: FOREIGN is exit 1, UNKNOWN exit 2. Its line now also shows the
+  sampler's FOREIGN reason (`reason=cg-audio: ...`); a spectral FOREIGN has none, so that line is
+  unchanged. The av-gate session start (`youtube_leg_e2e.py do_start`) refuses and the live watch
+  (`do_watch`) stops the broadcast on it: pinned through the REAL guard over payloads the REAL loop
+  wrote (`tests/python/test_program_audio_cg_1404.py`).
+- **Install:** setup-strih step 16e ships `program_audio_cg.py`, `obs_fleet_table.py` and
+  `scripts/lib/obs-fleet.sh` (DATA: the twin parses its `OBS_FLEET` and `OBS_FLEET_IDENTITY` blocks)
+  in the checkout layout; the closure test pins it.
+- **Consequence to keep in mind:** a measurement clip PLAYED on SongPlayer (the issue-1404 Task 5
+  clip, the opt-in CG_CHAIN profile) is CG audio too. Since the in-program test (next section) it
+  reads FOREIGN `cg-audio` only when it reaches the stream program, which is exactly a CG segment
+  carrying the clip on YouTube. Such a segment needs a decision on the ticket first, never a quiet
+  exemption here.
+
+## The CG arm's in-program test (the refinement after the owner cleaned mbc, 3.11.2026)
+
+The strict arm refused every YouTube stage while the CG box played anything. On 3.11.2026 the owner
+cleaned mbc ("mbc upravene aby bol len meraci signal"), and the program then carried only the marker
+(rms -44.9 dBFS, 15.0 % outside the band). The CG still played (cg-obs -9.8 dBFS), so every window
+read FOREIGN `cg-audio`. `scripts/program_audio_cg_corr.py` now asks whether a heard CG source is
+IN the program.
+
+- **The measure.** The normalized cross-correlation of each CG source (its mono channel mean)
+  against EACH channel of the received program (`STREAM-SNV (stream)`, the same sampler), best
+  channel wins.
+  - Both sides are resampled to 8 kHz by FFT and PRE-WHITENED: each spectrum is divided by its own
+    magnitude smoothed over 40 Hz. That removes the music's tilt and the FOH EQ, and makes the null
+    close to white noise.
+  - Both sides are band-limited to 800-3500 Hz. The bottom edge is the top of the marker band
+    (`program_audio.BAND_LO_HZ..BAND_HI_HZ`, notched from both sides), so the marker never
+    correlates, and no mains hum or bass is shared by accident. The top edge keeps coherence under a
+    sample-clock mismatch: a mix +50 ppm off moved the median NCC 0.21 -> 0.17.
+  - The program segment takes a FULL Hann window. With 50 ms tapers, its loud in-band marker cut at
+    the edges leaked an edge pattern that made two INDEPENDENT markers correlate at 0.40-0.43 (a CG
+    playing the measurement clip would have read PRESENT). The CG keeps 50 ms tapers so every lag of
+    the range sees it at full weight.
+- **The lag range is `LAG_MIN_MS=-1000 .. LAG_MAX_MS=+3000`,** on the NDI sender timestamps of both
+  sides (both boxes run the fleet dantesync). Review round 1 widened it from -500..+1500.
+  - The +3000 ms end: the CG -> FOH/mbc -> Dante or VBAN -> stream OBS path. That is the stream
+    OBS's audio buffering plus mbc's A/V offset, or through the strih program (`2ME PGM`, ~1 s
+    genlock hold) both OBS buffers, with margin.
+  - The real lag was NEVER measured: the CG did not reach the program once the sampler could hear
+    the CG. A lag outside the range is not searched and reads ABSENT. Whitened peaks are one sample
+    wide, so an "edge of the range = UNDECIDED" rule would catch nothing.
+  - Measure the real lag the first time a CG source reads PRESENT (`lag_ms` in the payload), and
+    narrow the range only from that.
+  - The -1000 ms end: a CG NDI copy stamped after its physical output (the cg OBS's buffering grows
+    128-362 ms), plus margin.
+  - The program segment (`PROGRAM_SEGMENT_S` 4 s) is the newest one whose CG counterpart over the
+    whole range is already buffered. It must end within `MAX_SEGMENT_AGE_S` (3 s) of the newest
+    program audio.
+  - Bounded rings: the program in the consumer (`run()`, fed in `place()` at each frame's timeline
+    stamp, real frames only) and each CG source in its `CgSourceMonitor` (mono), `RING_S` = 10 s by
+    stamp, and capped at `RING_MAX_SAMPLES` (`RING_S` x 192 kHz), so a frozen or backward sender
+    stamp cannot grow a ring.
+- **The decision.** It is computed only for a source heard at or over -60 dBFS.
+  - The peak is taken by MAGNITUDE (review round 1). A console channel with its polarity flipped, a
+    miswired balanced cable or an inverting hop put the song in with the sign flipped, and a signed
+    maximum read that ABSENT. `ncc` keeps its sign (negative = inverted).
+  - The decision table (`judge` per window, then `confirm`):
+
+    | peak \|NCC\| | earlier window at its lag (any kind, \|ncc\| >= 0.04, last 2, <= 5 s) | reads |
+    |---|---|---|
+    | >= `STRONG_NCC` 0.12 | not needed | PRESENT -> FOREIGN |
+    | `DETECT_NCC` 0.07 .. 0.12 | yes | PRESENT -> FOREIGN |
+    | `DETECT_NCC` 0.07 .. 0.12 | no | ABSENT `unconfirmed` |
+    | < 0.07 | -- | ABSENT |
+    | not computable | -- | UNDECIDED -> FOREIGN (fail closed) |
+
+  - PRESENT -> FOREIGN, with the ncc and lag in the reason.
+  - **Confirmed across windows** (`confirm`, E2E 41742028800, 4.11.2026): ten isolated windows read
+    PRESENT at |ncc| 0.071-0.083 with lags that jumped (+2734 / -998 / +623 ms) while mbc carried only the
+    marker -- the live null reaches past 0.07 on the busy rig, the 990-window dev1 null did not. A real
+    CG in the program correlates at ONE lag window after window (the 4 s segments overlap by 2 s). So a
+    PRESENT with |ncc| >= `STRONG_NCC` 0.12 counts at once; a weaker one only when one of the same
+    source's last `CONFIRM_WINDOWS` (2) earlier raw windows, ended at most `CONFIRM_SPAN_S` (5 s)
+    before it, peaked within `LAG_AGREE_MS` 5 ms of its lag: a PRESENT, or an ABSENT at |ncc| >=
+    `AGREE_FLOOR_NCC` 0.04 whose segment does NOT overlap this one (>= `PROGRAM_SEGMENT_S` 4 s apart:
+    the next window shares 2 s of program, so a null peak can repeat at its lag); else it reads ABSENT
+    `unconfirmed`.
+    - **Why any kind (review of 3662dfa599):** keyed on a previous PRESENT, a song whose |ncc| at its
+      one lag went 0.09 / 0.05 / 0.08 / 0.06 / 0.10 never read FOREIGN: each ABSENT window broke the
+      chain. Now the third window reads FOREIGN (the first, 4 s back, vouches), and an ABSENT 4 s
+      back vouches too.
+    - **The memory** (`remember`, kept per source in `CgArm.state`): the computed windows with their
+      judged segment end (`Correlation.seg_end`). A window on a segment already held replaces it and
+      never agrees with itself, so a frozen program ring (the sampler's no-audio UNKNOWN path calls the
+      arm every window) or a repeated read never self-confirms. An UNDECIDED carries no lag and is not
+      kept (it is FOREIGN on its own). A quiet window (the source under the silence bar) keeps the
+      memory: a song passage under the bar is the loudness twin of the ABSENT dip, and the memory
+      ages by the segment end stamps anyway. Every source forgets it when the arm runs without a
+      program ring.
+    - **The null chance of a same-lag agreement:** a null window peaks at a uniform lag of the 32001
+      lags of -1000..+3000 ms at 8 kHz; +-5 ms is 81 of them, p = 0.0025 per independent earlier
+      window. Only the window 4 s back is independent (disjoint segment); the overlapping one vouches
+      only as a PRESENT (the old rule's exposure). Measured on the 4.11.2026 long null (below): 15 of
+      992 windows at |ncc| >= 0.04 (1.5 %) = ~4e-5 per weak null PRESENT; at the live weak-PRESENT rate
+      of E2E 41742028800 (10 in ~120 windows) ~3e-6 per window, ~0.1 % of 300-window runs. WORST case
+      (the busy rig's null clearing the floor every time, unmeasured: that run kept no per-window
+      ncc/lag): 0.0025 per weak PRESENT, ~2e-4 per window, ~6 % of 300-window runs. If a live replay
+      shows the vouching rate over ~1 %, raise `AGREE_FLOOR_NCC`; never lower it without one.
+    - Cost: a CG under ~-20 dB in the program is caught one or two windows (2-4 s) later; the synthetic
+      song 24 dB under the marker is caught within its first three windows on advancing rings.
+    - Tests: `tests/python/test_program_audio_cg_confirm_1404.py` (the shapes, the floor, the span, the
+      window count, a frozen ring, the forget branches, an UNDECIDED between two PRESENT windows).
+  - ABSENT -> no FOREIGN from that source; the payload source shows `in_program` ABSENT and the
+    block status reads `not-in-program`.
+  - UNDECIDED -> today's strict FOREIGN, with `not proven absent from the stream program (<why>)`
+    (fail closed). That covers: no sender stamp on the newest frame, too little audio buffered (a
+    sampler start, a CG that just started), a CG behind the program by > 3 s, segment coverage
+    < 95 %, the CG segment < `MIN_CG_DBFS` -80 dBFS (an effectively empty segment; it was -50 until
+    E2E 41703531109 on 3.11.2026, where an idle SongPlayer at -52 dBFS read UNDECIDED and the strict
+    arm stopped a clean YouTube stage: the CG is digital and the NCC level-independent), a digitally
+    silent program, < -90 dBFS in the correlation band, and a non-finite sample.
+  - Any exception in the correlation (`program_audio_cg._correlate`) is UNDECIDED `correlation failed:
+    <exc>`, never a crash of the consumer loop. A raising ring push in a CG capture thread is that
+    source's error (it reads unreceivable), never a dead thread.
+  - A bridged program hole leaves the 4 s segment under 95 % covered once it passes ~200 ms, so that
+    window is UNDECIDED (strict FOREIGN while the CG plays). That is fail-closed, so it costs at most
+    a false refusal.
+  - A silent CG keeps today's behaviour (the not-receivable rule while home). A source with no
+    correlation at all (`CgArm.state()` without a program ring) is the strict rule.
+- **Calibration (3.11.2026, dev1, random offsets).** Read-only NDI receivers, 60-70 s each: the live
+  stream program from dev1, cg-obs on strih-snv (from dev1 its VLAN route delivered only ~360 ms
+  bursts every 2 s), SP-program from dev1.
+  - Null, over the -1000..+3000 ms range by |NCC|: live CG against the live program (the CG absent
+    by the cleanup) and against the committed clip, 90 trials: peak 0.026-0.045. Theory:
+    1/sqrt(2 x 2700 Hz x 4 s) = 0.0068 per lag.
+  - Detection: the same live cg-obs mixed 18 dB under the program level, 600 ms late: 0.117-0.313
+    (median 0.19). 24 dB under: median 0.12, min 0.026 in a quiet passage. 50 ppm fast: median
+    0.16. `DETECT_NCC` 0.07 = 1.6 x the null maximum.
+  - The LONG live null (review round 2): 600 s of the live stream program and the live SP-program
+    read together from dev1 at their real sender stamps, every 2 s window, plus the CG shifted by
+    60/120/180 s: 990 windows ABSENT (2 UNDECIDED: the CG segment under -50 dBFS), |NCC| p50 0.030,
+    p99.9 0.042, max 0.043, none at or over 0.07. One E2E grades a few hundred windows, so the margin
+    holds against false refusals. Recipe: `~/.claude/work-products/issue-1404-cg-corr/` (probe
+    `probe_sp.py`, `longnull.py`; `longnull2.py` adds the level scaling and replays `confirm`).
+  - **The -80..-50 dBFS band (review finding 4, 4.11.2026 02:26-02:36 UTC):** the same recipe again,
+    600 s each of `STREAM-SNV (stream)` and `RESOLUME-SNV (SP-program)` from dev1 at nice 19, 992
+    windows (the CG shifted by 0/60/120/180 s). SP-program was NOT idle then (window level p5 -43.1,
+    p50 -39.3 dBFS), so the idle -52..-60 dBFS signal itself was not caught; each window's CG was
+    then scaled to -60, -70 and -80 dBFS:
+    - at its own level, -60 and -70 dBFS: 992 ABSENT, |ncc| p50 0.031, p99 0.042, p99.9 0.045, max
+      0.046, none >= 0.07, none confirmed (the whitened NCC is level-independent while the band
+      clears `MIN_BAND_DBFS`);
+    - at -80 dBFS: 444 ABSENT, 548 UNDECIDED (533 the CG segment under `MIN_CG_DBFS`, a hair under
+      the window's -80.0; 15 no band energy over -90 dBFS), so the floor's edge fails closed;
+    - so no false PRESENT anywhere in the band and the floor stays at -80. Not covered: the real
+      noise floor of an idle sender (dither, a gate) at -70 differs from a scaled song; catch an idle
+      SP-program with `probe_sp.py` before lowering anything.
+  - Clock-rate mismatch was measured at +50 ppm only. A larger crystal error loses coherence over
+    the 4 s segment first in the top of the band.
+  - Known limit: a passage more than ~24 dB under the program level can read ABSENT in one window.
+    A strong PRESENT (>= 0.12), or a weak one an earlier window confirms at its lag, latches the
+    guard's 30 s hold, and a song has louder passages, so the 3.11 shape (15-20 dB under the marker)
+    is caught.
+  - Re-calibrate only from real audio: two audio-only probe receivers (`program_audio_ndi`, nice 19)
+    record `np.save` arrays and stamps; slices then go through `judge` as frames. Never tune the
+    threshold to pass one run.
+- **Cost:** ~32 ms of CPU per heard CG source per 2 s window on dev1 (one thread), only while it
+  is heard. Both CG sources playing: ~3 % of one core.
+  - Never a BLAS call (`np.dot`): its OpenBLAS worker threads spun to 15x that CPU under load.
+  - The program is whitened again for each CG source. Computing it once per window would halve the
+    cost if it is ever needed.
+- **Tests:** `tests/python/test_program_audio_cg_corr_1404.py`.
+  - The synthetic incident: a QPSK-like marker 200-800 Hz plus a room floor plus a music-like signal
+    18 dB under the marker, 600 ms late = PRESENT; absent = ABSENT. Every lag of the range is found.
+  - The committed real clip with the song = PRESENT; its null stays under 0.75 x the threshold.
+  - Each UNDECIDED cause, the rings, the overlay and the payload, and the loop handing the arm the
+    program's own frames.
+
+## Each sampler receiver is pinned to an on-link address (SP-program connections 0, 3.11.2026)
+
+- **What was found.** avahi on strih-snv lists every RESOLUME-SNV source twice: on enp7s0 at
+  10.77.9.201, and on the issue-1485 audio-VLAN leg enp7s0.70 at 10.77.7.107.
+  - The leg keeps 10.77.7.0/24 in routing table 70 only (`ip route get 10.77.7.107` = via 10.77.8.1).
+  - libndi (mDNS through avahi) picks one address when the receiver is created and never re-picks.
+    The sampler's SP-program receiver sat in SYN-SENT to 10.77.7.107:5961 for 3 h (connections 0;
+    the CG arm UNKNOWN once cg-obs went quiet). Fresh probes took .201 four times out of five.
+  - The pick also happens on a RECONNECT. At 16:51 the cg-obs connection (connected to .201 at
+    -13.5 dBFS) dropped and came back in SYN-SENT to 10.77.7.107:5962. The endpoint read UNKNOWN
+    `'RESOLUME-SNV (cg-obs)' no audio for 1807.1 s (connections=0)` while both senders were
+    announced and resolume.lan:4455 answered.
+  - The stream receiver never hits this: `STREAM-SNV (stream)` has one record, on the rig NIC.
+  - The strih OBS is not affected: its extra-IP discovery list resolves at 10.77.9.201.
+- **The fix.** `scripts/program_audio_ndi_url.py` `PinnedReceiver`, used for EVERY sampler receiver
+  through `open_receiver` in `main()`.
+  - It parses `avahi-browse -tpr _ndi._tcp` (decimal `\DDD` escapes) and keeps the records whose
+    address the MAIN table reaches on-link (`ip -4 -o route get` with no ` via `).
+  - It creates the receiver with `p_url_address` = `<ip>:<port>`, the name kept. With no on-link
+    record it falls back to the name, exactly as before.
+  - After `REPIN_AFTER_S` (15 s) without a connection it re-resolves, at most every 15 s. A new URL
+    re-creates the receiver in the capture thread; `connections()` shares the lock. A failed create
+    keeps the old receiver.
+  - Still no connection after `RECREATE_AFTER_S` (60 s) at the SAME url: it re-creates the receiver
+    there anyway, at most every 60 s. Each re-create is one `NDI receiver '<name>' re-created after
+    N s without a connection at <url>` line.
+  - After `RECREATE_FRUITLESS_MAX` (3) re-creates without a connection (the CG box away, the sender
+    off), the re-creates and the avahi browse back off to every `RECREATE_BACKOFF_S` (300 s). A
+    connection resets it. A failed create counts as an attempt (review round 1: it was retried on
+    every capture call).
+  - `PROGRAM_AUDIO_NDI_PIN=0` creates every receiver by name only (the tests' conftest sets it, so no
+    test reads dev1's live avahi; a rollback).
+- **SongPlayer's sender when idle.** It delivers audio frames continuously: 68 s read from dev1,
+  2050 frames, no timestamp gap, -36..-55 dBFS. So the 5 s no-audio rule does not misfire once
+  SP-program is received.
+- **After deploy, read the endpoint's `cg` block.** Both sources must show `connections` 1, and the
+  journal must show one `NDI receiver '<name>' created at 10.77.9.201:<port>` line per CG source.
+- **A guard run against a sampler older than the CG arm** still reads the old payload (no `cg`
+  block) as before: the arm protects only once the sampler on strih-snv runs this code (setup-strih
+  step 16e try-restarts it). Read the endpoint's `cg` block after a deploy.
 
 ## MEASUREMENT needs the QPSK marker itself (ROZHODNUTÉ 6026577906 + 6026826572)
 
@@ -583,9 +865,18 @@ shim + numpy next to restreamer's broadcast encoder).
   `test_the_dev1_server_no_longer_serves_program_audio`, `test_the_default_serve_dir_is_the_samplers_own`.
 - **The unit** `systemd/program-audio-sampler.strih-snv.service` (a TEMPLATE) is installed as the
   operator's `--user` `program-audio-sampler.service`:
-  - `CPUAffinity=` = the box's own `/sys/devices/cpu_atom/cpus` (12-15 on strih-snv), read the way
-    `strih_lx_lowprio_prefix` reads it (whitespace stripped; a value that is not a cpu list = no pin;
-    no cpu_atom = no affinity line). Normal priority (no Nice/CPUWeight: never ahead of OBS).
+  - `CPUAffinity=` = `strih_program_audio_cpus` (issue 1485), never every CPU and never empty:
+    - a hybrid box: its own `/sys/devices/cpu_atom/cpus`, read the way `strih_lx_lowprio_prefix`
+      reads it, minus the reserved Dante CPU (`/etc/strih-dante-rx-cpu.conf` `reserved=`);
+    - no cpu_atom (the AMD strih-snv), or E-cores that are only the reserved CPU: the BACKGROUND set,
+      `obs_box_background_cpus` = online minus `/etc/strih-isolated-cpus.conf` (the
+      `rig-background.slice` set; strih-snv 0-1), minus the reserved CPU;
+    - neither derivable (no OBS mask yet): step 16e FAILS by name and item 41 reads `unit=no-cpu-set`.
+    - Why: the old rule dropped the line when cpu_atom was absent, so on strih-snv the sampler (with
+      the CG receivers + correlation, ~11-20 % CPU) ran on 0-15. On CPU 15 it cost the dstack engine
+      a rebootstrap in every 10-15 min window; moved live to 0-1 a 15.5-min window was clean (A/B
+      3.11.2026, `strih-dante-input.md`).
+    - Normal priority (no Nice/CPUWeight: never ahead of OBS).
   - `ExecCondition=/usr/bin/test -e %h/.config/camera-box/program-audio-sampler.test-mode`: an OPT-IN
     TEST marker (review round 3). Without it every start is skipped, so the sampler is DOWN by default:
     a fresh provisioning, and a reboot during a production (strih-snv lingers the user manager,

@@ -1242,7 +1242,7 @@ fi
 # this very gate — #862 point 2: the harness's own host is never exempt), and strih/stream over
 # SSH exactly like every other node (#862 follow-up, 2026-07-30: the ORIGINAL bundle-state-backed
 # read for strih/stream was half-wired and always UNKNOWN in practice — every node, incl.
-# Windows, is now read the SAME uniform way via `dantesync --version`, no bundle-state
+# Windows, is now read the SAME uniform way via `dsync --version`, no bundle-state
 # involvement). An unreachable node never silently passes — it is either read, or explicitly
 # excluded via the SAME CAMBOX_OFFLINE_ACK/rig-fleet.txt mechanism the fleet preflight already
 # uses (#758/#827), never a silent skip.
@@ -1262,7 +1262,7 @@ else
 fi
 # issue 1351: on the M4 Linux strih (strih-snv, 10.77.9.202) the --win arm reads dantesync via the
 # Windows quoted-exe-path ssh call, which returns nothing on Linux -> strih UNKNOWN -> the gate
-# refuses (exit 11). strih-snv answers `dantesync --version` on the bare command line (the --linux
+# refuses (exit 11). strih-snv answers `dsync --version` on the bare command line (the --linux
 # arm's read, .claude/rules/dantesync-version-reading.md), so route strih through the --linux node
 # list there and pass only stream via --win. A Windows strih keeps strih+stream BOTH under --win
 # (byte-identical to the pre-1351 argv). Computed into DV_WIN_NODES so the SINGLE gate invocation is
@@ -1273,7 +1273,7 @@ if [ "$(strih_platform "$STRIH")" = "linux" ]; then
   DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX strih=${WIN_SSH_USER:-newlevel}@$STRIH"
   DV_WIN_NODES="stream=${WIN_SSH_USER:-newlevel}@$STREAM"
 fi
-# issue 1462: the Linux stream box (stream-snv) answers the bare `dantesync --version` too -- the same
+# issue 1462: the Linux stream box (stream-snv) answers the bare `dsync --version` too -- the same
 # move to the --linux arm, so it is never in both lists (the --win read would be UNKNOWN there).
 if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
   DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX stream=${WIN_SSH_USER:-newlevel}@$STREAM"

@@ -30,18 +30,21 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shading_release_fake_1487 import pin_for_args, service_port  # noqa: E402
+
 SCRIPT = os.path.join(REPO, "scripts", "bkshading-deploy-service.sh")
 LIB = os.path.join(REPO, "scripts", "lib", "bkshading-deploy-service-runtime.sh")
 PS1 = os.path.join(REPO, "scripts", "bkshading-install-service.ps1")
-CONFIG_EXAMPLE = os.path.join(REPO, "bkshading", "service", "bkshading.example.toml")
+CONFIG_EXAMPLE = os.path.join(REPO, "scripts", "bkshading.example.toml")
 
 # The canonical shared invariants (the lib is the SINGLE source of truth; the tests below assert the
 # lib prints exactly these AND that both the .sh and the .ps1 carry the same literals).
-WINDOWS_ARTIFACT = "bkshading-windows-amd64"
 EXE_NAME = "bkshading.exe"
 INSTALL_DIR = r"C:\bkshading"
 CONFIG_NAME = "bkshading.toml"
@@ -67,6 +70,7 @@ def _run_script(args, env=None):
     e = dict(os.environ)
     if env:
         e.update(env)
+    e.update(pin_for_args(args))
     return subprocess.run(["bash", SCRIPT] + args, capture_output=True, text=True, env=e)
 
 
@@ -96,7 +100,6 @@ def test_deploy_script_is_executable():
 # pure lib invariants (the ONE source of truth)
 # ---------------------------------------------------------------------------------------------
 def test_lib_invariants():
-    assert _bash("bkshading_service_artifact_name") == WINDOWS_ARTIFACT
     assert _bash("bkshading_service_exe_name") == EXE_NAME
     assert _bash("bkshading_service_install_dir") == INSTALL_DIR
     assert _bash("bkshading_service_config_name") == CONFIG_NAME
@@ -125,7 +128,8 @@ def test_lib_sha_match_decision():
 
 
 def test_port_matches_service_config_default():
-    # The port the deploy verifies MUST equal the service's own default_bind port (config.rs).
+    # The port the deploy verifies MUST equal the service's own default bind (the shading contract).
+    assert service_port() == PORT
     cfg = open(CONFIG_EXAMPLE, encoding="utf-8").read()
     assert (":%s" % PORT) in cfg, "port %s must match the service config bind" % PORT
 

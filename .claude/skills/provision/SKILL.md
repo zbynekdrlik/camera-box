@@ -31,10 +31,10 @@ Elgato 4K S).
 4. ACCEPT        scripts/verify-device.sh NAME         (from dev1, over SSH — the gate)
 ```
 
-**The bkshading shading relay is part of step 3 (issue 808, 25.9.2026).** A gh-less box needs the
-CI relay staged next to camera-box: `gh run download <run> -n bkshading-linux-amd64 --dir /tmp`,
-scp `bkshading-relay` to the box, then `setup-device.sh --binary /tmp/camera-box --relay-binary
-/tmp/bkshading-relay [--rig-mode test|event] NAME`. Without it STEP 19 refuses Setup Complete.
+**The bkshading shading relay is part of step 3 (issue 808, 25.9.2026).** The box fetches the relay of the pinned shading
+release (scripts/shading-release.pin) with curl. A box without that network: scp the release asset
+`bkshading-relay-linux-amd64` to the box, then `setup-device.sh --binary /tmp/camera-box --relay-binary
+/tmp/bkshading-relay-linux-amd64 [--rig-mode test|event] NAME`. Without it STEP 19 refuses Setup Complete.
 `--rig-mode` defaults to `test` (source box + cam2 relay installed disabled). verify-device `(ao)`
 grades it; pass `CAMERA_BOX_RIG_MODE=test|event` (the SAME env setup-device reads) or let it read cam2's painter state.
 
@@ -161,7 +161,7 @@ It checks (all must pass, exit 0 only if every check is OK):
 | (a) | `camera-box --version` is a valid, well-formed fleet version | regex on the binary's own `--version` output |
 | (b) | `camera-box.service` is active | `systemctl is-active camera-box` |
 | (c) | NDI sender is actually streaming, no crash | `journalctl -u camera-box`, reuses `scripts/lib/ndi-alive.sh`'s `emit_ok_grep_pattern()` / `fatal_grep_pattern()` (shared with `deploy-fleet.sh` / `upgrade-fleet-ndi.sh`) |
-| (d) | dantesync PTP servo LOCKED + a **FRESH** clock offset within bound | `journalctl -u dantesync -o short-iso`; `dantesync_offset_verdict()` reads the FRESHEST `[NTP] offset:` line, rejects a stale boot-step line (`DANTESYNC_OFFSET_FRESHNESS_S` default 300s), FAILs on a fresh offset outside ±`CLOCK_GUARD_BOUND_US` (2000µs). A fresh out-of-bound offset = a real desync (#550/#591); stale/absent + PTP LOCKED passes (gate (r) guarantees sole authority). Supersedes the age-blind `dantesync_offset_ok` |
+| (d) | dantesync PTP servo LOCKED + a **FRESH** clock offset within bound | `journalctl -u dsync -o short-iso`; `dantesync_offset_verdict()` reads the FRESHEST `[NTP] offset:` line, rejects a stale boot-step line (`DANTESYNC_OFFSET_FRESHNESS_S` default 300s), FAILs on a fresh offset outside ±`CLOCK_GUARD_BOUND_US` (2000µs). A fresh out-of-bound offset = a real desync (#550/#591); stale/absent + PTP LOCKED passes (gate (r) guarantees sole authority). Supersedes the age-blind `dantesync_offset_ok` |
 | (e) | `genlock.conf` drop-in present, `CAMERA_BOX_GENLOCK_FPS` matches `camera-set.sh`'s per-cam table | `cat` the drop-in, compare against `camera_resolve()`'s `CAMERA_GENLOCK_FPS` |
 | (f) | `cpu-affinity.conf` drop-in present (`CPUAffinity=<isolated core>`) | `cat` the drop-in (#289) |
 | (g) | `/usr/lib/ndi/libndi.so.6` is a root-owned SYMLINK to a root-owned regular file | `ls -la /usr/lib/ndi` — the CANONICAL layout; the #445 cam3-outlier real-file/user-owned layout deliberately FAILS this check |

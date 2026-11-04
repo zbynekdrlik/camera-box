@@ -68,15 +68,15 @@ if ! declare -F strih_cambox_log_sink_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-cambox-log-sink.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-cambox-log-sink.sh"
 fi
-# issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2) and the ONE CI-artifact
-# fetch (step 16c's bkshading service).
+# issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2); issue 1487: the pinned
+# shading release (step 16c's bkshading service).
 if ! declare -F dantesync_install >/dev/null; then
   # shellcheck source=scripts/lib/dantesync-install.sh
   . "$(dirname "${BASH_SOURCE[0]}")/dantesync-install.sh"
 fi
-if ! declare -F strih_ci_artifact_fetch >/dev/null; then
-  # shellcheck source=scripts/lib/strih-ci-artifact.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/strih-ci-artifact.sh"
+if ! declare -F shading_release_service >/dev/null; then
+  # shellcheck source=scripts/lib/shading-release.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/shading-release.sh"
 fi
 # issue 1470: the A/V-sync dock on the stream role (setup-strih step 16g's layout seed, verify-strih item 47).
 if ! declare -F obs_box_avsync_dock_seed >/dev/null; then
@@ -87,6 +87,11 @@ fi
 if ! declare -F obs_box_step_applies >/dev/null; then
   # shellcheck source=scripts/lib/obs-box-role.sh
   . "$(dirname "${BASH_SOURCE[0]}")/obs-box-role.sh"
+fi
+# issue 1474: the dev1 rig-lease host line on the stream box (setup-strih step 16l, verify-strih).
+if ! declare -F obs_box_lease_host_install >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-lease-host.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-lease-host.sh"
 fi
 # issue 1412: step 4's prefix install never writes into a file a running OBS maps.
 if ! declare -F strih_bundle_tree_install >/dev/null; then
@@ -107,6 +112,16 @@ fi
 if ! declare -F strih_intercom_hub_cred_dropin_apply >/dev/null; then
   # shellcheck source=scripts/lib/strih-intercom-hub-unit.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-hub-unit.sh"
+fi
+# issue 1487: the forked OBS is the pinned release of zbynekdrlik/obs (scripts/obs-release.pin), step 4.
+if ! declare -F obs_release_bundle >/dev/null; then
+  # shellcheck source=scripts/lib/obs-release.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-release.sh"
+fi
+# issue 1485: the strih-obs Dante device's dante-input.toml (step 13) + verify item 9's Dante grade.
+if ! declare -F strih_dante_input_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-dante-input.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-input.sh"
 fi
 # issue 1439: verify item 9 on a box whose program audio is the console's VBAN into the obs-vban source.
 if ! declare -F strih_program_vban_grade >/dev/null; then
@@ -356,7 +371,13 @@ strih_lx_seed_manifest_json() {
   # carries the program-audio input + its obs-vban source settings, which strih_scenes.py --bootstrap
   # switches (keeping the operator's mixer state); a hub-fed strih carries neither, byte-identical.
   local vban ai
-  if vban="$(strih_lx_program_audio_vban_json)"; then
+  if strih_program_dante_declared; then
+    # issue 1485: the program from the Dante device strih-obs -- the seed switches the input to dante_input
+    ai="$(strih_lx_program_audio_input)" || return 1
+    printf '  "camera_latency_ms": %s,\n' "$lat"
+    printf '  "program_audio_input": "%s",\n' "$ai"
+    printf '  "program_audio_dante": {"device": "%s"}\n' "$STRIH_DANTE_INPUT_DEVICE"
+  elif vban="$(strih_lx_program_audio_vban_json)"; then
     ai="$(strih_lx_program_audio_input)" || return 1
     printf '  "camera_latency_ms": %s,\n' "$lat"
     printf '  "program_audio_input": "%s",\n' "$ai"
@@ -380,8 +401,6 @@ strih_lx_program_audio_vban_json() {
   printf '{"port": %s, "stream_name": "%s", "receive_buffer_ms": %s}' "$vp" "$vs" "$vr"
 }
 
-# strih_lx_bundle_artifact -> the strih FULL-build CI artifact name (linux-genlock.yml strih job).
-strih_lx_bundle_artifact() { printf 'obs-genlock-linux-x86_64-strih'; }
 
 # strih_lx_dantesync_is_client_not_master MODE -> 0 iff MODE is a CLIENT mode (never server/master).
 # INTERNAL helper (issue 1317, this lane): retained as the pure CLIENT-args classifier that the
@@ -459,7 +478,8 @@ strih_lx_dantesync_status_role_verdict() {
 
 # strih_lx_profile_facts -> the OBS profile facts (from the Windows `light` profile inventory,
 # 15.9.), key=value one per line: base/output 1920x1080 @ 30 fps NV12, Advanced out, NVENC HEVC
-# record to /srv/_REC as 15-min-split mkv.
+# record to /srv/_REC as 15-min-split mkv. The record encoder is the CUDA NVENC one (issue 1387): the
+# texture encoder's fresh-thread GL MakeCurrent at StartRecord/StopRecord stalls the render ~55 ms.
 strih_lx_profile_facts() {
   printf '%s\n' \
     'base_res=1920x1080' \
@@ -467,7 +487,7 @@ strih_lx_profile_facts() {
     'fps=30' \
     'color_format=NV12' \
     'out_mode=Advanced' \
-    'rec_encoder=obs_nvenc_hevc_tex' \
+    'rec_encoder=obs_nvenc_hevc_soft' \
     'rec_path=/srv/_REC' \
     'rec_format=mkv' \
     'rec_split_min=15'
@@ -735,7 +755,7 @@ strih_lx_single_timesync_authority_ok() {
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      *dantesync*) has_dante=1 ;;
+      *dsync*) has_dante=1 ;;
       *timesyncd*|*chrony*|*ntpd*|*ntpsec*|*ptp4l*) competitor=1 ;;
     esac
   done
@@ -1041,7 +1061,7 @@ strih_install_bundle_prefix() {
 # Post-M4 (20.9.2026) the strih notebook IS the fleet's ONE NTP master (`strih.lan` -> 10.77.9.202),
 # so the unit now carries a ROLE: `server` (the M4 default) renders the bare NTP-master daemon; the
 # historical `client` role (the dead parallel-run shape) renders `--ntp-server <host>`. setup-strih.sh
-# step 2 installs the unit + removes any stale `dantesync.service.d/*.conf` drop-in (the live box had a
+# step 2 installs the unit + removes any stale `dsync.service.d/*.conf` drop-in (the live box had a
 # hand `10-ntp-master.conf` overriding the client ExecStart -- now folded INTO the unit); verify-strih
 # asserts the unit is active, a fresh offset, and (server) an NTP :123 listener. These pure helpers are
 # unit-tested in tests/strih_provision_pure_functions.rs.
@@ -1049,8 +1069,8 @@ strih_install_bundle_prefix() {
 # strih_dantesync_unit_text ROLE [ARGS] -> print the systemd unit text for the strih-snv dantesync
 # daemon (the EXACT cambox unit shape: Type=simple, Restart=always, RestartSec=5,
 # WantedBy=multi-user.target). ROLE is `server` (NTP master, the M4 default -- ExecStart is the BARE
-# `/usr/local/bin/dantesync`, folding the live 10-ntp-master.conf drop-in into the unit) or `client`
-# (ExecStart `/usr/local/bin/dantesync <ARGS>`, ARGS defaulting to the client args). `--service` is
+# `/usr/local/bin/dsync`, folding the live 10-ntp-master.conf drop-in into the unit) or `client`
+# (ExecStart `/usr/local/bin/dsync <ARGS>`, ARGS defaulting to the client args). `--service` is
 # NOT an installer flag -- it is a run mode, so it never appears here. Fail-closed via
 # strih_lx_dantesync_role_ok: an ambiguous shape (server WITH args, client with master/empty args, an
 # unknown role) emits NOTHING and returns 1 -- but a plain server role is CORRECT and NEVER refused
@@ -1084,13 +1104,13 @@ strih_dantesync_unit_text() {
   esac
   cat <<EOF
 [Unit]
-Description=Dante Time Sync (PTP/NTP Synchronization)
+Description=dsync (PTP/NTP Synchronization)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-${waitpre}ExecStart=/usr/local/bin/dantesync${execargs}
+${waitpre}ExecStart=/usr/local/bin/dsync${execargs}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -1542,16 +1562,10 @@ strih_companion_status_verdict() {
 }
 
 # --- issue 1353: bkshading SERVICE (shading panel backend) provisioning on strih-snv ----------------
-# The shading-control panel backend (bkshading/service) ran only on the Windows strih PC; post-M4 the
-# notebook is the strih, so it is provisioned here as a systemd unit fed the CI-built Linux artifact.
-# The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs include_str!), so the
-# unit needs only the self-contained binary; web/ ships beside it per the design as a panel-source copy.
-
-# strih_bkshading_artifact_name -> the CI artifact NAME the ci.yml Linux job uploads and setup-strih
-# fetches. SINGLE SOURCE OF TRUTH (KEEP IN SYNC with .github/workflows/ci.yml's
-# `Upload bkshading service (linux, panel)` step) -- the strih sibling of the Windows
-# `bkshading-windows-amd64` canon in scripts/lib/bkshading-deploy-service-runtime.sh.
-strih_bkshading_artifact_name() { printf '%s\n' bkshading-service-linux-amd64; }
+# The shading-control panel backend ran only on the Windows strih PC; post-M4 the
+# notebook is the strih, so it is provisioned here as a systemd unit fed the pinned shading release
+# (issue 1487). The panel web assets are EMBEDDED in the binary, so the unit needs only the binary;
+# web/ ships beside it as a copy (the shading contract).
 
 # strih_bkshading_unit_text -> the systemd SYSTEM unit for the bkshading panel service on strih-snv.
 # User=newlevel (the operator session owns libndi/PipeWire parity for the M2 live NDI preview),
@@ -1581,7 +1595,7 @@ EOF
 }
 
 # strih_bkshading_config_text [BIND] [RELAYS] [CAMERAS] -> the operator config seed for
-# /etc/bkshading/bkshading.toml. BIND defaults to the service's own default_bind (bkshading/service/src/config.rs
+# /etc/bkshading/bkshading.toml. BIND defaults to the service's own default bind (the shading contract
 # "0.0.0.0:8770"). The box's OWN venue cameras first (CAMERAS, default the loaded fact STRIH_CAMERAS;
 # owner 26.10.2026: strih-snv 2 3 5, strih-pp 1 4 6 7), then every other camera as a `visiting` block: issue 1431
 # makes strih.lan the ONE switch, every cambox relay registers itself as camN with the strih behind it, and the

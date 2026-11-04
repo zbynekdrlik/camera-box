@@ -10,9 +10,11 @@ files shaped like the live `:8899/bundle-state.json` of the two boxes. The gathe
 snippet on a fake box (the issue-1462 fake sshpass), the recording-e2e.sh wiring is the REAL gate block.
 Tier-0: no rig, no cargo, no network.
 """
+import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -271,14 +273,25 @@ def test_the_parser_drops_a_banner_line_and_a_line_without_a_sha():
 # --- the E2E helper: gather + manifest, appended to LINUX_BYTES_GATE_ARGS ---------------------------
 
 def _seam(tmp_path, ok=True):
-    """MANIFEST_AUTOSOURCE_CMD fixture: records its args, copies a manifest to DEST (or fails)."""
+    """issue 1487: the Linux boxes' manifest is the PINNED obs release's own. A fake pin (commit = SHA) and
+    its manifest served from file:// (absent when not OK); a curl wrapper first on PATH records each fetch.
+    Returns (env, rec)."""
     rec = tmp_path / "seam.log"
     src = _manifest(tmp_path, "bundle_seam_1474")
-    seam = tmp_path / "seam.sh"
-    seam.write_text('#!/bin/bash\necho "$* timeout=${MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S:-unset}" >> "%s"\n%s\n' % (
-        rec, ('cp "%s" "$5" && printf %%s "$5"' % src) if ok else "exit 1"))
-    seam.chmod(0o755)
-    return seam, rec
+    srv = tmp_path / "srv" / "v9.9.5"
+    if ok:
+        srv.mkdir(parents=True)
+        (srv / "BUNDLE_MANIFEST.json").write_bytes(src.read_bytes())
+    pin = tmp_path / "obs-release.pin"
+    pin.write_text("OBS_RELEASE_TAG=v9.9.5\nOBS_RELEASE_COMMIT=%s\nOBS_RELEASE_STRIH_SHA256=%s\n"
+                   "OBS_RELEASE_MANIFEST_SHA256=%s\n" % (SHA, "0" * 64, hashlib.sha256(src.read_bytes()).hexdigest()))
+    wrap = tmp_path / "curlwrap"
+    wrap.mkdir()
+    (wrap / "curl").write_text('#!/bin/bash\necho "curl $*" >> "%s"\nexec "%s" "$@"\n' % (rec, shutil.which("curl")))
+    (wrap / "curl").chmod(0o755)
+    rec.write_text("")
+    return {"OBS_RELEASE_PIN_FILE": str(pin), "OBS_RELEASE_CACHE": str(tmp_path / "obscache"),
+            "OBS_RELEASE_URL": "file://%s" % (tmp_path / "srv"), "CURLWRAP": str(wrap)}, rec
 
 
 def _helper(tmp_path, rig, *, ok_manifest=True, state_sha=SHA, down=False):
@@ -289,7 +302,8 @@ def _helper(tmp_path, rig, *, ok_manifest=True, state_sha=SHA, down=False):
     seam, rec = _seam(tmp_path, ok_manifest)
     out = tmp_path / "out"
     out.mkdir()
-    env = dict(rig["env"], MANIFEST_AUTOSOURCE_CMD=str(seam), E2E_LINUX_BYTES_REMOTE_PREFIX=str(root))
+    env = dict(rig["env"], E2E_LINUX_BYTES_REMOTE_PREFIX=str(root), **seam)
+    env["PATH"] = "%s:%s" % (seam["CURLWRAP"], env["PATH"])
     if down:
         env["FAKE_SSH_DOWN"] = "1"
     script = (
@@ -314,13 +328,10 @@ def test_the_helper_hands_the_gate_the_box_bytes_and_the_ci_manifest(tmp_path):
     assert args[1] == "strih=" + ",".join("%s=%s" % (p, _real_sha(p)) for p in PATHS), args
     assert args[2] == "--linux-manifest" and args[3].startswith("strih="), args
     assert pathlib.Path(args[3].split("=", 1)[1]).read_text() == _manifest(tmp_path, "bundle_seam_1474").read_text()
-    seam_args = rec.read_text().split()
-    assert seam_args[:4] == ["zbynekdrlik/camera-box", "linux-genlock.yml", "obs-genlock-linux-x86_64-strih", SHA], seam_args
-    # the strih bundle is one ~600 MB zip (run 40031379800: 601430199 bytes) that GitHub serves only
-    # whole, so its first DOWNLOAD per build needs more than the 300 s default gh bound (the run
-    # lookup keeps the 300 s bound, review round 1)
-    assert seam_args[-1] == "timeout=900", seam_args
-    assert "manifest of build %s (generated 2026-10-24T00:00:00Z) fetched" % SHA in r.stdout, r.stdout
+    # issue 1487: the pinned obs release's manifest (one fetch by the exact tag), never a CI artifact
+    fetches = rec.read_text().splitlines()
+    assert len(fetches) == 1 and fetches[0].endswith("/v9.9.5/BUNDLE_MANIFEST.json"), fetches
+    assert "the pinned obs release manifest of build %s (generated 2026-10-24T00:00:00Z) read" % SHA in r.stdout, r.stdout
     ssh = [c for c in calls(rig) if c["tool"] == "ssh"]
     assert len(ssh) == 1 and ssh[0]["target"] == "newlevel@10.77.9.202", ssh
     assert "UserKnownHostsFile=/dev/null" in " ".join(ssh[0]["argv"]), ssh
@@ -349,7 +360,8 @@ def _both_boxes(tmp_path, rig, ok_manifest):
     seam, rec = _seam(tmp_path, ok_manifest)
     out = tmp_path / "out"
     out.mkdir()
-    env = dict(rig["env"], MANIFEST_AUTOSOURCE_CMD=str(seam), E2E_LINUX_BYTES_REMOTE_PREFIX=str(root))
+    env = dict(rig["env"], E2E_LINUX_BYTES_REMOTE_PREFIX=str(root), **seam)
+    env["PATH"] = "%s:%s" % (seam["CURLWRAP"], env["PATH"])
     script = (
         'set -euo pipefail\n. "%s"\n. "%s"\nLINUX_BYTES_GATE_ARGS=()\n'
         'e2e_linux_bytes_gather strih 10.77.9.202 newlevel pw "%s" "%s" r\n'
@@ -368,7 +380,7 @@ def test_two_boxes_of_one_build_fetch_the_manifest_once(tmp_path):
     ms = [args[i + 1] for i, a in enumerate(args) if a == "--linux-manifest"]
     assert [m.split("=", 1)[0] for m in ms] == ["strih", "stream"], args
     assert ms[0].split("=", 1)[1] == ms[1].split("=", 1)[1], args
-    assert "stream (10.77.9.204): linux bundle manifest of build %s" % SHA in r.stdout, r.stdout
+    assert "stream (10.77.9.204): the pinned obs release manifest of build %s" % SHA in r.stdout, r.stdout
 
 
 def test_a_failed_fetch_is_not_repeated_for_the_second_box_of_the_build(tmp_path):
@@ -378,7 +390,7 @@ def test_a_failed_fetch_is_not_repeated_for_the_second_box_of_the_build(tmp_path
     args, r, rec = _both_boxes(tmp_path, rig, False)
     assert len(rec.read_text().splitlines()) == 1, rec.read_text()
     assert "--linux-manifest" not in args, args
-    assert r.stdout.count("could not fetch") == 2, r.stdout
+    assert r.stdout.count("no pinned obs release manifest") == 2, r.stdout
 
 
 def test_only_the_download_gets_the_long_bound(tmp_path):
@@ -410,7 +422,7 @@ def test_a_state_without_a_build_sha_fetches_no_manifest(tmp_path):
     rig = make_rig(tmp_path)
     args, _r, rec = _helper(tmp_path, rig, state_sha="")
     assert "--linux-manifest" not in args, args
-    assert not rec.exists(), rec.read_text()
+    assert rec.read_text() == "", rec.read_text()
 
 
 # --- recording-e2e.sh wiring ------------------------------------------------------------------------

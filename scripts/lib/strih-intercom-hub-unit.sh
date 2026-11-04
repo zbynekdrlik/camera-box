@@ -505,3 +505,65 @@ strih_intercom_hub_absent_grade() {
   fi
   return 0
 }
+
+# strih_intercom_hub_dante_rx_grade URL -> verify-strih item 16's `(intercom-dante)` row on a box whose
+# hub carries a Dante device (STRIH_DANTE_DEVICES names `<box>-intercom`, issue 1485), through the
+# caller's ok / bad / note. Reads /api/state twice STRIH_HUB_DANTE_WAIT_S (3) apart: every declared RX
+# channel of the hub's dlink participant must be `connected` and its `written` must grow (intercom 1.9.9's
+# participants[].dlink.rx[]; the intercom project's own grade). A connected channel that writes nothing
+# is the "flow is lost" case of 3.11.2026. Seams: STRIH_HUB_DANTE_STATE_FILE1/2. Always rc 0.
+strih_intercom_hub_dante_rx_grade() {
+  local url="${1:?hub state url required}" devs j1 j2 row
+  devs="$(strih_lx_dante_devices 2>/dev/null || true)"
+  case " ${devs} " in *-intercom=*) ;; *) return 0 ;; esac
+  if [ -n "${STRIH_HUB_DANTE_STATE_FILE1:-}" ]; then
+    j1="$(cat -- "$STRIH_HUB_DANTE_STATE_FILE1" 2>/dev/null || true)"
+    j2="$(cat -- "${STRIH_HUB_DANTE_STATE_FILE2:-}" 2>/dev/null || true)"
+  else
+    j1="$(curl -fsS --max-time 3 "$url" 2>/dev/null || true)"
+    sleep "${STRIH_HUB_DANTE_WAIT_S:-3}"
+    j2="$(curl -fsS --max-time 3 "$url" 2>/dev/null || true)"
+  fi
+  if [ -z "$j1" ] || [ -z "$j2" ]; then
+    bad "(intercom-dante) the hub state at ${url} is not readable twice -- the Dante channels cannot be graded"
+    return 0
+  fi
+  row="$(python3 -c '
+import json, sys
+def rx(text):
+    s = json.loads(text)
+    for p in s.get("participants", []):
+        d = p.get("dlink")
+        if isinstance(d, dict):
+            return p.get("name"), d.get("rx")
+    return None, None
+try:
+    n, a = rx(sys.argv[1]); _, b = rx(sys.argv[2])
+except Exception as e:
+    print("FAIL\tthe hub state is not JSON (%s)" % e); sys.exit(0)
+if n is None:
+    print("FAIL\tthe hub has no dlink participant although the box declares a hub Dante device"); sys.exit(0)
+if not isinstance(a, list) or not isinstance(b, list) or not b:
+    print("FAIL\t%s carries no per-channel rx[] (a hub before intercom 1.9.9) -- deploy the pinned hub" % n); sys.exit(0)
+before = {c.get("rx"): c for c in a if isinstance(c, dict)}
+bad, good = [], []
+for c in b:
+    k = c.get("rx"); w = c.get("written"); w0 = before.get(k, {}).get("written")
+    tag = "rx%s %s/%s" % (k, c.get("tx_device"), c.get("tx_channel"))
+    if c.get("state") != "connected":
+        bad.append("%s state=%s" % (tag, c.get("state")))
+    elif not isinstance(w, int) or not isinstance(w0, int) or w <= w0:
+        bad.append("%s connected but written did not grow (%s -> %s): the flow is lost" % (tag, w0, w))
+    else:
+        good.append("rx%s" % k)
+if bad:
+    print("FAIL\t%s: %s" % (n, "; ".join(bad)))
+else:
+    print("PASS\t%s: %d channel(s) connected, written growing (%s)" % (n, len(good), ", ".join(good)))
+' "$j1" "$j2" 2>/dev/null || true)"
+  case "$row" in
+    PASS$'\t'*) ok "(intercom-dante) ${row#PASS$'\t'}" ;;
+    FAIL$'\t'*) bad "(intercom-dante) ${row#FAIL$'\t'}" ;;
+    *) bad "(intercom-dante) the Dante channel grade printed nothing" ;;
+  esac
+}

@@ -50,7 +50,7 @@ def test_the_unit_waits_for_the_rig_ip_before_dantesync_starts():
     out = r.stdout
     wait = _wait_line(out)
     assert "10.77.9.204/" in wait, wait
-    assert out.index("ExecStartPre=") < out.index("ExecStart=/usr/local/bin/dantesync"), out
+    assert out.index("ExecStartPre=") < out.index("ExecStart=/usr/local/bin/dsync"), out
     assert "timeout" in wait, "the wait is bounded, a timeout fails the start: " + wait
     assert "$" not in wait, "systemd expands $ in Exec lines: " + wait
     # the rest of the unit keeps its shape
@@ -62,7 +62,7 @@ def test_a_client_unit_waits_too():
     r = _unit("client", "--ntp-server strih-snv.lan", "10.77.9.204")
     assert r.returncode == 0, r.stderr
     assert "10.77.9.204/" in _wait_line(r.stdout)
-    assert "ExecStart=/usr/local/bin/dantesync --ntp-server strih-snv.lan" in r.stdout
+    assert "ExecStart=/usr/local/bin/dsync --ntp-server strih-snv.lan" in r.stdout
 
 
 def test_a_malformed_rig_ip_is_refused_and_emits_nothing():

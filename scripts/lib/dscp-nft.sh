@@ -87,7 +87,7 @@ dscp_nft_service_unit_content() {
   cat <<EOF
 [Unit]
 Description=DSCP-mark outgoing NTP client packets to EF (dantesync issue 52)
-Documentation=https://github.com/zbynekdrlik/dantesync/issues/52
+Documentation=https://github.com/zbynekdrlik/dsync/issues/52
 Wants=network-pre.target
 Before=network-pre.target
 

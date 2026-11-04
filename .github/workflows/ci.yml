@@ -363,186 +363,6 @@ jobs:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: python -m pytest tests/python -v
 
-  bkshading:
-    name: bkshading service + relay (issue 808)
-    # The bkshading shading-control service + cambox relay are SEPARATE workspace members
-    # (bkshading/proto|relay|service). The appliance jobs above run cargo at the root WITHOUT
-    # --workspace, so they never build these; THIS job is their first compile + clippy + tests.
-    # No libv4l/libasound needed — these crates don't depend on the appliance's Linux tree.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: bkshading
-
-      # ndi is now the DEFAULT bkshading service build (issue 1157), so this members clippy
-      # already compiles the real NDI FFI path (src/preview/ndi_source.rs) with -D warnings.
-      # libloading is a RUNTIME dynamic load, so it still compiles here without libndi installed.
-      - name: Clippy (bkshading members)
-        run: cargo clippy -p bkshading-proto -p bkshading-relay -p bkshading --all-targets -- -D warnings
-
-      # ndi being default means the members clippy above covers the real path; this step instead
-      # keeps the OTHER config proven — the `--no-default-features` stub (libndi-free) path — so it
-      # stays clippy-clean and can't bit-rot (it was the free default coverage before ndi became
-      # the default build).
-      - name: Clippy (bkshading service, --no-default-features — stub path)
-        run: cargo clippy -p bkshading --no-default-features --all-targets -- -D warnings
-
-      # ndi is the default (issue 1157), so this runs the ndi-gated code path plus the ndi_paths
-      # cross-platform discovery unit tests (which pin that the Windows Processing.NDI.Lib runtime
-      # DLL is in the search set) and the shared_runtime lifecycle tests. libloading is a runtime
-      # dynamic load, so no libndi need be installed to build/run these.
-      - name: Test (bkshading members)
-        run: cargo test -p bkshading-proto -p bkshading-relay -p bkshading
-
-      # Prove the `--no-default-features` stub path still compiles + passes its tests (StubSource +
-      # the pure preview pipeline) so the libndi-free build can't silently break now that it is off
-      # the default.
-      - name: Test (bkshading service, --no-default-features — stub path)
-        run: cargo test -p bkshading --no-default-features
-
-      # Build the DEPLOYABLE binaries in RELEASE (issue 808 M3) so a live rig verify of the merged
-      # relay/service has an artifact to deploy — nothing produced one before, though
-      # scripts/bkshading-provision-relay.sh explicitly expects "the CI-built bkshading-relay binary".
-      # Relay = default features (drives the camera via the gphoto2 CLI, no ndi); service =
-      # --features ndi (kept explicit for intent + deploy-shape clarity; it now equals the service
-      # default since issue 1157 made ndi the default build). This release build supersedes the
-      # earlier debug --bins compile-proof — clippy --all-targets + the tests above already prove
-      # the crates compile in debug, so a release build is a strictly stronger proof.
-      - name: Build deployable binaries (relay default + service --features ndi)
-        run: |
-          cargo build --release --bins -p bkshading-relay
-          cargo build --release --features ndi --bins -p bkshading
-
-      # issue 1304 (+ issue 1337): real-browser E2E of the operator panel +/- step buttons. Runs the
-      # JUST-BUILT service (above) against a stdlib stub relay (bkshading/service/tests/stub_relay.py,
-      # whose caps fixture carries isoChoices/shutterChoices) and drives the panel with Playwright
-      # (chromium only, one spec — small CI budget): clona/biely bod/tint AND the issue-1337 ISO +
-      # uzávierka steppers, each one tap = one absolute PUT. Playwright's webServer manages BOTH the
-      # stub and the service and tears them down.
-      - name: Setup Node (bkshading panel E2E, issue 1304)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Install Playwright chromium (bkshading panel E2E, issue 1304)
-        working-directory: bkshading/service/tests/e2e
-        run: |
-          npm install
-          npx playwright install --with-deps chromium
-      - name: bkshading panel +/- step buttons E2E (issue 1304)
-        working-directory: bkshading/service/tests/e2e
-        env:
-          BKSHADING_BIN: ${{ github.workspace }}/target/release/bkshading
-        run: npx playwright test
-
-      # Upload the deployable relay + service binaries (issue 808 M3), mirroring the appliance's
-      # camera-box-linux-amd64 / probe-tools-linux-amd64 upload pattern. scripts/bkshading-deploy-relay.sh
-      # downloads bkshading-relay from this artifact and places it on a cambox (/usr/local/bin).
-      - name: Upload bkshading binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: bkshading-linux-amd64
-          # Fail loud if a binary is missing (renamed bin / wrong path) — an empty artifact with a
-          # green CI is exactly the "no deployable artifact" failure this milestone exists to fix.
-          if-no-files-found: error
-          path: |
-            target/release/bkshading-relay
-            target/release/bkshading
-
-      # issue 1353: a SERVICE-dedicated deploy artifact (the service binary + the panel web assets)
-      # for provisioning the bkshading SERVICE on strih-snv (systemd/bkshading-service.service via
-      # setup-strih.sh step 16c). Separate from the relay's bkshading-linux-amd64 above, mirroring the
-      # Windows bkshading-windows-amd64 / relay split. The artifact NAME is single-sourced in
-      # scripts/lib/strih-provision.sh (strih_bkshading_artifact_name) — KEEP IN SYNC. The web assets
-      # are also embedded in the binary, so the service is self-contained; web/ ships as a panel-source
-      # copy. Staged into one flat dir so the artifact root carries `bkshading` + `web/`.
-      - name: Stage bkshading service artifact (binary + panel web assets)
-        run: |
-          mkdir -p dist/bkshading-service/web
-          cp target/release/bkshading dist/bkshading-service/bkshading
-          cp -a bkshading/service/web/. dist/bkshading-service/web/
-      - name: Upload bkshading service (linux, panel)
-        uses: actions/upload-artifact@v4
-        with:
-          name: bkshading-service-linux-amd64
-          if-no-files-found: error
-          path: dist/bkshading-service
-
-      # Cross-build the relay for aarch64 (issue 808 SBC/handheld milestone): the handheld runs on a
-      # zero-class arm64 SBC (Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W) which is ARM and
-      # CANNOT run the amd64 binary. The relay is pure Rust (axum/tokio/serde/clap; no C link deps —
-      # no reqwest/rustls/ring on the relay side), so a rustup target + the gcc-aarch64-linux-gnu
-      # linker cross-compile it cleanly. Target choice justified (aarch64, not armhf) in
-      # scripts/lib/bkshading-sbc-runtime.sh + .claude/rules/bkshading.md.
-      - name: Cross-build relay for aarch64 (SBC / zero-class arm64 handheld)
-        run: |
-          rustup target add aarch64-unknown-linux-gnu
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          cargo build --release --target aarch64-unknown-linux-gnu --bins -p bkshading-relay
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-
-      # Upload the aarch64 relay for the SBC/handheld deploy path
-      # (scripts/bkshading-deploy-relay.sh --arch arm64). Relay-only — the service runs on the strih
-      # PC, never on a handheld — hence the distinct bkshading-relay-linux-arm64 name. Fail loud on a
-      # missing binary (never a green empty artifact), mirroring the amd64 upload above.
-      - name: Upload bkshading relay (aarch64 / SBC handheld)
-        uses: actions/upload-artifact@v4
-        with:
-          name: bkshading-relay-linux-arm64
-          if-no-files-found: error
-          path: target/aarch64-unknown-linux-gnu/release/bkshading-relay
-
-  bkshading-windows:
-    name: bkshading Windows compile check (issue 808)
-    # The bkshading service runs on the strih PC — Windows FIRST (Linux only after the
-    # frame-loss P0). A Linux compile is not proof the Windows target builds, so cheaply
-    # `cargo check` the members on windows-latest. Pure axum/tokio/reqwest-rustls (no platform
-    # deps) — but "should build on Windows" isn't a build.
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: bkshading-windows
-
-      # ndi is now the DEFAULT service build (issue 1157), so this default-features check compiles
-      # the REAL NDI path (src/preview/ndi_source.rs) on the exact Windows strih ship target —
-      # libloading resolves Processing.NDI.Lib.x64.dll at runtime, so it builds with no libndi on
-      # the runner.
-      - name: Check bkshading members (Windows target)
-        run: cargo check -p bkshading-proto -p bkshading-relay -p bkshading
-
-      # The strih service is deployed WITH --features ndi (issue 1157) to a Windows PC (Windows
-      # FIRST), so build the actual DEPLOYABLE Windows binary in RELEASE (issue 808 M3) — not just
-      # `cargo check` — and upload it, so the strih service deploy finally has an artifact (nothing
-      # produced one before). libloading resolves the NDI runtime DLL (Processing.NDI.Lib.x64.dll)
-      # at runtime, so this builds with no libndi installed on the runner.
-      - name: Build deployable service binary (--features ndi, Windows target)
-        run: cargo build --release --bins -p bkshading --features ndi
-
-      - name: Upload bkshading Windows service binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: bkshading-windows-amd64
-          # Fail loud on a missing binary (see the Linux upload) — never a green empty artifact.
-          if-no-files-found: error
-          path: target/release/bkshading.exe
-
   build:
     name: Build
     runs-on: ubuntu-22.04
@@ -756,8 +576,7 @@ jobs:
     # deploy-set.sh / camera-set.sh — a shell bug here can brick a box). A RED in any of these must
     # NOT auto-deploy to prod cameras. (coverage/mutants/python-tests/windows-probe/drift-guard are
     # deliberately excluded — they don't bear on the Linux binary or the deploy shell.)
-    # issue 1452: + bkshading -- the same run's bkshading relay is deployed with camera-box.
-    needs: [lint, test, build, security, shellcheck, bkshading]
+    needs: [lint, test, build, security, shellcheck]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: [self-hosted, linux, camera-lan]
     # Share the E2E hardware-serialization slot (loopback-e2e.yml / full-path-e2e.yml's group) so a
@@ -782,15 +601,6 @@ jobs:
         with:
           name: probe-tools-linux-amd64
           path: dist-probe
-
-      # issue 1452: the bkshading RELAY of this SAME run. deploy-fleet.sh brings every cambox that has
-      # a relay to it (through bkshading-deploy-relay.sh) and names each box's camera-box + relay
-      # version; before this the fleet deploy left every relay on an old build (28.10.2026 event).
-      - name: Download the bkshading relay (this run's bkshading job, issue 1452)
-        uses: actions/download-artifact@v4
-        with:
-          name: bkshading-linux-amd64
-          path: dist-relay
 
       # issue 1432: the deploy restarts camera-box on every active cambox, so it takes the shared rig
       # lease first through the SAME gate the full-path E2E uses: it waits for a live holder
@@ -828,7 +638,7 @@ jobs:
             exit 1
           fi
           echo "Active set: [$CAMERA_ACTIVE_SET]  ->  deploy set (minus acked): [$deploy_set]"
-          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe --relay-binary dist-relay/bkshading-relay
+          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe
 
       # issue 1432: release the SNV rig lease right after the SNV deploy (also on a failure or a
       # cancellation); the other venues' deploy below is a different rig the lease does not cover.
@@ -859,7 +669,7 @@ jobs:
           for v in $venues; do
             echo "Deploying camera-box $(dist/camera-box --version 2>/dev/null | awk '{print $NF}') to venue $v"
             v_rc=0
-            scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v" --relay-binary dist-relay/bkshading-relay || v_rc=$?
+            scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v" || v_rc=$?
             if [ "$v_rc" -ne 0 ]; then
               echo "::error::deploy-fleet.sh --venue $v exited $v_rc (its lines above name the cause)"
               rc=1
@@ -981,7 +791,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, version-check, release-tag, release]
+    needs: [lint, test, coverage, mutants, python-tests, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, version-check, release-tag, release]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

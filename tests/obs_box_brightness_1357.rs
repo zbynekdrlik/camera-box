@@ -230,8 +230,9 @@ fn the_merge_refuses_an_rc_without_a_keyboard_section_and_prints_nothing() {
 fn the_install_writes_every_part_through_the_idempotent_helper() {
     let f = kiosk_fn("obs_box_brightness_keys");
     for want in [
-        "obs_box_brightness_helper_text | obs_box_write_if_changed /usr/local/bin/obs-box-brightness 0755 root:root",
-        "obs_box_backlight_udev_rule | obs_box_write_if_changed /etc/udev/rules.d/90-obs-box-backlight.rules 0644 root:root",
+        // issue 1474: the renderers run inside the install (a failed one writes nothing)
+        "obs_box_write_if_changed_rendered /usr/local/bin/obs-box-brightness 0755 root:root \"brightness helper\" obs_box_brightness_helper_text",
+        "obs_box_write_if_changed_rendered /etc/udev/rules.d/90-obs-box-backlight.rules 0644 root:root \"backlight udev rule\" obs_box_backlight_udev_rule",
         "udevadm trigger --subsystem-match=backlight --action=add",
         "usermod -aG video \"$DESKTOP_USER\"",
         "/etc/xdg/openbox/rc.xml",

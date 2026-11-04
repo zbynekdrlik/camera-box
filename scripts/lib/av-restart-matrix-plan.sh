@@ -29,7 +29,7 @@ EOF
     case "$k" in
       strih-obs) echo "  strih-obs = strih-snv ${STRIH_HOST} (strih-obs.service, the --user unit; $(strih_platform "$STRIH_HOST"))" ;;
       cambox) echo "  cambox = ${CAMBOX} ${CAMBOX_IP} (camera-box.service)" ;;
-      dantesync) echo "  dantesync = ${DANTE_NODE} ${DANTE_IP} (dantesync.service; with no --dantesync-node it follows the cambox)" ;;
+      dantesync) echo "  dantesync = ${DANTE_NODE} ${DANTE_IP} (dsync.service; with no --dantesync-node it follows the cambox)" ;;
       stream-obs)
         if [ "$STREAM_OBS_MODE" = restart ]; then
           echo "  stream-obs = stream ${STREAM_HOST} (strih-obs.service, the --user unit; linux -- the matrix restarts it itself, issue 1474)"

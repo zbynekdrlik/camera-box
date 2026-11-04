@@ -1,7 +1,7 @@
 //! Issue 1425 (E2 slice 1, designs 6205974120 + 6206822792) — the WIRING of the STAMP basis of the
 //! per-source ASRC.
 //!
-//! The decisions are pinned elsewhere: `src/genlock_audio_pairing.rs` `audio_asrc_placement` /
+//! The decisions are pinned elsewhere: `vstack:rig/core/src/genlock_audio_pairing.rs` `audio_asrc_placement` /
 //! `audio_place_measured` / `audio_asrc_rate_point` (their C port by
 //! `tests/genlock_audio_asrc_basis_parity_1425.rs`), the behaviour by the two-clock bench
 //! `src/asrc_stamp_bench.rs` (+ its `asrc_stamp_bench_stall.rs` rows), the compensator's confirmed

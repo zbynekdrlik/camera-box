@@ -167,10 +167,13 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
 The E2E `[0/8]` version gate is NOT switched to `--fleet`: it gates the run's ACTIVE set, and a
 powered-off FOH PC would refuse every E2E. It stays per-run (camera_active_excluding + imag ack).
 
+**The nodes dsync upgrades itself (issue 1487):** `DSYNC_SELF_UPGRADED_NODES` stay rows here, graded by
+the watchdog and the drift check, but out of the upgrader and the version pin (`dsync-rename.md`).
+
 ## Config drift (report-only)
 
 `scripts/dantesync-config-drift.sh` scp's each node's config.json BYTES (Linux
-`/etc/dantesync/config.json`, Windows `C:/ProgramData/DanteSync/config.json`) and the pure
+`/etc/dsync/config.json`, Windows `C:/ProgramData/dsync/config.json`) and the pure
 `dantesync_fleet.drift()` compares it with its role template in `scripts/dantesync-canonical-config.json`:
 every template leaf must match (a missing dict names each missing LEAF), a node-only key is an
 `extra key`, a UTF-8/UTF-16 byte-order mark is DRIFT on its own (dantesync ignores such a file — the

@@ -841,7 +841,7 @@ genlock_build_parity_report() {
 # genlock_capability_from_log, mirroring the sibling strih/stream `drift_check_capability`'s
 # two-tier check (empty text -> UNKNOWN; non-empty text with no marker -> DRIFT).
 #
-# OBS_DANTESYNC_LOG_TEXT (#489, spun out of #479) is likewise the RAW `journalctl -u dantesync`
+# OBS_DANTESYNC_LOG_TEXT (#489, spun out of #479) is likewise the RAW `journalctl -u dsync`
 # text, for the same reason: check_imag_report derives the lock state itself via
 # dantesync_locked_from_log, so "journalctl never read" (empty text -> UNKNOWN) and "dantesync
 # running but never locked" (non-empty text, no marker -> DRIFT) stay distinguishable.
@@ -967,7 +967,7 @@ check_imag_report() {
   local obs_dantesync_locked
   obs_dantesync_locked="$(dantesync_locked_from_log "$obs_dantesync_log_text")"
   if [ -z "$obs_dantesync_locked" ]; then
-    printf '  %-22s UNKNOWN  (journalctl -u dantesync not read on imag-nb)\n' "dantesync_locked"
+    printf '  %-22s UNKNOWN  (journalctl -u dsync not read on imag-nb)\n' "dantesync_locked"
     unknown=$((unknown + 1))
   elif [ -z "$exp_dantesync_locked" ]; then
     printf '  %-22s UNKNOWN  (no pinned dantesync_locked_imag in README)\n' "dantesync_locked"
@@ -1251,7 +1251,7 @@ drift_guard_imag_obs_log_gather_snippet() {
 #     same libobs log lines fps_from_log / genlock_capability_from_log / genlock_latency_ms_from_log /
 #     projector_vsync_verdict already parse on Windows, since the log format is platform-independent
 #     libobs text)
-#   - `journalctl -u dantesync` (#489, spun out of #479) — the SAME PTP LOCK/NANO or NTP-offset
+#   - `journalctl -u dsync` (#489, spun out of #479) — the SAME PTP LOCK/NANO or NTP-offset
 #     markers scripts/setup-imag.sh's own provisioning-time restart check keys on (setup-imag.sh:230)
 #   - `dpkg -s` + `systemctl is-active`/`is-enabled` for systemd-timesyncd/chrony/ntp/ntpsec/
 #     openntpd (#596) — the SAME per-daemon signal scripts/verify-device.sh's (r) check gathers
@@ -1380,7 +1380,7 @@ gather_and_check_imag() {
   # secondary bound. 10 minutes is generous vs. the lock lines' periodic cadence; a genuinely-
   # locked dantesync always logs one well within that window.
   obs_dantesync_log="$("${ssh_cmd[@]}" \
-    'journalctl -u dantesync --no-pager --since "-10min" -n 100 2>/dev/null' 2>/dev/null || true)"
+    'journalctl -u dsync --no-pager --since "-10min" -n 100 2>/dev/null' 2>/dev/null || true)"
   # #596: gather per-competing-daemon state the EXACT SAME way verify-device.sh's own (r) sole-
   # timesync-authority check does for the cam1-6 fleet — one SSH call collecting each daemon's
   # `dpkg -s` status + `systemctl is-active` + `is-enabled` into a `NAME|DPKG|ACTIVE|ENABLED`
@@ -1914,7 +1914,7 @@ Usage:
   (`~/.config/obs-studio/logs/*.txt`, most recent file — OBS names logs `.txt`, #1151) for the genlock capability marker + the fps +
   latency pins + the #484 render-tick pin outcome (reported; since issue 1357 an unpinned or
   SCHED_OTHER tick is the expected outcome, not DRIFT), and
-  `journalctl -u dantesync` (#489) for the DanteSync PTP/NTP clock-lock pin.
+  `journalctl -u dsync` (#489) for the DanteSync PTP/NTP clock-lock pin.
   Optional `host=` / `user=` override the imag-nb defaults (`10.77.9.182` / `newlevel`). The
   remaining live-state pins live in vendor/README.md as `distroav_so_sha256_imag` (secondary) /
   `output_fps_imag` / `genlock_latency_ms_imag` / `dantesync_locked_imag`.
@@ -2578,6 +2578,13 @@ main() {
     fi
   fi
 
+  # issue 1487: a Linux OBS box (strih_linux=1) runs the pinned obs release, so its OBS + DistroAV versions
+  # are graded against scripts/obs-release.pin, never vendor/README.md (a tree that box never runs). An
+  # unreadable pin field is an empty pin: the exact compare then refuses, never a pass.
+  if [ "$o_strih_linux" = "1" ]; then
+    p_obs="$(sed -n 's/^OBS_RELEASE_OBS_STUDIO_VERSION=//p' "${OBS_RELEASE_PIN_FILE:-$HERE/obs-release.pin}" 2>/dev/null | head -n 1 || true)"
+    p_distroav="$(sed -n 's/^OBS_RELEASE_DISTROAV_VERSION=//p' "${OBS_RELEASE_PIN_FILE:-$HERE/obs-release.pin}" 2>/dev/null | head -n 1 || true)"
+  fi
   compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin" \
     "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency" "$o_plugin" \
     "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes" "$o_burn" \

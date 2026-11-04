@@ -2581,7 +2581,7 @@ mod vendored_source {
         // #1303: the receiver-side AUDIO genlock parity. The audio HOLD must be wired at the
         // source_output_audio_data ingest seam so a genlock_fifo source's audio is delayed by the
         // same latency_ms the video FIFO holds video, and the 5s audit line must carry the audio
-        // facet. Pure decision + C-vs-Rust parity: src/genlock_audio_pairing.rs <->
+        // facet. Pure decision + C-vs-Rust parity: vstack:rig/core/src/genlock_audio_pairing.rs <->
         // tests/genlock_audio_pairing_parity.rs. Lock-stepped into BOTH windows-genlock*.yml pwsh
         // gates.
         let src = squish(&vendor_file(OBS_SOURCE));

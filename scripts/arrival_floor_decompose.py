@@ -534,7 +534,7 @@ def _render_table(result):
         lines.append("  omitted (absent or #1253 phantom floor): %s" % ", ".join(s["omitted_sources"]))
     if s.get("n2_grid_sources"):
         lines.append("  * N>=2 grid input (issue 1367 D1): floor = the grid present age of the pin "
-                     "(src/genlock_n2_grid.rs twin); skew_ms = the arrival-lag diagnostic -- the "
+                     "(vstack:rig/core/src/genlock_n2_grid.rs twin); skew_ms = the arrival-lag diagnostic -- the "
                      "audit head is one source frame older than the target")
     return "\n".join(lines)
 

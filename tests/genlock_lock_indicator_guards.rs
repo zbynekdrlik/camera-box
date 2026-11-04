@@ -9,8 +9,11 @@
 //! twin of the 3-copy pwsh source-anchor gates in both `windows-genlock{,-fast}.yml`
 //! (`.claude/rules/obs-titlebar-build-id.md`) — keep all three in lock-step.
 //!
-//! Std-only + path via a runtime env lookup (not the `env!` macro) so it runs both under cargo
-//! and standalone (`rustc --test tests/genlock_lock_indicator_guards.rs` from the repo root).
+//! Std-only. Standalone it needs `CARGO_MANIFEST_DIR=<repo>` at compile time, for the pinned vstack
+//! lookup (`rustc --test tests/genlock_lock_indicator_guards.rs` from the repo root).
+
+#[path = "support/vstack.rs"]
+mod vstack;
 
 use std::path::PathBuf;
 
@@ -369,7 +372,7 @@ fn qpc_drift_books_a_fleet_date_step_1372() {
     );
     // the widget's two booking constants stay equal to the Rust authority's (issue 1302 split the
     // module; the qpc/wall-step concern lives in its qpc_step submodule)
-    let rust = vendor_file("src/genlock_lock_state/qpc_step.rs");
+    let rust = vstack::read("rig/core/src/genlock_lock_state/qpc_step.rs");
     for (widget, authority) in [
         (
             "static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 66;",
@@ -383,7 +386,7 @@ fn qpc_drift_books_a_fleet_date_step_1372() {
         assert_has(STATUSBAR_CPP, widget);
         assert!(
             rust.contains(authority),
-            "issue 1372: `{authority}` drifted in src/genlock_lock_state/qpc_step.rs — keep the widget \
+            "issue 1372: `{authority}` drifted in vstack:rig/core/src/genlock_lock_state/qpc_step.rs — keep the widget \
              and the Rust authority in lock-step"
         );
     }

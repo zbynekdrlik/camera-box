@@ -56,7 +56,7 @@ OBS_BOX_STREAM_OUTPUT_NAME="stream"
 # step reads the same list for a stream-role box, issue 1462).
 # issue 1436: the pulse sink the program input's Audio Monitor filter plays to (stream-operator-audio.sh's sink).
 OBS_BOX_STREAM_AUDIO_MONITOR_FILTER_DEVICE=stream-operator-headphones
-OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service strih-display-watch.service)
+OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dsync-tray.service strih-display-watch.service dtray.service)
 # issue 1380 (ROZHODNUTE 13.10.2026): the stream role's YouTube-safe Development scene -- the program
 # video input (muted) over the measurement clip, never the production scene (it holds the live mixer).
 # The scene name equals STREAM_DEV_SCENE_DEFAULT (scripts/lib/stream-dev-scene.sh, pinned by a pytest).
@@ -128,6 +128,17 @@ obs_box_step_applies() {
       v="$(strih_box_role)" || return 0
       if [ "$v" != stream ]; then
         printf 'the strih role is a production-only box: no Chrome, no restreamer control room (owner 24.9.2026)'
+        return 1
+      fi ;;
+    16l-lease)   # issue 1474: the restreamer host (stream role) dials the SNV rig lease on dev1
+      v="$(strih_box_role)" || return 0
+      if [ "$v" != stream ]; then
+        printf 'the strih role runs no rig-lease client (the restreamer host is the stream role, issue 1474)'
+        return 1
+      fi
+      v="$(strih_box_venue)" || return 0
+      if [ "$v" != snv ]; then
+        printf 'STRIH_VENUE=%s -- the rig lease lives on dev1 on the SNV rig LAN, dev1.local does not reach this venue (issue 1474)' "$v"
         return 1
       fi ;;
     6-devclip)

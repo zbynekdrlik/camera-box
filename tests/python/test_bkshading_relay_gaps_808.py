@@ -31,6 +31,9 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shading_release_fake_1487 import fake_release_env, pin_for_args  # noqa: E402
+
 DEPLOY = os.path.join(REPO, "scripts", "bkshading-deploy-relay.sh")
 DEPLOY_FLEET = os.path.join(REPO, "scripts", "deploy-fleet.sh")
 PROVISION = os.path.join(REPO, "scripts", "bkshading-provision-relay.sh")
@@ -183,14 +186,14 @@ def test_latest_success_fails_when_no_run_carries_the_artifact():
         assert r.stdout.strip() == "", r.stdout
 
 
-def test_deploy_fleet_and_relay_deploy_share_the_one_resolver():
-    for p in (DEPLOY, DEPLOY_FLEET):
-        s = _read(p)
-        assert "lib/ci-run-resolve.sh" in s, "%s must source the shared resolver" % p
-        assert "ci_run_latest_success" in _noncomment(s), "%s must call ci_run_latest_success" % p
-    # the old server-side-filtered one-shot query is gone from both
-    for p in (DEPLOY, DEPLOY_FLEET):
-        assert not re.search(r"--status success --limit 1", _noncomment(_read(p))), p
+def test_deploy_fleet_uses_the_one_resolver_and_the_relay_deploy_none():
+    s = _read(DEPLOY_FLEET)
+    assert "lib/ci-run-resolve.sh" in s, "deploy-fleet.sh must source the shared resolver"
+    assert "ci_run_latest_success" in _noncomment(s), "deploy-fleet.sh must call ci_run_latest_success"
+    # the old server-side-filtered one-shot query is gone
+    assert not re.search(r"--status success --limit 1", _noncomment(s))
+    # issue 1487: the relay deploy resolves no CI run at all
+    assert "ci-run-resolve" not in _read(DEPLOY) and "gh run" not in _noncomment(_read(DEPLOY))
 
 
 # =============================================================================================
@@ -272,6 +275,7 @@ def _bin(tmp):
 def _run_deploy(args, env):
     e = dict(os.environ)
     e.update(env)
+    e.update(pin_for_args(args))
     return subprocess.run(["bash", DEPLOY] + args, capture_output=True, text=True, env=e)
 
 
@@ -348,19 +352,6 @@ def test_restore_action_is_pure_and_never_starts_an_inactive_relay():
         assert r.returncode == 0 and r.stdout.strip() == want, (was, r.stdout)
     # the enable-only invariant stays: a deploy never STARTS a relay that was not running
     assert _src(lib, "bkshading_deploy_should_start").stdout.strip() == "no"
-
-
-def test_default_run_comes_from_the_shared_resolver_and_is_logged():
-    with tempfile.TemporaryDirectory() as tmp:
-        env, log = _deploy_env(tmp, hashlib.sha256(b"RELAYBIN").hexdigest(), was_active="inactive")
-        glog = os.path.join(tmp, "gh.log")
-        gh = _fake_gh(tmp, RUNS, {300: [ARTIFACT], 200: [ARTIFACT]}, glog)
-        env["BKSHADING_DEPLOY_GH"] = gh
-        r = _run_deploy(["--host", "10.77.9.66"], env)
-        out = r.stdout + r.stderr
-        assert r.returncode == 0, out
-        assert re.search(r"run download 300\b", _read(glog)), _read(glog)
-        assert "300" in out and "2026-09-25" in out, "the chosen run id + date must be printed:\n" + out
 
 
 # =============================================================================================
@@ -449,25 +440,6 @@ def test_install_enabled_enables_and_reads_back():
         assert "start" not in log, log
 
 
-def test_binary_plan_is_pure():
-    cases = [
-        (("/tmp/x", "", "no"), "none"),  # a missing local path is not silently a URL
-        (("https://h/relay", "", "no"), "url:https://h/relay"),
-        (("", "36106119088", "yes"), "run:36106119088"),
-        (("", "", "yes"), "latest"),
-        (("", "", "no"), "none"),
-    ]
-    for (arg, run, gh), want in cases:
-        r = _src(PROV_LIB, 'bkshading_relay_provision_binary_plan "$A" "$R" "$G"', env={"A": arg, "R": run, "G": gh})
-        assert r.returncode == 0, r.stderr
-        assert r.stdout.strip() == want, ((arg, run, gh), r.stdout)
-    with tempfile.TemporaryDirectory() as tmp:
-        p = os.path.join(tmp, "relay")
-        open(p, "w").close()
-        r = _src(PROV_LIB, 'bkshading_relay_provision_binary_plan "$A" "" no', env={"A": p})
-        assert r.stdout.strip() == "local:" + p
-
-
 def _unit_sha():
     with open(UNIT, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -510,7 +482,7 @@ def test_setup_device_provisions_the_relay_enable_only_before_the_ro_flip():
         "the relay step must sit in the rw window, before STEP 18"
     assert "bkshading_relay_expected_enable_state" in body, "the enable-state must follow the rig mode"
     assert "--rig-mode" in s and "--relay-binary" in s
-    assert "bkshading-linux-amd64" in s, "the relay binary comes from the bkshading CI artifact"
+    assert "bkshading_relay_provision_fetch_binary" in body, "the relay binary is the pinned shading release"
     assert not re.search(r"systemctl (start|restart) bkshading-relay", body), "enable-only"
     assert "RELAY_PROBLEM" in body and re.search(r"MISSING=.*RELAY_PROBLEM", body), \
         "a relay failure is RECORDED and STEP 19 refuses Setup Complete"
@@ -630,6 +602,7 @@ def test_a_signal_mid_scp_still_restores_ro_root_and_the_relay():
         env, log = _deploy_env_custom(tmp, sha, was_active="active", scp_body="sleep 2\nexit 0\n")
         e = dict(os.environ)
         e.update(env)
+        e.update(pin_for_args(["--binary", b]))
         p = subprocess.Popen(["bash", DEPLOY, "--host", "10.77.9.66", "--binary", b],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e)
         for _ in range(100):
@@ -662,40 +635,6 @@ def test_holder_probe_names_the_holder_without_lsof():
         assert s.returncode == 0 and "\n" not in s.stdout.strip()
 
 
-def _fetch(plan, tmp, extra_env=None):
-    e = {"BKSHADING_RELAY_GH": os.path.join(tmp, "fake-gh")}
-    if extra_env:
-        e.update(extra_env)
-    return _src(PROV_LIB, 'bkshading_relay_provision_fetch_binary "$P" "$D" zbynekdrlik/camera-box main',
-                env=dict(e, P=plan, D=os.path.join(tmp, "dl")))
-
-
-def test_fetch_binary_follows_the_plan():
-    with tempfile.TemporaryDirectory() as tmp:
-        glog = os.path.join(tmp, "gh.log")
-        _fake_gh(tmp, RUNS, {300: [ARTIFACT], 200: [ARTIFACT]}, glog)
-        loc = os.path.join(tmp, "staged-relay")
-        with open(loc, "w") as f:
-            f.write("R")
-        r = _fetch("local:" + loc, tmp)
-        assert r.returncode == 0 and r.stdout.strip() == loc, r.stdout + r.stderr
-        r = _fetch("run:200", tmp)
-        assert r.returncode == 0 and r.stdout.strip().endswith("/dl/bkshading-relay"), r.stdout + r.stderr
-        assert re.search(r"run download 200\b", _read(glog))
-        r = _fetch("latest", tmp)
-        assert r.returncode == 0, r.stdout + r.stderr
-        assert re.search(r"run download 300\b", _read(glog)), "latest = the newest run carrying it"
-        r = _fetch("none", tmp)
-        assert r.returncode != 0 and "--relay-binary" in r.stdout, r.stdout
-        curl = os.path.join(tmp, "fake-curl")
-        _write_exec(curl, '#!/usr/bin/env bash\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && printf R > "$2"; shift; done\n')
-        r = _fetch("url:https://h/relay", tmp, {"BKSHADING_RELAY_CURL": curl})
-        assert r.returncode == 0 and r.stdout.strip().endswith("/dl/bkshading-relay"), r.stdout + r.stderr
-        _write_exec(curl, "#!/usr/bin/env bash\nexit 22\n")
-        r = _fetch("url:https://h/relay", tmp, {"BKSHADING_RELAY_CURL": curl})
-        assert r.returncode != 0 and "failed" in r.stdout, r.stdout
-
-
 # =============================================================================================
 # Review round 2 (issue 808): a dead terminal, a signal inside the restore, the exe-held holder,
 # an unreadable artifact list, and the standalone install CLI following the rig mode.
@@ -703,6 +642,7 @@ def test_fetch_binary_follows_the_plan():
 def _deploy_popen(tmp, env, b, stderr):
     e = dict(os.environ)
     e.update(env)
+    e.update(pin_for_args(["--binary", b]))
     return subprocess.Popen(["bash", DEPLOY, "--host", "10.77.9.66", "--binary", b],
                             stdout=subprocess.DEVNULL, stderr=stderr, env=e)
 
@@ -769,6 +709,7 @@ def test_a_second_ctrl_c_cannot_kill_the_rerun_restore():
         env["BKSHADING_DEPLOY_SSHPASS_PREFIX"] = fake_sshpass
         e = dict(os.environ)
         e.update(env)
+        e.update(pin_for_args(["--binary", b]))
         p = subprocess.Popen(["bash", DEPLOY, "--host", "10.77.9.66", "--binary", b],
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=e,
                              start_new_session=True)
@@ -849,14 +790,6 @@ def test_an_unreadable_artifact_list_stops_the_resolver():
         assert "UNREADABLE" in r.stderr and "HTTP 502: Bad Gateway" in r.stderr, r.stderr
 
 
-def test_fetch_reports_the_gh_error():
-    with tempfile.TemporaryDirectory() as tmp:
-        gh = os.path.join(tmp, "fake-gh")
-        _write_exec(gh, '#!/usr/bin/env bash\necho "HTTP 404: artifact not found" >&2\nexit 1\n')
-        r = _fetch("run:77", tmp)
-        assert r.returncode != 0 and "HTTP 404: artifact not found" in r.stdout, r.stdout
-
-
 def _provision_cli(tmp, args, device):
     env, calls = _prov_env(tmp)
     env["BKSHADING_RELAY_DEVICE_NAME"] = device
@@ -930,8 +863,9 @@ REGISTER_URL_1431 = "http://strih.lan:8770/api/relays/register"
 
 def _good_block(enabled, relay_id=None):
     """A healthy (ao) gather; the relay id follows the box under test (issue 1431), set by _run_ao."""
-    return ("BIN_X=yes\nUNIT_SHA=%s\nENV_FPS=60\nENV_REGISTER_URL=%s\nENV_RELAY_ID=%s\nGPHOTO2=yes\n"
-            "ENABLED=%s\n" % (_unit_sha(), REGISTER_URL_1431, relay_id or "@RELAY_ID@", enabled))
+    pin = re.search(r"^SHADING_RELEASE_TAG=v(.+)$", _read(os.path.join(REPO, "scripts", "shading-release.pin")), re.M)
+    return ("BIN_X=yes\nBIN_VER=%s\nUNIT_SHA=%s\nENV_FPS=60\nENV_REGISTER_URL=%s\nENV_RELAY_ID=%s\nGPHOTO2=yes\n"
+            "ENABLED=%s\n" % (pin.group(1), _unit_sha(), REGISTER_URL_1431, relay_id or "@RELAY_ID@", enabled))
 
 
 def test_ao_block_passes_a_non_roster_box_enabled_in_any_mode():
@@ -1004,3 +938,73 @@ if __name__ == "__main__":
             print("FAIL %s: %s" % (fn.__name__, e))
     print("\n%d/%d passed" % (len(fns) - failed, len(fns)))
     sys.exit(1 if failed else 0)
+
+
+# =============================================================================================
+# issue 1487: the relay a box provisions is the pinned shading release
+# =============================================================================================
+def test_binary_plan_is_pure():
+    for arg, want in (("/tmp/x-not-there", "none"), ("https://h/relay", "url:https://h/relay"), ("", "release")):
+        r = _src(PROV_LIB, 'bkshading_relay_provision_binary_plan "$A"', env={"A": arg})
+        assert r.returncode == 0 and r.stdout.strip() == want, (arg, r.stdout, r.stderr)
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, "relay")
+        open(p, "w").close()
+        r = _src(PROV_LIB, 'bkshading_relay_provision_binary_plan "$A"', env={"A": p})
+        assert r.stdout.strip() == "local:" + p
+
+
+def _fetch(plan, tmp, extra_env=None):
+    e = dict(extra_env or {})
+    return _src(PROV_LIB, 'bkshading_relay_provision_fetch_binary "$P" "$D"',
+                env=dict(e, P=plan, D=os.path.join(tmp, "dl")))
+
+
+def _relay_src(tmp):
+    p = os.path.join(tmp, "relay-src")
+    with open(p, "w") as f:
+        f.write("#!/bin/sh\necho 'bkshading-relay 9.9.9-test'\n")
+    os.chmod(p, 0o755)
+    return p
+
+
+def test_fetch_binary_takes_the_release_and_passes_only_the_pinned_bytes():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _relay_src(tmp)
+        env = fake_release_env(tmp, {"bkshading-relay-linux-amd64": src})
+        r = _fetch("release", tmp, env)
+        assert r.returncode == 0 and r.stdout.strip().endswith("/bkshading-relay-linux-amd64"), r.stdout + r.stderr
+        r = _fetch("local:" + src, tmp, env)
+        assert r.returncode == 0 and r.stdout.strip() == src, r.stdout + r.stderr
+        other = os.path.join(tmp, "other")
+        with open(other, "w") as f:
+            f.write("another build")
+        r = _fetch("local:" + other, tmp, env)
+        assert r.returncode != 0 and "only the pinned release deploys" in r.stdout, r.stdout
+        curl = os.path.join(tmp, "fake-curl")
+        _write_exec(curl, '#!/usr/bin/env bash\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && cp %s "$2"; shift; done\n' % src)
+        r = _fetch("url:https://h/relay", tmp, dict(env, BKSHADING_RELAY_CURL=curl))
+        assert r.returncode == 0 and r.stdout.strip().endswith("/dl/bkshading-relay"), r.stdout + r.stderr
+        _write_exec(curl, "#!/usr/bin/env bash\nexit 22\n")
+        r = _fetch("url:https://h/relay", tmp, dict(env, BKSHADING_RELAY_CURL=curl))
+        assert r.returncode != 0 and "failed" in r.stdout, r.stdout
+        r = _fetch("none", tmp, env)
+        assert r.returncode != 0 and "--relay-binary" in r.stdout, r.stdout
+
+
+def test_fetch_binary_names_a_box_that_cannot_reach_the_release():
+    with tempfile.TemporaryDirectory() as tmp:
+        env = fake_release_env(tmp, {"bkshading-relay-linux-amd64": _relay_src(tmp)})
+        env["SHADING_RELEASE_URL"] = "file:///nonexistent"
+        r = _fetch("release", tmp, env)
+        assert r.returncode != 0 and "--relay-binary" in r.stdout and "\n" not in r.stdout.strip(), r.stdout
+
+
+def test_the_ao_verdict_grades_the_relay_against_the_pin():
+    block = ("BIN_X=yes\nBIN_VER=%s\nUNIT_SHA=%s\nENV_FPS=60\nENV_REGISTER_URL=http://strih.lan:8770/api/relays/register\n"
+             "ENV_RELAY_ID=cam3\nGPHOTO2=yes\nENABLED=enabled\n")
+    for ver, want in (("0.1.0", "ok"), ("1.8.6", "FAIL: relay binary reads version '1.8.6'"),
+                      ("", "FAIL: relay binary reads version 'unreadable'")):
+        r = _src(PROV_LIB, 'bkshading_relay_provision_verdict "$B" enabled cam3 0.1.0',
+                 env={"B": block % (ver, _unit_sha())})
+        assert r.returncode == 0 and r.stdout.startswith(want), r.stdout + r.stderr

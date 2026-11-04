@@ -202,11 +202,11 @@ case "$text" in
       echo "MV_REVERIFY_NO_UNIT: strih-obs.service is not installed on strih-snv"; exit 2
     fi
     echo "MV_REVERIFY_OBS_RESTART: strih-obs.service restarted" ;;
-  *"systemctl restart camera-box"* | *"systemctl restart dantesync"*)
+  *"systemctl restart camera-box"* | *"systemctl restart dsync"*)
     printf 'AV_MATRIX_INVOCATION_BEFORE=inv-old\n'
     if [ -n "${FAKE_RESTART_FAIL:-}" ]; then echo AV_MATRIX_RESTART_FAILED; exit 1; fi
     echo AV_MATRIX_RESTART_OK ;;
-  *"start strih-obs.service"* | *"systemctl start camera-box"* | *"systemctl start dantesync"*)
+  *"start strih-obs.service"* | *"systemctl start camera-box"* | *"systemctl start dsync"*)
     # issue 1474: a Linux stream box whose OBS stays dead after cleanup's start
     if [ "$host" = "${FAKE_STREAM_HOST:-}" ] && [ -n "${FAKE_STREAM_DEAD_AT_CLEANUP:-}" ]; then
       printf '%s' "${FAKE_STREAM_DEAD_READS:-}" > "$FAKE_STATE/stream-ws-dead"
@@ -334,7 +334,7 @@ def _restart_kinds(log):
             kinds.append(("strih-obs", host))
         elif "systemctl restart camera-box" in text:
             kinds.append(("cambox", host))
-        elif "systemctl restart dantesync" in text:
+        elif "systemctl restart dsync" in text:
             kinds.append(("dantesync", host))
     return kinds
 
@@ -358,7 +358,7 @@ def test_plan_is_the_default_and_touches_nothing(rig):
     for needle in ("rig_lease_acquire", "camera-box-av-restart-matrix", "stray_session_check_assert",
                    "--run --hours 0", "--lease-run-id av-matrix-", "w-00-baseline",
                    "systemctl --user restart strih-obs.service", "systemctl restart camera-box",
-                   "systemctl restart dantesync", "_SYSTEMD_INVOCATION_ID",
+                   "systemctl restart dsync", "_SYSTEMD_INVOCATION_ID",
                    ":8898/status", "dantesync_clock_decision.py analyze",
                    "launch-obs-genlock.sh --box stream --force", "win-stream-snv",
                    "confirm-stream-obs-r1", "av_tolerance_ms=", "x 3 repeats",
@@ -427,7 +427,7 @@ def test_run_measures_a_baseline_then_every_kind_three_times_under_one_lease(rig
             seq.append("window")
         elif k == "ssh" and ("systemctl --user restart strih-obs" in d[1]
                              or "systemctl restart camera-box" in d[1]
-                             or "systemctl restart dantesync" in d[1]):
+                             or "systemctl restart dsync" in d[1]):
             seq.append("restart")
     assert seq == ["window"] + ["restart", "window"] * 9
     assert _restart_kinds(p["log"]) == [("strih-obs", STRIH)] * 3 + [("cambox", CAM1)] * 3 \
@@ -474,7 +474,7 @@ def test_cleanup_leaves_every_restarted_component_running(rig):
     texts = [d[1] for k, d in _events(p["log"]) if k == "ssh"]
     assert any("systemctl --user start strih-obs.service" in t for t in texts)
     assert any("systemctl start camera-box" in t for t in texts)
-    assert any("systemctl start dantesync" in t for t in texts)
+    assert any("systemctl start dsync" in t for t in texts)
 
 
 def test_a_window_outside_the_bounds_fails_its_kind_and_the_later_kinds_still_run(rig):

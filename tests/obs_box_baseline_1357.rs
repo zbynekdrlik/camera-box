@@ -1611,6 +1611,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/rig-timezone.sh",
         // issue 1387: background work off the OBS cores (sourced by the system half)
         "scripts/lib/obs-box-background.sh",
+        // issue 1474: the compare-then-rewrite install (sourced by the system half)
+        "scripts/lib/obs-box-write.sh",
         "scripts/lib/strih-provision.sh",
         "scripts/lib/strih-drm-output.sh",
         // issue 1424: the X config of the fixed HDMI outputs (sourced by strih-drm-output.sh)

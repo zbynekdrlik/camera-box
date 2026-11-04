@@ -16,7 +16,6 @@ paths:
   - "vendor/distroav/src/genlock-emit-timecode.h"
   - "tests/distroav_jxs_output_1387.rs"
   - "vendor/distroav/src/jxs-state-table.h"
-  - "src/genlock_jxs_state.rs"
   - "vendor/obs-studio/frontend/widgets/GenlockJxs*"
   - "vendor/obs-studio/frontend/components/SourceTreeItem.*"
   - "tests/genlock_jxs_state_parity_1387.rs"
@@ -813,7 +812,7 @@ is on, and per source whether it comes over NDI or JPEG XS.
 
 ### The decision and the widget (frontend, every build)
 
-- **Authority** `src/genlock_jxs_state.rs`; **C port** `vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp`
+- **Authority** `vstack:rig/core/src/genlock_jxs_state.rs`; **C port** `vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp`
   (pure C, compiled whole as C11 AND C++17 by `tests/genlock_jxs_state_parity_1387.rs` over 8192 row
   vectors and 2025 count vectors, plus the names, the tags and the constants).
 - A row: DOWN with no frame for `JXS_DOWN_AGE_MS` (3000, the source's own not-connected bound) or none
@@ -1215,8 +1214,10 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
   - strih role: upserts `~/.config/obs-studio/plugin_config/distroav/jxs-output.json` = enabled +
     `jxs_target` = the VENUE's stream box (the stream-role fact file of the same `STRIH_VENUE`: its
     `STRIH_IP` + `STRIH_JXS_PROGRAM_PORT`, `strih_jxs_program_target`) + `jxs_stream_id` 100. The
-    operator's `jxs_bpp_*` / `jxs_cores` / `jxs_pace_mbps` and any other key are KEPT; the render of the
-    live file is the live file byte-for-byte (147 bytes). Root works in the user's tree, so a symlinked
+    operator's `jxs_bpp_*` / `jxs_cores` / `jxs_pace_mbps` and any other key are KEPT. On a box with no
+    Dante program the render of the live file is the live file byte-for-byte (147 bytes); on a Dante box
+    (strih-snv) the first run writes the derived `jxs_cores` + `jxs_cores_derived` (issue 1485,
+    `strih-dante-input.md`, step 13 on a fresh box), later runs are unchanged. Root works in the user's tree, so a symlinked
     file is REFUSED, every read is O_NOFOLLOW + a regular-file check, and an unparseable file is moved
     aside with `mv -T` (never copied through a planted link), then rewritten. A venue with no program
     port gets an ENABLED file disabled (`"enabled": false`, every other key kept) so setup converges to
@@ -1252,7 +1253,8 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
     hand-enabled file on a venue that declares no program FAILs (setup step 6 disables it).
 - Read-only check of the live boxes on 31.10.2026: `obs_jxs_inputs.py --verify` from dev1 against
   strih-snv and stream-snv PASSes every input with the declared facts, so the first setup-strih run there
-  is a pure read for the inputs and `unchanged` for jxs-output.json.
+  is a pure read for the inputs; jxs-output.json gets the issue-1485 `jxs_cores` (+ `jxs_cores_derived`)
+  on strih-snv once, then reads `unchanged`.
 - Tests: `tests/python/test_strih_jxs_provision_1387.py` (the facts + validator, the manifest, the
   program target, the output render, step 6 end to end on temp paths, the verify rows, the wiring and
   budgets), `tests/python/test_obs_jxs_inputs_1387.py` (the seeder against a fake obs-websocket, the
@@ -1269,8 +1271,9 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
    runtime file carried (a slice-1 `CAMERA_BOX_JXS_BPP` etc.): it is dropped with it. `rm -f "$prog"`.
    Then `./scripts/verify-device.sh CAMn`: `(ay)` PASS.
 2. strih-snv + stream-snv: the next genlock deploy runs setup-strih (or `sudo ./scripts/setup-strih.sh
-   --box <box>` from a checkout): step 6 prints `jxs-seed.json written`, `jxs-output.json unchanged` on
-   strih-snv. The inputs are healed at the next OBS start (a pure read on the live state: every live
+   --box <box>` from a checkout): step 6 prints `jxs-seed.json written` and, the first time,
+   `jxs-output.json written` on strih-snv (the issue-1485 derived `jxs_cores`; `unchanged` after that;
+   the running output takes it at its next Stop/StartOutput). The inputs are healed at the next OBS start (a pure read on the live state: every live
    input already matches); a hand `python3 /usr/local/bin/obs_jxs_inputs.py --bootstrap` refuses every
    write while OBS streams or records. The saved collection gets the 36 ms pin when OBS next saves it
    (on exit).
@@ -1783,3 +1786,23 @@ Recording on strih stays NVENC. Tearing it down at StopRecord costs the program 
 reverted). It does not happen during production, so `jxs_link_continuity.py` accepts at most 1 `dropped_busy` / `not_taken`
 over the output's last two windows together (the stop mark comes ~2 s after StopRecord) and reports it as `stop_transient`. The counter stays in the block; everything else
 stays RED. The root stays open on the ticket.
+
+**The cause, measured 4.11.2026 (bpftrace on libobs, obs-nvenc and libcuda, 11 tex cycles):** the
+TEXTURE NVENC encoder (`obs_nvenc_hevc_tex`) makes the libobs GL context current on a FRESH thread at
+both ends: the new `obs gpu encode` thread at StartRecord, the output's stop thread (`audio-io`) inside
+`stop_gpu_encode` at StopRecord. On the NVIDIA driver that first `glXMakeContextCurrent` on a thread
+takes 52-60 ms, and libobs does it holding the graphics mutex, so the render thread waits ~55 ms
+(`GS_ENTER` 51-60 ms on `libobs: graphic`), lags one frame, and libobs hands the output that frame twice
+back to back while the previous one still encodes. Stops lagged 8 of 8, the output dropped at 7 of 8;
+the start drop is the same stall, rarer (3 of 4 release E2Es, 0 of 11 bench starts). The earlier
+"holds of 0.01-3.9 ms" were the holder's time inside the lock; the stall is the MakeCurrent inside
+`gs_enter_context` before the hold starts. Each drop also stepped the auto bpp down.
+
+**The fix in this repo:** the strih role records with `obs_nvenc_hevc_soft` (the CUDA NVENC encoder of
+the same plugin, hidden in the encoder list, kept by the Settings dialog): the same NVENC hardware and
+settings, fed the NV12 program frames libobs already makes for the raw outputs, no GL context. Measured:
+6 of 6 cycles + a 180 s recording with 0 dropped_busy and no lag at a stop, recording at 30.00 fps;
+the output's `copy_ms_avg` rose ~0.4 ms while recording. Left: the CUDA context create (~150-200 ms at
+the start, on the UI thread) slows the render's own MakeCurrent and lagged 1 of 7 starts with no drop.
+The libobs-side fix (keep a warm gpu-encode thread, run the gpu-encode free on the graphics thread)
+belongs to the obs project. Once a release E2E shows no stop drop, `stop_transient` can go.

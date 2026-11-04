@@ -1684,7 +1684,7 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
             s: round(float(jitter_json[s]["mean_head_skew_ms"]), 1) for s in grid_used}
         sys.stderr.write(
             f"[qr-align] issue 1367 D1: N>=2 grid inputs {grid_used} -> arrival floor = the grid "
-            "present age of the pin (src/genlock_n2_grid.rs twin), holds in whole source frames, "
+            "present age of the pin (vstack:rig/core/src/genlock_n2_grid.rs twin), holds in whole source frames, "
             "budget on the RESULTING present age; mean_head_skew_ms is only the arrival-lag "
             "diagnostic (the audit head is one source frame older than the target).\n")
     # issue 1168 task 3 (REPORT-ONLY): surface the JITTER-FLOOR cross-camera spread + the re-tighten
@@ -1901,7 +1901,7 @@ def _grid_inputs_from_cli(strih_log):
     """Issue 1367 slice D1b: the confirmed D1 grid inputs of `--strih-log` ({src:
     source_interval_ns}), or None. An unreadable log WARNS and keeps the head-skew arithmetic (the
     pre-D1 behaviour, never an abort). A log with grid inputs reads GENLOCK_N2_AGE_BASE_NS from the
-    Rust source right away, so a missing constant fails CLOSED before any measurement or pin write."""
+    vendored C right away, so a missing constant fails CLOSED before any measurement or pin write."""
     if not strih_log:
         return None
     import genlock_n2_grid

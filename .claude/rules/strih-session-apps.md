@@ -18,9 +18,13 @@ paths:
   - "tests/python/test_strih_companion_satellite_1399.py"
   - "tests/python/test_strih_satellite_watch_1399.py"
   - "tests/python/test_strih_lx_deploy_session_apps_1399.py"
-  - "systemd/dantesync-tray.service"
+  - "systemd/dsync-tray.service"
   - "scripts/lib/dantesync-install.sh"
   - "tests/python/test_dantesync_tray_1429.py"
+  - "systemd/dtray.service"
+  - "scripts/lib/dtray.sh"
+  - "scripts/dtray-release.pin"
+  - "tests/python/test_dtray_1485.py"
 ---
 
 # strih-snv session apps: the browser-source keeper, the shading panel window, Companion Satellite + its watch (issue 1399)
@@ -249,14 +253,14 @@ uses the install / unit row / autostart machinery above unchanged; its packages 
 (`STRIH_STREAM_MONITOR_ROWS` counted by `strih_session_apps_row_count`). Everything else:
 `.claude/rules/stream-headphone-monitor.md`.
 
-## The dantesync tray (`dantesync-tray.service`, issue 1429)
+## The dantesync tray (`dsync-tray.service`, issue 1429)
 
 Owner, 14.10.2026: "dantesinc ma mat pod linuxom tiez v liste ikonuzo stavmi tak ako na windovse aby
 sme videli". Design comment 6176755827 (Approach 1). The fifth entry; it runs on EVERY Linux
 workstation, the stream role too (`obs_box_role_apply` keeps it next to the keeper).
 
 - **The program is a release binary, not a repo script** (the Satellite pattern):
-  `/usr/local/bin/dantesync-tray` = the PINNED dantesync release's `dantesync-tray-linux-amd64`
+  `/usr/local/bin/dsync-tray` = the PINNED dantesync release's `dsync-tray-linux-amd64`
   (first in v1.18.0, dantesync issue 132). It reads the local daemon's `127.0.0.1:8898/status` and
   shows the state in the tint2 systray. `strih_session_app_script` is EMPTY for it;
   `strih_session_app_program` prints `dantesync_install_tray_bin` (`DANTESYNC_INSTALL_TRAY_BIN`, the
@@ -272,7 +276,7 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
     `install` alone unlinks the name and creates it 0600 first, review round 1). Unlike the daemon, the
     tray FOLLOWS the pin;
   - every install (and every kept tray) writes the release record `v<pin> <sha256>` to
-    `DANTESYNC_INSTALL_TRAY_RELEASE_FILE` (`/usr/local/share/dantesync-tray/release`), so verify grades a
+    `DANTESYNC_INSTALL_TRAY_RELEASE_FILE` (`/usr/local/share/dsync-tray/release`), so verify grades a
     tray BEHIND the pin with no network read (`dantesync_install_tray_state`: `absent` / `stale:<why>` /
     `ok`);
   - a download failure, a malformed `.sha256` or a mismatch is rc 1 + a stderr line, nothing installed.
@@ -284,10 +288,10 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
   `STRIH_SESSION_APP_PACKAGES` (the same install line; the stream role gets them too).
 - **The unit:** `DISPLAY=:0`, `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0`,
   `TimeoutStopSec=10`, journal output, `WantedBy=graphical-session.target`, and
-  `ConditionFileIsExecutable=/usr/local/bin/dantesync-tray`: while the pin has no Linux tray the autostart /
+  `ConditionFileIsExecutable=/usr/local/bin/dsync-tray`: while the pin has no Linux tray the autostart /
   deploy `start` is a clean condition skip (rc 0, no `[strih-snv start]` WARNING), never a 5 s
   restart loop on a missing (or non-executable) ExecStart.
-- **The grader row `(dantesync-tray)`:** the binary branch (unit byte-identical, the binary = the
+- **The grader row `(dsync-tray)`:** the binary branch (unit byte-identical, the binary = the
   pinned release by its record (`dantesync_install_tray_state`; `stale:*` FAILs `script-differs`, e.g.
   `program=stale:installed-v1.18.0-pin-v1.19.0` after a pin bump setup has not followed), enabled, the
   autostart line, active, `/proc/<MainPID>/exe` = the binary, started after the newest of unit +
@@ -308,16 +312,79 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
 - **Live steps (supervisor):** roll the fleet dantesync to 1.18.0 (`dantesync-fleet-upgrade.sh`,
   canaried) and bump `DANTESYNC_VERSION_PIN` to 1.18.0 in `scripts/dantesync-version-gate.sh`; then
   re-run setup-strih on strih-snv / strih-pp / stream-pp (step 16d logs `installed the dantesync tray
-  v1.18.0`), `systemctl --user start dantesync-tray.service` (or the next kiosk login / genlock deploy),
-  and `verify-strih.sh` reads `(dantesync-tray) ... OK`. Before the pin bump every box reads the NOTE.
+  v1.18.0`), `systemctl --user start dsync-tray.service` (or the next kiosk login / genlock deploy),
+  and `verify-strih.sh` reads `(dsync-tray) ... OK`. Before the pin bump every box reads the NOTE.
   Acceptance: the tint2 panel shows the icon and its colour follows the daemon state.
+
+## dstack's tray (`dtray.service`, issue 1485)
+
+camera-box decision 3.11.2026: the strih OBS's `dante_input` device and the intercom hub's Dante device
+show in dstack's shared tray `dtray`. Design comment 6609295433 (Approach 1). The seventh entry, LAST on
+both roles (`STRIH_SESSION_APP_UNITS`, `OBS_BOX_STREAM_SESSION_APP_UNITS`), so every Linux workstation runs
+it. setup-strih.sh / verify-strih.sh carry no line of their own: it rides step 16d's loop and the grader.
+
+- **ONE pin, `scripts/dtray-release.pin`:** `DTRAY_RELEASE_TAG` (v0.6.19), `DTRAY_RELEASE_ASSET`
+  (`dtray-v0.6.19-linux-x86_64`), `DTRAY_RELEASE_SHA256` (the release's own sha256, read from
+  `gh release view <tag> -R zbynekdrlik/dstack` and the downloaded asset), `DTRAY_DEVICE_FIRST_DSTACK`
+  (v0.6.13: a device on an older dstack is not discoverable). A bump edits the tag, asset and sha
+  together and `tests/python/test_dtray_1485.py` pins the shipped values.
+- **The install** (`dtray_install HOME`, `scripts/lib/dtray.sh`, step 16d inside the per-entry loop):
+  a binary already on the pin's sha256 is kept with NO network read (mtime unchanged; the pin is the
+  authority, so a GitHub outage never WARNs a box already on it); else the release `.sha256` must name
+  the pin's sha256, else nothing is downloaded; then download, prove against the pin, install 0755 as a
+  `<bin>.new.<pid>` sibling and rename (a running tray keeps its inode). Record `<tag> <sha256>` in
+  `/usr/local/share/dtray/release`. No fallback: a failure is rc 1 + stderr, step 16d WARNs once and
+  provisions the rest, verify FAILs `(dtray)`. It also removes `~/.config/autostart/dtray.desktop`
+  (`dtray --autostart on` writes one; the unit is the ONE start path).
+- **The expected devices** (`dtray_devices_apply`, same step): `/etc/dstack/devices/<name>.device`, empty
+  0644 (dtray reads only the name), for every name of the box fact `STRIH_DANTE_DEVICES` (strih-snv:
+  `strih-snv-intercom`, `strih-obs`; none elsewhere). The names WE wrote are recorded in
+  `/usr/local/share/dtray/devices`; a recorded name the facts no longer declare is deleted, a marker we
+  did not write is never claimed or deleted. A name (from the facts or the record) that is not a plain
+  device name (ASCII letters, digits, `-_.`, not starting with `.`; `dtray_name_ok`) is refused before
+  any write or delete, so no marker path leaves the dir. A marker change needs no tray restart: the
+  running dtray reads the dir on every 1 s tick (dstack v0.6.19 `crates/dtray/src/tray.rs`).
+- **The unit:** foreground `/usr/local/bin/dtray`, no args, `DISPLAY=:0`, `PartOf=` + `After=graphical-session.target`,
+  `ConditionFileIsExecutable=`, `Restart=on-failure`, `RestartSec=10`, and UNLIKE the other entries a
+  start limit (`StartLimitIntervalSec=300`, `StartLimitBurst=5`): dtray exits 1 when it has no desktop,
+  so a box with no session must not restart it forever. The next login's autostart start retries; a
+  start within 300 s of the fifth failure is refused (start-limit-hit, no `reset-failed` in the autostart
+  line), so restart it by hand then. `on-failure`, not `always`: the tray's own Exit menu item (exit 0)
+  closes it until the next login, which is the operator's choice.
+- **The runtime packages** libgtk-3-0t64 (libgtk-3-0 on 24.04) + libayatana-appindicator3-1 were already
+  in `STRIH_SESSION_APP_PACKAGES` (the dsync tray's), installed only when missing.
+- **Verify:** the `(dtray)` unit row is the binary branch (unit byte-identical, enabled, autostart line,
+  active, `/proc/<MainPID>/exe` = the binary, started after the files; the binary by its record against
+  the pin, `dtray_state`: `absent` / `stale:<why>` / `ok`, no network). One extra row
+  `(dtray-devices)` (`dtray_devices_row`, counted by `strih_session_apps_row_count`): every declared
+  marker present and no stale one of ours, then on a Dante box `timeout 15 dtray --print` (a 3.5 s
+  discovery pass, no desktop needed) must list each expected device. Its lines are `<name>: <status>` or
+  `<name>: expected, not running` (dtray `model.rs`), names compared case aside, trailing blanks/CR
+  ignored (`dtray_print_states`). ONLY the status form `<name>: clock ...` is present; any other text
+  (`status unreadable (...)`, a reworded line) is `odd` and FAILs naming it, never a false OK.
+  A device reported "expected, not running" is a NOTE while the pinned intercom OR obs dstack
+  (`INTERCOM_RELEASE_DSTACK_VERSION` / `OBS_RELEASE_DSTACK_VERSION`, new keys in their pins, both v0.6.10
+  on 3.11.2026) is below `DTRAY_DEVICE_FIRST_DSTACK`, a FAIL once both reach it; a device dtray does not
+  list at all, a failed or hung `--print`, or a missing marker FAILs. A pin bump of the intercom or obs
+  release MUST update its `*_DSTACK_VERSION` key: `tests/intercom_pin_1487.rs` checks it against the
+  tag's Cargo.lock (cargo's checkout), `tests/obs_pin_1487.rs` against the release commit's
+  `plugins/dante-input/ffi/Cargo.lock` (HTTPS), so a stale key FAILs there.
+- **Tests:** `tests/python/test_dtray_1485.py` (a file:// release the real curl reads, a fake dtray that
+  prints a `--print` fixture, the shared fakes' `dtray_env`); the fakes' `HERMETIC` points every dtray
+  path at `/nonexistent-1485` and declares no Dante device, so no other session-app test reaches GitHub
+  or `/etc/dstack`.
+- **Live steps (supervisor):** the next setup-strih (genlock deploy) on each Linux workstation logs
+  `installed dtray v0.6.19` and on strih-snv `dtray expected devices in /etc/dstack/devices:
+  strih-snv-intercom strih-obs, 2 marker(s) written`; the deploy start step starts it. Read
+  `dtray --print` once on strih-snv (the NOTE until the hub and obs pins reach dstack v0.6.13), and the
+  tint2 panel shows the icon.
 
 ## Start path: the kiosk autostart, not default.target
 
 Every entry is `WantedBy=graphical-session.target` like `strih-obs.service`, and like it STARTED by the
 kiosk openbox autostart (`strih_openbox_autostart_text` calls `strih_session_apps_autostart_lines`,
 after strih-obs + the bundle-state server, in `STRIH_SESSION_APP_UNITS` order: keeper, panel, Satellite,
-watch timer, dantesync tray).
+watch timer, dantesync tray, display watch, dtray).
 - openbox never reaches graphical-session.target, so the WantedBy only makes `enable` meaningful.
 - A `default.target` unit would also start on a user-manager start with no X session (an ssh login,
   linger), where the panel or the Satellite tray cannot open a window. ONE login start path, the one OBS

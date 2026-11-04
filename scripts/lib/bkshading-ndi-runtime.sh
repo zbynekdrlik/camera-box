@@ -2,7 +2,7 @@
 # scripts/lib/bkshading-ndi-runtime.sh — shared NDI-runtime discovery constants + pure helpers
 # for the bkshading service (issue 1157).
 #
-# The bkshading SERVICE loads libndi at RUNTIME (bkshading/service/src/preview/ndi_paths.rs) to
+# The bkshading SERVICE loads libndi at RUNTIME (shading:bkshading/service/src/preview/ndi_paths.rs) to
 # receive the M2 live camera preview. This lib mirrors that module's LINUX search order (so a
 # Linux service host can be provisioned + verified with the SAME dirs/names the binary will try)
 # and records the documented Windows strih runtime DLL path.
@@ -12,7 +12,7 @@
 # in .claude/rules/ci-testing-gotchas.md).
 # airuleset:script-ok source-only lib — set -euo pipefail would leak into the sourcing shell (ci-testing-gotchas)
 #
-# KEEP IN SYNC with bkshading/service/src/preview/ndi_paths.rs — the python test
+# KEEP IN SYNC with tests/fixtures/shading_pinned/ndi_paths.rs (the tag's copy) — the python test
 # tests/python/test_bkshading_ndi_provision_1157.py cross-checks the two so they cannot drift.
 
 # Env-var names (priority order) whose values are NDI runtime DIRECTORIES. Mirrors ndi_paths.rs

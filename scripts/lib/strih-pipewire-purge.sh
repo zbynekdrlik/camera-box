@@ -123,6 +123,8 @@ strih_pipewire_purge_why() {
   local role="" streams="" toml=""
   role="$(strih_box_role 2>/dev/null)" || role=""
   streams="$(strih_lx_program_vban_streams 2>/dev/null)" || streams=""
+  # issue 1485: a program from the Dante device strih-obs (the dante_input source) needs no sound server either
+  if [ "$streams" = none ] && strih_program_dante_declared 2>/dev/null; then streams="dante:strih-obs"; fi
   toml="$(_strih_pw_purge_toml)" || toml=""
   strih_pipewire_purge_decision "$role" "$streams" "$toml"
 }
@@ -296,9 +298,8 @@ strih_pipewire_purge_install() {
   archs="$(strih_pipewire_purge_archs)" || return 1
   mapfile -t arch <<<"$archs"
   install -d -m 0755 "$(dirname "$pref")" || { echo "strih-pipewire-purge: cannot create $(dirname "$pref")" >&2; return 1; }
-  strih_pipewire_purge_pin_text "${arch[@]}" \
-    | obs_box_write_if_changed "$pref" 0644 "${STRIH_PW_PURGE_OWNER:-root:root}" "apt pin (no PipeWire / pulseaudio, ${arch[*]})" \
-    || return 1
+  obs_box_write_if_changed_rendered "$pref" 0644 "${STRIH_PW_PURGE_OWNER:-root:root}" "apt pin (no PipeWire / pulseaudio, ${arch[*]})" \
+    strih_pipewire_purge_pin_text "${arch[@]}" || return 1
   strih_pipewire_purge_shim_install "$repo" || return 1
   mapfile -t keep_inst < <(_strih_pw_purge_installed "${STRIH_PW_PURGE_KEEP[@]}")
   kept_before="${keep_inst[*]}"

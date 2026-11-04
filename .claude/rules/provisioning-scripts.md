@@ -50,7 +50,7 @@ boxes: setup-device had them, the fleet never got them.
 ## `setup-device.sh` never starts/restarts services live — it only writes files + `enable`s
 
 Every STEP that touches a systemd unit (camera-box.service at STEP 7, cam2-painter.service at
-STEP 3b, dantesync.service, etc.) writes the unit/drop-in file and runs `systemctl daemon-reload`
+STEP 3b, dsync.service, etc.) writes the unit/drop-in file and runs `systemctl daemon-reload`
 + `systemctl enable <unit>` — it never calls `systemctl start`/`restart`. The whole provisioning
 run defers taking effect to the box's NEXT REBOOT (STEP 19's own summary literally tells the
 operator to `reboot` at the end). **When adding a new provisioning STEP that installs a service,
@@ -283,7 +283,7 @@ writable BEFORE the first mutating action" class twice in one run, at two differ
 
 2. **A `curl -o` download can straight-up truncate a RUNNING binary in place.** Once (1) was fixed
    and root stayed writable for the whole run, the SAME re-run died again at STEP 17:
-   `curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync` while `dantesync.service` was ACTIVE
+   `curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dsync` while `dsync.service` was ACTIVE
    and had that exact path open — the kernel refuses to open a currently-EXECUTING file for write
    (`ETXTBSY`), so curl failed and `fail()` aborted, even though the release URL itself answered
    200. The IDENTICAL shape existed in STEP 3's camera-box URL branch and STEP 3b's frame-probe URL
@@ -294,10 +294,10 @@ writable BEFORE the first mutating action" class twice in one run, at two differ
    SAME inode. **Fix: download to a `mktemp` temp file, verify it non-empty (`[ -s "$tmp" ]`), then
    `install -m 0755 "$tmp" dest`, `rm -f "$tmp"` — never `curl ... -o /usr/local/bin/<name>`
    anywhere in this script.** STEP 17 additionally SKIPS the download entirely when
-   `/usr/local/bin/dantesync --version` already reports the release URL's own tag (parsed from the
+   `/usr/local/bin/dsync --version` already reports the release URL's own tag (parsed from the
    URL path, `.../releases/download/vX.Y.Z/...`, via `grep -oE '/v[0-9]+\.[0-9]+\.[0-9]+/' | tr -d
    '/v'`) — an idempotent re-run then never touches the live binary/service at all, per
-   `.claude/rules/dantesync-version-reading.md`'s `dantesync --version`-answers-everywhere finding.
+   `.claude/rules/dantesync-version-reading.md`'s `dsync --version`-answers-everywhere finding.
 
 **The general lesson for ANY future STEP that installs/replaces an executable this script (or
 `setup-imag.sh`) might be re-run against on an already-provisioned box: `install -m 0755 src dest`
@@ -310,10 +310,10 @@ cam6/cam7's actual re-provisioning surfaced them, one after the other, in the SA
 
 **The SAME defect existed in `setup-imag.sh`'s own dantesync install — ported the identical fix,
 plus one edge case unique to that script (#1289 follow-up).** `setup-imag.sh` had the exact same
-`curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync` shape, AND its cam1-fallback `scp -O`
+`curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dsync` shape, AND its cam1-fallback `scp -O`
 branch wrote straight onto the live path too (a `curl`-family sibling: `scp -O` also truncates its
 destination in place). Fixed identically (temp file + `install -m 0755`, both branches). **The
-edge case:** `setup-imag.sh`'s pre-existing gate was `if [ ! -x /usr/local/bin/dantesync ]` — a
+edge case:** `setup-imag.sh`'s pre-existing gate was `if [ ! -x /usr/local/bin/dsync ]` — a
 DELIBERATELY lenient "already there, don't even try the network" skip, because imag sits on a
 notebook with other network interfaces and "a re-provision cannot fail solely because GitHub is
 unreachable from imag's network" (the file's own pre-existing comment). A naive port of
@@ -332,11 +332,11 @@ deliberately written to tolerate the same failure differently.**
 
 ## Rewriting a provisioning line that OTHER tests in the SAME file anchor on: run the WHOLE file + the old-vs-new literal sweep over EVERY test reading the script (#1289 CI round 2)
 
-The #1289 STEP 17 rewrite retired the literal `curl ... -o /usr/local/bin/dantesync`. The lane
+The #1289 STEP 17 rewrite retired the literal `curl ... -o /usr/local/bin/dsync`. The lane
 added its own tests (all green) into `tests/setup_device_provisioner_hardening.rs` —
 but TWO pre-existing tests in that SAME file (#591 / #597 "purge runs before the dantesync
 install") anchored the install action on exactly that retired literal via
-`first_noncomment_idx(&body, "-o /usr/local/bin/dantesync").expect(...)`, so CI went red on a
+`first_noncomment_idx(&body, "-o /usr/local/bin/dsync").expect(...)`, so CI went red on a
 file the lane had just edited, and nextest's fail-fast left 791 tests un-run behind the two
 failures (the entire `setup_imag_guards.rs` binary among them). The occurrence-count anchor
 discipline CLAUDE.md prescribes for `recording-e2e.sh`/`rig-mode.sh` applies to
@@ -450,8 +450,8 @@ ro-root-safe config, would pass a box whose service can never actually run).
 
 - `setup-device.sh` `[bkshading-relay]` (rw window, before STEP 18) installs the relay through the ONE
   lib `scripts/lib/bkshading-relay-provision.sh`. The enable-state follows `--rig-mode` (default
-  `test`: the source box + cam2 installed DISABLED). A gh-less box needs `--relay-binary <path|url>`
-  next to `--binary`; without a binary source the step RECORDS `RELAY_PROBLEM` and STEP 19 refuses
+  `test`: the source box + cam2 installed DISABLED). The binary is the pinned shading release;
+  a box that cannot reach it needs `--relay-binary <path|url>` (the pinned bytes); without one the step RECORDS `RELAY_PROBLEM` and STEP 19 refuses
   Setup Complete. Full detail: `.claude/rules/bkshading.md`.
 - `verify-device.sh` `(ao)` grades it. **Never add a check between `(an)` and `(q)`:**
   `tests/python/test_ndi_discovery_1342.py` slices the `(an)` block up to `(q)` and EXECUTES it

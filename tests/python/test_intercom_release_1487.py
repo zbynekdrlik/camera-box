@@ -65,6 +65,31 @@ def _ensure(root, url):
     return _run('strih_intercom_release_ensure "$1"', root, env={"STRIH_INTERCOM_RELEASE_URL": url})
 
 
+def _chown_logger(tmp_path):
+    """A `chown` first on PATH that logs its arguments, then runs the real one."""
+    d = tmp_path / "chownbin"
+    d.mkdir(exist_ok=True)
+    log = tmp_path / "chown.log"
+    (d / "chown").write_text('#!/bin/sh\nprintf "%%s\\n" "$*" >> %s\nexec /bin/chown "$@"\n' % log)
+    (d / "chown").chmod(0o755)
+    return d, log
+
+
+# 3.11.2026: setup-strih (root) extracted the bundle into the operator-owned staged tree as root, and
+# the next deploy's rsync could not set those files' group (rc 23). The placed files take the owner
+# of the directory they land in.
+def test_the_placed_files_take_the_owner_of_their_directory(tmp_path):
+    url, sha = _release(tmp_path)
+    root = _tree(tmp_path, sha)
+    d, log = _chown_logger(tmp_path)
+    r = _run('strih_intercom_release_ensure "$1"', root,
+             env={"STRIH_INTERCOM_RELEASE_URL": url, "PATH": "%s:%s" % (d, os.environ["PATH"])})
+    assert r.returncode == 0, r.stderr
+    rel = root / "intercom-release" / TAG
+    lines = log.read_text().splitlines() if log.exists() else []
+    assert any(l.startswith("--reference=%s " % rel) and "intercom-hub" in l for l in lines), lines
+
+
 def test_the_shipped_pin_is_well_formed():
     r = _run('strih_intercom_pin_tag "$1"\nstrih_intercom_pin_sha256 "$1"', REPO)
     assert r.returncode == 0, r.stderr

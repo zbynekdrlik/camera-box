@@ -102,12 +102,6 @@ fn camera_latency_is_the_rig_floor_three() {
 }
 
 #[test]
-fn bundle_artifact_is_the_strih_variant() {
-    let (_c, out, _e) = run_sourced(&[], "strih_lx_bundle_artifact");
-    assert_eq!(out.trim(), "obs-genlock-linux-x86_64-strih");
-}
-
-#[test]
 fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
     // issue 1361: the client upstream is the box fact STRIH_DANTESYNC_UPSTREAM. strih-snv is the NTP
     // master (role server, NO upstream), so asking it for client args fails closed -- there is no
@@ -176,7 +170,7 @@ fn profile_facts_carry_the_windows_light_profile_shape() {
         "fps=30",
         "color_format=NV12",
         "out_mode=Advanced",
-        "rec_encoder=obs_nvenc_hevc_tex",
+        "rec_encoder=obs_nvenc_hevc_soft",
         "rec_path=/srv/_REC",
         "rec_format=mkv",
         "rec_split_min=15",
@@ -726,7 +720,7 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
         "a server role must emit a unit (the post-M4 NTP master)"
     );
     assert!(
-        out.contains("ExecStart=/usr/local/bin/dantesync\n"),
+        out.contains("ExecStart=/usr/local/bin/dsync\n"),
         "server ExecStart must be the BARE NTP-master daemon: {out}"
     );
     assert!(
@@ -752,7 +746,7 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
     );
     assert_eq!(c2, 0, "a client role with client args must emit a unit");
     assert!(
-        out2.contains("ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan"),
+        out2.contains("ExecStart=/usr/local/bin/dsync --ntp-server strih.lan"),
         "client ExecStart must be the CLIENT daemon: {out2}"
     );
     // client with no ARGS defaults to the client args helper -- whose upstream is the box fact
@@ -763,7 +757,7 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
     );
     assert_eq!(c2b, 0);
     assert!(
-        out2b.contains("ExecStart=/usr/local/bin/dantesync --ntp-server venue-ntp.lan"),
+        out2b.contains("ExecStart=/usr/local/bin/dsync --ntp-server venue-ntp.lan"),
         "the default client ExecStart must carry the client args: {out2b}"
     );
     // ...and on a box with NO upstream (strih-snv is the NTP master) `client ''` is refused and emits
@@ -865,8 +859,8 @@ fn dantesync_status_role_verdict_grades_reachable_locked_and_server_listener() {
 }
 
 /// issue 1317: `setup-strih.sh` step 2 must INSTALL the dantesync unit with the ROLE folded in (write
-/// it via `strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS"` into /etc/systemd/system/dantesync.service),
-/// default the role to `server` (the post-M4 NTP master), remove any stale dantesync.service.d/*.conf
+/// it via `strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS"` into /etc/systemd/system/dsync.service),
+/// default the role to `server` (the post-M4 NTP master), remove any stale dsync.service.d/*.conf
 /// drop-in, and this must precede the OBS unit enable (step 8). Issue 1372: the write, the reload and
 /// the (re)start happen only on a real change, through strih_dantesync_install, which lives in its
 /// own lib scripts/lib/strih-dantesync.sh (setup-strih.sh stays under its 1000-line budget).
@@ -883,8 +877,8 @@ fn setup_strih_installs_the_dantesync_unit_in_step_2() {
         "setup-strih step 2 must hand the unit text to strih_dantesync_install (its own lib)"
     );
     assert!(
-        lib.contains("STRIH_DANTESYNC_UNIT:-/etc/systemd/system/dantesync.service"),
-        "the dantesync install must write the unit to /etc/systemd/system/dantesync.service"
+        lib.contains("STRIH_DANTESYNC_UNIT:-/etc/systemd/system/dsync.service"),
+        "the dantesync install must write the unit to /etc/systemd/system/dsync.service"
     );
     // issue 1361: the role is a FACT of the selected box (strih-snv.env: server, the post-M4 NTP
     // master), no longer a per-run STRIH_LX_DANTESYNC_ROLE env knob.
@@ -904,18 +898,17 @@ fn setup_strih_installs_the_dantesync_unit_in_step_2() {
     // temp root); the drop-in dir follows the unit path.
     assert!(
         lib.contains("rm -f \"$dropin_dir\"/*.conf"),
-        "setup-strih step 2 must remove any stale dantesync.service.d/*.conf drop-in (role now in the unit)"
+        "setup-strih step 2 must remove any stale dsync.service.d/*.conf drop-in (role now in the unit)"
     );
     // issue 1372: the lock of a RUNNING daemon is never removed. It is cleared only on the `start`
     // decision (the daemon is not active); the unconditional removal is gone. The behaviour is
     // pinned by tests/python/test_strih_dantesync_keep_running_1372.py.
     assert!(
-        lib.contains("STRIH_DANTESYNC_LOCK:-/var/run/dantesync.lock"),
-        "the dantesync install must know /var/run/dantesync.lock to clear a stale lock before a start"
+        lib.contains("STRIH_DANTESYNC_LOCK:-/var/run/dsync.lock"),
+        "the dantesync install must know /var/run/dsync.lock to clear a stale lock before a start"
     );
     assert!(
-        !s.contains("rm -f /var/run/dantesync.lock")
-            && !lib.contains("rm -f /var/run/dantesync.lock"),
+        !s.contains("rm -f /var/run/dsync.lock") && !lib.contains("rm -f /var/run/dsync.lock"),
         "setup-strih must never clear the dantesync lock unconditionally (issue 1372)"
     );
     let enable = s
@@ -954,7 +947,7 @@ fn setup_strih_installs_the_ndi_runtime_before_the_obs_enable() {
 }
 
 /// issue 1317: `verify-strih.sh` item 6 must assert the dantesync UNIT is active + a FRESH offset
-/// (the shared `dantesync_offset_verdict`), NOT read /etc/dantesync/config.json (a Windows/imag
+/// (the shared `dantesync_offset_verdict`), NOT read /etc/dsync/config.json (a Windows/imag
 /// artifact a flag-based Linux client never creates). issue 1357: never-sleep is graded by the SHARED
 /// baseline grader (its `nosleep` item), so the old strih-only sleep item is gone.
 #[test]
@@ -965,12 +958,12 @@ fn verify_strih_dantesync_and_sleep_items_are_fixed() {
         "verify-strih item 6 must grade a fresh offset via dantesync_offset_verdict"
     );
     assert!(
-        v.contains("systemctl is-active dantesync"),
+        v.contains("systemctl is-active dsync"),
         "verify-strih item 6 must assert the dantesync unit is active"
     );
     assert!(
-        !v.contains("/etc/dantesync/config.json"),
-        "verify-strih must NOT read /etc/dantesync/config.json (a flag-based Linux client has none)"
+        !v.contains("/etc/dsync/config.json"),
+        "verify-strih must NOT read /etc/dsync/config.json (a flag-based Linux client has none)"
     );
     assert!(
         v.contains("obs_box_baseline_verdict"),
@@ -2807,21 +2800,10 @@ fn setup_strih_installs_ffmpeg_and_verify_checks_ffprobe() {
 
 // ===========================================================================================
 // issue 1353: strih-snv bkshading SERVICE provisioning -- the shading panel backend moved off the
-// Windows PC to the notebook as a systemd unit. Three pure printers (artifact name / system unit /
-// config seed) + setup-strih step 16c (enable-only) + verify-strih item + the ci.yml service
-// artifact. The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs), so the
-// unit needs only the self-contained binary; web/ ships beside it per the design as a panel-source
-// copy. Development = one camera on cam1.
+// Windows PC to the notebook as a systemd unit. Two pure printers (system unit / config seed) +
+// setup-strih step 16c (enable-only) + verify-strih item, the service being the pinned shading
+// release (issue 1487). Development = one camera on cam1.
 // ===========================================================================================
-
-/// The Linux service artifact NAME is single-sourced here (the ci.yml upload + the setup-strih fetch
-/// both key on it) -- the strih variant of the Windows `bkshading-windows-amd64` canon.
-#[test]
-fn bkshading_artifact_name_is_the_linux_service_variant() {
-    let (code, out, _e) = run_sourced(&[], "strih_bkshading_artifact_name");
-    assert_eq!(code, 0);
-    assert_eq!(out.trim(), "bkshading-service-linux-amd64");
-}
 
 /// The systemd unit is a SYSTEM unit run as the operator (User=newlevel for libndi/PipeWire parity),
 /// ExecStart the installed binary with --config, Restart=on-failure, multi-user target, and it never
@@ -2946,8 +2928,8 @@ fn setup_strih_installs_bkshading_service_in_step_16c_enable_only() {
         "bkshading service must be lettered sub-step 16c so TOTAL_STEPS stays 17"
     );
     assert!(
-        s.contains("strih_bkshading_artifact_name"),
-        "the fetch keys on the single-sourced artifact name"
+        s.contains("shading_release_service"),
+        "the service comes from the pinned shading release"
     );
     assert!(
         s.contains("/opt/bkshading"),
@@ -3008,28 +2990,6 @@ fn verify_strih_has_the_bkshading_service_item() {
     assert!(
         v.contains("8770"),
         "verify-strih must reference the service port :8770"
-    );
-}
-
-/// The ci.yml Linux bkshading job uploads the service artifact under the SAME name the printer
-/// single-sources, staging the service binary + the panel web assets.
-#[test]
-fn ci_uploads_the_bkshading_service_linux_artifact() {
-    let (code, name, _e) = run_sourced(&[], "strih_bkshading_artifact_name");
-    assert_eq!(code, 0);
-    let ci = read_script(".github/workflows/ci.yml");
-    assert!(
-        ci.contains(&format!("name: {}", name.trim())),
-        "ci.yml must upload the artifact named by strih_bkshading_artifact_name ({})",
-        name.trim()
-    );
-    assert!(
-        ci.contains("bkshading/service/web"),
-        "the service artifact must stage the panel web assets"
-    );
-    assert!(
-        ci.contains("target/release/bkshading"),
-        "the service artifact must carry the service binary"
     );
 }
 
@@ -3551,16 +3511,14 @@ fn verify_strih_bkshading_probe_hits_a_real_service_route() {
         .chars()
         .take_while(|c| *c != '"' && !c.is_whitespace())
         .collect();
-    let router = read_script("bkshading/service/src/http.rs");
-    let routes: Vec<String> = router
-        .split(".route(\"")
-        .skip(1)
-        .filter_map(|r| r.split('"').next().map(str::to_string))
-        .collect();
+    let contract = read_script("tests/fixtures/shading_pinned/CONTRACT.md");
+    let service = contract
+        .split("## Service")
+        .nth(1)
+        .expect("the Service section");
     assert!(
-        routes.iter().any(|r| r == &path),
-        "verify-strih probes the service at `{path}`, which is not a route the service serves \
-         (routes: {routes:?})"
+        service.contains(&format!("`GET {path}`")),
+        "verify-strih probes the service at `{path}`, which is not the contract's health route"
     );
 }
 

@@ -76,11 +76,26 @@ fn the_moved_code_left_this_repo() {
         "jxs",
         "rig",
         "vendor/svt-jpeg-xs",
+        "src/genlock_audio_buffering.rs",
+        "src/genlock_audio_pairing.rs",
+        "src/genlock_audio_pairing_arrival_tests.rs",
+        "src/genlock_audio_pairing_pending_slice3_tests.rs",
+        "src/genlock_audio_pairing_pending_tests.rs",
+        "src/genlock_audio_pairing_step_tests.rs",
+        "src/genlock_audio_pairing_tests.rs",
+        "src/genlock_audio_step_hold.rs",
         "src/genlock_backlog.rs",
+        "src/genlock_fifo_relabel.rs",
+        "src/genlock_fifo_relabel_tests.rs",
+        "src/genlock_jxs_state.rs",
+        "src/genlock_lock_state",
+        "src/genlock_lock_state.rs",
         "src/genlock_n1_depth.rs",
+        "src/genlock_n2_grid.rs",
         "src/genlock_wall_step.rs",
         "src/qpsk_marker.rs",
         "src/qpsk_marker_scan.rs",
+        "tests/fixtures/genlock_n2_present_age_1367.tsv",
     ] {
         assert!(!root().join(gone).exists(), "{gone} must be gone");
     }
@@ -94,9 +109,15 @@ fn the_old_paths_stay_as_reexports() {
     for line in [
         "pub use ::qpsk_marker::qpsk_marker;",
         "pub use ::qpsk_marker::qpsk_marker_scan;",
+        "pub use rig_core::genlock_audio_buffering;",
+        "pub use rig_core::genlock_audio_pairing::*;",
         "pub use rig_core::genlock_backlog;",
+        "pub use rig_core::genlock_fifo_relabel;",
         "pub use rig_core::genlock_grid;",
+        "pub use rig_core::genlock_jxs_state;",
+        "pub use rig_core::genlock_lock_state;",
         "pub use rig_core::genlock_n1_depth;",
+        "pub use rig_core::genlock_n2_grid;",
         "pub use rig_core::genlock_wall_step;",
     ] {
         assert!(lib.contains(line), "{line}");
@@ -134,6 +155,6 @@ fn the_strih_build_links_the_pinned_tag_with_this_repos_release_profile() {
 #[test]
 fn the_python_job_fetches_the_pinned_source() {
     let ci = read(".github/workflows/ci.yml");
-    let job = &ci[ci.find("  python-tests:").unwrap()..ci.find("  bkshading:").unwrap()];
+    let job = &ci[ci.find("  python-tests:").unwrap()..ci.find("  build:").unwrap()];
     assert!(job.contains("run: cargo fetch"));
 }

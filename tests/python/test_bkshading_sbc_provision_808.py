@@ -19,7 +19,7 @@ assumes a read-only root (a stock Pi OS root is read-write). This milestone clos
     appliance and a handheld has no grab comparison), and its `--check` verifies the deployed binary
     is actually aarch64 (an ELF e_machine read) so a mis-deployed amd64 binary is caught here, not at
     reboot with an opaque `Exec format error`.
-  - the CI `bkshading` job cross-builds the relay for aarch64 and uploads `bkshading-relay-linux-arm64`.
+  - the relay for aarch64 is the pinned shading release's `bkshading-relay-linux-arm64`.
   - `scripts/bkshading-deploy-relay.sh` gains `--arch amd64|arm64` (selects the artifact), so the
     arm64 relay has a real deploy path.
 
@@ -70,12 +70,15 @@ from bkshading_sbc_fakes_808 import (  # noqa: E402
     _sbc_paths,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shading_release_fake_1487 import pin_for_args  # noqa: E402
+
 RELAY_LIB = os.path.join(REPO, "scripts", "lib", "bkshading-relay-runtime.sh")
 DEPLOY_SCRIPT = os.path.join(REPO, "scripts", "bkshading-deploy-relay.sh")
 DEPLOY_LIB = os.path.join(REPO, "scripts", "lib", "bkshading-deploy-runtime.sh")
 UNIT = os.path.join(REPO, "systemd", "bkshading-relay.service")
 CI_YML = os.path.join(REPO, ".github", "workflows", "ci.yml")
-EXAMPLE_TOML = os.path.join(REPO, "bkshading", "service", "bkshading.example.toml")
+EXAMPLE_TOML = os.path.join(REPO, "scripts", "bkshading.example.toml")
 BIN_PATH = "/usr/local/bin/bkshading-relay"
 CROSS_TARGET = "aarch64-unknown-linux-gnu"
 ARM64_ARTIFACT = "bkshading-relay-linux-arm64"
@@ -624,61 +627,14 @@ def test_provision_sources_the_shared_ro_root_lib():
 
 
 # ---------------------------------------------------------------------------------------------
-# CI: the bkshading job cross-builds + uploads the aarch64 relay; no continue-on-error
+# issue 1487: the arm64 relay is the pinned release's asset
 # ---------------------------------------------------------------------------------------------
-def test_ci_bkshading_job_cross_builds_aarch64_relay():
-    ci = _load_ci()
-    job = ci["jobs"]["bkshading"]
-    runs = _job_step_runs(job)
-    assert CROSS_TARGET in runs, "bkshading job must reference the aarch64 target"
-    assert "rustup target add %s" % CROSS_TARGET in runs, "must add the aarch64 rustup target"
-    assert "gcc-aarch64-linux-gnu" in runs, "must install the aarch64 cross linker"
-    assert re.search(
-        r"cargo build --release[^\n]*--target %s[^\n]*-p bkshading-relay" % re.escape(CROSS_TARGET),
-        runs,
-    ), "must cross-build the relay for aarch64"
-
-
-def test_ci_uploads_arm64_artifact():
-    ci = _load_ci()
-    job = ci["jobs"]["bkshading"]
-    up = _job_uploads(job, ARM64_ARTIFACT)
-    assert up is not None, "bkshading job must upload the %s artifact" % ARM64_ARTIFACT
-    assert ARM64_BUILD_PATH in up.get("path", ""), "must upload the aarch64 relay build output"
-    assert up.get("if-no-files-found") == "error", "must fail loud on a missing arm64 binary"
-
-
-def test_ci_no_continue_on_error_in_bkshading_job():
-    ci = _load_ci()
-    job = ci["jobs"]["bkshading"]
-    assert "continue-on-error" not in job
-    for s in job.get("steps", []):
-        assert "continue-on-error" not in s
-
-
-def test_ci_arm64_upload_name_agrees_with_deploy_lib():
-    # ONE source of truth for the arm64 artifact name: the deploy lib. CI must upload under it.
-    lib_name = _bash(DEPLOY_LIB, "bkshading_deploy_arm64_artifact_name")
-    assert lib_name == ARM64_ARTIFACT, "deploy lib arm64 artifact name drift: %s" % lib_name
-    ci = _load_ci()
-    assert _job_uploads(ci["jobs"]["bkshading"], lib_name) is not None, \
-        "CI must upload under the deploy lib's arm64 artifact name (%s)" % lib_name
-
-
 # ---------------------------------------------------------------------------------------------
-# deploy extension: --arch arm64 selects the arm64 artifact; the remount follows the target's root
+# deploy extension: --arch arm64 selects the arm64 asset; the remount follows the target's root
 # ---------------------------------------------------------------------------------------------
-def test_deploy_lib_arch_artifact_selection():
-    # amd64 (default) unchanged; arm64 -> the relay-only arm64 artifact.
-    assert _bash(DEPLOY_LIB, "bkshading_deploy_artifact_name") == "bkshading-linux-amd64"
-    assert _bash_arg(DEPLOY_LIB, "bkshading_deploy_artifact_name_for_arch", "amd64")[1] == \
-        "bkshading-linux-amd64"
-    assert _bash_arg(DEPLOY_LIB, "bkshading_deploy_artifact_name_for_arch", "arm64")[1] == \
-        ARM64_ARTIFACT
-
-
 def _run_deploy(args, env=None):
     e = dict(os.environ)
+    e.update(pin_for_args(args))
     if env:
         e.update(env)
     return subprocess.run(["bash", DEPLOY_SCRIPT] + args, capture_output=True, text=True, env=e)
@@ -881,3 +837,9 @@ def test_check_fails_when_the_relay_env_is_missing_or_changed_808():
         assert "relay.env missing or differs" in r3.stderr, r3.stderr
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_arch_names_its_release_asset():
+    lib = os.path.join(REPO, "scripts", "lib", "shading-release.sh")
+    assert _bash_arg(lib, "shading_relay_asset_for_arch", "amd64")[1] == "bkshading-relay-linux-amd64"
+    assert _bash_arg(lib, "shading_relay_asset_for_arch", "arm64")[1] == ARM64_ARTIFACT

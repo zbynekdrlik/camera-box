@@ -52,8 +52,9 @@ UNITS = F.UNITS
 _bash = F.bash
 CLASS = F.PANEL_CLASS
 WIN = F.WIN
-# + the keeper's pass, the panel window, the Satellite watch's pass, the display watch's pass + X config row
-ROWS = len(UNITS) + 5
+# + the keeper's pass, the panel window, the Satellite watch's pass, the display watch's pass + X config row,
+# + dtray's device markers (issue 1485)
+ROWS = len(UNITS) + 6
 
 
 def _install(tmp_path, home, bindir, **fakes):
@@ -116,8 +117,9 @@ def test_script_mapping_and_items():
         "bkshading-panel-app.service [bkshading_panel_app.py] shading-app",
         "companion-satellite.service [] companion-satellite",
         "strih-satellite-watch.timer [strih_satellite_watch.py] satellite-watch",
-        "dantesync-tray.service [] dantesync-tray",
+        "dsync-tray.service [] dsync-tray",
         "strih-display-watch.service [strih_display_watch.py] display-watch",
+        "dtray.service [] dtray",
         "REFUSED",
     ]
 
@@ -681,10 +683,10 @@ def test_panel_closing_the_window_quits_so_the_unit_restarts_it():
 
 
 def test_panel_url_port_is_the_service_default_bind_port():
-    # ONE source of truth: the bkshading service's own default_bind (the shading-https sibling pins it too)
-    cfg = (REPO / "bkshading" / "service" / "src" / "config.rs").read_text()
-    port = re.search(r'fn default_bind\(\) -> String \{\s*"[0-9.]+:(\d+)"', cfg).group(1)
-    assert _load_panel().PANEL_URL == "http://127.0.0.1:%s/" % port
+    # ONE source of truth: the shading contract (the shading-https sibling pins it too)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from shading_release_fake_1487 import service_port
+    assert _load_panel().PANEL_URL == "http://127.0.0.1:%s/" % service_port()
 
 
 def test_panel_source_never_uses_the_deprecated_or_stacking_calls():

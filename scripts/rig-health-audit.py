@@ -357,9 +357,9 @@ def http_get(url: str, timeout: int = 6) -> str | None:
 def check_cam(name: str, ip: str) -> None:
     out = ssh(ip, "systemctl is-active camera-box; "
                   "journalctl -u camera-box -n 120 --no-pager | grep -E 'Streaming:|capture chroma' | tail -4; "
-                  "journalctl -u dantesync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
+                  "journalctl -u dsync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
                   "awk '$2==\"/\"{print $4}' /proc/mounts | cut -d, -f1; "
-                  "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
+                  "journalctl -u dsync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
                   "cut -d' ' -f1 /proc/loadavg")
     if out is None:
         emit("FAIL", name, "unreachable over ssh")
@@ -417,9 +417,9 @@ def check_imag() -> None:
     out = ssh(IMAG, "pgrep -x obs >/dev/null && echo obs=up || echo obs=DOWN; "
                     "systemctl is-active imag-obs-watchdog 2>/dev/null; "
                     "grep -o isolcpus /proc/cmdline || echo cmdline-clean; "
-                    "journalctl -u dantesync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
+                    "journalctl -u dsync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
                     "cut -d' ' -f1 /proc/loadavg; "
-                    "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
+                    "journalctl -u dsync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
                     # #1299: also surface the newest genlock-lock: verdict line (ignored by AUDIT_RE;
                     # parsed only by genlock_lock_state_from_log for the report-only facet chip).
                     "tail -400 \"$(ls -t ~/.config/obs-studio/logs/*.txt | head -1)\" | grep -E 'genlock-fifo audit|genlock-lock:'",

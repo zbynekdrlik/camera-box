@@ -145,3 +145,24 @@ fn the_hubs_dante_ports_are_the_ones_the_leg_declares() {
     let env = read(&root().join("scripts/strih-boxes/strih-snv.env"));
     assert!(env.contains("strih-snv-intercom=4441:8801:4456:47100-47131"));
 }
+
+/// Issue 1485: the dstack version the pinned hub runs (the dtray `--print` threshold reads it from the pin,
+/// `scripts/lib/dtray.sh`) is the one the tag's own Cargo.lock locks: the RELEASE TAG of its git source
+/// (`?tag=vX.Y.Z#`), the same kind of value as DTRAY_DEVICE_FIRST_DSTACK, never the crate version.
+#[test]
+fn the_pinned_dstack_version_is_the_tags_lock() {
+    let lock = read(&checkout().join("Cargo.lock"));
+    let want = pin("INTERCOM_RELEASE_DSTACK_VERSION");
+    let have = lock
+        .split("[[package]]")
+        .find(|p| p.contains("\nname = \"dstack\"\n"))
+        .and_then(|p| p.lines().find_map(|l| l.strip_prefix("source = \"")))
+        .and_then(|src| src.split("?tag=").nth(1))
+        .and_then(|t| t.split('#').next())
+        .map(str::to_string)
+        .expect("the tag's Cargo.lock locks dstack");
+    assert_eq!(
+        have, want,
+        "INTERCOM_RELEASE_DSTACK_VERSION must be the tag's locked dstack"
+    );
+}

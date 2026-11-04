@@ -300,7 +300,7 @@ def test_the_version_pin_is_the_release_this_date_grading_implements():
     # 1.19.0 (dantesync#134 fast boot sync) keeps every date field this grading reads; it adds
     # ntp_server_unsynchronized only. 1.20.0 (dantesync#136, the time server + NTP burst on their own
     # threads) changes no /status field.
-    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.20.0}"' in body
+    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.27.0}"' in body
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1129,7 +1129,7 @@ def test_patcher_legacy_mode_keeps_the_old_phase_slew_flip():
 @pytest.mark.parametrize("script", ["setup-device.sh", "setup-imag.sh"])
 def test_provisioning_writes_the_1_9_0_discipline_not_phase_slew(script):
     body = (_ROOT / "scripts" / script).read_text()
-    start = body.index("cat > /etc/dantesync/config.json <<DANTECFGEOF")
+    start = body.index("cat > /etc/dsync/config.json <<DANTECFGEOF")
     block = body[start:body.index("\nDANTECFGEOF\n", start)]
     assert '"clock_discipline": "ptp_phase_lock"' in block
     assert "phase_slew" not in block

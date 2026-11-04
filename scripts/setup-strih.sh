@@ -125,10 +125,10 @@ fi
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->
 # 10.77.9.202; the cam boxes take NTP from it), so strih-snv's dantesync ROLE is `server` (a bare
-# `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dantesync/config.json). issue 1361: the
+# `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dsync/config.json). issue 1361: the
 # role + its upstream are box FACTS (STRIH_DANTESYNC_ROLE / STRIH_DANTESYNC_UPSTREAM), so a venue whose
 # strih is a CLIENT declares it in its fact file. The live box had a hand
-# `dantesync.service.d/10-ntp-master.conf` drop-in overriding the provisioned CLIENT ExecStart -- now
+# `dsync.service.d/10-ntp-master.conf` drop-in overriding the provisioned CLIENT ExecStart -- now
 # the role is folded INTO the unit and the stale drop-in is removed.
 DS_ROLE="$(strih_lx_dantesync_role)"
 step 2 "DanteSync ${DS_ROLE} (single timesync authority; post-M4 the notebook is the fleet NTP master)"
@@ -148,7 +148,7 @@ strih_lx_dantesync_role_ok "$DS_ROLE" "$DS_ARGS" \
 echo "  dantesync role: ${DS_ROLE}  (args: '${DS_ARGS:-<bare NTP master>}')"
 # issue 1317: install dantesync as a systemd SERVICE, role folded INTO the unit (the EXACT cambox
 # shape: Type=simple, Restart=always). strih_dantesync_unit_text fail-closes on an ambiguous shape.
-# The live box had a hand dantesync.service.d/10-ntp-master.conf resetting ExecStart; the role is now
+# The live box had a hand dsync.service.d/10-ntp-master.conf resetting ExecStart; the role is now
 # IN the unit, so strih_dantesync_install removes any stale drop-in (two files describing one role).
 # issue 1372: the unit is rewritten, reloaded and the daemon (re)started ONLY on a real change
 # (strih_dantesync_install, scripts/lib/strih-dantesync.sh) -- restarting the fleet date master steps
@@ -156,7 +156,7 @@ echo "  dantesync role: ${DS_ROLE}  (args: '${DS_ARGS:-<bare NTP master>}')"
 DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_lx_ip)")" \
   || fail "strih_dantesync_unit_text refused to emit a unit for role '$DS_ROLE' args '$DS_ARGS'"
 strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE" \
-  || fail "dantesync.service install failed (role '${DS_ROLE}') -- see the line above"
+  || fail "dsync.service install failed (role '${DS_ROLE}') -- see the line above"
 
 # ---------------------------------------------------------------------------------------------
 REC_ENC="$(strih_lx_profile_facts | grep '^rec_encoder=' | cut -d= -f2)"
@@ -178,9 +178,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-ART="$(strih_lx_bundle_artifact)"
-step 4 "Genlock bundle -> ${GENLOCK_DIR} (strih FULL artifact: ${ART})"
+ART="$(obs_release_tarball_name "$(obs_pin_tag "${HERE}/..")")" || fail "issue 1487: scripts/obs-release.pin is unreadable"
+step 4 "Genlock bundle -> ${GENLOCK_DIR} (the pinned obs release: ${ART})"
 mkdir -p "$GENLOCK_DIR"
+[ "${STRIH_LX_BUNDLE_SRC:-}" != pin ] || { STRIH_LX_BUNDLE_SRC="${HERE}/../obs-release/bundle-$$"; obs_release_bundle "${HERE}/.." "$STRIH_LX_BUNDLE_SRC" || fail "issue 1487: the pinned obs release did not fetch + verify (above) -- never another build"; }
 if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   # issue 1317: NEVER install a bundle built for a different Ubuntu release than the box runs -- a
   # 24.04-built bundle (noble ffmpeg/Qt sonames) would crash OBS at load on the 26.04 strih-snv box.
@@ -224,7 +225,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   # marker = unknown = the marker is removed.
   SABI="$(genlock_stats_abi_pair_from_marker 2>/dev/null < "${STRIH_LX_BUNDLE_SRC%/}/GENLOCK_STATS_ABI.txt" || true)"
   genlock_write_markers "$GENLOCK_DIR" "$GSHA" "$DSHA" "" "$SABI" || fail "genlock_write_markers failed"
-  echo "  installed genlock bundle to ${GENLOCK_DIR} (genlock ${GSHA}, distroav ${DSHA})"
+  echo "  installed genlock bundle to ${GENLOCK_DIR} (obs $(sed -n 's/^tag=//p' "$GENLOCK_DIR/OBS_RELEASE.txt" 2>/dev/null || true), commit ${GSHA}, distroav ${DSHA})"
   # issue 1317: install the bundle into its /usr prefix so the dynamic loader finds it -- the /opt
   # staged copy above is the marker home, but OBS is BUILT for /usr (libs -> /usr/lib/x86_64-linux-gnu,
   # the frontend -> /usr/bin/obs, data -> /usr/share/obs). Without this the loader has libobs.so.30 /
@@ -235,7 +236,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
     || fail "strih_install_bundle_prefix: installing the bundle into the /usr prefix failed -- OBS would not load"
   echo "  installed bundle into the /usr prefix (/usr/bin/obs + /usr/lib/x86_64-linux-gnu + ldconfig)"
 else
-  warn "  STRIH_LX_BUNDLE_SRC unset -- fetch the ${ART} CI artifact and re-run with STRIH_LX_BUNDLE_SRC=<dir>"
+  warn "  STRIH_LX_BUNDLE_SRC unset -- OBS not installed; STRIH_LX_BUNDLE_SRC=pin fetches + installs the pinned ${ART}"
   warn "  (deploy-genlock-fleet.sh --boxes ${BOX_NAME} does this over ssh once the box is reachable)"
 fi
 # chrome-sandbox setuid-root (issue 1317 F6): the CEF SUID sandbox helper must be owned root:root
@@ -666,15 +667,15 @@ else
   # issue 1345 (owner accepted 25.9.2026): the MiniFuse PLAYBACK period (1024 x 3, headroom 256 -- the
   # buzz fix) and the graph's min-quantum floor 1024 (the robotic-cameraman fix). Compared, rewritten only
   # on a difference, logged; both apply at the next WirePlumber/PipeWire start (the reboot after setup).
-  strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
-  strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
+  obs_box_write_if_changed_rendered "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period" strih_wireplumber_minifuse_output_period_conf || fail "MiniFuse output period: not installed (above)"
+  obs_box_write_if_changed_rendered "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024" strih_pipewire_quantum_conf || fail "graph quantum 1024: not installed (above)"
   echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session)"
 fi
 # Linger the operator so its user@.service + PipeWire come up at boot before any login: a headless start
 # finds no /run/user/<uid>/pipewire-0 otherwise (the hub's pw-cat backoff self-heals; linger removes the gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
-if strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
+if strih_program_dante_declared; then echo "  the OBS program-audio input = the dante_input source of the Dante device strih-obs (issue 1485), seeded by scripts/strih_scenes.py --bootstrap"; elif strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
 [ -n "${STRIH_PW_PURGED:-}" ] || echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
@@ -700,6 +701,7 @@ else
   strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"
 fi
 strih_vban_leg_install || fail "issue 1439: the VBAN-only leg (a second NIC or a VLAN on the rig NIC, ROZHODNUTE 6360417876) failed (above)"
+strih_dante_input_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1485: the strih-obs Dante device's ~/.camera-box/dante-input.toml (above; the site file $(strih_dante_input_site_file) must exist)"
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"
@@ -882,37 +884,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step "16c" "bkshading shading-control service (issue 1353) -- CI artifact -> /opt/bkshading, seed config + unit, enable-only"
+step "16c" "bkshading shading-control service (issue 1353) -- the pinned shading release -> /opt/bkshading, seed config + unit, enable-only"
 if WHY="$(obs_box_step_applies 16c)"; then   # issue 1412: scripts/lib/obs-box-role.sh
-# issue 1353: the shading panel BACKEND (bkshading/service) ran only on the Windows strih PC; post-M4
-# the notebook is the strih, so it is provisioned here as a systemd unit fed the CI-built Linux
-# artifact. The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs), so the
-# unit needs only the self-contained binary; web/ is installed beside it (design) as a panel-source
-# copy. ENABLE-ONLY: the SUPERVISOR deploys the running service; the Windows service stays the
-# fallback until the owner accepts it.
-BKSH_ART="$(strih_bkshading_artifact_name)"
-# issue 1412: the ONE CI-artifact fetch (scripts/lib/strih-ci-artifact.sh): the pre-staged dir
-# STRIH_LX_BKSHADING_SRC (the step-4 STRIH_LX_BUNDLE_SRC precedent), else the GitHub artifact via GH_TOKEN.
-BKSH_SRC="$(strih_ci_artifact_fetch "$BKSH_ART" "${STRIH_LX_BKSHADING_SRC:-}")" \
-  || { BKSH_SRC=""; warn "  install /opt/bkshading/bkshading (+ web/) from the ${BKSH_ART} artifact before go-live"; }
-[ -z "$BKSH_SRC" ] || echo "  ${BKSH_ART} artifact: ${BKSH_SRC}"
-# Install the binary (+ web/ beside it) when a source resolved (robust to any nesting in the zip).
-if [ -n "$BKSH_SRC" ]; then
-  BKSH_BIN="$(find "$BKSH_SRC" -type f -name bkshading 2>/dev/null | head -1 || true)"
-  BKSH_WEB="$(find "$BKSH_SRC" -type d -name web 2>/dev/null | head -1 || true)"
-  [ -n "$BKSH_BIN" ] || fail "issue 1353: bkshading binary not found in the ${BKSH_ART} artifact"
-  install -d -m 0755 -o root -g root /opt/bkshading
-  install -m 0755 -o root -g root "$BKSH_BIN" /opt/bkshading/bkshading
-  if [ -n "$BKSH_WEB" ]; then
-    rm -rf /opt/bkshading/web
-    cp -a "$BKSH_WEB" /opt/bkshading/web
-    chown -R root:root /opt/bkshading/web
-    find /opt/bkshading/web -type d -exec chmod 0755 {} + 2>/dev/null || true
-    find /opt/bkshading/web -type f -exec chmod 0644 {} + 2>/dev/null || true
-  fi
-  echo "  installed bkshading service binary -> /opt/bkshading/bkshading (panel assets embedded; web/ copied beside it)"
-fi
-strih_ci_artifact_cleanup "$BKSH_SRC" "${STRIH_LX_BKSHADING_SRC:-}"   # the fetch's temp dir only
+# issue 1353: the shading panel BACKEND is a systemd unit here. Issue 1487: binary + web/ come from the
+# pinned shading release (scripts/shading-release.pin), the strih deploy stages it in its tree, a run
+# from a checkout fetches it; no fallback. Enable-only, but a RUNNING service on another binary restarts
+# after the unit is written, so a deploy never leaves the panel on the old version.
+BKSH_OLD="$(sha256sum /opt/bkshading/bkshading 2>/dev/null || true)"
+BKSH_DIR="$(shading_release_service "${HERE}/..")" || fail "the pinned shading release (above)"
+strih_bkshading_service_install "$BKSH_DIR" /opt/bkshading/bkshading || fail "bkshading service install from ${BKSH_DIR} failed (above)"
+echo "  installed bkshading service $(shading_pin_tag "${HERE}/..") -> /opt/bkshading/bkshading (web/ beside it)"
 # Seed the operator config ONLY IF absent (the projector.json / bkshading.example.toml precedent).
 install -d -m 0755 /etc/bkshading
 if [ ! -f /etc/bkshading/bkshading.toml ]; then
@@ -923,16 +904,15 @@ else
   echo "  /etc/bkshading/bkshading.toml already present -- leaving the operator's config"
 fi
 # Install the SYSTEM unit from the printer (source of truth) + ENABLE (NEVER start -- the supervisor
-# deploys the running service; the Windows service stays the fallback until the owner accepts).
+# deploys the running service).
 strih_bkshading_unit_text > /etc/systemd/system/bkshading-service.service \
   || fail "could not write /etc/systemd/system/bkshading-service.service"
 systemctl daemon-reload
 systemctl enable bkshading-service.service 2>/dev/null || warn "  could not enable bkshading-service.service"
-if [ -x /opt/bkshading/bkshading ]; then
-  echo "  bkshading-service.service installed + enabled (NOT started -- supervisor deploys the running service); binary present"
-else
-  warn "  bkshading-service.service installed + enabled but /opt/bkshading/bkshading is ABSENT -- install the CI ${BKSH_ART} binary before go-live"
+if [ "$BKSH_OLD" != "$(sha256sum /opt/bkshading/bkshading)" ]; then
+  systemctl try-restart bkshading-service.service || fail "bkshading-service did not restart on the pinned release"
 fi
+echo "  bkshading-service.service installed + enabled (a stopped one stays stopped)"
 
 else echo "  SKIP: ${WHY}"; fi
 
@@ -980,6 +960,8 @@ if WHY="$(obs_box_step_applies 16j-restreamer)"; then obs_box_stream_restreamer_
 # ---------------------------------------------------------------------------------------------
 step "16k" "Cambox log sink (issue 1394): journal-remote + the netconsole rsyslog instance, idle priority, enabled + running"
 if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_install || fail "issue 1394: the cambox log sink could not be provisioned (above)"; else echo "  SKIP: ${WHY}"; fi
+step "16l" "Rig-lease host (issue 1474): the dev1 line in /etc/hosts kept from dev1.local by a root timer -- stream role, snv"
+obs_box_lease_host_install || fail "issue 1474: the dev1 lease host line could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"

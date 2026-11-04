@@ -1,7 +1,7 @@
 //! Issue 1381 (design 5882391108, piece 2) — an EXECUTABLE C-vs-Rust parity gate for the per-source
 //! SKEW HOLD of the genlock timecode audio across a wall step.
 //!
-//! `src/genlock_audio_pairing.rs` (`audio_step_hold` and its helpers) is the Tier-0 authority; the
+//! `vstack:rig/core/src/genlock_audio_pairing.rs` (`audio_step_hold` and its helpers) is the Tier-0 authority; the
 //! `genlock_audio_step_*` / `genlock_audio_stamp_age_ns` helpers inside the contiguous audio-pairing
 //! block of `vendor/obs-studio/libobs/obs-source.c` are its port. This gate lifts that block VERBATIM
 //! (the shared `tests/genlock_audio_pairing_lift/mod.rs`), compiles it under `-Wall -Wextra

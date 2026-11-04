@@ -37,14 +37,16 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shading_release_fake_1487 import service_port  # noqa: E402
 SCRIPT = os.path.join(REPO, "scripts", "dev1-shading-https-install.sh")
 LIB = os.path.join(REPO, "scripts", "lib", "shading-https.sh")
 CONF = os.path.join(REPO, "scripts", "nginx", "shading.newlevel.media.conf")
-CONFIG_RS = os.path.join(REPO, "bkshading", "service", "src", "config.rs")
 
 HOSTNAME = "shading.newlevel.media"
 ZONE = "newlevel.media"
@@ -97,10 +99,8 @@ def test_lib_constants():
 
 def test_service_port_matches_appliance_default_bind():
     # ONE source of truth: the proxy upstream port must equal the service's own default_bind port.
-    with open(CONFIG_RS, encoding="utf-8") as f:
-        cfg = f.read()
-    assert '"0.0.0.0:%s"' % SERVICE_PORT in cfg, (
-        "bkshading service default_bind changed — update the proxy upstream port too"
+    assert service_port() == SERVICE_PORT, (
+        "the shading contract moved the service port — update the proxy upstream port too"
     )
     assert (":%s" % SERVICE_PORT) in UPSTREAM
 

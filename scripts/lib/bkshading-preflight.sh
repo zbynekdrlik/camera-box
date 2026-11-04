@@ -91,7 +91,7 @@ except Exception:
 print(s if isinstance(s, int) and not isinstance(s, bool) else "")' "${1:-}"
 }
 
-# issue 1237: params.iso is the camera's ISO/gain (Option<i64> in bkshading/proto/src/wire.rs,
+# issue 1237: params.iso is the camera's ISO/gain (Option<i64> in shading:bkshading/proto/src/wire.rs,
 # set from the gphoto2 `iso` config by relay/src/transport.rs). Same non-dict/bool guards as the
 # shutter extractor: a malformed/non-dict body, a non-dict params, a JSON null/bool, or an absent
 # field all print EMPTY -- never a fabricated value.

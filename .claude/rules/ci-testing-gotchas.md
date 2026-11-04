@@ -1453,6 +1453,18 @@ Typed inline in a worktree lane, the isolation guard REFUSES that command ("runs
 `bash /abs/nonet.sh` as its own call. The run is the same, and a test that needed the network now
 fails instead of passing.
 
+**No pytest-xdist inside `unshare -n`** (issue 1485): `-n 4` there dies with `INTERNALERROR> KeyError:
+<WorkerController gw0>` and runs nothing (its workers need the network namespace's loopback). Run the
+no-network check serially on the files that matter; xdist stays for the normal full run.
+
+**`unshare -n` takes loopback down too** (issue 1404, the CG arm): a test that serves on
+`127.0.0.1` (the guard's `_Fake` HTTP server) fails there with `Network is unreachable`, which is not
+a rig leak. Run such files normally and the rig-sensitive ones under `unshare -n`, or serve a
+payload as a `file://` URL (the guard's `urlopen` reads it) and stub `socket.create_connection` for
+a TCP-probe test. **Also run a serve-dir test under umask 022 or `mkdir(mode=0o700)`:** dev1's shells
+run umask 002, and a plain `mkdir` then makes a 775 dir that the sampler refuses before the code
+under test runs.
+
 ## Emitted PowerShell can be RUN locally, not only read as text (issue 1372)
 
 Several libs emit Windows PowerShell as text (the dantesync upgrade/tray programs, genlock deploy
@@ -1900,3 +1912,12 @@ rename the variable instead of disabling the warning.
 `cargo metadata` resolves every target's packages, so it fails offline on one not in the local cache
 (`failed to download cc`). `tests/intercom_pin_1487.rs` takes the commit from Cargo.lock and reads
 `<cargo home>/git/checkouts/intercom-*/<first 7 of the commit>/`, which building the crate has created.
+
+## `while read ...; do [ "$k" = x ] && v=...; done < file || return 1` always returns 1 (issue 1485)
+
+A `while` loop's status is the status of the LAST command its body ran. When the last line read does not
+match, `[ ... ] && ...` leaves 1, so a `|| return 1` (or `|| continue`) on the loop fires on every file
+whose match is not on its last line. The first cut of the reserved-cpu grade read `btime` from
+`/proc/stat` this way and never saw a pending reboot; only a test with `btime` in the middle of the
+fixture caught it. Put the match in a `case` (status 0) inside the body, and keep the `||` for a
+redirection that fails.

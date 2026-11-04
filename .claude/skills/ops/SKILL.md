@@ -13,7 +13,7 @@ description: >
 Operator feel "MV nie je 30fps" while strih GetStats shows a PERFECT render (30.0fps, 0% skips)
 and inputs show 60fps arrivals with zero holds in a short window: the hitches are sporadic
 per-cell TS-ALIGN holds caused by sender CLOCK STEPS — count them per cam box:
-`journalctl -u dantesync --since "-30 min" | grep -c Stepped`. Live event 2026-07-18: 1-33
+`journalctl -u dsync --since "-30 min" | grep -c Stepped`. Live event 2026-07-18: 1-33
 steps/30min per cam (~100 fleet-wide = a visible hitch somewhere in the grid every ~18s) from
 NTP jitter on the loaded venue LAN; at home offsets are sub-100µs with zero steps. Each ~1-2ms
 step jumps that camera's genlock timecodes -> its cell holds a frame -> a single-cell hic. An
@@ -61,7 +61,7 @@ All nodes sync to strih: stream, cam2 (`--ntp-server strih.lan`), dev1.
 | cam4 | 10.77.9.64 | v1.8.11 | — | — |
 | dev1 | — | v1.8.16 | LOCK | 0.16 ms |
 
-`systemctl is-active dantesync` = active+enabled on all.
+`systemctl is-active dsync` = active+enabled on all.
 
 **Fleet version = whatever `scripts/dantesync-version-gate.sh`'s `DANTESYNC_VERSION_PIN` says
 (1.8.30 since 2026-08-11 — NTP server-mode self-discipline fix), and a fleet ROLLOUT MUST bump
@@ -89,11 +89,11 @@ version-parity gate lists dev1. Concretely:
   (`.claude/rules/dantesync-clock-alert-watchdog.md`, the `local` node).
 
 **The fleet roll on the Windows boxes (strih+stream) covers TWO binaries: the
-`dantesync.exe` SERVICE and the `dantesync-tray.exe` TRAY** — every upgrade script until
+`dsync.exe` SERVICE and the `dsync-tray.exe` TRAY** — every upgrade script until
 2026-08-12 swapped only the service, so the tray (the version the USER actually sees in the
 system-tray UI) silently sat months stale (strih's was ~22 releases behind; user-caught). Tray
-swap = stop `dantesync-tray` process, copy `dantesync-tray-windows-amd64.exe` over
-`C:\Program Files\DanteSync\dantesync-tray.exe` (backup `.pre-<ver>`), relaunch via the win-*
+swap = stop `dsync-tray` process, copy `dsync-tray-windows-amd64.exe` over
+`C:\Program Files\dsync\dsync-tray.exe` (backup `.pre-<ver>`), relaunch via the win-*
 MCP Shell (session 1 — an ssh-launched tray is invisible to the operator). Linux nodes have no
 tray.
 
@@ -303,7 +303,7 @@ are also worthless (cam2 SSH RTT 0.4-0.8s while painting → ±0.4s error swamps
 
 **Status query:**
 - Windows: named pipe `\\.\pipe\dantesync` (length-prefixed JSON; PowerShell NamedPipeClientStream)
-- Linux: `journalctl -u dantesync` + `/var/log/dantesync/dantesync.log`
+- Linux: `journalctl -u dsync` + `/var/log/dantesync/dantesync.log`
   - Lines: `[PTP] LOCK Drift … µs/s`, `[NTP] offset:…us`
 
 **Gotchas (will bite again):**
@@ -323,7 +323,7 @@ recheck before assuming the rig is broken (2026-07-10).** `dantesync-gate.sh` fa
 active `[NTP] Stepped ...us` correction in progress at that exact moment (a normal sawtooth
 re-lock, not a real problem) — PTP was already back to LOCK. A ~20s wait + re-check showed a clean
 GATE PASS. Don't loosen the bound or bypass the gate on a single failure; do re-run it once after a
-short wait and read the box's OWN freshest journal line (`journalctl -u dantesync -n 10`) to confirm
+short wait and read the box's OWN freshest journal line (`journalctl -u dsync -n 10`) to confirm
 it's mid-correction rather than genuinely stuck DEGRADED.
 
 ## The strih/stream `:8899` `BundleStateServer` scheduled task has NO restart-on-failure by default (found 2026-07-10)
@@ -657,9 +657,9 @@ THE STUCK STATE (intermittent, after long uptime): the cam→OBS NDI receive on 
 happens, a full PC reboot clears it (2026-06-26: cam1→strih ~10→30.2 fps, underruns 290k→0 after
 reboot). Restarting only the dantesync service does NOT fix the NDI collapse.
 
-**DO NOT use `dantesync.exe` CPU as the stuck signal on strih — it is a RED HERRING (corrected
+**DO NOT use `dsync.exe` CPU as the stuck signal on strih — it is a RED HERRING (corrected
 2026-06-29).** strih is the cluster NTP MASTER (`ntp_server_mode.enabled=true` in
-`C:\ProgramData\DanteSync\config.json`); its NTP-serving thread busy-loops ~99% of ONE core
+`C:\ProgramData\dsync\config.json`); its NTP-serving thread busy-loops ~99% of ONE core
 CONTINUOUSLY since process start — present at every boot, healthy or not. The stream box (an NTP
 client) does NOT do this. So a 99%-core dantesync on strih is NORMAL and a reboot does NOT fix it
 (the busy-loop resumes identically next boot). The 2026-06-29 incident: a black #312 program +
@@ -1480,7 +1480,7 @@ already cured by enabling phase_slew. Full mechanism + the supervisor RUNBOOK li
 `.claude/rules/resolume-dantesync.md`; the maintenance tier in brief:
 
 - **Maintenance-tier health check (REPORT-ONLY, never `[0/8]`):** `scripts/dantesync-maintenance-gate.sh
-  --box resolume` asserts, from `:8898/status` + `dantesync --version`, that resolume is on the pin,
+  --box resolume` asserts, from `:8898/status` + `dsync --version`, that resolume is on the pin,
   `is_locked`, `ntp_failed=false`, `ntp_age_s<120`, `|ntp_offset_us|<2000`, `phase_slew_enabled=true`.
   Prints ONE honest row — **SKIP when away** (`obs_fleet_is_home resolume` false — never a false
   red), OK / ALARM / UNKNOWN when home. Exit 0 OK|SKIP, 30 ALARM, 11 UNKNOWN. Run it on the same

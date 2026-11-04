@@ -51,8 +51,9 @@ def _stubs(tmp_path, program_out, hosts):
         "host = next(a for a in args[1:] if '@' in a).split('@', 1)[1].split(':', 1)[0]\n"
         "state = d / f'version-{host}'\n"
         "if tool == 'scp':\n"
-        "    shutil.copy(args[-2], d / f'uploaded-{host}.ps1')\n"
-        "    shutil.copy(args[-2], d / 'uploaded.ps1')\n"
+        "    if 'hadLegacy' not in pathlib.Path(args[-2]).read_text():\n"  # issue 1487: not the finalize
+        "        shutil.copy(args[-2], d / f'uploaded-{host}.ps1')\n"
+        "        shutil.copy(args[-2], d / 'uploaded.ps1')\n"
         "    shutil.copy(args[-2], d / f'upload-{len(list(d.glob(\"upload-*.ps1\")))}.ps1')\n"
         "    sys.exit(0)\n"
         "cmd = args[-1]\n"

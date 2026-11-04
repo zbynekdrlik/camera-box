@@ -27,8 +27,9 @@ MODULE = os.path.join(REPO, "scripts", "camera_test_settings.py")
 LIB = os.path.join(REPO, "scripts", "lib", "camera-test-settings.sh")
 BASELINE = os.path.join(REPO, "scripts", "camera-test-baseline.json")
 E2E = os.path.join(REPO, "scripts", "recording-e2e.sh")
-TRANSPORT_RS = os.path.join(REPO, "bkshading", "relay", "src", "transport", "reads.rs")  # issue 808: split out of transport.rs
-READ_RS = os.path.join(REPO, "bkshading", "proto", "src", "read.rs")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shading_release_fake_1487 import contract  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("camera_test_settings", MODULE)
 cts = importlib.util.module_from_spec(_spec)
@@ -63,23 +64,26 @@ def _blocks(values):
 
 
 # ---------------------------------------------------------------------------------------------
-# key names come from the relay's own transport source -- never guessed
+# key names come from the shading contract -- never guessed
 # ---------------------------------------------------------------------------------------------
-def test_every_read_key_is_one_of_the_relay_core_config_keys():
-    src = open(TRANSPORT_RS, encoding="utf-8").read()
-    m = re.search(r"pub const CORE_CONFIG_KEYS: \[&str; \d+\] = \[([^\]]*)\]", src)
-    assert m, "CORE_CONFIG_KEYS not found in bkshading/relay/src/transport/reads.rs"
-    relay_keys = re.findall(r'"([^"]+)"', m.group(1))
+def _contract_keys():
+    """{key: its camera-box E2E column} of the contract's gphoto2 key table."""
+    rows = re.findall(r"^\| `([^`]+)` \| [^|]* \| ([^|]*?) \|$", contract(), re.M)
+    assert len(rows) >= 8, rows
+    return dict(rows)
+
+
+def test_every_read_key_is_a_contract_key():
+    keys = _contract_keys()
     for k in cts.READ_KEYS:
-        assert k in relay_keys, "key %r is not one of the relay's CORE_CONFIG_KEYS %s" % (k, relay_keys)
+        assert k in keys, "key %r is not in the shading contract %s" % (k, sorted(keys))
+        assert "read" in keys[k], "the contract does not let the E2E read %r: %s" % (k, keys[k])
 
 
-def test_every_enforceable_key_is_one_the_relay_writes():
-    src = open(READ_RS, encoding="utf-8").read()
-    body = src[src.index("pub fn plan_writes("):]
-    written = set(re.findall(r'out\.push\(\(\s*"([^"]+)"\.to_string\(\)', body))
+def test_every_enforceable_key_is_one_the_contract_lets_the_e2e_set():
+    keys = _contract_keys()
     for k in cts.ENFORCEABLE_KEYS:
-        assert k in written, "enforceable key %r is not a key plan_writes sets (%s)" % (k, sorted(written))
+        assert "set" in keys[k], "the contract does not let the E2E set %r: %s" % (k, keys[k])
 
 
 def test_shutter_and_iso_are_the_required_keys_and_fps_is_never_enforced():

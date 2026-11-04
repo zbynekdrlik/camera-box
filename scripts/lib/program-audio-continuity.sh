@@ -28,6 +28,14 @@
 # the block says the obs-vban check is n/a). The transport is stream_box_exec (bash over plain ssh on
 # Linux, PowerShell through win_ssh_run on Windows), bounded by `timeout`.
 #
+# issue 1485: a strih box whose facts take the program from the Dante device `strih-obs` (the obs
+# release's dante_input source, strih-snv) is graded too, over the SAME window on its OWN OBS log: the
+# marks also record the strih log's line count (program-audio-continuity-strih-<label>.mark, through the
+# ONE strih log reader strih-log-read.sh), and the gate folds scripts/dante_input_continuity.py's result
+# into the block (`strih_dante`, the worse verdict wins, so the report needs no second key). The strih
+# host is $STRIH (recording-e2e.sh's), its facts by its obs-fleet row; a box without the Dante program
+# is not graded here. Seam: PROGRAM_AUDIO_CONTINUITY_STRIH_READ_CMD (`CMD count|since HOST FROM`).
+#
 # Knobs: PROGRAM_AUDIO_CONTINUITY_LOOKBACK (2000 lines before the start mark: the opening status line
 # is at most 10 s back, the ASRC line 60 s), _WAIT_S (90 s for the closing lines) / _STEP_S (10 s),
 # _READ_TIMEOUT_S (60 s per read). Test seams: PROGRAM_AUDIO_CONTINUITY_READ_CMD (`CMD mark|slice HOST
@@ -35,6 +43,75 @@
 
 _PROGRAM_AUDIO_CONTINUITY_LIB="${BASH_SOURCE[0]%/*}"
 command -v stream_box_platform >/dev/null 2>&1 || . "$_PROGRAM_AUDIO_CONTINUITY_LIB/stream-box.sh"
+command -v strih_log_line_count >/dev/null 2>&1 || . "$_PROGRAM_AUDIO_CONTINUITY_LIB/strih-log-read.sh"
+
+# _program_audio_continuity_strih_dante HOST -> rc 0 when the obs-fleet box at HOST is a strih whose box
+# facts take the program from the Dante device strih-obs (issue 1485). Facts load in a SUBSHELL.
+_program_audio_continuity_strih_dante() {
+  local host="${1-}" name lib="$_PROGRAM_AUDIO_CONTINUITY_LIB"
+  [ -n "$host" ] || return 1
+  name="$(obs_fleet_name_for_host "$host" 2>/dev/null)" || return 1
+  [ -n "$name" ] && [ -f "${lib}/../strih-boxes/${name}.env" ] || return 1
+  (
+    command -v strih_box_load >/dev/null 2>&1 || . "${lib}/strih-box-facts.sh"
+    command -v strih_program_dante_declared >/dev/null 2>&1 || . "${lib}/strih-dante-input.sh"
+    strih_box_load "$name" >/dev/null 2>&1 && strih_program_dante_declared
+  )
+}
+
+# _program_audio_continuity_strih_read MODE HOST [FROM] -> the strih log's line count (count) or every
+# line after the first FROM lines (since).
+_program_audio_continuity_strih_read() {
+  local mode="$1" host="$2" from="${3-}" t="${PROGRAM_AUDIO_CONTINUITY_READ_TIMEOUT_S:-60}"
+  _program_audio_continuity_count_ok "$t" || t=60
+  if [ -n "${PROGRAM_AUDIO_CONTINUITY_STRIH_READ_CMD:-}" ]; then
+    timeout "$t" "$PROGRAM_AUDIO_CONTINUITY_STRIH_READ_CMD" "$mode" "$host" "$from"
+    return
+  fi
+  if [ "$mode" = count ]; then
+    strih_log_line_count "$host" "${STRIH_USER:-newlevel}" "${STRIH_PW:-newlevel}" "$t"
+  else
+    strih_log_since_line "$host" "${STRIH_USER:-newlevel}" "${STRIH_PW:-newlevel}" "$from" "$t"
+  fi
+}
+
+# _program_audio_continuity_strih_gate DIR BLOCK -> fold the strih Dante grade into BLOCK (issue 1485).
+_program_audio_continuity_strih_gate() {
+  local dir="$1" block="$2" host="${STRIH:-}" py="${_PROGRAM_AUDIO_CONTINUITY_LIB}/../dante_input_continuity.py"
+  local s="" e="" from slog="$dir/program-audio-continuity-strih-log.txt" tries step i rc
+  _program_audio_continuity_strih_dante "$host" || return 0
+  echo "    [program-audio] issue 1485: the strih ${host} takes the program from the Dante device strih-obs -- graded on its own OBS log"
+  read -r s <"$dir/program-audio-continuity-strih-start.mark" 2>/dev/null || true
+  read -r e <"$dir/program-audio-continuity-strih-stop.mark" 2>/dev/null || true
+  if ! _program_audio_continuity_count_ok "$s" || ! _program_audio_continuity_count_ok "$e" || [ "$e" -lt "$s" ]; then
+    python3 "$py" --unknown "no strih OBS log window marks (start '${s}', stop '${e}'), or the log restarted inside the window" \
+      --fold-into "$block" 2>&1 | sed 's/^/    /' || true
+    return 0
+  fi
+  from="${PROGRAM_AUDIO_CONTINUITY_LOOKBACK:-2000}"
+  _program_audio_continuity_count_ok "$from" || from=2000
+  from=$((s - from))
+  [ "$from" -ge 0 ] || from=0
+  step="${PROGRAM_AUDIO_CONTINUITY_STEP_S:-10}"
+  _program_audio_continuity_count_ok "$step" || step=10
+  tries=$(( ${PROGRAM_AUDIO_CONTINUITY_WAIT_S:-90} / (step > 0 ? step : 1) + 1 ))
+  for ((i = 1; i <= tries; i++)); do
+    if _program_audio_continuity_strih_read since "$host" "$from" 2>/dev/null | tr -d '\r' >"$slog" && [ -s "$slog" ]; then
+      rc=0
+      python3 "$py" --log "$slog" --first-line "$((from + 1))" --start-line "$s" --end-line "$e" \
+        --out "$dir/program-audio-continuity-strih.json" >/dev/null 2>&1 || rc=$?
+      if [ "$rc" = 2 ] && [ "$i" -lt "$tries" ] && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("retryable") else 1)' \
+           "$dir/program-audio-continuity-strih.json" 2>/dev/null; then
+        sleep "$step"; continue
+      fi
+      python3 "$py" --log "$slog" --first-line "$((from + 1))" --start-line "$s" --end-line "$e" \
+        --fold-into "$block" 2>&1 | sed 's/^/    /' || true
+      return 0
+    fi
+    [ "$i" -lt "$tries" ] && sleep "$step"
+  done
+  python3 "$py" --unknown "the strih OBS log could not be read from ${host} (${tries} tries)" --fold-into "$block" 2>&1 | sed 's/^/    /' || true
+}
 
 # A log name the box may hand back: OBS names its logs `YYYY-MM-DD HH-MM-SS.txt`. Anything else is
 # refused before it reaches a remote command (spelled-out digit sets: a locale bracket range is wider).
@@ -115,6 +192,17 @@ program_audio_continuity_mark() {
   else
     echo "    WARNING: [program-audio] issue 1439: no window ${label} mark from the stream box ${host} (read: '${out}') -- the program-audio continuity gate will read UNKNOWN and fail the run" >&2
   fi
+  # issue 1485: the strih Dante program's window on the strih OBS log
+  if _program_audio_continuity_strih_dante "${STRIH:-}"; then
+    rm -f "$dir/program-audio-continuity-strih-${label}.mark" 2>/dev/null || true
+    count="$(_program_audio_continuity_strih_read count "$STRIH" 2>/dev/null | tr -d '\r' | head -n 1)" || count=""
+    if _program_audio_continuity_count_ok "$count"; then
+      printf '%s\n' "$count" >"$dir/program-audio-continuity-strih-${label}.mark" 2>/dev/null || true
+      echo "    [program-audio] issue 1485: window ${label} mark = line ${count} of the strih OBS log (Dante strih-obs)"
+    else
+      echo "    WARNING: [program-audio] issue 1485: no window ${label} mark from the strih ${STRIH} -- the Dante program grade will read UNKNOWN and fail the run" >&2
+    fi
+  fi
   return 0
 }
 
@@ -124,7 +212,7 @@ program_audio_continuity_gate() {
   local log="$dir/program-audio-continuity-log.txt" platform input="" expect="" reason="" rc=0
   local sname="" scount="" ename="" ecount="" newest="" from tries step wmax back raw i widened=0
   local -a vban=()
-  rm -f "$block" "$log" 2>/dev/null || true
+  rm -f "$block" "$log" "$dir/program-audio-continuity-strih.json" 2>/dev/null || true
   platform="$(_program_audio_continuity_platform "$host")"
   echo "[program-audio] issue 1439: program-audio continuity over the recording window (stream box ${host}, ${platform}) -- BLOCKING"
   if [ "$platform" = linux ]; then
@@ -206,6 +294,7 @@ program_audio_continuity_gate() {
   fi
   [ -s "$block" ] || python3 "$py" --unknown "the continuity decision wrote no result" --input "$input" \
     "${vban[@]}" --out "$block" >/dev/null 2>&1 || true
+  _program_audio_continuity_strih_gate "$dir" "$block" || true
   rc=0
   if [ -n "$verdict" ] && [ -f "$verdict" ]; then
     python3 "$py" --from-block "$block" --input "$input" --merge-into "$verdict" 2>&1 | sed 's/^/    /' || true

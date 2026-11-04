@@ -21,6 +21,14 @@ paths:
 - **`src/lib.rs` keeps the old paths** with `pub use`, so `camera_box::genlock_wall_step` and the
   binaries work unchanged. `qpsk_marker` is written `::qpsk_marker::qpsk_marker`: the leading `::`
   names the crate, not the re-export.
+- **The benches stay here** on the re-exports (`genlock_n2_grid_bench`, `genlock_fifo_relabel_bench`,
+  `genlock_shallow_av_bench`, the ASRC benches). `genlock_audio_pairing_bench.rs` uses `use super::*`,
+  so `src/lib.rs` mounts it in a `genlock_audio_pairing` module that glob re-exports rig-core; that
+  module carries `#[path = "."]`, because a `../` path needs a `src/genlock_audio_pairing/` directory.
+- **A script that runs inside the full-path E2E job cannot read the pinned source.** That job has no
+  cargo, so no checkout of the tag. `scripts/genlock_n2_grid.py` reads the vendored C
+  `#define GENLOCK_N2_AGE_BASE_NS`, which the parity gate holds equal to the pinned Rust. Only tests
+  use the pinned-source helpers.
 - **`jxs-recv-ffi` / `jxs-send-ffi` are never root dependencies.** They pull the codec in
   unconditionally, and a default build must need no cmake or nasm.
 - **The moved crates' unit tests run in vstack's CI, not here.** Cargo refuses `-p` on a dependency,

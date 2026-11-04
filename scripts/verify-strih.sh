@@ -284,11 +284,11 @@ fi
 #    dantesync 1.12.0 master in daily mode on the daily bound + margin and its nightly schedule (a
 #    dead schedule reads DATE MASTER OUT); without a readable /status on the step bound + margin,
 #    named as such. Never the 2 ms UTC bound.
-DS_ACTIVE="$(systemctl is-active dantesync 2>/dev/null || true)"
+DS_ACTIVE="$(systemctl is-active dsync 2>/dev/null || true)"
 if [ "$DS_ACTIVE" != active ]; then
-  bad "dantesync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
+  bad "dsync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
 else
-  DS_JOURNAL="$(journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null || true)"
+  DS_JOURNAL="$(journalctl -u dsync --no-pager -n 400 -o short-iso 2>/dev/null || true)"
   # Issue 1372: the date master's journal reads `[NTP] offset:-2140us (date authority, fleet line
   # ..., step bound 50000us)` on every release since 1.9.0 -- the line cannot tell a 1.11.x master
   # (micro-corrections, DATE_MASTER_MICRO_BOUND_MS) from a 1.10.0 one (step bound). The box's own
@@ -345,8 +345,8 @@ esac
 
 # 9) program audio by the FACTS (issue 1439): a box declaring the console's VBAN program -> its obs-vban source; a hub-fed one
 #    (issue 1344) -> strih-program sink + pulse capture + hub program rx (FOH level: supervisor). Hub boxes: HDMI legs + the card leg.
-if strih_program_vban_declared; then
-  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"
+if strih_program_audio_declared; then   # issue 1485: the Dante device strih-obs, else the console's VBAN
+  strih_program_audio_grade "$SCN_BIN" "$WS_HOST" "$LOG"
 else
   AUDIO_SINK=0
   # 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's PipeWire
@@ -362,7 +362,7 @@ else
   AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/null || echo absent)"
   if systemctl is-active intercom-hub >/dev/null 2>&1; then   # hub active (M4+): the real program-feed rx off /api/state
     if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
-         | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp
+         | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="foh_dante"] or [p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp; issue 1485: a Dante box feeds from foh_dante, fohabl routed nowhere
       AUDIO_RX=1
     else
       AUDIO_RX=0
@@ -419,6 +419,7 @@ strih_home_ownership_grade "$USER_HOME"   # issue 1412: a root-owned ~/.config l
 if WHY="$(obs_box_step_applies 3-nvenc)"; then   # issue 1412: the stream role grades its own encoder
 { ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"; obs_box_strih_profile_grade "${USER_HOME}/.config/obs-studio/basic/profiles/$(strih_lx_obs_profile)"
 else obs_box_stream_encoder_grade "${USER_HOME}/.config/obs-studio/basic/profiles/$(strih_lx_obs_profile)"; obs_box_stream_dev_grade "$HERE"; obs_box_stream_restreamer_host_grade; fi
+obs_box_lease_host_grade   # issue 1474: dev1 (the rig-lease host) resolves on the box and answers 200
 
 # 12) single timesync authority (dantesync only).
 UNITS="$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null | awk '{print $1}')"
@@ -502,7 +503,7 @@ elif [ -f /etc/systemd/system/intercom-hub.service ]; then
   elif [ "${IH_EN}/${IH_ACT}" = enabled/active ]; then ok "intercom-hub.service enabled + active"
   elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service enabled=${IH_EN:-unknown} active=${IH_ACT:-unknown} -- the interkom is down (issue 1418): systemctl enable --now intercom-hub; journalctl -u intercom-hub"
   else note "intercom-hub.service installed (enabled=${IH_EN:-unknown}, active=${IH_ACT:-unknown}) -- ${WHY}"; fi
-  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d; strih_intercom_hub_memlock_grade "http://${WS_HOST}:8790/api/state"; strih_intercom_hub_version_grade "http://${WS_HOST}:8790" "$(strih_box_loaded_name)"   # issue 1412 role drop-in; issue 1401 memory lock; issue 1467 hub version
+  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d; strih_intercom_hub_memlock_grade "http://${WS_HOST}:8790/api/state"; strih_intercom_hub_dante_rx_grade "http://${WS_HOST}:8790/api/state"; strih_intercom_hub_version_grade "http://${WS_HOST}:8790" "$(strih_box_loaded_name)"   # issue 1412 role drop-in; issue 1401 memory lock; issue 1467 hub version
 elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1418: the interkom runs on it)"
 else note "intercom-hub.service not installed -- ${WHY}"; fi
 
@@ -772,7 +773,7 @@ DS_JOIN_V="$(strih_dantesync_join_verdict "$(strih_lx_ip)")"; case "$DS_JOIN_V" 
 #     setup-strih step 2 emits for the role, no drop-in overrides it, and the running process runs its
 #     ExecStart (strih_dantesync_unit_verdict). Step 2 restarts only on a change (a date-master restart
 #     steps the whole fleet date), so drift is caught HERE, never by a blind restart on a deploy.
-DS_UNIT_PATH_V="/etc/systemd/system/dantesync.service"
+DS_UNIT_PATH_V="/etc/systemd/system/dsync.service"
 DS_ARGS_V="$(strih_lx_dantesync_args 2>/dev/null)" || DS_ARGS_V=""
 DS_UNIT_ARGV_V="$(strih_dantesync_running_argv 2>/dev/null || true)"
 if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" "$(strih_lx_ip)" 2>/dev/null)"; then
@@ -832,6 +833,7 @@ else
   bad "(bkshading-service) unit /etc/systemd/system/bkshading-service.service not installed -- re-run setup-strih.sh step 16c (issue 1353)"
 fi
 
+strih_bkshading_version_grade "http://127.0.0.1:${BKSH_PORT}"   # issue 1487: against the shading pin
 else note "(bkshading-service) not graded: ${WHY}"; fi
 # 37)-40) issue 1399 session apps (scripts/lib/strih-session-apps.sh, sourced by strih-provision.sh): the
 #     browser-source keeper (unit + its last pass), the shading panel window (unit + "Shading" on :0),

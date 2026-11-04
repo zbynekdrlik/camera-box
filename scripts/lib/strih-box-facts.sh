@@ -289,7 +289,7 @@ strih_box_validate() {
       || { echo "strih-box ${name}: STRIH_HDMI_OUTPUTS '${v}' must be auto, none or 1..2 space-separated CONNECTOR:program|multiview[:noaudio] (no connector twice)" >&2; bad=1; } ;;
   esac
   # issue 1412: the box ROLE (strih = the cutter, stream = the stream OBS box), the PTP grandmaster the
-  # dantesync config allows (setup-strih step 2 writes it into a FRESH box's /etc/dantesync/config.json)
+  # dantesync config allows (setup-strih step 2 writes it into a FRESH box's /etc/dsync/config.json)
   # and whether the box runs the YouTube-guard program-audio sampler (setup-strih step 16e / verify 41).
   case "${f[STRIH_ROLE]}" in
     strih | stream) ;;
@@ -309,7 +309,14 @@ strih_box_validate() {
   # or all four `none`: a hub-fed strih (none deployed since strih-pp took lv1's `strih-obs`, 24.10.2026).
   local vs="${f[STRIH_PROGRAM_VBAN_STREAMS]}" vp="${f[STRIH_PROGRAM_VBAN_PORT]}" vr="${f[STRIH_PROGRAM_VBAN_RESERVE_MS]}"
   local ai="${f[STRIH_PROGRAM_AUDIO_INPUT]}"
-  if [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}:${ai}" = none:none:none:none ]; then
+  if [[ " ${f[STRIH_DANTE_DEVICES]} " == *" strih-obs="* ]]; then
+    # issue 1485: the program from the Dante device strih-obs (the obs release's dante_input source): no
+    # VBAN program, the input name kept (strih role only; one program source)
+    [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}" = none:none:none ] && [ "$ai" != none ] \
+      || { echo "strih-box ${name}: a strih-obs Dante device (STRIH_DANTE_DEVICES) is the program source: strih role only, STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS none, STRIH_PROGRAM_AUDIO_INPUT the input name (issue 1485)" >&2; bad=1; }
+    _strih_box_obs_input_name "$ai" \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_INPUT '${ai}' must be the OBS program-audio input's name (1..64 letters, digits, space, . _ - ( ), no space first or last)" >&2; bad=1; }
+  elif [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}:${ai}" = none:none:none:none ]; then
     :   # a hub-fed strih: its program is the hub's program_out (its STRIH_INTERCOM_CONFIG)
   else
     if [ "${f[STRIH_ROLE]}" = strih ] && { [ "$vs" = none ] || [ "$vp" = none ] || [ "$vr" = none ] || [ "$ai" = none ]; }; then
@@ -831,11 +838,11 @@ strih_lx_audio_buffering_ms() { strih_box_fact STRIH_AUDIO_BUFFERING_MS; }
 
 # strih_box_bkshading_relays_ok VALUE [PREFIX] -> 0 iff VALUE is `none` or space-separated
 # `N=<transport>@<host>:<port>` entries: N one of 1..7 and of the box's STRIH_CAMERAS (owner ruling 5977504457 + owner 26.10.2026),
-# no N twice, transport cambox-relay | sbc-relay | ethernet-rest (bkshading/service/src/config.rs; never
+# no N twice, transport cambox-relay | sbc-relay | ethernet-rest (shading:bkshading/service/src/config.rs; never
 # Bluetooth), host a host name / address that starts with a letter or digit, port 1..65535. Each problem is
 # one stderr line starting with PREFIX. The ONE grammar of the fact: the loader and the seed both call it.
 # _strih_box_relay_id ID -> 0 when ID is a relay registration id: 1-64 of [A-Za-z0-9._-] (the set the
-# bkshading service accepts, bkshading/service/src/registry.rs valid_relay_id). Spelled out, never a range.
+# bkshading service accepts, shading:bkshading/service/src/registry.rs valid_relay_id). Spelled out, never a range.
 _strih_box_relay_id() {
   local LC_ALL=C lower='abcdefghijklmnopqrstuvwxyz' upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ' digit='0123456789'
   [ "${#1}" -ge 1 ] && [ "${#1}" -le 64 ] && [[ "$1" =~ ^[${lower}${upper}${digit}._-]+$ ]]

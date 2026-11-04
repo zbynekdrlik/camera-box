@@ -5,7 +5,6 @@ Covers:
     from the 11.10.2026 recon + owner rulings (only STRIH_NDI_RUNTIME_PEER stays TODO_OWNER);
   * the obs-fleet rows strih-pp / stream-pp (name rows, traveling, in no facet) + the python twin;
   * G5 scripts/lib/dantesync-install.sh: the pinned binary + the role config, both only when absent;
-  * G6 scripts/lib/strih-ci-artifact.sh: the intercom-hub binary from a CI artifact, only when absent;
   * G7 + G11 scripts/lib/obs-box-role.sh: step 11b (xhci IRQ unit) and 16e (the sampler) by box fact;
   * intercom.strih-pp.toml (the pinned copy) against the hub's Matrix::from_toml rules (a python replica;
     the real loader runs in the intercom repo's hub/tests/deployed_matrix_pp_1412.rs);
@@ -21,13 +20,18 @@ from pathlib import Path
 
 import pytest
 
+@pytest.fixture(autouse=True)
+def _fixture_release(monkeypatch):
+    """issue 1487: these tests serve a fixture release, never the pinned bytes."""
+    monkeypatch.setenv("DSYNC_PINNED_SHA_VERSION", "")
+
+
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 FACTS = SCRIPTS / "lib" / "strih-box-facts.sh"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
 FLEET = SCRIPTS / "lib" / "obs-fleet.sh"
 DS_INSTALL = SCRIPTS / "lib" / "dantesync-install.sh"
-CI_ART = SCRIPTS / "lib" / "strih-ci-artifact.sh"
 ROLE = SCRIPTS / "lib" / "obs-box-role.sh"
 SETUP = SCRIPTS / "setup-strih.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
@@ -226,7 +230,7 @@ def test_the_install_pin_is_the_version_gates_pin():
     assert r.returncode == 0, r.stderr
     pin, url = r.stdout.splitlines()
     assert pin == _gate_pin()
-    assert url == "https://github.com/zbynekdrlik/dantesync/releases/download/v1.2.3/dantesync-linux-amd64"
+    assert url == "https://github.com/zbynekdrlik/dsync/releases/download/v1.2.3/dsync-linux-amd64"
 
 
 def _config(role, gm):
@@ -268,7 +272,7 @@ def _fake_curl(tmp_path, version, sha_ok=True):
     (bindir / "curl").write_text(
         "#!/bin/bash\nprintf '%%s\\n' \"$*\" >> %s\nout=\"\"; url=\"\"\n"
         "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2;; -*) shift;; *) url=\"$1\"; shift;; esac; done\n"
-        "case \"$url\" in *.sha256) printf '%s  dantesync-linux-amd64\\n' > \"$out\";; "
+        "case \"$url\" in *.sha256) printf '%s  dsync-linux-amd64\\n' > \"$out\";; "
         "*) cp %s \"$out\";; esac\n" % (log, sha, tmp_path / "payload"))
     (bindir / "curl").chmod(0o755)
     return bindir, log
@@ -299,7 +303,7 @@ def test_a_fresh_box_gets_the_pinned_binary_and_the_role_config(tmp_path):
            "DANTESYNC_INSTALL_CONFIG": str(tmp_path / "etc" / "config.json")}
     r = _bash("dantesync_install server 10.77.8.110", env=env, sources=(DS_INSTALL,), path_prefix=bindir)
     assert r.returncode == 0, r.stderr
-    assert "/v%s/dantesync-linux-amd64" % pin in log.read_text()
+    assert "/v%s/dsync-linux-amd64" % pin in log.read_text()
     assert os.access(env["DANTESYNC_INSTALL_BIN"], os.X_OK)
     cfg = json.loads(Path(env["DANTESYNC_INSTALL_CONFIG"]).read_text())
     assert cfg["system"]["gm_allowlist"] == ["10.77.8.110"] and cfg["ntp_server_mode"]["enabled"] is True
@@ -333,93 +337,6 @@ def test_a_download_that_is_not_the_pin_is_refused(tmp_path):
 
 # --- G6: the intercom-hub binary --------------------------------------------------------------------
 
-def _fake_github(tmp_path, branch_of_newest="dev"):
-    """A curl that answers the GitHub artifacts API with two artifacts (newest on BRANCH_OF_NEWEST, the
-    older on main) and serves each zip; it records its argv and the header it read on stdin."""
-    import zipfile
-    for name in ("newest", "main"):
-        with zipfile.ZipFile(tmp_path / ("%s.zip" % name), "w") as z:
-            z.writestr("intercom-hub", "#!/bin/sh\necho %s\n" % name)
-    api = {"artifacts": [
-        {"expired": False, "archive_download_url": "https://dl/newest", "workflow_run": {"head_branch": branch_of_newest}},
-        {"expired": False, "archive_download_url": "https://dl/main", "workflow_run": {"head_branch": "main"}},
-    ]}
-    (tmp_path / "api.json").write_text(json.dumps(api))
-    bindir = tmp_path / "ghbin"
-    bindir.mkdir()
-    (bindir / "curl").write_text(
-        "#!/bin/bash\nprintf 'ARGV %%s\\n' \"$*\" >> %(d)s/gh.log\n"
-        "hdr=\"\"; for a in \"$@\"; do [ \"$a\" = @- ] && hdr=\"$(cat)\"; done\n"
-        "printf 'HDR %%s\\n' \"$hdr\" >> %(d)s/gh.log\nout=\"\"; url=\"\"\n"
-        "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2;; -H) shift 2;; -*) shift;; *) url=\"$1\"; shift;; esac; done\n"
-        "case \"$url\" in *actions/artifacts*) cat %(d)s/api.json;; https://dl/newest) cp %(d)s/newest.zip \"$out\";; "
-        "https://dl/main) cp %(d)s/main.zip \"$out\";; *) exit 22;; esac\n" % {"d": tmp_path})
-    (bindir / "curl").chmod(0o755)
-    return bindir
-
-
-def _fake_paged_github(tmp_path, dev_on_page_1=100):
-    """A curl for a busy repo: page 1 of the artifacts API holds DEV_ON_PAGE_1 dev artifacts only,
-    page 2 holds the newest main one, page 3 is empty. It answers by the `page=` query parameter
-    (page 1 when absent) and logs every API url it was asked for."""
-    import zipfile
-    for name in ("dev", "main"):
-        with zipfile.ZipFile(tmp_path / ("%s.zip" % name), "w") as z:
-            z.writestr("intercom-hub", "#!/bin/sh\necho %s\n" % name)
-    dev = {"expired": False, "archive_download_url": "https://dl/dev", "workflow_run": {"head_branch": "dev"}}
-    main = {"expired": False, "archive_download_url": "https://dl/main", "workflow_run": {"head_branch": "main"}}
-    (tmp_path / "page1.json").write_text(json.dumps({"total_count": dev_on_page_1 + 1, "artifacts": [dev] * dev_on_page_1}))
-    (tmp_path / "page2.json").write_text(json.dumps({"total_count": dev_on_page_1 + 1, "artifacts": [main]}))
-    (tmp_path / "page3.json").write_text(json.dumps({"total_count": dev_on_page_1 + 1, "artifacts": []}))
-    bindir = tmp_path / "ghbin"
-    bindir.mkdir()
-    (bindir / "curl").write_text(
-        "#!/bin/bash\nprintf 'ARGV %%s\\n' \"$*\" >> %(d)s/gh.log\n"
-        "for a in \"$@\"; do [ \"$a\" = @- ] && cat > /dev/null; done\nout=\"\"; url=\"\"\n"
-        "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2;; -H) shift 2;; -*) shift;; *) url=\"$1\"; shift;; esac; done\n"
-        "case \"$url\" in *actions/artifacts*) p=1; case \"$url\" in *page=2*) p=2;; *page=3*) p=3;; esac; "
-        "[ \"$p\" -le 3 ] || p=3; cat %(d)s/page$p.json;; https://dl/dev) cp %(d)s/dev.zip \"$out\";; "
-        "https://dl/main) cp %(d)s/main.zip \"$out\";; *) exit 22;; esac\n" % {"d": tmp_path})
-    (bindir / "curl").chmod(0o755)
-    return bindir
-
-
-def test_a_branch_fetch_with_no_match_on_any_page_fails_cleanly_1412(tmp_path):
-    bindir = _fake_paged_github(tmp_path)
-    (tmp_path / "page2.json").write_text(json.dumps({"artifacts": []}))
-    tmproot = tmp_path / "tmproot"
-    tmproot.mkdir()
-    r = _bash('strih_ci_artifact_fetch intercom-hub-linux-amd64 "" main', sources=(CI_ART,), path_prefix=bindir,
-              env={"GH_TOKEN": "t", "STRIH_CI_ARTIFACT_TMP": str(tmproot)})
-    assert r.returncode == 1 and "could not fetch" in r.stderr
-    assert list(tmproot.iterdir()) == [], "no temp dir left behind"
-    assert "page=3" not in (tmp_path / "gh.log").read_text(), "an empty page ends the walk"
-
-
-def test_bkshading_still_takes_the_newest_artifact_of_any_branch(tmp_path):
-    bindir = _fake_github(tmp_path)
-    r = _bash('d="$(strih_ci_artifact_fetch some-art "")" && cat "$d/intercom-hub" && strih_ci_artifact_cleanup "$d" ""',
-              sources=(CI_ART,), path_prefix=bindir,
-              env={"GH_TOKEN": "t", "STRIH_CI_ARTIFACT_TMP": str(tmp_path)})
-    assert r.returncode == 0, r.stderr
-    assert "echo newest" in r.stdout
-
-
-def test_cleanup_never_removes_a_prestaged_dir_even_inside_an_old_fetch_leftover(tmp_path):
-    old = tmp_path / "strih-ci-artifact.keep"
-    pre = old / "x"
-    pre.mkdir(parents=True)
-    (pre / "intercom-hub").write_text("hub\n")
-    env = {"STRIH_CI_ARTIFACT_TMP": str(tmp_path)}
-    r = _bash('strih_ci_artifact_cleanup "%s" "%s"' % (pre, pre), sources=(CI_ART,), env=env)
-    assert r.returncode == 0 and pre.is_dir()
-    # a path outside the fetch's temp root, or not ending in /x, is never removed either
-    other = tmp_path / "elsewhere" / "strih-ci-artifact.zz" / "x"
-    other.mkdir(parents=True)
-    r = _bash('strih_ci_artifact_cleanup "%s"; strih_ci_artifact_cleanup "%s"' % (other, old), sources=(CI_ART,), env=env)
-    assert r.returncode == 0 and other.is_dir() and old.is_dir()
-
-
 def test_the_new_libs_run_clean_under_the_callers_errexit(tmp_path):
     """setup-strih / verify-strih call these under set -euo pipefail: a skip, an absent artifact, a
     kept binary and the cleanup must all return without aborting the caller."""
@@ -435,7 +352,6 @@ def test_the_new_libs_run_clean_under_the_callers_errexit(tmp_path):
             'if WHY="$(obs_box_step_applies 11b)"; then echo RAN; else echo "SKIP11b"; fi\n'
             'if WHY="$(obs_box_step_applies 16e)"; then echo RAN; else echo "SKIP16e"; fi\n'
             'dantesync_install server "$(strih_lx_dante_gm)"\n'
-            'strih_ci_artifact_cleanup "" ""\nstrih_ci_artifact_cleanup /nonexistent/x\n'
             "echo END\n")
     full = {k: v for k, v in os.environ.items() if k not in LEAKY}
     full.update(env)
@@ -539,8 +455,6 @@ def test_setup_strih_wires_g5_g6_g7_g11_and_stays_in_budget():
     assert s.index('step "11b"') < g11b < s.index("strih_nic_irq_affinity_script_text >") < s.index("step 12 ")
     g16e = s.index('if WHY="$(obs_box_step_applies 16e)"; then')
     assert s.index('step "16e"') < g16e < s.index('strih_program_audio_install "${HERE}/..') < s.index("step 17 ")
-    # 16c uses the ONE shared fetch, no inline copy of it
-    assert 'strih_ci_artifact_fetch "$BKSH_ART"' in s and "archive_download_url" not in s
 
 
 def test_verify_strih_gates_items_16_and_41_by_the_same_rule():
@@ -553,7 +467,7 @@ def test_verify_strih_gates_items_16_and_41_by_the_same_rule():
 
 def test_the_new_libs_are_source_only_and_sourced_by_strih_provision():
     p = PROVISION.read_text()
-    for lib in (DS_INSTALL, CI_ART, ROLE):
+    for lib in (DS_INSTALL, ROLE):
         assert '. "$(dirname "${BASH_SOURCE[0]}")/%s"' % lib.name in p
         head = lib.read_text().splitlines()[:3]
         assert any("airuleset:script-ok" in ln for ln in head)

@@ -2,7 +2,7 @@
 # scripts/lib/bkshading-cloudflared-runtime.sh — shared constants + pure helpers for provisioning
 # the bkshading CLOUDFLARE remote access (issue 808 cloudflare-remote milestone).
 #
-# Everything merged so far is LAN-only: the aggregation service (bkshading/service) binds the web
+# Everything merged so far is LAN-only: the aggregation service (shading:bkshading/service) binds the web
 # panel on 0.0.0.0:8770 and is reachable only on strih.lan. The owner decided remote access goes
 # through a password-protected cloudflare proxy (NOT tailscale — issue 808 comment 5355836067). A
 # `cloudflared` tunnel (config-file mode) fronts the local panel; the password is enforced at the
@@ -39,7 +39,7 @@ bkshading_cloudflared_access_marker_path() { printf '%s\n' /etc/bkshading/cloudf
 bkshading_cloudflared_apt_package() { printf '%s\n' cloudflared; }
 
 # The bkshading service (web panel) port. MUST equal the service's own default_bind port
-# (bkshading/service/src/config.rs -> "0.0.0.0:8770") so the tunnel points at exactly where the
+# (shading:bkshading/service/src/config.rs -> "0.0.0.0:8770") so the tunnel points at exactly where the
 # panel listens — the python test pins this against config.rs. ONE source of truth.
 bkshading_cloudflared_service_port() { printf '%s\n' 8770; }
 

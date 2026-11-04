@@ -40,7 +40,7 @@ RESOLUME-SNV (SP-program)
   ],
   "camera_latency_ms": 3,
   "program_audio_input": "ASIO zvuk",
-  "program_audio_vban": {"port": 6981, "stream_name": "strih-obs", "receive_buffer_ms": 30}
+  "program_audio_dante": {"device": "strih-obs"}
 }
 === profile-facts ===
 base_res=1920x1080
@@ -48,20 +48,20 @@ output_res=1920x1080
 fps=30
 color_format=NV12
 out_mode=Advanced
-rec_encoder=obs_nvenc_hevc_tex
+rec_encoder=obs_nvenc_hevc_soft
 rec_path=/srv/_REC
 rec_format=mkv
 rec_split_min=15
 === dantesync-unit ===
 [Unit]
-Description=Dante Time Sync (PTP/NTP Synchronization)
+Description=dsync (PTP/NTP Synchronization)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
 ExecStartPre=/usr/bin/timeout 120 /bin/sh -c 'until ip -o -4 addr show | grep -qF " 10.77.9.202/"; do sleep 1; done'
-ExecStart=/usr/local/bin/dantesync
+ExecStart=/usr/local/bin/dsync
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -123,8 +123,9 @@ systemctl --user start strih-browser-keeper.service || true
 systemctl --user start bkshading-panel-app.service || true
 systemctl --user start companion-satellite.service || true
 systemctl --user start strih-satellite-watch.timer || true
-systemctl --user start dantesync-tray.service || true
+systemctl --user start dsync-tray.service || true
 systemctl --user start strih-display-watch.service || true
+systemctl --user start dtray.service || true
 systemctl --user start obs-box-panel.service || true
 === openbox-menu ===
 <?xml version="1.0" encoding="UTF-8"?>
@@ -256,7 +257,7 @@ for irq in $irqs; do
 done
 log "done: xhci NIC IRQ(s) [${irqs}] pinned to cpu ${target}"
 === intercom-toml ===
-d81645a50f0e8b60076eb8bcd24935bcdf502b7e63c2c3f97cc1be36c044c3b3
+16fc33065971d7b1a747d0bff94335ad841f3a6c3a49fbada49480e725d7d3bb
 === ndi-runtime-peer ===
 10.77.9.65
 === companion-host-conf ===

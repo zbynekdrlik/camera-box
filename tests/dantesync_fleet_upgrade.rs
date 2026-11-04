@@ -156,7 +156,7 @@ fn upgrade_status_orders_semver_and_flags_unknown() {
 fn release_url_linux_points_at_pinned_tag_asset() {
     assert_eq!(
         run_sourced("dantesync_release_url_linux 1.8.41").trim(),
-        "https://github.com/zbynekdrlik/dantesync/releases/download/v1.8.41/dantesync-linux-amd64",
+        "https://github.com/zbynekdrlik/dsync/releases/download/v1.8.41/dsync-linux-amd64",
         "#876: Linux URL must pin the tag (vX.Y.Z), never releases/latest"
     );
 }
@@ -165,7 +165,7 @@ fn release_url_linux_points_at_pinned_tag_asset() {
 fn release_url_windows_points_at_pinned_tag_asset() {
     assert_eq!(
         run_sourced("dantesync_release_url_windows 1.8.41").trim(),
-        "https://github.com/zbynekdrlik/dantesync/releases/download/v1.8.41/dantesync-windows-amd64.exe",
+        "https://github.com/zbynekdrlik/dsync/releases/download/v1.8.41/dsync-windows-amd64.exe",
         "#876: Windows URL must pin the tag (vX.Y.Z), never releases/latest"
     );
 }
@@ -176,7 +176,7 @@ fn release_url_windows_points_at_pinned_tag_asset() {
 fn linux_upgrade_cmd_downloads_pinned_verifies_sha_stops_swaps_restarts() {
     let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.41");
     assert!(
-        cmd.contains("releases/download/v1.8.41/dantesync-linux-amd64"),
+        cmd.contains("releases/download/v1.8.41/dsync-linux-amd64"),
         "#876: Linux upgrade must download the PINNED asset. Got:\n{cmd}"
     );
     assert!(
@@ -184,19 +184,19 @@ fn linux_upgrade_cmd_downloads_pinned_verifies_sha_stops_swaps_restarts() {
         "#876: Linux upgrade must verify the download's SHA256. Got:\n{cmd}"
     );
     assert!(
-        cmd.contains("systemctl stop dantesync"),
+        cmd.contains("systemctl stop dsync"),
         "#876: Linux upgrade must stop the service before swapping the binary. Got:\n{cmd}"
     );
     assert!(
-        cmd.contains("/usr/local/bin/dantesync"),
-        "#876: Linux upgrade must install to /usr/local/bin/dantesync (install.sh's path). Got:\n{cmd}"
+        cmd.contains("/usr/local/bin/dsync"),
+        "#876: Linux upgrade must install to /usr/local/bin/dsync (install.sh's path). Got:\n{cmd}"
     );
     assert!(
-        cmd.contains("systemctl restart dantesync") || cmd.contains("systemctl start dantesync"),
+        cmd.contains("systemctl restart dsync") || cmd.contains("systemctl start dsync"),
         "#876: Linux upgrade must (re)start the service after the swap. Got:\n{cmd}"
     );
     assert!(
-        cmd.contains("dantesync --version"),
+        cmd.contains("dsync --version"),
         "#876: Linux upgrade must read the version back for verification. Got:\n{cmd}"
     );
 }
@@ -207,14 +207,14 @@ fn linux_upgrade_cmd_downloads_pinned_verifies_sha_stops_swaps_restarts() {
 fn linux_upgrade_cmd_downloads_and_verifies_before_stopping_the_service() {
     let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.41");
     let dl = cmd
-        .find("dantesync-linux-amd64")
+        .find("dsync-linux-amd64")
         .expect("#876: expected the download line");
     let sha = cmd
         .find("sha256")
         .or_else(|| cmd.find("sha256sum"))
         .expect("#876: expected a sha256 verification step");
     let stop = cmd
-        .find("systemctl stop dantesync")
+        .find("systemctl stop dsync")
         .expect("#876: expected a service-stop line");
     assert!(
         dl < stop && sha < stop,
@@ -229,9 +229,9 @@ fn linux_upgrade_cmd_downloads_and_verifies_before_stopping_the_service() {
 fn linux_upgrade_cmd_backs_up_current_binary_before_swap() {
     let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.41");
     let bak = cmd
-        .find("/usr/local/bin/dantesync.bak")
+        .find("/usr/local/bin/dsync.bak")
         .expect("#876: expected a backup of the current binary");
-    // the live binary is overwritten via `install -m ... /usr/local/bin/dantesync`; the backup
+    // the live binary is overwritten via `install -m ... /usr/local/bin/dsync`; the backup
     // must appear before that overwrite so a failed verification can be rolled back.
     let overwrite = cmd
         .find("install -m")
@@ -246,11 +246,11 @@ fn linux_upgrade_cmd_backs_up_current_binary_before_swap() {
 fn linux_rollback_cmd_restores_backup_and_restarts() {
     let cmd = run_sourced("dantesync_linux_rollback_cmd");
     assert!(
-        cmd.contains("/usr/local/bin/dantesync.bak") && cmd.contains("/usr/local/bin/dantesync"),
+        cmd.contains("/usr/local/bin/dsync.bak") && cmd.contains("/usr/local/bin/dsync"),
         "#876: Linux rollback must restore the .bak over the live binary. Got:\n{cmd}"
     );
     assert!(
-        cmd.contains("systemctl restart dantesync") || cmd.contains("systemctl start dantesync"),
+        cmd.contains("systemctl restart dsync") || cmd.contains("systemctl start dsync"),
         "#876: Linux rollback must restart the service. Got:\n{cmd}"
     );
 }
@@ -265,7 +265,7 @@ fn linux_rollback_cmd_restores_backup_and_restarts() {
 fn windows_upgrade_ps_downloads_pinned_verifies_stops_swaps_starts() {
     let ps = run_sourced("dantesync_windows_upgrade_ps 1.8.41");
     assert!(
-        ps.contains("releases/download/v1.8.41/dantesync-windows-amd64.exe"),
+        ps.contains("releases/download/v1.8.41/dsync-windows-amd64.exe"),
         "#876: Windows upgrade must download the PINNED asset. Got:\n{ps}"
     );
     assert!(
@@ -277,7 +277,7 @@ fn windows_upgrade_ps_downloads_pinned_verifies_stops_swaps_starts() {
         "#876: Windows upgrade must stop the service before replacing the exe. Got:\n{ps}"
     );
     assert!(
-        ps.contains(r"C:\Program Files\DanteSync\dantesync.exe"),
+        ps.contains(r"C:\Program Files\dsync\dsync.exe"),
         "#876: Windows upgrade must replace the installed exe path. Got:\n{ps}"
     );
     assert!(
@@ -360,8 +360,7 @@ fn windows_upgrade_ps_self_heals_on_swap_failure() {
 fn windows_rollback_ps_restores_backup_and_starts() {
     let ps = run_sourced("dantesync_windows_rollback_ps");
     assert!(
-        ps.contains("dantesync.exe.bak")
-            && ps.contains(r"C:\Program Files\DanteSync\dantesync.exe"),
+        ps.contains("dsync.exe.bak") && ps.contains(r"C:\Program Files\dsync\dsync.exe"),
         "#876: Windows rollback must restore the .bak over the live exe. Got:\n{ps}"
     );
     assert!(
@@ -569,7 +568,10 @@ fn rolls_back_on_verification_failure() {
 /// failure (which — with a pre-existing .bak — would stop a HEALTHY master and downgrade it).
 #[test]
 fn upgrade_command_failure_is_reported_not_blind_rolled_back() {
-    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    // issue 1487: the upgrade programs moved to scripts/lib/dsync-swap.sh (the script's line budget).
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh")
+        + &fs::read_to_string(script().parent().unwrap().join("lib/dsync-swap.sh"))
+            .expect("read lib/dsync-swap.sh");
     // Linux self-heal: an ERR trap restoring the .bak, disarmed on success.
     assert!(
         s.contains("_dantesync_restore") && s.contains("trap '_dantesync_restore' ERR"),
@@ -625,7 +627,7 @@ fn windows_path_sends_a_ps1_file() {
 
 /// The cam boxes run DELIBERATE read-only roots (the deploy-fleet.sh remount cycle exists for
 /// exactly this), and the FIRST live canary run failed on cam1 with
-/// `cp: cannot create regular file '/usr/local/bin/dantesync.bak': Read-only file system`
+/// `cp: cannot create regular file '/usr/local/bin/dsync.bak': Read-only file system`
 /// (2026-08-16, v1.8.42 roll). The generated Linux upgrade script must therefore detect a
 /// non-writable binary dir, remount rw BEFORE the backup step, and restore ro via the EXIT
 /// trap so BOTH the success path and the self-heal ERR path end read-only again.
@@ -636,7 +638,7 @@ fn linux_upgrade_cmd_remounts_ro_root_rw_before_backup_and_restores_ro_on_exit()
         .find("mount -o remount,rw /")
         .expect("upgrade cmd must remount a read-only root rw before touching the binary");
     let bak = cmd
-        .find("/usr/local/bin/dantesync.bak")
+        .find("/usr/local/bin/dsync.bak")
         .expect("#876: expected the backup of the current binary");
     assert!(
         rw < bak,
@@ -793,7 +795,7 @@ fn escalation_feeds_password_via_stdin_not_the_uploaded_file() {
 fn linux_upgrade_cmd_prefers_staged_binary_then_curl_then_wget() {
     let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.43");
     assert!(
-        cmd.contains("/tmp/dantesync-staged"),
+        cmd.contains("/tmp/dsync-staged"),
         "#1077: the generated script must prefer a pre-staged binary (curl-less path for cam3). Got:\n{cmd}"
     );
     assert!(
@@ -801,7 +803,7 @@ fn linux_upgrade_cmd_prefers_staged_binary_then_curl_then_wget() {
         "#1077: on-box fetch must fall back to curl then wget when there is no staged binary. Got:\n{cmd}"
     );
     let staged = cmd
-        .find("dantesync-staged")
+        .find("dsync-staged")
         .expect("#1077: expected the pre-staged binary check");
     let curl = cmd
         .find("command -v curl")
@@ -828,7 +830,7 @@ fn linux_upgrade_cmd_sha_verifies_after_fetch_before_stop_for_every_path() {
         .find("sha256sum")
         .expect("#1077: expected a sha256sum verification of the fetched binary");
     let stop = cmd
-        .find("systemctl stop dantesync")
+        .find("systemctl stop dsync")
         .expect("#1077: expected the service-stop line");
     assert!(
         sha < stop,
@@ -836,7 +838,7 @@ fn linux_upgrade_cmd_sha_verifies_after_fetch_before_stop_for_every_path() {
     );
     // the staged branch copies both the binary and its .sha256 into the verify tmp dir
     assert!(
-        cmd.contains("/tmp/dantesync-staged.sha256"),
+        cmd.contains("/tmp/dsync-staged.sha256"),
         "#1077: the staged path must carry its own .sha256 for the on-box re-verify. Got:\n{cmd}"
     );
 }
@@ -1044,7 +1046,7 @@ fn linux_rollback_cmd_detects_ro_root_via_findmnt_with_proc_mounts_fallback() {
 }
 
 // --- #1265: wait for the dantesync PROCESS to exit before touching the exe ----------------------
-// `Stop-Service dantesync` returns when the SCM reports STOPPED, but on strih the dantesync.exe
+// `Stop-Service dsync` returns when the SCM reports STOPPED, but on strih the dsync.exe
 // PROCESS lingers a few seconds after that (its Npcap capture handle on the X520 tears down
 // slowly), so an immediate `Copy-Item -Force $tmp $exe` hits "The process cannot access the file
 // ... because it is being used by another process", the self-heal restores the .bak, and the
@@ -1063,10 +1065,10 @@ fn offset_of(hay: &str, needle: &str, what: &str) -> usize {
 #[test]
 fn windows_upgrade_ps_waits_for_the_process_to_exit_between_stop_and_swap_1265() {
     let ps = run_sourced("dantesync_windows_upgrade_ps 1.8.53");
-    let stop = offset_of(&ps, "Stop-Service dantesync", "the service stop");
+    let stop = offset_of(&ps, "Stop-Service dsync", "the service stop");
     let wait = offset_of(
         &ps,
-        "Wait-Process -Name dantesync",
+        "Wait-Process -Name dsync",
         "a bounded wait for the dantesync PROCESS to exit",
     );
     let swap = offset_of(&ps, "Copy-Item -Force $tmp $exe", "the exe swap");
@@ -1080,7 +1082,7 @@ fn windows_upgrade_ps_waits_for_the_process_to_exit_between_stop_and_swap_1265()
     // script must fall back to Stop-Process -Force before the swap, never leave the file locked.
     let kill = offset_of(
         &ps,
-        "Stop-Process -Name dantesync -Force",
+        "Stop-Process -Name dsync -Force",
         "the forced-kill backstop for a wedged process",
     );
     assert!(
@@ -1088,25 +1090,25 @@ fn windows_upgrade_ps_waits_for_the_process_to_exit_between_stop_and_swap_1265()
         "#1265: the forced-kill backstop must sit between the bounded wait and the swap \
          (wait={wait} kill={kill} swap={swap}). Got:\n{ps}"
     );
-    // exact-name process cmdlets only — `dantesync-tray.exe` (the autostart tray, a separate
+    // exact-name process cmdlets only — `dsync-tray.exe` (the autostart tray, a separate
     // process) must never be waited on or killed by the daemon swap. Issue 1372: the same program
     // now refreshes the tray in its OWN step after the service is back, so the invariant is scoped
     // to the daemon's stop -> swap window (and a wildcard stays banned everywhere).
     let daemon_swap = &ps[stop..swap];
     assert!(
-        !ps.contains("dantesync*") && !daemon_swap.contains("dantesync-tray"),
+        !ps.contains("dantesync*") && !daemon_swap.contains("dsync-tray"),
         "#1265: the process wait/kill must target the daemon process name EXACTLY, never a wildcard \
-         that would also hit dantesync-tray. Got:\n{ps}"
+         that would also hit dsync-tray. Got:\n{ps}"
     );
 }
 
 #[test]
 fn windows_rollback_ps_waits_for_the_process_to_exit_between_stop_and_restore_1265() {
     let ps = run_sourced("dantesync_windows_rollback_ps");
-    let stop = offset_of(&ps, "Stop-Service dantesync", "the service stop");
+    let stop = offset_of(&ps, "Stop-Service dsync", "the service stop");
     let wait = offset_of(
         &ps,
-        "Wait-Process -Name dantesync",
+        "Wait-Process -Name dsync",
         "a bounded wait for the dantesync PROCESS to exit",
     );
     let restore = offset_of(&ps, "Copy-Item -Force $bak $exe", "the .bak restore");
@@ -1118,7 +1120,7 @@ fn windows_rollback_ps_waits_for_the_process_to_exit_between_stop_and_restore_12
     );
     let kill = offset_of(
         &ps,
-        "Stop-Process -Name dantesync -Force",
+        "Stop-Process -Name dsync -Force",
         "the forced-kill backstop for a wedged process",
     );
     assert!(

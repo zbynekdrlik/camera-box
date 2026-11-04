@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # scripts/lib/bkshading-relay-version.sh -- read a cambox's camera-box + bkshading relay versions and
-# grade the relay against camera-box (issue 1452).
+# grade the relay against the shading pin (issue 1452, issue 1487).
 #
 # Owner, 29.10.2026: the fleet upgrade before the 28.10 event left every cambox on an old relay
 # (dev.755-810) because deploy-fleet.sh never touched it, and cam7's shading did not set values.
-# Both binaries come from the ONE workspace version (root Cargo.toml [workspace.package]), so a relay
-# from the same CI run as camera-box prints the same version. Two consumers share this lib:
+# The relay is its own project since issue 1487, with its own version: the pin
+# (scripts/shading-release.pin) says which one the boxes run, camera-box's version says nothing about
+# it. Two consumers share this lib:
 #   - scripts/deploy-fleet.sh: the per-box relay step + the final summary line;
 #   - scripts/rig-dev-handover-check.sh item 15 (shading): one `verdict=RELAY-*` line per box.
 #
@@ -51,39 +52,25 @@ bkshading_relay_versions_field() {
   printf '%s\n' "$val"
 }
 
-# bkshading_relay_version_verdict CAMERA_BOX_VERSION RELAY_VERSION [MAIN_VERSION] -> one token:
+# bkshading_relay_version_verdict PIN_VERSION RELAY_VERSION [MAIN_PIN_VERSION] -> one token:
 #   RELAY-NONE     no relay on the box (neutral)
 #   RELAY-MISSING  the relay unit without its binary (the relay cannot run: forgot)
-#   RELAY-UNKNOWN  either version could not be read (neutral, never a false STALE)
-#   RELAY-CURRENT  the relay runs the box's camera-box version (the same build), or main's
-#                  release: the E2E [0/8] parity align puts a dev candidate camera-box on the
-#                  boxes (--no-relay), so a relay on MAIN_VERSION next to it is not forgotten
+#   RELAY-UNKNOWN  the relay's or the pin's version could not be read (neutral, never a false STALE)
+#   RELAY-CURRENT  the relay runs the pin, or main's pin: a pin bump on dev reaches the boxes with
+#                  the merge, so a relay on MAIN_PIN_VERSION is not forgotten
 #   RELAY-STALE    the relay runs another version than both (forgot: deploy-fleet.sh)
+# Equality, never an order: a box left on a 1.x camera-box-numbered relay is simply not the pin.
 bkshading_relay_version_verdict() {
-  local cb="${1:-}" rl="${2:-}" main="${3:-}"
+  local pin="${1:-}" rl="${2:-}" main="${3:-}"
   case "$rl" in
     absent) printf '%s\n' RELAY-NONE; return 0 ;;
     missing-binary) printf '%s\n' RELAY-MISSING; return 0 ;;
     '' | unreadable) printf '%s\n' RELAY-UNKNOWN; return 0 ;;
   esac
-  case "$cb" in
-    '' | absent | unreadable) printf '%s\n' RELAY-UNKNOWN; return 0 ;;
-  esac
-  if [ "$cb" = "$rl" ] || { [ -n "$main" ] && [ "$main" = "$rl" ]; }; then
+  [ -n "$pin" ] || { printf '%s\n' RELAY-UNKNOWN; return 0; }
+  if [ "$pin" = "$rl" ] || { [ -n "$main" ] && [ "$main" = "$rl" ]; }; then
     printf '%s\n' RELAY-CURRENT
   else
     printf '%s\n' RELAY-STALE
   fi
-}
-
-# bkshading_relay_main_version_from_cargo CARGO_TOML_TEXT -> the [workspace.package] version (the
-# first column-0 `version = "X"` line, the anchor every version reader uses), or nothing.
-bkshading_relay_main_version_from_cargo() {
-  local line
-  while IFS= read -r line; do
-    case "$line" in
-      'version = "'*'"') line="${line#version = \"}"; printf '%s\n' "${line%\"}"; return 0 ;;
-    esac
-  done <<<"${1:-}"
-  return 0
 }

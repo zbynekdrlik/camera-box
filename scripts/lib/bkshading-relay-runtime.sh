@@ -3,7 +3,7 @@
 # bkshading cambox/SBC RELAY (issue 808 relay-provisioning milestone; unblocks the issue-809 live
 # grab derive).
 #
-# The relay BINARY (bkshading/relay/) already reads CAMERA_BOX_CAPTURE_FPS from its environment
+# The relay BINARY (shading:bkshading/relay/) already reads CAMERA_BOX_CAPTURE_FPS from its environment
 # (parse_capture_fps_env in main.rs -> CameraSession::with_capture_fps -> RelayState.capture_fps)
 # and drives the local Blackmagic camera over USB-PTP via the gphoto2 CLI. What was missing is the
 # PROVISIONING: a systemd unit to run it, gphoto2 installed, and the env value. This lib is the
@@ -88,7 +88,7 @@ bkshading_relay_env_file_content() {
 # /etc/bkshading/relay.env -- provisioned by scripts/bkshading-provision-relay.sh (issue 808/809).
 # CAMERA_BOX_CAPTURE_FPS: this box's grab-mode fps, derived from the appliance's own capture-fps
 # config (the SAME value src/capture.rs requested_capture_denominator uses). Read by the relay
-# (bkshading/relay/src/main.rs) -> RelayState.capture_fps -> the service's issue-809 grab derive.
+# (shading:bkshading/relay/src/main.rs) -> RelayState.capture_fps -> the service's issue-809 grab derive.
 # The relay's EnvironmentFile= line makes this file OPTIONAL: if it is absent the relay reports no
 # capture fps and the service falls back to the static grab_fps config instead of a wrong value.
 CAMERA_BOX_CAPTURE_FPS=$fps

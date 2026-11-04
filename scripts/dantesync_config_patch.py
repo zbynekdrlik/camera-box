@@ -128,7 +128,7 @@ $status | ConvertTo-Json -Depth 8
 def emit_apply_program(
     config_path,
     patched_json,
-    service="dantesync",
+    service="dsync",
     status_port=8898,
     settle_s=8,
 ):
@@ -169,10 +169,10 @@ def _main(argv=None):
     )
     ap.add_argument(
         "--config-path",
-        default=r"C:\ProgramData\dantesync\config.json",
+        default=r"C:\ProgramData\dsync\config.json",
         help="the on-box config.json path baked into the --emit-apply program",
     )
-    ap.add_argument("--service", default="dantesync", help="the on-box service name to restart")
+    ap.add_argument("--service", default="dsync", help="the on-box service name to restart")
     ap.add_argument("--status-port", type=int, default=8898, help="the :PORT/status read-back port")
     args = ap.parse_args(argv)
 

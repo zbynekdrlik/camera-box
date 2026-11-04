@@ -200,9 +200,10 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_PROGRAM_AUDIO_SAMPLER=on",
         // issue 1439 phase 2: the FOH console's `strih-obs` VBAN straight into the OBS obs-vban source
         // `ASIO zvuk` on UDP 6981 (the hub keeps 6980), a low fixed Receive Buffer.
-        "STRIH_PROGRAM_VBAN_STREAMS=strih-obs",
-        "STRIH_PROGRAM_VBAN_PORT=6981",
-        "STRIH_PROGRAM_VBAN_RESERVE_MS=30",
+        // issue 1485: the program comes over Dante (the strih-obs device below), no VBAN program
+        "STRIH_PROGRAM_VBAN_STREAMS=none",
+        "STRIH_PROGRAM_VBAN_PORT=none",
+        "STRIH_PROGRAM_VBAN_RESERVE_MS=none",
         "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk",
         // issue 1439 (supervisor 23.10.2026 10:31): VLAN 70 tagged on the rig NIC; Ableton-FOH sends the
         // hub's fohabl-strih (6980) and the strih OBS's strih-obs (6981) to it.
@@ -869,7 +870,7 @@ fn a_client_box_with_a_master_named_upstream_host_renders_its_unit() {
     );
     assert_eq!(c, 0, "a client box must render its unit: {err}");
     assert!(
-        out.contains("ExecStart=/usr/local/bin/dantesync --ntp-server ntp-master.lan\n"),
+        out.contains("ExecStart=/usr/local/bin/dsync --ntp-server ntp-master.lan\n"),
         "{out}"
     );
 }
@@ -959,7 +960,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "STRIH-ZZ (Grading)",
         "{\"sender\": \"STRIH-ZZ (2ME PVW)\", \"input\": \"NDI 2ME PVW\", \"scene\": \"2ME PVW\"}",
         "{\"sender\": \"CAM3 (usb)\", \"input\": \"NDI cam3\", \"scene\": \"Cam 3\"}",
-        "ExecStart=/usr/local/bin/dantesync --ntp-server venue-ntp.lan\n",
+        "ExecStart=/usr/local/bin/dsync --ntp-server venue-ntp.lan\n",
         "local_ip = \"10.0.0.5\"",
         "ws_ip = \"127.0.0.1\"",
         "# strih-zz OBS kiosk boot",

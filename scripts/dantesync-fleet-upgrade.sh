@@ -48,11 +48,11 @@ set -euo pipefail
 #     downgrade it).
 #
 #   * THE TRAY RIDES THE ROLL (issue 1372): on a Windows node the same .ps1 also refreshes
-#     dantesync-tray.exe (the version the operator sees) from the SAME pinned release -- fetched +
+#     dsync-tray.exe (the version the operator sees) from the SAME pinned release -- fetched +
 #     sha-verified before any stop, swapped after the service is back, backed up to
 #     .pre-<version>, relaunched in the logged-on user's session through a temporary BUILTIN\Users
 #     scheduled task that is unregistered again, verified as one tray process. A tray failure is a
-#     named WARNING in the roll summary ("dantesync-tray was NOT refreshed on ..."), never a
+#     named WARNING in the roll summary ("dsync-tray was NOT refreshed on ..."), never a
 #     service rollback and never a non-zero exit: the tray is UI, the service is the clock.
 #
 #   * THE MASTER'S SAVED DATE (issue 1372, dantesync 1.15.0): a VERIFY-failure rollback or a
@@ -77,8 +77,8 @@ set -euo pipefail
 #   scripts/dantesync-fleet-upgrade.sh --help
 #
 # --fleet (issue 1372) adds every node of scripts/lib/dantesync-fleet.sh (every camera, dev1, the
-# OBS boxes, the audio-VLAN PCs mbc + fohabl) not already named by --linux/--win/--local -- so a roll
-# can no longer forget a box. A node whose fleet row names its own ssh credential (fohabl) is reached
+# OBS boxes) not already named by --linux/--win/--local -- so a roll can no longer forget a box. The
+# nodes dsync upgrades itself (DSYNC_SELF_UPGRADED_NODES, issue 1487) are never rolled here, named or not. A node whose fleet row names its own ssh credential (fohabl) is reached
 # with that variable's value (env or the dev1-local credential file), every other node with SSH_PASS.
 # A traveling box that is away is skipped as before. Always run --fleet --dry-run first.
 #
@@ -124,24 +124,28 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/dantesync-tray-upgrade.sh"  # issue 1372: the tray arm of the Windows program + its outcome
 # shellcheck source=scripts/lib/dantesync-rollback.sh
 . "$HERE/lib/dantesync-rollback.sh"   # the VERIFY-failure rollback programs (issue 1372: their own lib)
+# shellcheck source=scripts/lib/dsync-release.sh
+. "$HERE/lib/dsync-release.sh"       # issue 1487: the pinned shas of the dsync release
+# shellcheck source=scripts/lib/dsync-swap.sh
+. "$HERE/lib/dsync-swap.sh"          # issue 1487: the upgrade programs + the dantesync -> dsync swap
 
-# The GitHub release download base for the (Claude-stewarded) dantesync repo. Releases are
+# The GitHub release download base of dsync (dantesync until its v1.25.0). Releases are
 # ALL-OR-NOTHING (dantesync #56): a published tag always carries BOTH the Linux and Windows
 # assets plus their .sha256 companions, so a pinned tag can always be fetched for either OS.
-DANTESYNC_RELEASE_BASE="${DANTESYNC_RELEASE_BASE:-https://github.com/zbynekdrlik/dantesync/releases/download}"
-DANTESYNC_WIN_EXE='C:\Program Files\DanteSync\dantesync.exe'
-DANTESYNC_WIN_BAK='C:\Program Files\DanteSync\dantesync.exe.bak'
-DANTESYNC_WIN_PS_REMOTE='C:\Windows\Temp\dantesync-fleet-upgrade.ps1'
-DANTESYNC_LINUX_BIN="/usr/local/bin/dantesync"
-DANTESYNC_LINUX_BAK="/usr/local/bin/dantesync.bak"
+DANTESYNC_RELEASE_BASE="${DANTESYNC_RELEASE_BASE:-https://github.com/zbynekdrlik/dsync/releases/download}"
+DANTESYNC_WIN_EXE='C:\Program Files\dsync\dsync.exe'
+DANTESYNC_WIN_BAK='C:\Program Files\dsync\dsync.exe.bak'
+DANTESYNC_WIN_PS_REMOTE='C:\Windows\Temp\dsync-fleet-upgrade.ps1'
+DANTESYNC_LINUX_BIN="/usr/local/bin/dsync"
+DANTESYNC_LINUX_BAK="/usr/local/bin/dsync.bak"
 DANTESYNC_DEAD_TASK="DanteSyncUpdate"
 # #1077: the orchestrator downloads + sha256-verifies the binary ONCE on dev1 and scp's it to each
 # Linux node here — the generated script prefers this pre-placed binary (the curl-less path: cam3
 # has no curl and a broken apt; also friendlier to the metered venue LAN). DANTESYNC_LINUX_SH_REMOTE
 # is where the generated upgrade/rollback script is uploaded and run BY FILE (so a non-root node can
 # `sudo -S bash <file>` without any nested-quoting hazard — mirrors the Windows -File pattern).
-DANTESYNC_LINUX_STAGED="/tmp/dantesync-staged"
-DANTESYNC_LINUX_SH_REMOTE="/tmp/dantesync-fleet-upgrade-remote.sh"
+DANTESYNC_LINUX_STAGED="/tmp/dsync-staged"
+DANTESYNC_LINUX_SH_REMOTE="/tmp/dsync-fleet-upgrade-remote.sh"
 
 # --- PURE functions (no network/ssh — unit-tested from tests/dantesync_fleet_upgrade.rs) -----
 
@@ -169,101 +173,18 @@ dantesync_upgrade_status() {
 
 # dantesync_release_url_linux VERSION -> the pinned-tag Linux asset URL. NEVER releases/latest.
 dantesync_release_url_linux() {
-  echo "${DANTESYNC_RELEASE_BASE}/v${1}/dantesync-linux-amd64"
+  echo "${DANTESYNC_RELEASE_BASE}/v${1}/dsync-linux-amd64"
 }
 
 # dantesync_release_url_windows VERSION -> the pinned-tag Windows asset URL. NEVER releases/latest.
 dantesync_release_url_windows() {
-  echo "${DANTESYNC_RELEASE_BASE}/v${1}/dantesync-windows-amd64.exe"
+  echo "${DANTESYNC_RELEASE_BASE}/v${1}/dsync-windows-amd64.exe"
 }
 
 # dantesync_release_url_windows_tray VERSION -> the pinned-tag Windows TRAY asset URL (issue 1372):
 # the same release as the service, never releases/latest.
 dantesync_release_url_windows_tray() {
-  echo "${DANTESYNC_RELEASE_BASE}/v${1}/dantesync-tray-windows-amd64.exe"
-}
-
-# dantesync_linux_upgrade_cmd VERSION [ROLE] -> the remote bash text to upgrade a Linux node to VERSION.
-# Safety order: download + sha256-verify FIRST (a bad download never stops the daemon), THEN back
-# up the current binary, THEN arm a restore-on-error trap (self-heal), THEN stop/swap/restart.
-# Any failure PAST the backup point restores the previous binary and restarts before returning
-# non-zero; a failure BEFORE it leaves the running clock master untouched. ROLE (issue 1372): a
-# forced downgrade of the ntp-master below 1.15.0 also deletes its saved fleet date, as the LAST
-# step -- after the start, so a failed start self-heals to the 1.15 binary WITH that file.
-dantesync_linux_upgrade_cmd() {
-  local version="$1" url
-  url="$(dantesync_release_url_linux "$version")"
-  cat <<EOF
-set -e
-tmp="\$(mktemp -d)"
-trap 'rm -rf "\$tmp"' EXIT
-# 1. obtain the new binary BEFORE touching the running clock master. Order (#1077):
-#    (a) a pre-staged binary the orchestrator downloaded+verified on dev1 and scp'd here -- the
-#        curl-less path (cam3 has no curl + a broken apt) AND the metered-LAN-friendly path (one
-#        download on dev1, not eight); (b) on-box curl; (c) on-box wget as a secondary. Whichever
-#        path, the sha256 is re-verified below, so a corrupt scp OR download never reaches the
-#        clock master. The staged file is consumed (moved into \$tmp) and removed immediately.
-if [ -f "$DANTESYNC_LINUX_STAGED" ]; then
-  cp -a "$DANTESYNC_LINUX_STAGED" "\$tmp/dantesync"
-  cp -a "$DANTESYNC_LINUX_STAGED.sha256" "\$tmp/dantesync.sha256"
-  rm -f "$DANTESYNC_LINUX_STAGED" "$DANTESYNC_LINUX_STAGED.sha256"
-elif command -v curl >/dev/null 2>&1; then
-  curl --fail -fsSL -o "\$tmp/dantesync" "$url"
-  curl --fail -fsSL -o "\$tmp/dantesync.sha256" "$url.sha256"
-elif command -v wget >/dev/null 2>&1; then
-  wget -q -O "\$tmp/dantesync" "$url"
-  wget -q -O "\$tmp/dantesync.sha256" "$url.sha256"
-else
-  echo "no staged binary at $DANTESYNC_LINUX_STAGED and neither curl nor wget is available" >&2
-  exit 1
-fi
-expected="\$(awk '{print \$1}' "\$tmp/dantesync.sha256")"
-actual="\$(sha256sum "\$tmp/dantesync" | awk '{print \$1}')"
-if [ "\$expected" != "\$actual" ]; then
-  echo "SHA256 MISMATCH: expected \$expected got \$actual" >&2
-  exit 1
-fi
-chmod +x "\$tmp/dantesync"
-# 1.5 cam boxes run a DELIBERATE read-only root (the 2026-08-16 canary failed here with
-# 'cp: ... Read-only file system'). The ONE window prologue (dantesync-rollback.sh, issue 1407):
-# read the ACTUAL mount state (#1077: findmnt + the /proc/mounts fallback, never a write probe),
-# remount rw on a read-only root, and the window helpers. Only writes and the stop run inside it;
-# the window closes VERIFIED before the restart, and the EXIT trap closes it on any failure.
-$(_dantesync_linux_rw_window_sh)
-trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT
-# 2. back up the current binary BEFORE overwriting it (rollback target)
-cp -a "$DANTESYNC_LINUX_BIN" "$DANTESYNC_LINUX_BAK"
-# 3. self-heal: from here (the point of no return), restore the .bak on ANY error -- in its own
-#    rw window, closed verified, so the old binary comes back up on a read-only root
-_dantesync_restore() {
-  _dantesync_reopen_rw
-  if cp -a "$DANTESYNC_LINUX_BAK" "$DANTESYNC_LINUX_BIN"; then
-    _dantesync_remount_ro
-    systemctl restart dantesync 2>/dev/null || true
-    echo "SELF-HEAL: restored previous dantesync binary" >&2
-  else
-    _dantesync_remount_ro
-    systemctl restart dantesync 2>/dev/null || true
-    echo "SELF-HEAL FAILED: the previous binary could NOT be copied back -- dantesync runs whatever is installed now; restore $DANTESYNC_LINUX_BAK by hand" >&2
-  fi
-}
-trap '_dantesync_restore' ERR
-# 4. swap, close the window (verified, issue 1407), then the restart on the read-only root
-systemctl stop dantesync
-install -m 0755 "\$tmp/dantesync" $DANTESYNC_LINUX_BIN
-_dantesync_remount_ro
-systemctl restart dantesync
-# success: re-set the EXIT trap (tmp cleanup + the ro close, a no-op once closed). The ERR self-heal
-# stays ARMED through the version read below: a new binary that cannot even print its version is
-# rolled back too (the orchestrator then reports the self-heal). It is disarmed right after it, so
-# nothing that follows (the master's date-state delete) can roll the master back to its .bak after
-# its date file is gone -- the state the issue-1372 delete-last order exists to avoid.
-trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT
-# 5. read the new version back
-dantesync --version
-trap - ERR
-EOF
-  _dantesync_linux_date_state_rm_sh "${2:-}" "$version"
+  echo "${DANTESYNC_RELEASE_BASE}/v${1}/dsync-tray-windows-amd64.exe"
 }
 
 # dantesync_windows_purge_dead_task_cmd -> the idempotent forced delete of the dead DanteSyncUpdate
@@ -274,79 +195,26 @@ dantesync_windows_purge_dead_task_cmd() {
 
 # dantesync_windows_wait_service_exit_ps -> the PowerShell lines that wait for the dantesync
 # PROCESS to actually exit after `Stop-Service dantesync`, before the exe is touched (#1265).
-# `Stop-Service` returns when the SCM reports STOPPED, but on strih the dantesync.exe process
+# `Stop-Service` returns when the SCM reports STOPPED, but on strih the dsync.exe process
 # lingers a few seconds after that (its Npcap capture handle on the X520 tears down slowly —
 # .claude/rules/nic-swap-timesync-recovery.md §2, the box where `sc stop` "silently hung"), so an
 # immediate Copy-Item hits "The process cannot access the file ... being used by another process",
 # the self-heal restores the .bak and the canary ABORTS the whole roll (live 2026-09-03 19:02Z).
 # Waits on the REAL resource (the process holding the exe): a bounded Wait-Process, then a forced
 # Stop-Process backstop for a wedged process (the documented cure for a dead-pcap-handle
-# dantesync) + a short re-wait. Exact process NAME only — never a wildcard: `dantesync-tray.exe`
+# dantesync) + a short re-wait. Exact process NAME only — never a wildcard: `dsync-tray.exe`
 # (the autostart tray, a separate process) must survive the daemon swap. Shared by the upgrade
 # and the rollback .ps1 so both swap directions get the same guarantee.
 dantesync_windows_wait_service_exit_ps() {
-  cat <<'EOF'
+  local svc="${1:-dsync}"
+  cat <<EOF
     # #1265: Stop-Service returns on SCM STOPPED, but the process can linger holding the exe --
     # wait on the PROCESS (bounded), force-kill a wedged one, then re-wait before the swap.
-    Wait-Process -Name dantesync -Timeout 30 -ErrorAction SilentlyContinue
-    if (Get-Process -Name dantesync -ErrorAction SilentlyContinue) {
-        Stop-Process -Name dantesync -Force
-        Wait-Process -Name dantesync -Timeout 10 -ErrorAction SilentlyContinue
+    Wait-Process -Name $svc -Timeout 30 -ErrorAction SilentlyContinue
+    if (Get-Process -Name $svc -ErrorAction SilentlyContinue) {
+        Stop-Process -Name $svc -Force
+        Wait-Process -Name $svc -Timeout 10 -ErrorAction SilentlyContinue
     }
-EOF
-}
-
-# dantesync_windows_upgrade_ps VERSION [ROLE] -> the CONTENT of a PowerShell .ps1 that upgrades a Windows
-# node to VERSION. Sent as a FILE (scp -O) and run with `-File` — never a nested
-# `powershell -Command "..."` over ssh (which fails SILENTLY, .claude/rules/rig-state-inspection.md
-# §2). Same safety order as Linux: download + Get-FileHash-verify FIRST, back up the exe, then a
-# try/catch self-heal around stop/swap/start, purge the dead relic task, read the version back.
-# Issue 1372: the tray rides the same program -- fetched + verified with the service binary before any
-# stop (dantesync_windows_tray_fetch_ps), swapped after the service is back
-# (dantesync_windows_tray_swap_ps); a tray failure prints TRAY-WARNING and never throws, so it can
-# never roll back or block the service. ROLE (issue 1372): a forced downgrade of the ntp-master
-# below 1.15.0 deletes its saved fleet date right after the service try/catch, whose catch rethrows.
-dantesync_windows_upgrade_ps() {
-  local version="$1" url
-  url="$(dantesync_release_url_windows "$version")"
-  cat <<EOF
-\$ErrorActionPreference = 'Stop'
-\$url = '$url'
-\$exe = '$DANTESYNC_WIN_EXE'
-\$bak = '$DANTESYNC_WIN_BAK'
-\$tmp = Join-Path \$env:TEMP 'dantesync-new.exe'
-# 1. download + sha256-verify BEFORE touching the running clock master
-Invoke-WebRequest -UseBasicParsing -Uri \$url -OutFile \$tmp
-Invoke-WebRequest -UseBasicParsing -Uri (\$url + '.sha256') -OutFile (\$tmp + '.sha256')
-\$expected = ((Get-Content (\$tmp + '.sha256')) -split '\s+')[0].Trim()
-\$actual = (Get-FileHash -Algorithm SHA256 \$tmp).Hash
-if (\$expected -ne \$actual) { throw ('SHA256 MISMATCH expected ' + \$expected + ' got ' + \$actual) }
-$(dantesync_windows_tray_fetch_ps "$version")
-# 2. back up the current exe BEFORE overwriting it
-Copy-Item -Force \$exe \$bak
-# 3. self-heal: any failure during stop/swap/start restores the .bak and restarts before rethrow
-try {
-    Stop-Service dantesync
-$(dantesync_windows_wait_service_exit_ps)
-    Copy-Item -Force \$tmp \$exe
-    Start-Service dantesync
-} catch {
-    # A locked-exe IOException terminates despite -ErrorAction: never let it skip the start (12.10.2026).
-    try { Copy-Item -Force \$bak \$exe } catch { Write-Output ('SELF-HEAL: restore of the .bak failed: ' + \$_.Exception.Message) }
-    try { Start-Service dantesync } catch { Write-Output ('SELF-HEAL: Start-Service failed: ' + \$_.Exception.Message) }
-    throw
-}
-EOF
-  _dantesync_windows_date_state_rm_ps "${2:-}" "$version"
-  cat <<EOF
-# 4. purge the dead DanteSyncUpdate relic task -- genuinely idempotent: routed through cmd /c
-# with full redirection, because a bare schtasks on an ALREADY-ABSENT task writes to stderr and
-# \$ErrorActionPreference=Stop turns that into a terminating NativeCommandError AFTER the swap
-# (live 2026-08-16 v1.8.43 canary: swap completed, ps1 exited non-zero, orchestrator misreported
-# a failed upgrade).
-cmd /c "schtasks /Delete /TN \"$DANTESYNC_DEAD_TASK\" /F >nul 2>&1"
-$(dantesync_windows_tray_swap_ps)
-& \$exe --version
 EOF
 }
 
@@ -356,13 +224,14 @@ dantesync_windows_run_ps_file_cmd() {
   echo "powershell -NoProfile -ExecutionPolicy Bypass -File \"$1\""
 }
 
-# dantesync_resolve_canary LINUX_SET WIN_SET OVERRIDE -> the canary node set (space-separated).
+# dantesync_resolve_canary LINUX_SET WIN_SET OVERRIDE [MASTERS] -> the canary node set (space-separated).
 # Default: one representative per OS class present (first Linux node + first Windows node) — a
 # green Linux canary must never authorize touching a Windows box (#452 per-class insight; the
-# class here is the OS). OVERRIDE (space-separated) is honored verbatim iff every member is in the
+# class here is the OS). Issue 1487: never an NTP master while the class has another node (dsync's
+# docs/release-rollout.md: "one canary node first, never the NTP master"). OVERRIDE (space-separated) is honored verbatim iff every member is in the
 # union of the two sets; errors (non-zero, names the offender) otherwise.
 dantesync_resolve_canary() {
-  local linux_set="$1" win_set="$2" override="$3" all cam a found out=""
+  local linux_set="$1" win_set="$2" override="$3" masters="${4:-}" all cam a found out="" pick
   all="$linux_set $win_set"
   if [ -n "$override" ]; then
     for cam in $override; do
@@ -378,8 +247,14 @@ dantesync_resolve_canary() {
     echo "$override"
     return 0
   fi
-  for cam in $linux_set; do out="$cam"; break; done
-  for cam in $win_set; do out="${out:+$out }$cam"; break; done
+  for a in "$linux_set" "$win_set"; do
+    pick=""
+    for cam in $a; do
+      if ! dantesync_is_ntp_master "$cam" "$masters"; then pick="$cam"; break; fi
+    done
+    if [ -z "$pick" ]; then for cam in $a; do pick="$cam"; break; done; fi
+    [ -z "$pick" ] || out="${out:+$out }$pick"
+  done
   if [ -z "$out" ]; then
     echo "dantesync_resolve_canary: empty fleet" >&2
     return 1
@@ -399,6 +274,16 @@ dantesync_remaining_after_canary() {
     [ "$skip" -eq 0 ] && out="${out:+$out }$node"
   done
   echo "$out"
+}
+
+# dantesync_masters_last SET MASTERS -> SET with every NTP master moved to the end, order otherwise
+# kept (dsync's docs/release-rollout.md keeps the master last since v1.10.0).
+dantesync_masters_last() {
+  local n head="" tail=""
+  for n in $1; do
+    if dantesync_is_ntp_master "$n" "${2:-}"; then tail="${tail:+$tail }$n"; else head="${head:+$head }$n"; fi
+  done
+  printf '%s\n' "$head${head:+${tail:+ }}$tail"
 }
 
 # dantesync_needs_sudo USER -> 0 (needs privilege escalation) unless USER is already root. #1077:
@@ -522,7 +407,10 @@ USE_FLEET=0
 CANARY_OVERRIDE=""
 DRY_RUN=0
 FORCE=0
-GATE_WAIT_TRIES="${GATE_WAIT_TRIES:-10}"
+# issue 1487: since dsync 1.23 is_locked needs the phase within 50 us, and a first start has no
+# drift.json: PROD -> LOCK 30-40 s, then ~30-55 s to [41] (dsync docs/release-rollout.md), so ~95 s.
+# The old 10 x 6 s rolled a healthy swap back. A read-only cambox never keeps a drift.json.
+GATE_WAIT_TRIES="${GATE_WAIT_TRIES:-20}"
 GATE_WAIT_SECS="${GATE_WAIT_SECS:-6}"
 # #1077: the NTP master's OWN dantesync restart makes it re-discipline against upstream and the
 # whole fleet chases (a sawtooth that converges MINUTES later). Verifying the master right after its
@@ -592,20 +480,24 @@ ensure_linux_binary_staged() {
   [ -n "$STAGED_LOCAL_DIR" ] && return 0
   url="$(dantesync_release_url_linux "$version")"
   dir="$(mktemp -d)"
-  if ! curl --fail -fsSL -o "$dir/dantesync" "$url"; then
+  if ! curl --fail -fsSL -o "$dir/dsync" "$url"; then
     err "could not download the pinned dantesync binary on dev1 ($url)"
     rm -rf "$dir"
     return 1
   fi
-  if ! curl --fail -fsSL -o "$dir/dantesync.sha256" "$url.sha256"; then
+  if ! curl --fail -fsSL -o "$dir/dsync.sha256" "$url.sha256"; then
     err "could not download the pinned dantesync sha256 on dev1 ($url.sha256)"
     rm -rf "$dir"
     return 1
   fi
-  expected="$(awk '{print $1}' "$dir/dantesync.sha256")"
-  actual="$(sha256sum "$dir/dantesync" | awk '{print $1}')"
+  expected="$(awk '{print $1}' "$dir/dsync.sha256")"
+  actual="$(sha256sum "$dir/dsync" | awk '{print $1}')"
   if [ "$expected" != "$actual" ]; then
     err "staged binary SHA256 mismatch on dev1: expected $expected got $actual"
+    rm -rf "$dir"
+    return 1
+  fi
+  if ! dsync_release_sha_ok dsync-linux-amd64 "$version" "$actual"; then
     rm -rf "$dir"
     return 1
   fi
@@ -620,11 +512,11 @@ stage_linux_binary_to() {  # KIND ADDR
   local kind="$1" addr="$2"
   case "$kind" in
     local)
-      cp -a "$STAGED_LOCAL_DIR/dantesync" "$DANTESYNC_LINUX_STAGED" \
-        && cp -a "$STAGED_LOCAL_DIR/dantesync.sha256" "$DANTESYNC_LINUX_STAGED.sha256" ;;
+      cp -a "$STAGED_LOCAL_DIR/dsync" "$DANTESYNC_LINUX_STAGED" \
+        && cp -a "$STAGED_LOCAL_DIR/dsync.sha256" "$DANTESYNC_LINUX_STAGED.sha256" ;;
     linux)
-      scp_node "$STAGED_LOCAL_DIR/dantesync" "$addr:$DANTESYNC_LINUX_STAGED" \
-        && scp_node "$STAGED_LOCAL_DIR/dantesync.sha256" "$addr:$DANTESYNC_LINUX_STAGED.sha256" ;;
+      scp_node "$STAGED_LOCAL_DIR/dsync" "$addr:$DANTESYNC_LINUX_STAGED" \
+        && scp_node "$STAGED_LOCAL_DIR/dsync.sha256" "$addr:$DANTESYNC_LINUX_STAGED.sha256" ;;
   esac
 }
 
@@ -633,9 +525,11 @@ stage_linux_binary_to() {  # KIND ADDR
 read_node_version() {
   local kind="$2" addr="$3" raw=""
   case "$kind" in
-    local) raw="$(dantesync --version 2>/dev/null || true)" ;;
-    linux) raw="$(ssh_node "$addr" 'dantesync --version' 2>/dev/null || true)" ;;
-    win)   raw="$(ssh_node "$addr" "\"$DANTESYNC_WIN_EXE\" --version" 2>/dev/null || true)" ;;
+    # issue 1487: a node not swapped yet still answers as dantesync. Windows: `if exist` first, a command
+    # that starts with a quoted path has no room for a second one in cmd.exe's quote handling.
+    local) raw="$( { dsync --version 2>/dev/null || dantesync --version 2>/dev/null; } || true)" ;;
+    linux) raw="$(ssh_node "$addr" 'dsync --version 2>/dev/null || dantesync --version' 2>/dev/null || true)" ;;
+    win)   raw="$(ssh_node "$addr" "if exist \"$DANTESYNC_WIN_EXE\" (\"$DANTESYNC_WIN_EXE\" --version) else (\"$DSYNC_LEGACY_WIN_EXE\" --version)" 2>/dev/null || true)" ;;
   esac
   dantesync_version_from_version_output "$raw"
 }
@@ -800,6 +694,41 @@ rollback_node() {
   fi
 }
 
+# finalize_node NAME KIND ADDR -> issue 1487: remove what the dantesync swap kept for the way back,
+# once the node verified, and on a node already on the target (an interrupted roll). A failure is a
+# named line, never a failed node: the clock runs on dsync either way, and the next roll retries.
+finalize_node() {
+  local name="$1" kind="$2" addr="$3" out="" rc=0 local_f user runcmd
+  local_f="$(mktemp)"
+  case "$kind" in
+    win)
+      dsync_windows_finalize_ps >"$local_f"
+      if out="$(scp_node "$local_f" "$addr:$DANTESYNC_WIN_PS_REMOTE" 2>&1)"; then
+        out="$(ssh_node "$addr" "$(dantesync_windows_run_ps_file_cmd "$DANTESYNC_WIN_PS_REMOTE")" 2>&1)" || rc=$?
+      else rc=1; fi ;;
+    local)
+      dsync_linux_finalize_cmd >"$local_f"
+      runcmd="$(dantesync_linux_run_script_cmd "$(id -un)" "$local_f" "$SSH_PASS")"
+      out="$(bash -c "$runcmd" 2>&1)" || rc=$? ;;
+    linux)
+      user="${addr%%@*}"
+      dsync_linux_finalize_cmd >"$local_f"
+      if out="$(scp_node "$local_f" "$addr:$DANTESYNC_LINUX_SH_REMOTE" 2>&1)"; then
+        runcmd="$(dantesync_linux_run_script_cmd "$user" "$DANTESYNC_LINUX_SH_REMOTE" "$SSH_PASS")"
+        out="$(ssh_node "$addr" "$runcmd" 2>&1)" || rc=$?
+      else rc=1; fi ;;
+  esac
+  rm -f "$local_f"
+  if [ "$rc" -ne 0 ]; then
+    log "[$name] WARNING: the old dantesync files were NOT removed (rc=$rc), the next roll retries: $out"
+  else
+    while IFS= read -r line; do
+      case "$line" in *LEGACY*) log "[$name] ${line%$'\r'}" ;; esac
+    done <<<"$out"
+  fi
+  return 0
+}
+
 # upgrade_node NAME KIND ADDR -> 0 on a verified upgrade, non-zero on failure. SAME target = a
 # documented no-op; OLDER = refused unless --force; UNKNOWN = refused. On an upgrade-command
 # failure the remote script has already self-healed to the previous version, so we only REPORT
@@ -811,6 +740,7 @@ upgrade_node() {
   case "$status" in
     SAME)
       log "[$name] already on $TARGET — nothing to do"
+      [ "$DRY_RUN" -eq 1 ] || finalize_node "$name" "$kind" "$addr"
       return 0 ;;
     UNKNOWN)
       err "[$name] could not read the current version — refusing to upgrade a node in an unknown state"
@@ -843,6 +773,7 @@ upgrade_node() {
   dantesync_rollback_date_state_note "$name" "$REMOTE_OUT"   # issue 1372: a forced master downgrade
 
   if verify_node "$name" "$kind" "$addr"; then
+    finalize_node "$name" "$kind" "$addr"
     return 0
   fi
   err "[$name] verification failed after upgrade — rolling back the completed swap"
@@ -854,6 +785,10 @@ upgrade_node() {
 # NODES: name|kind|addr ; a node is skipped (EXCLUDED) if acked offline in rig-fleet.txt.
 declare -a NODES=()
 add_node() {  # NAME KIND ADDR
+  if dantesync_fleet_self_upgraded "$1"; then
+    log "  $1 NOT ROLLED (dsync upgrades this node itself; its clock stays graded on :8898)"
+    return 0
+  fi
   if cambox_offline_ack_is_acked "$1"; then
     log "  $1 EXCLUDED (acked offline: $(cambox_offline_ack_reason "$1"))"
     return 0
@@ -902,6 +837,7 @@ fi
 # --- decide who needs an upgrade -------------------------------------------------------------
 declare -a NEED_LINUX=() NEED_WIN=()
 declare -a NEED_ALL=()
+declare -a NEED_FINALIZE=()   # issue 1487: already on the target, the old files may still be there
 declare -a TRAY_ONLY=()   # issue 1372: Windows nodes already on the target -- only their tray is checked
 echo
 log "-- current fleet state (target v${TARGET}) --"
@@ -911,7 +847,9 @@ for spec in "${NODES[@]}"; do
   status="$(dantesync_upgrade_status "$cur" "$TARGET")"
   printf '  %-12s %-8s %-10s -> %s\n' "$name" "$kind" "${cur:-<unread>}" "$status"
   case "$status" in
-    SAME) [ "$kind" != win ] || TRAY_ONLY+=("$name") ;;
+    SAME)
+      [ "$kind" != win ] || TRAY_ONLY+=("$name")
+      NEED_FINALIZE+=("$name") ;;
     *)
       NEED_ALL+=("$name")
       case "$kind" in
@@ -922,6 +860,7 @@ for spec in "${NODES[@]}"; do
 done
 echo
 
+kind_of() { local n="$1" s; for s in "${NODES[@]}"; do IFS='|' read -r nm kd ad <<<"$s"; [ "$nm" = "$n" ] && { printf '%s\n' "$kd"; return; }; done; }
 addr_of() { local n="$1" s; for s in "${NODES[@]}"; do IFS='|' read -r nm kd ad <<<"$s"; [ "$nm" = "$n" ] && { printf '%s\n' "$ad"; return; }; done; }
 # refresh_same_node_trays -> issue 1372: run the tray-only program on every Windows node whose
 # service is already on the target (a tray already on the release is left running, so this costs one
@@ -947,16 +886,25 @@ refresh_same_node_trays() {
   done
 }
 
+finalize_same_nodes() {
+  local n
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  for n in ${NEED_FINALIZE[@]+"${NEED_FINALIZE[@]}"}; do
+    finalize_node "$n" "$(kind_of "$n")" "$(addr_of "$n")"
+  done
+}
+
 if [ "${#NEED_ALL[@]}" -eq 0 ]; then
   log "Every node is already on v${TARGET} — nothing to do for the service."
   refresh_same_node_trays
+  finalize_same_nodes
   dantesync_tray_report
   exit 0
 fi
 
 # --- canary-first ordering (one representative per OS class present) --------------------------
-CANARY_SET="$(dantesync_resolve_canary "${NEED_LINUX[*]:-}" "${NEED_WIN[*]:-}" "$CANARY_OVERRIDE")" || exit 1
-REST="$(dantesync_remaining_after_canary "${NEED_ALL[*]}" "$CANARY_SET")"
+CANARY_SET="$(dantesync_resolve_canary "${NEED_LINUX[*]:-}" "${NEED_WIN[*]:-}" "$CANARY_OVERRIDE" "$NTP_MASTER")" || exit 1
+REST="$(dantesync_masters_last "$(dantesync_remaining_after_canary "${NEED_ALL[*]}" "$CANARY_SET")" "$NTP_MASTER")"
 log "Canary set: $CANARY_SET   Remaining after canary: ${REST:-<none>}"
 echo
 
@@ -965,9 +913,6 @@ if [ "$DRY_RUN" -eq 1 ]; then
   refresh_same_node_trays
   exit 0
 fi
-
-# addr_of / kind_of NAME -> the node's addr / kind from the table.
-kind_of() { local n="$1" s; for s in "${NODES[@]}"; do IFS='|' read -r nm kd ad <<<"$s"; [ "$nm" = "$n" ] && { printf '%s\n' "$kd"; return; }; done; }
 
 declare -a FAILED=()
 
@@ -991,6 +936,7 @@ done
 
 echo
 refresh_same_node_trays
+finalize_same_nodes
 dantesync_tray_report
 if [ "${#FAILED[@]}" -gt 0 ]; then
   err "FLEET DANTESYNC UPGRADE INCOMPLETE: canaries passed but ${#FAILED[*]} node(s) failed (recovered): ${FAILED[*]}"

@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
-# scripts/bkshading-deploy-relay.sh — deploy the CI-built bkshading RELAY binary to a cambox (808 M3).
+# scripts/bkshading-deploy-relay.sh — deploy the pinned bkshading RELAY release to a cambox (808 M3).
 # Full header below `set -euo pipefail` (kept early for pre-write-script-check.sh).
 set -euo pipefail
 
 # ---------------------------------------------------------------------------------------------
-# WHY: everything merged so far (M1 relay/service, M2 NDI preview, WS live-state push, relay
-# provisioning) could NOT be verified on the live rig because CI produced NO deployable bkshading
-# binary and there was no deploy tool. scripts/bkshading-provision-relay.sh installs the systemd
-# unit + gphoto2 + env (enable-only) but EXPLICITLY leaves "the CI-built bkshading-relay binary
-# (separate supervisor step)" dangling — its --check FAILS on a missing binary. This script is that
-# step: it fetches the CI-built relay (the `bkshading-linux-amd64` artifact the `bkshading` CI job
-# now uploads) and places it on a cambox at /usr/local/bin/bkshading-relay.
+# WHY: scripts/bkshading-provision-relay.sh installs the systemd unit + gphoto2 + env (enable-only)
+# and leaves the relay binary to this script. It takes the relay of the pinned shading release
+# (issue 1487, scripts/shading-release.pin, scripts/lib/shading-release.sh: the exact tag, sha256 proved
+# against the pin and the release's .sha256, no fallback) and places it on a cambox at
+# /usr/local/bin/bkshading-relay.
 #
-# It mirrors the PROVEN deploy idiom in scripts/deploy-fleet.sh: download ONE CI artifact from a
-# committed/pushed ref (deploy-from-clean-tree.md — never a locally built binary), then the
+# It mirrors the PROVEN deploy idiom in scripts/deploy-fleet.sh: the verified binary, then the
 # read-only-root swap cycle `remount,rw -> scp -> chmod +x -> sha256 byte-verify -> remount,ro`.
 # ROOT MODE (issue 808, slice B): the deploy READS the target's own root (`findmnt -no OPTIONS /`)
 # and runs that cycle only on a read-only root -- every cambox, and a handheld SBC once its
 # read-only fstab is live. A read-write root (an SBC before its first read-only reboot) is never
 # remounted; an unreadable root refuses before the box is touched. One path for cambox and SBC.
-# Pure decisions (artifact name, relay bin name, the ENABLE-ONLY invariant, the sha-match verdict)
+# Pure decisions (the ENABLE-ONLY invariant, the sha-match verdict, the relay + root state)
 # live in scripts/lib/bkshading-deploy-runtime.sh so they are Tier-0 unit-testable without a rig.
 #
 # RELAY STATE (issue 808, 25.9.2026): the deploy reads the relay's state first. An ACTIVE relay is
@@ -36,16 +33,15 @@ set -euo pipefail
 # "is it off-air"; the operator who runs it guards live timing. It does NOT reboot the host.
 #
 # Usage:  scripts/bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64]
-#                                           [--run <id> | --binary <path>] [--dry-run] [--force-live]
+#                                           [--binary <path>] [--dry-run] [--force-live]
 #   --host <ip>       (required) the cambox/SBC to deploy the relay to (e.g. 10.77.9.201).
-#   --arch <a>        target arch of the CI artifact: `amd64` (default; cambox — the relay+service
-#                     bkshading-linux-amd64 artifact) or `arm64` (SBC/handheld zero-class arm64 SBC —
-#                     relay-only bkshading-relay-linux-arm64 artifact; issue 808 SBC milestone).
+#   --arch <a>        target arch of the release asset: `amd64` (default; cambox) or `arm64`
+#                     (SBC/handheld zero-class arm64 SBC, issue 808 SBC milestone).
 #                     The remount cycle follows the target's own root mode, never a flag.
-#   --run <id>        pin a specific GitHub Actions ci.yml run id to download the artifact from.
-#   --binary <path>   deploy an already-downloaded CI relay binary (skips gh download).
+#   --binary <path>   an already-fetched relay binary (deploy-fleet.sh fetches once for the whole
+#                     fleet). Its sha256 must equal the pin: any other bytes are refused.
 #   --dry-run         print the plan and touch no box (no ssh/scp; without --binary it still
-#                     downloads the CI artifact read-only, to show its sha256).
+#                     fetches the release asset, to show its sha256).
 #   (exit 6)          the rig lease is held by a live E2E (issue 1371): no deploy, no bypass. A lease
 #                     held by THIS run itself (RIG_LEASE_REPO/RIG_LEASE_RUN_ID, else GITHUB_REPOSITORY/
 #                     GITHUB_RUN_ID; issue 1452, the post-merge deploy job) is ours and goes through.
@@ -55,17 +51,11 @@ set -euo pipefail
 #                     override ONLY, logged loudly — a relay deploy/restart during live production can
 #                     fork-wedge the cambox (gphoto2 PTP on the shared xHCI bus, 2026-09-13 #1229).
 #   -h | --help       show this header.
-# With neither --run nor --binary, the ci.yml run of the $BRANCH head that carries the artifact is
-# used — the ONE shared resolver scripts/lib/ci-run-resolve.sh (deploy-fleet.sh uses it too). It
-# logs the chosen run id + date + sha; while the head's own run is in flight or failed it falls back
-# LOUDLY to the newest older successful run, and it REFUSES a stale runs listing (pass --run <id>).
-# (issue 808 + #1394: the old query picked a 3-week-old run twice.)
 # SBC/handheld example: scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64
 #
-# Env: SSH_PASS (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main),
-#      ARTIFACT (default from the lib), STRIH_HOST/STREAM_HOST (rig-busy OBS-WS hosts, default
+# Env: SSH_PASS (default newlevel), STRIH_HOST/STREAM_HOST (rig-busy OBS-WS hosts, default
 #      10.77.9.202/.204), OBS_PASSWORD (default ""). Overridable for Tier-0 tests (inject fakes):
-#      BKSHADING_DEPLOY_GH, BKSHADING_DEPLOY_SSH, BKSHADING_DEPLOY_SCP, BKSHADING_DEPLOY_SSHPASS_PREFIX,
+#      BKSHADING_DEPLOY_SSH, BKSHADING_DEPLOY_SCP, BKSHADING_DEPLOY_SSHPASS_PREFIX,
 #      BKSHADING_DEPLOY_OBS_PHASE2_DIR (dir holding obs_phase2.py for the rig-busy guard).
 #
 # Exit codes: 0 = relay deployed + byte-verified AND the root back in its previous mode (read-only
@@ -81,8 +71,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/bkshading-deploy-runtime.sh"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$HERE/lib/bkshading-relay-runtime.sh" # bkshading_relay_bin_path() — the ONE relay install path
-# shellcheck source=scripts/lib/ci-run-resolve.sh
-. "$HERE/lib/ci-run-resolve.sh" # ci_run_latest_success() — the ONE newest-successful-run resolver (shared with deploy-fleet.sh)
+# shellcheck source=scripts/lib/shading-release.sh
+. "$HERE/lib/shading-release.sh" # the pinned shading release (issue 1487)
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh" # stray_session_check_assert() — the ONE shared rig-busy guard
 # shellcheck source=scripts/lib/rig-lease.sh
@@ -94,7 +84,6 @@ RELAY_DEST="$(bkshading_relay_bin_path)"     # /usr/local/bin/bkshading-relay (o
 RELAY_UNIT="$(bkshading_relay_unit_name)"    # bkshading-relay.service (one source of truth)
 RESTORE_ACTION=none                          # issue 808: `start` only when the relay was running before the swap
 BOX_DIRTY=0                                  # issue 808: 1 from the relay stop / rw remount until finish_once ran
-DIST=""                                      # the downloaded artifact dir (cleaned by the EXIT trap)
 # Staging path for the ETXTBSY-safe swap: scp lands here (SAME dir → atomic rename), then `mv -f`
 # replaces the (possibly RUNNING) relay inode. scp'ing directly onto a running exe fails ETXTBSY
 # ("dest open: Failure", 2026-09-13 escalation). $$ is the local PID = a unique per-run stage name.
@@ -107,16 +96,10 @@ STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
 OBS_PASSWORD="${OBS_PASSWORD:-}"
 RIG_BUSY_HERE="${BKSHADING_DEPLOY_OBS_PHASE2_DIR:-$HERE}"
 SSH_PASS="${SSH_PASS:-newlevel}"
-REPO="${REPO:-zbynekdrlik/camera-box}"
-BRANCH="${BRANCH:-main}"
-# An explicit ARTIFACT env override wins; otherwise it is derived from --arch AFTER arg parsing (the
-# arch flag decides which CI artifact to fetch), so capture the override here and resolve below.
-ARTIFACT_ENV="${ARTIFACT:-}"
-ARCH="amd64"   # default: cambox (relay+service amd64 artifact); --arch arm64 = SBC/handheld relay
+ARCH="amd64"   # default: cambox; --arch arm64 = SBC/handheld relay
 RO_ROOT=0      # issue 808: 1 once the target's own root reads read-only (the remount cycle runs)
 
 # Overridable command surfaces (real defaults; the test injects fakes + an empty sshpass prefix).
-GH="${BKSHADING_DEPLOY_GH:-gh}"
 SSH_BIN="${BKSHADING_DEPLOY_SSH:-ssh}"
 SCP_BIN="${BKSHADING_DEPLOY_SCP:-scp}"
 # sshpass prefix as an ARRAY (not a word-split string), so a password with whitespace is safe
@@ -130,7 +113,6 @@ else
 fi
 
 HOST=""
-RUN_ID=""
 BINARY=""
 DRY_RUN=0
 FORCE_LIVE=0   # --force-live: bypass the rig-busy guard (supervisor-only, logged loudly)
@@ -143,7 +125,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --host) require_val "$#" --host; HOST="$2"; shift 2 ;;
     --arch) require_val "$#" --arch; ARCH="$2"; shift 2 ;;
-    --run) require_val "$#" --run; RUN_ID="$2"; shift 2 ;;
     --binary) require_val "$#" --binary; BINARY="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --force-live) FORCE_LIVE=1; shift ;;
@@ -156,20 +137,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$HOST" ]; then
-  echo "ERROR: --host <ip> is required. Usage: bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64] [--run <id> | --binary <path>] [--dry-run]" >&2
-  exit 2
-fi
-if [ -n "$RUN_ID" ] && [ -n "$BINARY" ]; then
-  echo "ERROR: --run and --binary are mutually exclusive" >&2
+  echo "ERROR: --host <ip> is required. Usage: bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64] [--binary <path>] [--dry-run]" >&2
   exit 2
 fi
 
-# Validate the arch and derive the CI artifact from it (an explicit ARTIFACT env override wins).
+# Validate the arch and name its release asset.
 case "$ARCH" in
   amd64 | arm64) ;;
   *) echo "ERROR: --arch must be amd64 or arm64 (got: $ARCH)" >&2; exit 2 ;;
 esac
-ARTIFACT="${ARTIFACT_ENV:-$(bkshading_deploy_artifact_name_for_arch "$ARCH")}"
+ASSET="$(shading_relay_asset_for_arch "$ARCH")"
 
 # The provisioning a box needs before its relay runs: the cambox relay canon, or the SBC one.
 if [ "$ARCH" = "arm64" ]; then
@@ -285,7 +262,6 @@ deploy_on_exit() {
     echo "ERROR: deploy interrupted/aborted after the box was touched -- restoring the ro root + the relay state" >&2 2>/dev/null
     finish_once
   fi
-  [ -n "$DIST" ] && rm -rf "$DIST"
   return "$rc"
 }
 trap deploy_on_exit EXIT
@@ -293,21 +269,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-# --- resolve the relay binary (a pre-downloaded --binary, or the CI artifact) ---
+# --- resolve the relay binary: the pinned release, or a --binary carrying exactly its bytes ---
 if [ -z "$BINARY" ]; then
-  if [ -z "$RUN_ID" ]; then
-    # issue 808 + #1394: the ONE shared resolver (deploy-fleet.sh uses it too) -- the branch head's
-    # own ci.yml run carrying $ARTIFACT, else a loud fallback to the newest older one, else a loud
-    # refusal of a stale runs listing. A stale listing picked a 3-week-old run on 25.9. and 30.9.2026.
-    RUN_ID="$(CI_RUN_RESOLVE_GH="$GH" ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
-    [ -n "$RUN_ID" ] || { echo "ERROR: no usable ci.yml run on $BRANCH carries $ARTIFACT (the ci-run-resolve line above names why)" >&2; exit 1; }
-  fi
-  DIST="$(mktemp -d)"   # removed by the deploy_on_exit trap (mirrors deploy-fleet.sh's DIST cleanup)
-  echo "Downloading $ARTIFACT from ci.yml run $RUN_ID ($REPO) ..."
-  "$GH" run download "$RUN_ID" --repo "$REPO" -n "$ARTIFACT" --dir "$DIST"
-  BINARY="$DIST/$(bkshading_deploy_relay_artifact_bin)"
+  BINARY="$(shading_release_relay "$HERE/.." "$ARCH")" || { echo "ERROR: no verified relay of the pinned shading release (above)" >&2; exit 1; }
 fi
 [ -f "$BINARY" ] || { echo "ERROR: relay binary not found: $BINARY" >&2; exit 1; }
+shading_release_file_ok "$HERE/.." "$ASSET" "$BINARY" || exit 1
 chmod +x "$BINARY" 2>/dev/null || true
 
 LOCAL_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
@@ -318,7 +285,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   cat <<PLAN
 DRY-RUN — bkshading relay deploy plan:
   host           : $HOST
-  arch           : $ARCH (artifact $ARTIFACT)
+  arch           : $ARCH (asset $ASSET, shading $(shading_pin_tag "$HERE/.."))
   source binary  : $BINARY (sha256 $LOCAL_SHA)
   deploy target  : root@$HOST:$RELAY_DEST
   steps          : $STEPS

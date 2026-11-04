@@ -101,7 +101,7 @@ Three dev1-side pure parsers:
 |---|---|---|
 | `deploy-fleet.sh` camera-box swap | `systemctl stop camera-box`, scp to the `camera-box.new` sidecar, the sidecar's byte-verify, `chmod` + `mv -f` rename | `systemctl start camera-box` |
 | `deploy-fleet.sh` cam2 frame-probe swap (`painter_restore`) | dead-man + painter stop, scp to `frame-probe.new`, its byte-verify, rename, the final-path byte-verify, `systemctl enable` (enable-now) | painter start + dead-man re-arm (#1351 prior state), only on a verified binary |
-| dantesync upgrade (`dantesync_linux_upgrade_cmd`) | backup, `systemctl stop dantesync`, install | `systemctl restart dantesync` |
+| dantesync upgrade (`dantesync_linux_upgrade_cmd`) | backup, `systemctl stop dsync`, install | `systemctl restart dsync` |
 | dantesync rollback | stop, `.bak` restore, the master's date-state delete | restart |
 | `bkshading-relay-mode.sh` stop / start | `disable` / `enable` | (start only) `systemctl start` |
 | `bkshading-deploy-relay.sh` (`remount_ro_checked`; also run per box by `deploy-fleet.sh`'s relay phase, issue 1452) | relay stop, scp + rename | the relay restore (`start` if it ran) |
@@ -191,7 +191,7 @@ Three dev1-side pure parsers:
   - **The orchestrator never calls a failed close a self-heal.** `upgrade_node` checks REMOTE_OUT
     with `ro_window_close_failed`. If the program stopped at a failed close, it reports
     "NOT self-healed; dantesync may be LEFT STOPPED", because nothing was started after the close.
-  - The ERR self-heal stays ARMED through the final `dantesync --version` on purpose: a binary that
+  - The ERR self-heal stays ARMED through the final `dsync --version` on purpose: a binary that
     cannot print its version is rolled back, and that is what the orchestrator then reports.
     `trap - ERR` follows right after it (review round 2), so the master's date-state delete that
     comes next can never roll the master back to its `.bak` after its date file is gone, the state

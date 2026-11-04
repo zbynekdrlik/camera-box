@@ -125,10 +125,10 @@ def test_rejects_non_object_phase_slew():
 # ---------------------------------------------------------------- emit apply program
 def test_emit_apply_program_has_backup_write_restart_readback():
     patched = dcp.patch_config(_RESOLUME_CONFIG)
-    prog = dcp.emit_apply_program(r"C:\ProgramData\dantesync\config.json", patched)
+    prog = dcp.emit_apply_program(r"C:\ProgramData\dsync\config.json", patched)
     assert "Copy-Item" in prog and ".bak-" in prog  # backup
     assert "UTF8Encoding" in prog  # no-BOM write
-    assert "Stop-Service" in prog and "Start-Service" in prog and "Restart-Service -Name" not in prog and "dantesync" in prog  # restart
+    assert "Stop-Service" in prog and "Start-Service" in prog and "Restart-Service -Name" not in prog and "dsync" in prog  # restart
     assert "8898/status" in prog  # read-back
     # the patched JSON is embedded verbatim in the single-quoted here-string
     assert '"enabled": true' in prog

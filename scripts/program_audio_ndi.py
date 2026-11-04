@@ -11,8 +11,10 @@ the libndi the fleet already uses, with the struct layouts copied from the vendo
 tests/python/test_program_audio_1404.py.
 
 The receiver:
-  * is created BY NAME (`source_to_connect_to.p_ndi_name`, no URL): the SDK runs its own finder and
-    reconnects by itself when the sender restarts;
+  * is created BY NAME (`source_to_connect_to.p_ndi_name`); `url_address` (`<ip>:<port>`, default
+    None = name only) also pins the address the SDK connects to (program_audio_ndi_url.py: an
+    address the box reaches on-link, never the audio-VLAN one libndi may pick, issue 1404); the
+    SDK reconnects by itself when the sender restarts;
   * asks for `NDIlib_recv_bandwidth_audio_only` -- no video ever crosses the network;
   * discovers by mDNS only (no extra IPs), so while the rig is away at an event behind tailscale it
     simply finds nothing and pulls nothing over the mobile link.
@@ -126,8 +128,9 @@ class NdiAudioReceiver:
     when nothing arrived within the timeout (or a non-audio frame type came back)."""
 
     def __init__(self, source_name: str, lib_path: str | None = None,
-                 receiver_name: str = RECEIVER_NAME):
+                 receiver_name: str = RECEIVER_NAME, url_address: str | None = None):
         self.source_name = source_name
+        self.url_address = url_address
         lib = _load_library(lib_path)
         lib.NDIlib_initialize.restype = ctypes.c_bool
         lib.NDIlib_initialize.argtypes = []
@@ -152,8 +155,9 @@ class NdiAudioReceiver:
         # Keep the encoded strings alive for the receiver's lifetime.
         self._name_b = source_name.encode("utf-8")
         self._recv_name_b = receiver_name.encode("utf-8")
+        self._url_b = url_address.encode("utf-8") if url_address else None
         settings = NDIlib_recv_create_v3_t()
-        settings.source_to_connect_to = NDIlib_source_t(self._name_b, None)
+        settings.source_to_connect_to = NDIlib_source_t(self._name_b, self._url_b)
         settings.color_format = COLOR_FORMAT_BGRX_BGRA
         settings.bandwidth = BANDWIDTH_AUDIO_ONLY
         settings.allow_video_fields = True

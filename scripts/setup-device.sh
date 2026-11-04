@@ -78,7 +78,7 @@ fail() {
 . "$HERE/lib/bkshading-relay-provision.sh"  # bkshading_relay_provision_install / _expected_enable_state /
                                             # _binary_plan / _fetch_binary (issue 808) -- the ONE relay install
                                             # body, shared with bkshading-provision-relay.sh; it sources the
-                                            # relay CI artifact names + the ONE run resolver itself.
+                                            # the pinned shading release.
                                             # verify-device.sh (ao) grades the result.
 # shellcheck source=scripts/lib/ci-run-resolve.sh
 . "$HERE/lib/ci-run-resolve.sh"  # ci_run_latest_success -- the ONE head-anchored CI run resolver (#1394),
@@ -139,6 +139,8 @@ fail() {
                                # time zone STEP 1 writes; shared with create-usb-linux.sh, the OBS-box
                                # baseline and verify-device.sh (as)
 
+# shellcheck source=scripts/lib/dantesync-install.sh
+. "$HERE/lib/dantesync-install.sh"  # issue 1487: dantesync_install_retire_legacy + the pinned shas
 # shellcheck source=scripts/dantesync-version-gate.sh
 . "$HERE/dantesync-version-gate.sh"  # DANTESYNC_VERSION_PIN (#1066, source-safe: its source-guard
                                      # returns before the gate logic runs) -- the SAME single source
@@ -505,8 +507,8 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         --relay-binary)
-            # issue 808: the CI-built bkshading-relay (bkshading-linux-amd64 artifact) as a local path or
-            # URL -- symmetric with --binary / --probe-binary for a gh-less box.
+            # issue 808: the bkshading-relay of the pinned shading release, staged as a local path or a
+            # URL for a box without network to GitHub; its sha256 must equal the pin (issue 1487).
             RELAY_BINARY_ARG="${2:?--relay-binary needs a URL or local path}"
             shift 2
             ;;
@@ -535,7 +537,7 @@ DEVICE_NAME_ARG="${1:-}"
 if [ -z "$DEVICE_NAME_ARG" ]; then
     echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
     echo "       (also: --probe-binary <url|path> for cam2's frame-probe #1066 D5, --run <ci.yml run id>;"
-    echo "        --relay-binary <url|path> = the CI bkshading-relay for a gh-less box, --rig-mode test|event"
+    echo "        --relay-binary <url|path> = the pinned bkshading-relay for a box without network, --rig-mode test|event"
     echo "        (default test: the relay on the source box + cam2 is installed DISABLED, issue 808/1311);"
     echo "        --yes|-y = non-interactive, no confirmation prompt)"
     echo ""
@@ -567,7 +569,7 @@ esac
 TOTAL_STEPS=19
 
 # GitHub repos
-DANTESYNC_REPO="zbynekdrlik/dantesync"
+DANTESYNC_REPO="zbynekdrlik/dsync"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Camera-Box Device Setup${NC}"
@@ -1526,7 +1528,7 @@ done
 # needs its own stanza rather than fitting the shared `for _ts in ...` loop -- but the SAME
 # disable -> purge -> mask order as that loop: disable+stop each unit, purge the ONE shared
 # package, then mask each unit as a backstop. dantesync is a standalone binary
-# (/usr/local/bin/dantesync, downloaded below) with no dependency on linuxptp -- safe to purge
+# (/usr/local/bin/dsync, downloaded below) with no dependency on linuxptp -- safe to purge
 # outright.
 for _u in ptp4l phc2sys; do
     systemctl disable --now "$_u" 2>/dev/null || true
@@ -1566,7 +1568,7 @@ DANTESYNC_INSTALLED=false
 # of the fleet the moment a newer dantesync ships (the exact PIN-DRIFT class this batch fixes for
 # the camera-box binary too). Resolve the pinned tag's asset URL from GitHub.
 DANTESYNC_URL=$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/tags/v${DANTESYNC_VERSION_PIN}" 2>/dev/null | \
-    grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' | \
+    grep -o '"browser_download_url": *"[^"]*dsync-linux-amd64"' | \
     grep -o 'https://[^"]*' | head -1) || true
 
 # #450: fail loud -- dantesync disciplines the cluster wall-clock genlock depends on (#8); a box
@@ -1574,17 +1576,17 @@ DANTESYNC_URL=$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/relea
 [ -n "$DANTESYNC_URL" ] || fail "could not get dantesync release URL from GitHub for the pinned v${DANTESYNC_VERSION_PIN} (releases/tags/v${DANTESYNC_VERSION_PIN}) -- dantesync is required for cluster clock sync (#8), not optional"
 
 # #1289: derive the release's TARGET version from the download URL's own path
-# (.../releases/download/vX.Y.Z/dantesync-linux-amd64), and read the CURRENTLY-installed
-# dantesync's own version (per .claude/rules/dantesync-version-reading.md: `dantesync --version`
+# (.../releases/download/vX.Y.Z/dsync-linux-amd64), and read the CURRENTLY-installed
+# dantesync's own version (per .claude/rules/dantesync-version-reading.md: `dsync --version`
 # answers on every platform, no journal/bundle-state coupling needed). When they already agree,
 # SKIP the download entirely -- both to avoid a needless replace on an idempotent re-run, and
-# because `curl -o` straight onto a RUNNING dantesync.service binary fails with ETXTBSY (the
+# because `curl -o` straight onto a RUNNING dsync.service binary fails with ETXTBSY (the
 # kernel refuses to open a currently-executing file for write) -- live, cam5/cam6/cam7,
 # 2026-09-03 11:52-11:56Z.
 DANTESYNC_TARGET_VERSION="$(printf '%s\n' "$DANTESYNC_URL" | grep -oE '/v[0-9]+\.[0-9]+\.[0-9]+/' | head -1 | tr -d '/v' || true)"
 DANTESYNC_CURRENT_VERSION=""
-if [ -x /usr/local/bin/dantesync ]; then
-    DANTESYNC_CURRENT_VERSION="$(/usr/local/bin/dantesync --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+if [ -x /usr/local/bin/dsync ]; then
+    DANTESYNC_CURRENT_VERSION="$(/usr/local/bin/dsync --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 fi
 
 if [ -n "$DANTESYNC_TARGET_VERSION" ] && [ "$DANTESYNC_CURRENT_VERSION" = "$DANTESYNC_TARGET_VERSION" ]; then
@@ -1592,7 +1594,7 @@ if [ -n "$DANTESYNC_TARGET_VERSION" ] && [ "$DANTESYNC_CURRENT_VERSION" = "$DANT
 else
     # download to a temp file and `install -m 0755` it into place, never `curl -o` straight onto
     # the live path (see #1289 rationale above) -- install's rename-into-place semantics are safe
-    # over a running dantesync.service.
+    # over a running dsync.service.
     _dantesync_dl_tmp="$(mktemp)"
     curl -fsSL "$DANTESYNC_URL" -o "$_dantesync_dl_tmp" 2>/dev/null \
         || {
@@ -1603,9 +1605,13 @@ else
         rm -f "$_dantesync_dl_tmp"
         fail "downloaded dantesync from $DANTESYNC_URL is empty"
     }
-    install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync || {
+    dsync_release_sha_ok dsync-linux-amd64 "$DANTESYNC_TARGET_VERSION" "$(sha256sum "$_dantesync_dl_tmp" | awk '{print $1}')" || {
         rm -f "$_dantesync_dl_tmp"
-        fail "could not install downloaded dantesync from $DANTESYNC_URL to /usr/local/bin/dantesync"
+        fail "downloaded dsync from $DANTESYNC_URL is not the pinned release"
+    }
+    install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dsync || {
+        rm -f "$_dantesync_dl_tmp"
+        fail "could not install downloaded dantesync from $DANTESYNC_URL to /usr/local/bin/dsync"
     }
     rm -f "$_dantesync_dl_tmp"
 fi
@@ -1627,8 +1633,10 @@ fi
 # the unit so the enable/restart below picks it up on a first provision.
 _RG_GM_IP="$(rig_grandmaster_ip)" || fail "cannot resolve the PTP grandmaster host (video-clock.lan) -- refusing to provision dantesync without a resolvable grandmaster (#1307)"
 _RG_GM_HOST="$(rig_grandmaster_host)"
-install -d -m 755 /etc/dantesync
-cat > /etc/dantesync/config.json <<DANTECFGEOF
+# issue 1487: a box still on dantesync moves to dsync here: the old service out, its state dir renamed.
+dantesync_install_retire_legacy || fail "could not retire dantesync (above)"
+install -d -m 755 /etc/dsync
+cat > /etc/dsync/config.json <<DANTECFGEOF
 {
   "_ntp_server_examples": "sk.pool.ntp.org, europe.pool.ntp.org, time.google.com, time.cloudflare.com",
   "http_status": {
@@ -1649,12 +1657,12 @@ cat > /etc/dantesync/config.json <<DANTECFGEOF
   }
 }
 DANTECFGEOF
-chmod 644 /etc/dantesync/config.json
-echo "  #1307/#1066: /etc/dantesync/config.json installed (gm_allowlist=[\"${_RG_GM_HOST}\"], resolves to ${_RG_GM_IP}, clock_discipline=ptp_phase_lock)"
+chmod 644 /etc/dsync/config.json
+echo "  #1307/#1066: /etc/dsync/config.json installed (gm_allowlist=[\"${_RG_GM_HOST}\"], resolves to ${_RG_GM_IP}, clock_discipline=ptp_phase_lock)"
 
-cat > /etc/systemd/system/dantesync.service << 'DANTEEOF'
+cat > /etc/systemd/system/dsync.service << 'DANTEEOF'
 [Unit]
-Description=Dante Time Sync (PTP/NTP Synchronization)
+Description=dsync (PTP/NTP Synchronization)
 After=network.target
 Wants=network.target
 
@@ -1666,7 +1674,7 @@ Type=simple
 # the old literal SNV IP left every Poprad cambox with no NTP at all (cam7 ~150 s off strih-pp). The
 # CLI value is resolved on every query, so an unresolvable name is a counted NTP failure, never a
 # public-pool fallback, and it recovers once DNS answers.
-ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan
+ExecStart=/usr/local/bin/dsync --ntp-server strih.lan
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -1677,7 +1685,9 @@ WantedBy=multi-user.target
 DANTEEOF
 
 systemctl daemon-reload
-systemctl enable dantesync 2>/dev/null || true
+systemctl enable dsync 2>/dev/null || true
+# issue 1487: enable-only, except the clock this step just stopped: a live box keeps running its daemon.
+if [ "${DSYNC_RETIRED_ACTIVE:-0}" = 1 ]; then systemctl start dsync; fi
 DANTESYNC_INSTALLED=true
 echo "  dantesync: installed and enabled"
 
@@ -1867,8 +1877,8 @@ echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_SINK_IP}:${REMOTE_LOG_N
 # gphoto2 -- because only the separate bkshading-provision-relay.sh installed it, so the shading
 # panel silently lost those cameras. Every cambox now gets it HERE, through the ONE provisioning lib
 # (scripts/lib/bkshading-relay-provision.sh, the same body bkshading-provision-relay.sh runs):
-# gphoto2 + the unit + the env derived from the camera-box drop-ins (STEP 7 wrote them) + the CI
-# relay binary from the SAME ci.yml run as camera-box (the bkshading-linux-amd64 artifact).
+# gphoto2 + the unit + the env derived from the camera-box drop-ins (STEP 7 wrote them) + the relay
+# binary of the pinned shading release (issue 1487, scripts/shading-release.pin).
 # ENABLE-only, never a live start (.claude/rules/provisioning-scripts.md). The enable-state follows
 # the rig mode (--rig-mode, default test): TEST = the relay roster (the source box + cam2, the SAME
 # two boxes rig-mode.sh stops+disables, issue 1311) installed DISABLED, every other box enabled;
@@ -1885,14 +1895,11 @@ if [ "$RELAY_ENABLE_STATE" = unknown ]; then
     RELAY_ENABLE_STATE=disabled
     RELAY_PROBLEM="could not resolve the rig source box (camera_source_box) for the TEST relay roster -- installed DISABLED"
 fi
-RELAY_GH=no
-if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then RELAY_GH=yes; fi
-# The binary is the bkshading-linux-amd64 CI artifact: --relay-binary (a dev1-staged path/URL), else
-# the SAME ci.yml run STEP 3 took camera-box from, else the newest run carrying it (gh boxes only).
-RELAY_PLAN="$(bkshading_relay_provision_binary_plan "$RELAY_BINARY_ARG" "${RUN_ID:-${CI_RUN_ID_ARG:-}}" "$RELAY_GH")"
+# The binary: --relay-binary (a dev1-staged path/URL), else the pinned release; only the pinned bytes pass.
+RELAY_PLAN="$(bkshading_relay_provision_binary_plan "$RELAY_BINARY_ARG")"
 RELAY_DL_DIR="$(mktemp -d)"
 RELAY_BIN_SRC=""
-if RELAY_FETCH_OUT="$(bkshading_relay_provision_fetch_binary "$RELAY_PLAN" "$RELAY_DL_DIR" "$GITHUB_REPO" "$CI_BRANCH")"; then
+if RELAY_FETCH_OUT="$(bkshading_relay_provision_fetch_binary "$RELAY_PLAN" "$RELAY_DL_DIR")"; then
     RELAY_BIN_SRC="$RELAY_FETCH_OUT"
 else
     RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }$RELAY_FETCH_OUT"

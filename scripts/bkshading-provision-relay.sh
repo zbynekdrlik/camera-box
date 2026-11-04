@@ -4,7 +4,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------------------------
-# WHY: the bkshading RELAY binary (bkshading/relay) drives the local Blackmagic camera over
+# WHY: the bkshading RELAY binary (shading:bkshading/relay) drives the local Blackmagic camera over
 # USB-PTP via the `gphoto2` CLI and exposes its shading over a small HTTP API the aggregation
 # service polls. M1 shipped the binary (it already reads CAMERA_BOX_CAPTURE_FPS from its env and
 # reports it as RelayState.capture_fps, which the service's issue-809 grab derive consumes) — but
@@ -21,7 +21,7 @@ set -euo pipefail
 # .claude/rules/provisioning-scripts.md; the relay's live verify against the camera is the
 # supervisor's post-reboot rig step).
 #
-# The relay BINARY deploy (the CI-built bkshading-relay -> /usr/local/bin) is a SEPARATE supervisor
+# The relay BINARY deploy (the pinned bkshading-relay -> /usr/local/bin) is a SEPARATE supervisor
 # step; --check treats a missing binary as a failure (the unit needs it), --install only warns.
 #
 # Usage:  scripts/bkshading-provision-relay.sh [--check|--install] [--rig-mode test|event]
@@ -180,7 +180,7 @@ do_check() {
     cat >&2 <<MSG
 bkshading relay NOT fully provisioned on this box. Fix:
   scripts/bkshading-provision-relay.sh --install [--rig-mode test|event]   # gphoto2 + unit + env; never started
-Then deploy the CI-built bkshading-relay binary to $RELAY_BIN and reboot.
+Then deploy the pinned bkshading-relay (scripts/bkshading-deploy-relay.sh) to $RELAY_BIN and reboot.
 MSG
   else
     echo "OK: bkshading relay fully provisioned (live after reboot / already running)."

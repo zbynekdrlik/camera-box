@@ -29,6 +29,12 @@ import sys
 
 import pytest
 
+@pytest.fixture(autouse=True)
+def _every_node_rolled(monkeypatch):
+    """issue 1487: these tests use mbc / fohabl as their rolled nodes."""
+    monkeypatch.setenv("DSYNC_SELF_UPGRADED_NODES", "")
+
+
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _LIB = _ROOT / "scripts" / "lib" / "dantesync-fleet.sh"
 _PY = _ROOT / "scripts" / "dantesync_fleet.py"

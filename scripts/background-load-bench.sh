@@ -115,7 +115,7 @@ P="$(pgrep -xo obs)"; [ -z "$P" ] || echo "OBS live mask: $(awk '/^Cpus_allowed_
 echo "== cgroup"; cat /sys/fs/cgroup/cgroup.subtree_control; uname -r; systemctl show -p AllowedCPUs,CPUWeight,IOWeight,MemoryHigh rig-background.slice
 echo "== realtime threads"; ps -eLo psr,cls,rtprio,ni,pid,comm --no-headers | awk '$2 != "TS" && $2 != "IDL"' | sort -n | head -40
 echo "== threads last seen on cpu 0-1 (top by count)"; ps -eLo psr,comm --no-headers | awk '$1 <= 1 {print $2}' | sort | uniq -c | sort -rn | head -20
-echo "== dantesync + hub + restic masks"; for c in dantesync intercom-hub restic fbagent; do for p in $(pgrep -x "$c"); do echo "$c $p $(awk '/^Cpus_allowed_list:/{print $2; exit}' "/proc/$p/status") $(cut -d: -f3 "/proc/$p/cgroup" | head -1)"; done; done
+echo "== dantesync + hub + restic masks"; for c in dsync intercom-hub restic fbagent; do for p in $(pgrep -x "$c"); do echo "$c $p $(awk '/^Cpus_allowed_list:/{print $2; exit}' "/proc/$p/status") $(cut -d: -f3 "/proc/$p/cgroup" | head -1)"; done; done
 echo "== IRQs by effective cpu"; for d in /proc/irq/[0-9]*; do [ -r "$d/effective_affinity_list" ] && echo "$(cat "$d/effective_affinity_list") $(ls "$d" | grep -vE '^(affinity_hint|effective_affinity|effective_affinity_list|node|smp_affinity|smp_affinity_list|spurious)$' | head -1)"; done | sort | uniq -c | sort -k2 -n | head -40
 echo "== io scheduler"; cat /sys/block/nvme*/queue/scheduler
 EOF

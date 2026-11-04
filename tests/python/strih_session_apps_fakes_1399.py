@@ -10,6 +10,10 @@ Issue 1429: the install also fetches the dantesync tray from the pinned release.
 hermetic: unless a test passes its own, DANTESYNC_RELEASE_BASE is a file:// URL that does not exist and
 DANTESYNC_INSTALL_TRAY_BIN a path nobody can write, so no test ever reaches GitHub or /usr/local/bin.
 `tray_env` serves a fake release (a file:// tree read by the real curl) at the pin 1.18.0.
+
+Issue 1485: dstack's tray dtray rides the same loop. `HERMETIC` points its release, binary, record and
+device-marker paths at nonexistent places and declares no Dante device (DTRAY_DANTE_DEVICES=none);
+`fake_dtray` installs a fake binary + record, `dtray_pin` writes a fixture pin for it.
 """
 import hashlib
 import json
@@ -23,27 +27,34 @@ REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "strih-session-apps.sh"
 UNITS = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-         "strih-satellite-watch.timer", "dantesync-tray.service", "strih-display-watch.service")
+         "strih-satellite-watch.timer", "dsync-tray.service", "strih-display-watch.service", "dtray.service")
 # every unit FILE the install writes (the watch timer's oneshot service rides with the timer)
 UNIT_FILES = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-              "strih-satellite-watch.timer", "strih-satellite-watch.service", "dantesync-tray.service",
-              "strih-display-watch.service")
+              "strih-satellite-watch.timer", "strih-satellite-watch.service", "dsync-tray.service",
+              "strih-display-watch.service", "dtray.service")
 PROGRAMS = ("strih_browser_keeper.py", "bkshading_panel_app.py", "strih_satellite_watch.py",
             "strih_display_watch.py")
 LEAKY = ("STRIH_SESSION_APPS_BIN_DIR", "STRIH_SESSION_APPS_RUNTIME_DIR", "STRIH_SESSION_APPS_EUID",
          "STRIH_SESSION_APPS_PYTHON", "STRIH_SESSION_APPS_SATELLITE_BIN", "STRIH_LX_IP", "STRIH_BOXES_DIR",
          "DANTESYNC_VERSION_PIN", "DANTESYNC_RELEASE_BASE", "DANTESYNC_INSTALL_TRAY_BIN",
-         "DANTESYNC_INSTALL_TRAY_RELEASE_FILE")
+         "DANTESYNC_INSTALL_TRAY_RELEASE_FILE", "DTRAY_PIN_FILE", "DTRAY_RELEASE_BASE", "DTRAY_BIN",
+         "DTRAY_RELEASE_FILE", "DTRAY_DEVICES_DIR", "DTRAY_DEVICES_RECORD", "DTRAY_DANTE_DEVICES",
+         "DTRAY_INTERCOM_PIN_FILE", "DTRAY_OBS_PIN_FILE", "DTRAY_PRINT_TIMEOUT")
 # issue 1429: the hermetic defaults (see the module doc); a test's own env wins
 HERMETIC = {"DANTESYNC_RELEASE_BASE": "file:///nonexistent-1429/release",
-            "DANTESYNC_INSTALL_TRAY_BIN": "/nonexistent-1429/bin/dantesync-tray",
-            "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": "/nonexistent-1429/share/release"}
+            "DANTESYNC_INSTALL_TRAY_BIN": "/nonexistent-1429/bin/dsync-tray",
+            "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": "/nonexistent-1429/share/release",
+            # issue 1485: dtray never reaches GitHub, /usr/local or /etc/dstack in a test
+            "DTRAY_RELEASE_BASE": "file:///nonexistent-1485/release", "DTRAY_BIN": "/nonexistent-1485/bin/dtray",
+            "DTRAY_RELEASE_FILE": "/nonexistent-1485/share/release",
+            "DTRAY_DEVICES_DIR": "/nonexistent-1485/etc/dstack/devices",
+            "DTRAY_DEVICES_RECORD": "/nonexistent-1485/share/devices", "DTRAY_DANTE_DEVICES": "none"}
 TRAY_PIN = "1.18.0"
-TRAY_ASSET = "dantesync-tray-linux-amd64"
+TRAY_ASSET = "dsync-tray-linux-amd64"
 # the main processes /proc shows (the watch's oneshot service has none between its runs)
 PIDS = {"strih-browser-keeper.service": 4242, "bkshading-panel-app.service": 4343,
-        "companion-satellite.service": 4444, "strih-satellite-watch.service": 0, "dantesync-tray.service": 4545,
-        "strih-display-watch.service": 4646}
+        "companion-satellite.service": 4444, "strih-satellite-watch.service": 0, "dsync-tray.service": 4545,
+        "strih-display-watch.service": 4646, "dtray.service": 4747}
 PANEL_CLASS = "bkshading-panel-app.Bkshading-panel-app"
 WIN = "0x01  0 %s  strih-snv Shading\n" % PANEL_CLASS
 
@@ -139,7 +150,7 @@ def fake_tray_release(tmp_path, content=b"#!/bin/sh\n# dantesync tray v1.18.0\n"
 
 
 def tray_bin(tmp_path):
-    return tmp_path / "tray" / "dantesync-tray"
+    return tmp_path / "tray" / "dsync-tray"
 
 
 def tray_record(tmp_path):
@@ -168,6 +179,50 @@ def fake_tray(tmp_path, version=TRAY_PIN):
     return p
 
 
+DTRAY_TAG = "v0.6.19"
+DTRAY_ASSET = "dtray-v0.6.19-linux-x86_64"
+DTRAY_GOOD = b"#!/bin/sh\n# dtray v0.6.19 (fake)\n"
+
+
+def dtray_bin(tmp_path):
+    return tmp_path / "dtray" / "dtray"
+
+
+def dtray_record(tmp_path):
+    return tmp_path / "dtray-share" / "release"
+
+
+def dtray_pin(tmp_path, sha=None, first="v0.6.13", tag=DTRAY_TAG, asset=DTRAY_ASSET):
+    """A fixture dtray pin (DTRAY_PIN_FILE) naming `sha` (default the sha256 of DTRAY_GOOD)."""
+    p = tmp_path / "dtray-release.pin"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("DTRAY_RELEASE_TAG=%s\nDTRAY_RELEASE_ASSET=%s\nDTRAY_RELEASE_SHA256=%s\nDTRAY_DEVICE_FIRST_DSTACK=%s\n"
+                 % (tag, asset, sha or hashlib.sha256(DTRAY_GOOD).hexdigest(), first))
+    return p
+
+
+def fake_dtray(tmp_path, content=DTRAY_GOOD):
+    """dtray as step 16d installs it (DTRAY_BIN) + its release record."""
+    p = dtray_bin(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(content)
+    p.chmod(0o755)
+    past = time.time() - 86400
+    os.utime(p, (past, past))
+    rec = dtray_record(tmp_path)
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    rec.write_text("%s %s\n" % (DTRAY_TAG, hashlib.sha256(content).hexdigest()))
+    return p
+
+
+def dtray_env(tmp_path):
+    """The dtray seams of a test (the fixture pin, the binary, its record, the device markers)."""
+    return {"DTRAY_PIN_FILE": str(dtray_pin(tmp_path)), "DTRAY_BIN": str(dtray_bin(tmp_path)),
+            "DTRAY_RELEASE_FILE": str(dtray_record(tmp_path)),
+            "DTRAY_DEVICES_DIR": str(tmp_path / "dstack-devices"),
+            "DTRAY_DEVICES_RECORD": str(tmp_path / "dtray-share" / "devices")}
+
+
 def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, panel_cmd=None, satellite_exe=None,
                    tray=True, tray_exe=None):
     """A home + bin dir as step 16d leaves them (every unit + program from the checkout, enabled, started by
@@ -189,6 +244,7 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
         shutil.copy(SCRIPTS / prog, bindir / prog)
     sat = fake_satellite(tmp_path)
     tray_path = fake_tray(tmp_path) if tray else tray_bin(tmp_path)
+    dtray_path = fake_dtray(tmp_path)  # issue 1485
     (home / ".config/openbox").mkdir(parents=True)
     lines = ["systemctl --user start strih-obs.service || true"]
     if autostart:
@@ -204,7 +260,8 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
         "bkshading-panel-app.service": panel_cmd or ["/usr/bin/python3", str(bindir / "bkshading_panel_app.py")],
         # Chromium rewrites the browser process title, so the Satellite's argv proves nothing: its exe does
         "companion-satellite.service": ["companion-satellite", "--rewritten-title"],
-        "dantesync-tray.service": [str(tray_path)],
+        "dsync-tray.service": [str(tray_path)],
+        "dtray.service": [str(dtray_path)],  # issue 1485
         # issue 1424: the display watch
         "strih-display-watch.service": ["/usr/bin/python3", str(bindir / "strih_display_watch.py"),
                                         "--state-file", "/run/user/1000/strih-display-watch.json"],
@@ -213,7 +270,8 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
         (proc / str(PIDS[unit])).mkdir(parents=True)
         (proc / str(PIDS[unit]) / "cmdline").write_bytes(b"\0".join(w.encode() for w in words) + b"\0")
     os.symlink(satellite_exe or str(sat), proc / str(PIDS["companion-satellite.service"]) / "exe")
-    os.symlink(tray_exe or str(tray_path), proc / str(PIDS["dantesync-tray.service"]) / "exe")
+    os.symlink(tray_exe or str(tray_path), proc / str(PIDS["dsync-tray.service"]) / "exe")
+    os.symlink(str(dtray_path), proc / str(PIDS["dtray.service"]) / "exe")
     return home, bindir
 
 
@@ -256,6 +314,7 @@ def grade_env(tmp_path, bindir, rundir, euid="1000"):
             "STRIH_SESSION_APPS_SATELLITE_BIN": str(tmp_path / "opt" / "companion-satellite" / "companion-satellite"),
             "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path)), "DANTESYNC_VERSION_PIN": TRAY_PIN,
             "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(tray_record(tmp_path)),
+            **dtray_env(tmp_path),  # issue 1485
             # issue 1424: the display watch's X config row never reads the real /etc/X11 or Xorg log
             "STRIH_X_CONF_DIR": str(tmp_path / "xorg.conf.d"), "STRIH_X_XORG_LOG": str(tmp_path / "Xorg.0.log")}
 

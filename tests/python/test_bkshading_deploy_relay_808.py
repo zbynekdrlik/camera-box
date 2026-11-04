@@ -33,6 +33,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -40,14 +41,15 @@ import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shading_release_fake_1487 import pin_for_args  # noqa: E402
+
 SCRIPT = os.path.join(REPO, "scripts", "bkshading-deploy-relay.sh")
 LIB = os.path.join(REPO, "scripts", "lib", "bkshading-deploy-runtime.sh")
 RELAY_LIB = os.path.join(REPO, "scripts", "lib", "bkshading-relay-runtime.sh")
 CI_YML = os.path.join(REPO, ".github", "workflows", "ci.yml")
 
 RELAY_BIN_PATH = "/usr/local/bin/bkshading-relay"
-LINUX_ARTIFACT = "bkshading-linux-amd64"
-WINDOWS_ARTIFACT = "bkshading-windows-amd64"
 
 
 def _bash(snippet):
@@ -62,6 +64,7 @@ def _run_script(args, env=None, check=False):
     e = dict(os.environ)
     if env:
         e.update(env)
+    e.update(pin_for_args(args))
     return subprocess.run(
         ["bash", SCRIPT] + args, capture_output=True, text=True, env=e, check=check
     )
@@ -84,14 +87,6 @@ def test_deploy_script_is_executable():
 # ---------------------------------------------------------------------------------------------
 # pure lib decisions
 # ---------------------------------------------------------------------------------------------
-def test_artifact_name():
-    assert _bash("bkshading_deploy_artifact_name") == LINUX_ARTIFACT
-
-
-def test_relay_artifact_bin_name():
-    assert _bash("bkshading_deploy_relay_artifact_bin") == "bkshading-relay"
-
-
 def test_should_start_is_never_yes_enable_only_invariant():
     # ENABLE-ONLY: a relay binary deploy NEVER starts the service. This pure predicate is the single
     # source of truth; pinning it to "no" makes a future accidental start a RED test.
@@ -109,60 +104,6 @@ def test_sha_match_decision():
 # ---------------------------------------------------------------------------------------------
 # CI: release build + upload the deployable binaries; no continue-on-error
 # ---------------------------------------------------------------------------------------------
-def _load_ci():
-    with open(CI_YML) as f:
-        return yaml.safe_load(f)
-
-
-def _job_step_runs(job):
-    return "\n".join(s.get("run", "") for s in job.get("steps", []))
-
-
-def _job_uploads(job, artifact_name):
-    for s in job.get("steps", []):
-        if str(s.get("uses", "")).startswith("actions/upload-artifact") and \
-                s.get("with", {}).get("name") == artifact_name:
-            return s.get("with", {}).get("path", "")
-    return None
-
-
-def test_bkshading_job_release_builds_and_uploads_relay_and_service():
-    ci = _load_ci()
-    job = ci["jobs"]["bkshading"]
-    runs = _job_step_runs(job)
-    # release build of BOTH the relay (default features) and the service (--features ndi, deploy shape)
-    assert "cargo build --release" in runs, "bkshading job must release-build the deployable binaries"
-    assert re.search(r"cargo build --release[^\n]*-p bkshading-relay", runs), \
-        "must release-build the relay"
-    assert re.search(r"cargo build --release[^\n]*--features ndi[^\n]*-p bkshading\b", runs) or \
-        re.search(r"cargo build --release[^\n]*-p bkshading\b[^\n]*--features ndi", runs), \
-        "must release-build the service with --features ndi"
-    path = _job_uploads(job, LINUX_ARTIFACT)
-    assert path is not None, "bkshading job must upload the %s artifact" % LINUX_ARTIFACT
-    assert "target/release/bkshading-relay" in path
-    assert re.search(r"target/release/bkshading\b", path), "must upload the service binary"
-
-
-def test_bkshading_windows_job_builds_and_uploads_service():
-    ci = _load_ci()
-    job = ci["jobs"]["bkshading-windows"]
-    runs = _job_step_runs(job)
-    assert re.search(r"cargo build --release[^\n]*--features ndi", runs), \
-        "windows job must release-build the service with --features ndi (the strih ship shape)"
-    path = _job_uploads(job, WINDOWS_ARTIFACT)
-    assert path is not None, "windows job must upload the %s artifact" % WINDOWS_ARTIFACT
-    assert re.search(r"target/release/bkshading\.exe", path)
-
-
-def test_no_continue_on_error_in_bkshading_jobs():
-    ci = _load_ci()
-    for name in ("bkshading", "bkshading-windows"):
-        job = ci["jobs"][name]
-        assert "continue-on-error" not in job, "%s job must not use continue-on-error" % name
-        for s in job.get("steps", []):
-            assert "continue-on-error" not in s, "%s step must not use continue-on-error" % name
-
-
 # ---------------------------------------------------------------------------------------------
 # --dry-run plan
 # ---------------------------------------------------------------------------------------------
@@ -622,3 +563,23 @@ def test_a_stale_or_absent_lease_does_not_block_the_deploy_1371():
         r = _run_script(["--host", "10.77.9.65", "--binary", fake_bin], env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         assert "SCP" in open(log).read()
+
+
+# ---------------------------------------------------------------------------------------------
+# issue 1487: only the pinned bytes deploy
+# ---------------------------------------------------------------------------------------------
+def test_a_binary_the_pin_does_not_name_is_refused():
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "relay")
+        with open(fake_bin, "w") as f:
+            f.write("not the release")
+        e = dict(os.environ, SHADING_RELEASE_PIN_FILE=os.path.join(REPO, "scripts", "shading-release.pin"))
+        r = subprocess.run(["bash", SCRIPT, "--host", "10.77.9.201", "--binary", fake_bin, "--dry-run"],
+                           capture_output=True, text=True, env=e)
+        assert r.returncode == 1, r.stdout
+        assert "only the pinned release deploys" in r.stderr, r.stderr
+
+
+def test_the_ci_run_flag_is_gone():
+    r = _run_script(["--host", "10.77.9.201", "--run", "123", "--dry-run"])
+    assert r.returncode == 2 and "unknown argument" in r.stderr, r.stderr

@@ -17,8 +17,8 @@ set -euo pipefail
 # "ptp_phase_lock", "legacy" = drift; system.phase_slew is no longer graded ({"$ignore": true}).
 # No E2E step calls this as a blocking gate.
 #
-# READS (read-only): dev1's own /etc/dantesync/config.json (local), a Linux node's
-# /etc/dantesync/config.json and a Windows node's C:\ProgramData\DanteSync\config.json over
+# READS (read-only): dev1's own /etc/dsync/config.json (local), a Linux node's
+# /etc/dsync/config.json and a Windows node's C:\ProgramData\dsync\config.json over
 # `scp -O` (the raw BYTES, so a PowerShell-written byte-order mark -- which makes dantesync ignore the
 # file -- is caught). A traveling box that is away (obs_fleet_is_home false) is SKIPPED; a node acked
 # offline in rig-fleet.txt / CAMBOX_OFFLINE_ACK is EXCLUDED; any other unread node is UNKNOWN, never
@@ -75,7 +75,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 # fetch_config NAME OS TARGET OUT -> the node's config.json bytes into OUT (rc 0), or rc != 0.
 fetch_config() {
-  local name="$1" os="$2" target="$3" out="$4" var pass remote
+  local name="$1" os="$2" target="$3" out="$4" var pass remote legacy
   if [ -n "${DANTESYNC_CONFIG_DRIFT_FETCH_CMD:-}" ]; then
     "$DANTESYNC_CONFIG_DRIFT_FETCH_CMD" "$name" "$os" "$target" "$out"
     return
@@ -95,12 +95,15 @@ fetch_config() {
     pass="$SSH_PASS"
   fi
   case "$os" in
-    windows) remote="${DANTESYNC_FLEET_CONFIG_WINDOWS//\\//}" ;;
-    *) remote="$DANTESYNC_FLEET_CONFIG_LINUX" ;;
+    windows) remote="${DANTESYNC_FLEET_CONFIG_WINDOWS//\\//}"; legacy="${DANTESYNC_FLEET_CONFIG_WINDOWS_LEGACY//\\//}" ;;
+    *) remote="$DANTESYNC_FLEET_CONFIG_LINUX"; legacy="$DANTESYNC_FLEET_CONFIG_LINUX_LEGACY" ;;
   esac
   sshpass -p "$pass" timeout "$SSH_TIMEOUT" scp -O -q -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout="$SSH_TIMEOUT" \
-    "${target}:${remote}" "$out"
+    "${target}:${remote}" "$out" 2>/dev/null \
+    || sshpass -p "$pass" timeout "$SSH_TIMEOUT" scp -O -q -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout="$SSH_TIMEOUT" \
+    "${target}:${legacy}" "$out"
 }
 
 echo "== dantesync config drift (issue 1372): every fleet node vs its role's canonical template =="

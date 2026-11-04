@@ -509,7 +509,7 @@ def test_build_bundle_state_omits_826_keys_when_empty():
 # (2026-07-30) found it half-wired end to end: the servers actually deployed on strih/stream never
 # picked up the new key, and even the log line the parser looked for is not something dantesync
 # ever logs on this fleet -- so the facet could only ever read UNKNOWN. The gate now reads EVERY
-# node (including strih/stream) via a uniform `dantesync --version` over SSH instead
+# node (including strih/stream) via a uniform `dsync --version` over SSH instead
 # (scripts/dantesync-version-gate.sh's dantesync_version_from_version_output) -- no bundle-state
 # involvement at all. This module intentionally carries no dantesync_version code any more; do not
 # re-add it without a live, working consumer.

@@ -96,7 +96,7 @@ def measured_by_camera(jitter_json: dict, grid_inputs: dict | None = None) -> di
     ``latency_ms`` / ``mean_head_skew_ms`` is missing, non-numeric, or the value itself isn't a
     dict, is SKIPPED -- never a fabricated/guessed value. Returns ``{}`` for empty/malformed
     input (never raises -- the caller decides whether an empty result is fatal); a grid input only
-    raises ``genlock_n2_grid.N2GridConstantError`` when the Rust age constant cannot be read."""
+    raises ``genlock_n2_grid.N2GridConstantError`` when the age constant cannot be read."""
     out: dict = {}
     if not isinstance(jitter_json, dict):
         return out
@@ -111,7 +111,7 @@ def measured_by_camera(jitter_json: dict, grid_inputs: dict | None = None) -> di
         if not isinstance(skew_ms, (int, float)) or isinstance(skew_ms, bool):
             continue
         if grid_inputs and name in grid_inputs:
-            import genlock_n2_grid  # lazy: the head-skew path never reads the Rust constant
+            import genlock_n2_grid  # lazy: the head-skew path never reads the constant
             out[int(m.group(1))] = genlock_n2_grid.present_age_ms(latency_ms, grid_inputs[name])
             continue
         out[int(m.group(1))] = float(latency_ms) + float(skew_ms)
@@ -183,7 +183,7 @@ def main(argv=None):
     with open(args.jitter_json, encoding="utf-8") as f:
         jitter_json = json.load(f)
 
-    import genlock_n2_grid  # the dev1 twin (issue 1367 D1b); pure, reads the Rust constant lazily
+    import genlock_n2_grid  # the dev1 twin (issue 1367 D1b); pure, reads the constant lazily
 
     grid_inputs = None
     if args.strih_log:
@@ -196,13 +196,13 @@ def main(argv=None):
         if grid_inputs:
             print("prerecord_phase_calibrate: issue 1367 N>=2 grid inputs "
                   f"{sorted(grid_inputs)} -> the grid present age of the pin "
-                  "(src/genlock_n2_grid.rs); mean_head_skew_ms is only the arrival-lag diagnostic")
+                  "(vstack:rig/core/src/genlock_n2_grid.rs); mean_head_skew_ms is only the arrival-lag diagnostic")
 
     try:
         by_cam = measured_by_camera(jitter_json, grid_inputs)
     except genlock_n2_grid.N2GridConstantError as exc:
         print(f"ERROR: prerecord_phase_calibrate: the N>=2 grid twin cannot read "
-              f"GENLOCK_N2_AGE_BASE_NS from src/genlock_n2_grid.rs ({exc}) -- writing nothing",
+              f"GENLOCK_N2_AGE_BASE_NS from {genlock_n2_grid.AGE_BASE_SOURCE[0]} ({exc}) -- writing nothing",
               file=sys.stderr)
         return 1
     if not by_cam:
