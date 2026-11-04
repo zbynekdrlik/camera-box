@@ -149,6 +149,8 @@ def test_a_marker_that_is_not_a_plain_key_is_refused(tmp_path, bad):
     r = subprocess.run(["python3", str(SEED), "seed", "--ini", str(ini), "--dock", LOUD, "--marker", bad],
                        capture_output=True, text=True)
     assert r.returncode != 0 and ini.read_bytes() == snap
+    # refused by the marker check itself, never only by argparse not knowing --marker
+    assert "is not a plain [CameraBox] key" in r.stderr, r.stderr
 
 
 # --- the lib: setup step 16g -----------------------------------------------------------------------
@@ -272,8 +274,8 @@ def test_a_log_without_the_module_fails_the_loaded_row(tmp_path):
     assert rows[1].startswith("FAIL|(loudness-dock-loaded) ") and "restart strih-obs.service" in rows[1]
 
 
-def test_an_avsync_only_log_never_reads_as_the_meter_loaded(tmp_path):
-    # `obs-audio-video-sync-dock.so` is not `loudness-dock.so`: the module match is the whole name
+def test_a_module_whose_name_only_ends_in_loudness_dock_so_is_not_the_meter(tmp_path):
+    # the Loaded Modules match is the entry's whole name: `xloudness-dock.so` is not the meter
     r = _bash('printf "x:   Loaded Modules:\\nx:     xloudness-dock.so\\nx: -----\\n" | obs_box_loudness_dock_loaded_verdict')
     assert r.stdout.strip() == "not-loaded", r.stdout
 
