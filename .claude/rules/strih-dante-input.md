@@ -6,6 +6,8 @@ paths:
   - "tests/python/test_strih_dante_input_1485.py"
   - "scripts/lib/strih-dante-rx-pin.sh"
   - "tests/python/test_strih_dante_rx_pin_1485.py"
+  - "scripts/lib/strih-dante-ptp.sh"
+  - "tests/python/test_strih_dante_ptp_1485.py"
 ---
 
 # strih-snv's program audio over Dante: the obs release's `dante_input` source (issue 1485)
@@ -132,4 +134,56 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
       an empty `jxs_cores` or one holding the reserved CPU FAILs;
     - the Dante libs not sourced is an error by name, never "not a Dante box";
     - the output reads the file at its next start (or Stop/StartOutput over WS).
+- **PTP in process (ROZHODNUTÉ 6628785864, owner 4.11.2026; design 6629112890; `scripts/lib/strih-dante-ptp.sh`).**
+  Every dstack device here (the hub's `strih-snv-intercom`, OBS's `strih-obs`) follows Dante PTP itself: dstack
+  v0.6.23's `ClockSource::Linked` starts dsync's follower (UDP 319 + 320 on INADDR_ANY, joined to 224.0.1.129 on
+  the leg, receive only) and falls back to the dsync service's clock. The dsync service stays the ONLY writer
+  of the system clock and the clock of the rest of the box; "dsync is the only PTP owner" is superseded for
+  these devices.
+  - **The leg:** one input rule for the group to 319/320 (`obs-vban-receive.md`, the Dante variant).
+  - **OBS's right to bind 319 = the box-wide sysctl** `net.ipv4.ip_unprivileged_port_start = 319` in
+    `/etc/sysctl.d/60-strih-dante-ptp-port.conf`, step 13 on a Dante-program box (`strih_dante_ptp_port_install`
+    from `strih_dante_input_install`, header-checked file, the running value written to
+    `/proc/sys/net/ipv4/ip_unprivileged_port_start`, no restart: the follower binds at OBS's next start);
+    another box removes OUR file and puts a running 319 back to 1024 (a running 319 with no file of ours is
+    left: nothing records who set it). **Only once BOTH pins are READY** (`strih_dante_ptp_all_ready`):
+    until then step 13 takes the path of another box, since an older dlink that could bind 319 would start
+    its follower beside dsync (the dantesync#109 collision; review round 1), and the right is box-wide, so
+    the hub (an operator process, `DynamicUser=no`) gets it too (review round 2). Cost: every unprivileged process may bind 319-1023 (live
+    `ss -lntup` read on strih-snv 4.11.2026, validation comment 6629102078: only dsync 319/320, rsyslog 514,
+    nginx 443 there; one operator account). Rejected: `setcap` on /usr/bin/obs (a secure exec: libdbus /
+    GLib refuse the session bus, no core dumps, the `/proc/<obs>` files root-owned, re-applied after every
+    bundle install) and an ambient capability through the user manager (pam_systemd v259's
+    `apply_user_record_settings` -> `capability_ambient_set_apply` REPLACES the manager's ambient set with
+    CAP_WAKE_ALARM, read in systemd's source and matched by the live manager's CapPrm; a PAM / userdb
+    change + a restart of the whole user session). Considered, not done: narrowing it with a cgroup bind
+    filter (`SocketBindAllow=udp:319 udp:320` + `SocketBindDeny=` below 1024 on `user-.slice`), an option
+    if the 320-1023 exposure ever matters. Verify item 9 `(program-dante) ptp-port` (graded before the
+    log check, it reads no log): the file as rendered + the running value 319; below the threshold a NOTE
+    when absent, a FAIL when our file is still there.
+  - **The hub's right** comes from its released unit (item 16, `intercom-pinned-release.md`).
+  - **The pin threshold** `STRIH_DANTE_PTP_FIRST_DSTACK=v0.6.23`: a component is READY when its pin's
+    `*_RELEASE_DSTACK_VERSION` is at or above it (`strih_dante_ptp_pin_ready intercom|obs`, the repo's one
+    version rule `release_version_cmp`, which `dtray_version_ge` uses too). Below it nothing opens 319: the
+    leg rule needs either pin READY (`strih_dante_ptp_leg_open`: it only admits packets), the box-wide sysctl
+    both (`strih_dante_ptp_all_ready`: the bind right is what starts an old follower); the capability
+    and media clock rows are NOTEs. The threshold follows the pins, never a date.
+  - **The hub's journal** is read for the current invocation only, filtered to the clock lines as it
+    streams (a weeks-long invocation is never held whole), bounded 20 s; a hub that is not running is a
+    NOTE (item 16's active row already names it), a journalctl that fails, or a read as non-root (journalctl
+    then exits 0 with only a hint), is its own row, never "no line".
+  - **The `media clock` rows** (`strih_dante_media_clock_grade LABEL COMPONENT < log`): the LAST dstack
+    `media clock source source=<X>` line (target `dstack::clock::linked`); the OBS log carries it as
+    `HH:MM:SS.mmm: dante-input dlink:  INFO dstack::clock::linked: media clock source source=Internal
+    from=Service` (two spaces before the level, no ANSI); the hub's journal of its CURRENT invocation
+    (`_SYSTEMD_INVOCATION_ID`) has ANSI codes on, stripped before the parse. `Internal` = OK; `Service`,
+    `None` (`media clock: no source ready`), no line or another value = FAIL once READY, a NOTE below;
+    the last `in-process follower did not start ... reason="..."` warning is named. Item 9 `(program-dante)
+    media clock` (OBS log), item 16 `(intercom-dante) media clock` (only on a box whose facts declare a
+    `*-intercom=` device). Seams: `STRIH_DANTE_PTP_INTERCOM_PIN` / `_OBS_PIN`, `STRIH_HUB_JOURNAL_FILE`,
+    `STRIH_HUB_AMBIENT_CAPS` / `STRIH_HUB_BOUNDING_CAPS`, and the Dante libs' `STRIH_DANTE_RX_PIN_ROOT` prefix
+    for `/etc` + `/proc`.
+  - **Deploy (supervisor):** with the intercom + obs pins on dstack v0.6.23: setup-strih (the leg filter
+    unit is restarted by step 13, the sysctl set live), restart the hub and OBS, then read both `media clock`
+    rows `source=Internal` and measure the Dante path (rx_loss, holes, re_anchors) before and after.
 - Clocks + latency: `.claude/rules/audio-clock-map.md` (Dante on strih-snv).

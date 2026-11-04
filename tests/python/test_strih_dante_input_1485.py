@@ -62,6 +62,14 @@ def _boxes_with(tmp_path, box, pairs):
     return d
 
 
+# ROZHODNUTE 6628785864 (4.11.2026): the sysctl drop-in step 13 writes on a Dante box, pinned literally
+PTP_PORT_DROPIN = ("# issue 1485: written by camera-box setup-strih step 13 on a Dante-program box; every run rewrites it.\n"
+                   "# The strih OBS dante-input (a desktop-user process under systemd --user) follows Dante PTP in process\n"
+                   "# and binds UDP 319 (ROZHODNUTE 6628785864). Every unprivileged process may bind 319-1023 on this box.\n"
+                   "net.ipv4.ip_unprivileged_port_start = 319\n")
+# dstack's line as the obs release forwards it into the OBS log (the obs project, 4.11.2026)
+MEDIA_CLOCK = "11:59:59.000: dante-input dlink:  INFO dstack::clock::linked: media clock source source=Internal from=Service"
+
 SITE = "# test site file (fake names)\nRX1=Program L|foh-tx|MASTER-L\nRX2=Program R|foh-tx|MASTER-R\n"
 
 
@@ -159,12 +167,20 @@ def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
     root = tmp_path / "root"
     (root / "etc").mkdir(parents=True)
     (root / "etc" / "strih-isolated-cpus.conf").write_text("2-15\n")
+    port = root / "proc" / "sys" / "net" / "ipv4" / "ip_unprivileged_port_start"   # ROZHODNUTE 6628785864
+    port.parent.mkdir(parents=True)
+    port.write_text("1024\n")
+    obs_pin = tmp_path / "obs-release.pin"   # both pins READY (strih_dante_ptp_all_ready)
+    obs_pin.write_text("OBS_RELEASE_DSTACK_VERSION=v0.6.23\n")
+    ic_pin = tmp_path / "intercom-release.pin"
+    ic_pin.write_text("INTERCOM_RELEASE_DSTACK_VERSION=v0.6.23\n")
     (tmp_path / "online").write_text("0-15\n")
     (tmp_path / "bin").mkdir()
     stub(tmp_path / "bin", "visudo", "exit 0\n")
     env = {"STRIH_DANTE_INPUT_TOML": str(dest), "STRIH_DANTE_INPUT_IFACE": "enp7s0.70",
            "STRIH_DANTE_INPUT_SITE_FILE": str(site), "STRIH_DANTE_RX_PIN_ROOT": str(root),
            "STRIH_DANTE_RX_PIN_OWNER": "%s:%s" % (user, group), "OBS_BOX_ONLINE_CPUS": str(tmp_path / "online"),
+           "STRIH_DANTE_PTP_OBS_PIN": str(obs_pin), "STRIH_DANTE_PTP_INTERCOM_PIN": str(ic_pin),
            "PATH": "%s:%s" % (tmp_path / "bin", os.environ["PATH"])}
     rx_conf = root / "etc" / "strih-dante-rx-cpu.conf"
     body = ('. scripts/lib/obs-box-baseline.sh; fail() { echo "FAIL $*" >&2; exit 1; }; strih_box_load strih-snv >/dev/null; '
@@ -177,11 +193,15 @@ def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
     assert tomllib.loads(dest.read_text())["iface"] == "enp7s0.70"
     assert "written" in r.stdout
     assert "reserved=15\nobs=2-14\n" in rx_conf.read_text(), "the Dante threads' CPU comes with the device"
+    sysctl = root / "etc" / "sysctl.d" / "60-strih-dante-ptp-port.conf"
+    assert "net.ipv4.ip_unprivileged_port_start = 319\n" in sysctl.read_text(), "the OBS dante-input binds 319"
+    assert port.read_text() == "319\n", "set live, no restart"
     r = _bash(body, user, tmp_path / "home", env=env)
     assert "unchanged" in r.stdout
     # a box without the device removes OUR file, never an operator's own
     r = _bash('strih_box_load strih-pp >/dev/null; strih_dante_input_install "$1" "$2"', user, tmp_path / "home", env=env)
     assert r.returncode == 0 and not dest.exists(), r.stdout + r.stderr
+    assert not sysctl.exists() and port.read_text() == "1024\n", r.stdout + r.stderr
     assert not rx_conf.exists() and not (root / "usr" / "local" / "sbin" / "strih-dante-rx-pin").exists()
     assert not (root / "etc" / "sudoers.d" / "strih-dante-rx-pin").exists()
     dest.write_text("name = \"mine\"\n")
@@ -207,7 +227,11 @@ START = ("12:00:00.000: dante-input start: config=/home/newlevel/.camera-box/dan
 
 def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=None, user=None):
     log = tmp_path / "obs.log"
-    log.write_text("\n".join(log_lines) + "\n")
+    log.write_text("\n".join([MEDIA_CLOCK] + log_lines) + "\n")
+    pin = tmp_path / "obs-release.pin"
+    pin.write_text("OBS_RELEASE_DSTACK_VERSION=v0.6.23\n")
+    ic_pin = tmp_path / "intercom-release.pin"
+    ic_pin.write_text("INTERCOM_RELEASE_DSTACK_VERSION=v0.6.23\n")
     kf = tmp_path / "kind"
     kf.write_text(kind)
     dest = tmp_path / "dante-input.toml"
@@ -230,6 +254,11 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     for mgr in ("system", "user"):
         (root / "etc" / "systemd" / ("%s.conf.d" % mgr)).mkdir(parents=True, exist_ok=True)
         (root / "etc" / "systemd" / ("%s.conf.d" % mgr) / "50-strih-dante-reserved-cpu.conf").write_text(dropin)
+    # the ptp-port row (strih-dante-ptp.sh): the drop-in as setup writes it + the running value
+    (root / "etc" / "sysctl.d").mkdir(parents=True, exist_ok=True)
+    (root / "etc" / "sysctl.d" / "60-strih-dante-ptp-port.conf").write_text(PTP_PORT_DROPIN)
+    (root / "proc" / "sys" / "net" / "ipv4").mkdir(parents=True, exist_ok=True)
+    (root / "proc" / "sys" / "net" / "ipv4" / "ip_unprivileged_port_start").write_text("319\n")
     (tmp_path / "rxonline").write_text("0-15\n")
     proc = fake_proc(tmp_path, threads={4242: ("obs", "2-14", 0), 4300: ("dstack-engine", "15", -10),
                                         4301: ("dstack-rx", "15", -10)})
@@ -239,7 +268,8 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
                  env=dict({"STRIH_DANTE_INPUT_KIND_FILE": str(kf), "STRIH_DANTE_INPUT_TOML": str(dest),
                            "STRIH_DANTE_INPUT_WAIT_S": "0", "STRIH_DANTE_RX_PIN_ROOT": str(root),
                            "OBS_BOX_ONLINE_CPUS": str(tmp_path / "rxonline"),
-                           "STRIH_DANTE_RX_PIN_PROC": str(proc),
+                           "STRIH_DANTE_RX_PIN_PROC": str(proc), "STRIH_DANTE_PTP_OBS_PIN": str(pin),
+                           "STRIH_DANTE_PTP_INTERCOM_PIN": str(ic_pin),
                            "PATH": "%s:%s" % (tmp_path / "rxbin", os.environ["PATH"])},
                           **({"STRIH_LX_USER": user} if user else {})))
 
@@ -252,6 +282,8 @@ def test_item9_passes_a_healthy_dante_source(tmp_path):
     assert "OK (program-dante) rx-pin: dstack-rx tid 4301 on CPU 15 at nice -10" in r.stdout
     assert "OK (program-dante) reserved-cpu: systemd + user managers default to CPUAffinity=0-14" in r.stdout
     assert "OK (program-dante) reserved-cpu: of 3 tasks only OBS's" in r.stdout
+    assert "OK (program-dante) media clock: source=Internal" in r.stdout, r.stdout
+    assert "OK (program-dante) ptp-port: unprivileged processes may bind UDP 319" in r.stdout, r.stdout
 
 
 # Live on strih-snv 3.11.2026 the v0.2.0 source ran ~200 underruns/s and ~9 overruns/s with a clean

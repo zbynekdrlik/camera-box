@@ -504,9 +504,20 @@ def _mutations(s):
 
 # --- issue 1485: the Dante variant of the leg -------------------------------------------------------------
 
-def _dante_text(sender="10.77.7.30", port="6980,6981"):
-    r = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, STRIH_VLAN_IF, sender, port, STRIH_LEG_ADDR,
-              STRIH_DEVICES, env={"STRIH_DANTE_AVAHI_UID": "111"})
+# ROZHODNUTE 6628785864: the leg's PTP rule exists once a pinned device's dstack follows PTP in process
+# (strih_dante_ptp_leg_open); the pins come from STRIH_DANTE_PTP_*_PIN files, ready by default.
+def _pin_env(tmp_dir, intercom="v0.6.23", obs="v0.6.23"):
+    ic, ob = Path(tmp_dir) / "intercom.pin", Path(tmp_dir) / "obs.pin"
+    ic.write_text("INTERCOM_RELEASE_DSTACK_VERSION=%s\n" % intercom)
+    ob.write_text("OBS_RELEASE_DSTACK_VERSION=%s\n" % obs)
+    return {"STRIH_DANTE_PTP_INTERCOM_PIN": str(ic), "STRIH_DANTE_PTP_OBS_PIN": str(ob)}
+
+
+def _dante_text(sender="10.77.7.30", port="6980,6981", intercom="v0.6.23", obs="v0.6.23"):
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        r = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, STRIH_VLAN_IF, sender, port, STRIH_LEG_ADDR,
+                  STRIH_DEVICES, env=dict(_pin_env(d, intercom, obs), STRIH_DANTE_AVAHI_UID="111"))
     assert r.returncode == 0, r.stderr
     return r.stdout
 
@@ -558,11 +569,37 @@ def test_a_range_touching_a_common_port_is_never_lost():
     assert "8700-8710" in r.stdout, r.stdout
 
 
-@pytest.mark.parametrize("port", ["319", "320", "31900"])
-def test_the_ptp_ports_stay_shut(port):
-    """dantesync is the only PTP owner: neither UDP 319/320 nor dsync's own 31900 ever passes the leg."""
+def test_dsyncs_own_port_stays_shut():
+    """dsync's own 31900 never passes the leg (only the PTP group's 319/320 since ROZHODNUTE 6628785864)."""
     rules = "\n".join(x for x in _dante_text().splitlines() if not x.lstrip().startswith("#"))
-    assert not re.search(r"\b%s\b" % port, rules)
+    assert not re.search(r"\b31900\b", rules)
+
+
+def test_the_ptp_group_reaches_the_in_process_follower():
+    """ROZHODNUTE 6628785864 (owner 4.11.2026; this test replaced `test_the_ptp_ports_stay_shut`, whose
+    premise "dantesync is the only PTP owner" the owner superseded): every dstack device follows Dante PTP
+    in process, dsync's follower binds 319 + 320 and joins 224.0.1.129 on the leg. Exactly that group,
+    from the audio /24, to exactly those two ports; nothing else names 319 or 320, and nothing goes out."""
+    rules = [x for x in _dante_text().splitlines() if not x.lstrip().startswith("#")]
+    ptp = [x for x in rules if re.search(r"\b(319|320)\b", x)]
+    assert ptp == ['        iifname "enp7s0.70" ip saddr 10.77.7.0/24 ip daddr 224.0.1.129 udp dport { 319, 320 } '
+                   'counter accept'], ptp
+    drop = next(i for i, x in enumerate(rules) if x.strip() == 'iifname "enp7s0.70" counter drop')
+    assert rules.index(ptp[0]) < drop, "the accept sits before the leg's drop"
+
+
+@pytest.mark.parametrize("intercom,obs,opened", [("v0.6.19", "v0.6.19", False), ("v0.6.23", "v0.6.19", True),
+                                                 ("v0.6.19", "v0.6.23", True), ("", "garbage", False)])
+def test_the_ptp_rule_follows_the_pins(intercom, obs, opened):
+    """Review round 1 (🔴): below dstack v0.6.23 a device that could reach 319 would start its old follower
+    beside dsync, so the rule appears only once either pinned device follows PTP in process."""
+    t = _dante_text(intercom=intercom, obs=obs)
+    assert bool(re.search(r"udp dport \{ 319, 320 \}", t)) is opened, t
+
+
+def test_a_box_without_devices_never_opens_the_ptp_ports():
+    t = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, LEG_IF, SENDER, "6980", LEG_ADDR, "none").stdout
+    assert not re.search(r"\b(319|320)\b", t)
 
 
 def test_avahi_is_dropped_before_the_output_accept():

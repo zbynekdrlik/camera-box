@@ -18,6 +18,11 @@
 # empty LoadCredential= clears every earlier one; the live workaround that brought the hub up, NRestarts 0).
 # A box that runs step 14 keeps the base unit's credential and has the drop-in removed.
 
+if ! declare -F strih_dante_ptp_pin_ready >/dev/null; then
+  # shellcheck source=scripts/lib/strih-dante-ptp.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-ptp.sh"   # issue 1485: the in-process PTP pin threshold
+fi
+
 STRIH_HUB_CRED_DROPIN_NAME="20-no-janus-credential.conf"
 
 # strih_intercom_hub_cred_dropin_text -> the role drop-in for a box without the Janus phones leg.
@@ -422,19 +427,77 @@ PYHUBV
   return 0
 }
 
-# strih_intercom_hub_cap_grade BIN -> verify item 16's capability row (issue 1485): CAP_NET_BIND_SERVICE on
-# the hub would start dlink's own PTP follower on UDP 319 beside dantesync, the box's only PTP owner (a port
-# collision upset the clock once, dantesync#109). FAIL names where it came from; always rc 0.
-# STRIH_HUB_AMBIENT_CAPS = the test seam for the unit's AmbientCapabilities.
+# strih_intercom_hub_cap_grade BIN -> verify item 16's capability row (issue 1485, ROZHODNUTE 6628785864):
+# the hub's dstack device follows Dante PTP in process and binds UDP 319, so once the intercom pin carries
+# STRIH_DANTE_PTP_FIRST_DSTACK (strih-dante-ptp.sh) the released unit must grant EXACTLY
+# `AmbientCapabilities=CAP_NET_BIND_SERVICE` + `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and the binary no
+# file capability (the unit is the one grant): missing, or any other capability, FAILs. Below the threshold
+# a NOTE names the state. The dsync service stays the only writer of the system clock. Always rc 0.
+# Seams: STRIH_HUB_AMBIENT_CAPS / STRIH_HUB_BOUNDING_CAPS (the unit's two properties, systemctl show).
 strih_intercom_hub_cap_grade() {
-  local bin="${1:-/usr/local/bin/intercom-hub}" file="" amb
+  local bin="${1:-/usr/local/bin/intercom-hub}" file="" amb bnd want=cap_net_bind_service why="" state
   if command -v getcap >/dev/null 2>&1; then file="$(getcap "$bin" 2>/dev/null || true)"; fi
   amb="${STRIH_HUB_AMBIENT_CAPS-$(systemctl show -p AmbientCapabilities --value intercom-hub 2>/dev/null || true)}"
-  if [[ "${file,,}" == *cap_net_bind_service* ]] || [[ "${amb,,}" == *cap_net_bind_service* ]]; then
-    bad "(intercom-hub) CAP_NET_BIND_SERVICE granted (file: ${file:-none}, unit: ${amb:-none}) -- dlink would start its own PTP follower beside dantesync, the only PTP owner"
+  bnd="${STRIH_HUB_BOUNDING_CAPS-$(systemctl show -p CapabilityBoundingSet --value intercom-hub 2>/dev/null || true)}"
+  amb="$(printf '%s' "${amb,,}" | xargs 2>/dev/null || true)"; bnd="$(printf '%s' "${bnd,,}" | xargs 2>/dev/null || true)"
+  [ "$amb" = "$want" ] || why="${why}AmbientCapabilities='${amb:-none}' "
+  [ "$bnd" = "$want" ] || why="${why}CapabilityBoundingSet='${bnd:-none}' "
+  [ -z "$file" ] || why="${why}a file capability on the binary (${file}) "
+  state="AmbientCapabilities=${amb:-none}, CapabilityBoundingSet=$( [ "${#bnd}" -le 40 ] && printf '%s' "${bnd:-none}" || printf 'the full set' ), file: ${file:-none}"
+  if ! strih_dante_ptp_pin_ready intercom; then
+    note "(intercom-hub) capabilities not graded: the intercom pin's dstack $(v="$(strih_dante_ptp_pin_dstack intercom)"; printf '%s' "${v:-unreadable}") is below ${STRIH_DANTE_PTP_FIRST_DSTACK} (no in-process PTP follower yet); ${state}"
+  elif [ -z "$why" ]; then
+    ok "(intercom-hub) exactly CAP_NET_BIND_SERVICE (ambient + bounding set, no file capability): the dstack device binds UDP 319 for its in-process PTP follower"
   else
-    ok "(intercom-hub) no CAP_NET_BIND_SERVICE: dantesync stays the only PTP owner"
+    bad "(intercom-hub) capabilities: ${why% } -- the unit must grant exactly AmbientCapabilities=CAP_NET_BIND_SERVICE + CapabilityBoundingSet=CAP_NET_BIND_SERVICE (the intercom release's unit; reinstall it with setup-strih.sh step 13)"
   fi
+  return 0
+}
+
+# strih_intercom_hub_media_clock_grade -> verify item 16's `(intercom-dante) media clock` row on a box whose
+# facts declare the hub's Dante device (`*-intercom=` in STRIH_DANTE_DEVICES): the last dstack `media clock
+# source` line of the hub's CURRENT invocation's journal (strih-dante-ptp.sh); only those lines are kept
+# (a weeks-long invocation is never held in a variable). A hub that is not running (no InvocationID) is a
+# NOTE, never a second FAIL beside item 16's active row; a journal that cannot be read is its own row
+# (FAIL once the intercom pin is READY), never read as "no line". Always rc 0.
+# Seams: STRIH_HUB_JOURNAL_FILE (the journal text instead of journalctl), STRIH_HUB_INVOCATION_ID,
+# STRIH_HUB_JOURNAL_EUID / STRIH_HUB_JOURNAL_GROUPS (the euid + groups the journal is read as: root or a
+# member of systemd-journal / adm reads it; anyone else is named, never read as "no line").
+strih_intercom_hub_media_clock_grade() {
+  local devs inv text rc
+  devs="$(strih_lx_dante_devices 2>/dev/null || true)"
+  case " ${devs} " in *-intercom=*) ;; *) return 0 ;; esac
+  if [ -n "${STRIH_HUB_JOURNAL_FILE:-}" ]; then
+    text="$({ cat -- "$STRIH_HUB_JOURNAL_FILE"; printf '\nJOURNAL-RC %s\n' "$?"; } 2>/dev/null | LC_ALL=C grep -a -E 'media clock|^JOURNAL-RC ' || true)"
+  else
+    inv="${STRIH_HUB_INVOCATION_ID-$(systemctl show -p InvocationID --value intercom-hub 2>/dev/null || true)}"
+    if [ -z "$inv" ]; then
+      note "(intercom-dante) media clock: the hub is not running (no InvocationID), not graded"
+      return 0
+    fi
+    if [ "${STRIH_HUB_JOURNAL_EUID:-$(id -u)}" != 0 ] \
+         && ! [[ " ${STRIH_HUB_JOURNAL_GROUPS-$(id -nG 2>/dev/null || true)} " =~ \ (systemd-journal|adm)\  ]]; then
+      # journalctl exits 0 with only a hint for a user who may not read the system journal
+      if strih_dante_ptp_pin_ready intercom; then
+        bad "(intercom-dante) media clock: the hub's journal is not readable as $(id -un) -- run verify-strih as root"
+      else
+        note "(intercom-dante) media clock: the hub's journal is not readable as $(id -un), and the intercom pin is below ${STRIH_DANTE_PTP_FIRST_DSTACK}"
+      fi
+      return 0
+    fi
+    text="$({ timeout 20 journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=${inv}"; printf '\nJOURNAL-RC %s\n' "$?"; } 2>/dev/null \
+      | LC_ALL=C grep -a -E 'media clock|^JOURNAL-RC ' || true)"
+  fi
+  rc="$(printf '%s\n' "$text" | sed -n 's/^JOURNAL-RC //p' | tail -n 1)"
+  if [ "${rc:-?}" != 0 ]; then
+    if strih_dante_ptp_pin_ready intercom; then
+      bad "(intercom-dante) media clock: the hub's journal could not be read (rc ${rc:-?}; journalctl as root, bounded 20 s) -- not graded"
+    else
+      note "(intercom-dante) media clock: the hub's journal could not be read (rc ${rc:-?}), and the intercom pin is below ${STRIH_DANTE_PTP_FIRST_DSTACK}"
+    fi
+    return 0
+  fi
+  printf '%s\n' "$text" | strih_dante_media_clock_grade "(intercom-dante)" intercom
 }
 
 # --- issue 1439: the stream role runs no intercom hub ------------------------------------------------
