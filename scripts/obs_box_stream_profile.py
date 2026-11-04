@@ -92,10 +92,14 @@ def basic_ini_text(existing_text, encoder, profile_name):
 # record / output / video / audio keys. The record keys equal scripts/lib/strih-provision.sh
 # strih_lx_profile_facts (pinned by tests/python/test_strih_obs_parity_1419.py). Never copied: window
 # geometry, the Panels cookie id, the stream service + its key (the strih box does not stream).
+# RecEncoder (issue 1387, measured 4.11.2026): the CUDA NVENC HEVC encoder, never the texture one.
+# The texture encoder makes the libobs GL context current on a FRESH thread at every StartRecord and
+# StopRecord; that first MakeCurrent takes ~55 ms under the graphics mutex, the render thread lags a
+# frame and the JPEG XS program output drops one. Same NVENC hardware + settings, no GL context.
 STRIH_PROFILE = {
     "Output": {"Reconnect": "true", "RetryDelay": "2", "MaxRetries": "25",
                "FilenameFormatting": "%CCYY-%MM-%DD %hh-%mm-%ss"},
-    "AdvOut": {"RecType": "Standard", "RecEncoder": "obs_nvenc_hevc_tex", "RecFilePath": "/srv/_REC",
+    "AdvOut": {"RecType": "Standard", "RecEncoder": "obs_nvenc_hevc_soft", "RecFilePath": "/srv/_REC",
                "RecFormat2": "mkv", "RecSplitFileType": "Time", "RecSplitFileTime": "15", "RecTracks": "1"},
     "Video": {"FPSInt": "30", "FPSNum": "30", "FPSDen": "1", "ScaleType": "bicubic"},
     "Audio": {"MonitoringDeviceId": "default", "MonitoringDeviceName": "Default"},

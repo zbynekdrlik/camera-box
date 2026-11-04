@@ -1786,3 +1786,23 @@ Recording on strih stays NVENC. Tearing it down at StopRecord costs the program 
 reverted). It does not happen during production, so `jxs_link_continuity.py` accepts at most 1 `dropped_busy` / `not_taken`
 over the output's last two windows together (the stop mark comes ~2 s after StopRecord) and reports it as `stop_transient`. The counter stays in the block; everything else
 stays RED. The root stays open on the ticket.
+
+**The cause, measured 4.11.2026 (bpftrace on libobs, obs-nvenc and libcuda, 11 tex cycles):** the
+TEXTURE NVENC encoder (`obs_nvenc_hevc_tex`) makes the libobs GL context current on a FRESH thread at
+both ends: the new `obs gpu encode` thread at StartRecord, the output's stop thread (`audio-io`) inside
+`stop_gpu_encode` at StopRecord. On the NVIDIA driver that first `glXMakeContextCurrent` on a thread
+takes 52-60 ms, and libobs does it holding the graphics mutex, so the render thread waits ~55 ms
+(`GS_ENTER` 51-60 ms on `libobs: graphic`), lags one frame, and libobs hands the output that frame twice
+back to back while the previous one still encodes. Stops lagged 8 of 8, the output dropped at 7 of 8;
+the start drop is the same stall, rarer (3 of 4 release E2Es, 0 of 11 bench starts). The earlier
+"holds of 0.01-3.9 ms" were the holder's time inside the lock; the stall is the MakeCurrent inside
+`gs_enter_context` before the hold starts. Each drop also stepped the auto bpp down.
+
+**The fix in this repo:** the strih role records with `obs_nvenc_hevc_soft` (the CUDA NVENC encoder of
+the same plugin, hidden in the encoder list, kept by the Settings dialog): the same NVENC hardware and
+settings, fed the NV12 program frames libobs already makes for the raw outputs, no GL context. Measured:
+6 of 6 cycles + a 180 s recording with 0 dropped_busy and no lag at a stop, recording at 30.00 fps;
+the output's `copy_ms_avg` rose ~0.4 ms while recording. Left: the CUDA context create (~150-200 ms at
+the start, on the UI thread) slows the render's own MakeCurrent and lagged 1 of 7 starts with no drop.
+The libobs-side fix (keep a warm gpu-encode thread, run the gpu-encode free on the graphics thread)
+belongs to the obs project. Once a release E2E shows no stop drop, `stop_transient` can go.

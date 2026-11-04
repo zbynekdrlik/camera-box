@@ -478,7 +478,8 @@ strih_lx_dantesync_status_role_verdict() {
 
 # strih_lx_profile_facts -> the OBS profile facts (from the Windows `light` profile inventory,
 # 15.9.), key=value one per line: base/output 1920x1080 @ 30 fps NV12, Advanced out, NVENC HEVC
-# record to /srv/_REC as 15-min-split mkv.
+# record to /srv/_REC as 15-min-split mkv. The record encoder is the CUDA NVENC one (issue 1387): the
+# texture encoder's fresh-thread GL MakeCurrent at StartRecord/StopRecord stalls the render ~55 ms.
 strih_lx_profile_facts() {
   printf '%s\n' \
     'base_res=1920x1080' \
@@ -486,7 +487,7 @@ strih_lx_profile_facts() {
     'fps=30' \
     'color_format=NV12' \
     'out_mode=Advanced' \
-    'rec_encoder=obs_nvenc_hevc_tex' \
+    'rec_encoder=obs_nvenc_hevc_soft' \
     'rec_path=/srv/_REC' \
     'rec_format=mkv' \
     'rec_split_min=15'
