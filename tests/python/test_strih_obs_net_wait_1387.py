@@ -171,6 +171,37 @@ def _start_row(tmp_path, lines, box="strih-snv", enabled=True):
     return r.stdout.splitlines()
 
 
+# obs v0.4.14 (the fork's retry supervisor, coordinator note 4.11.2026): the output retries every 2 s and
+# is INACTIVE meanwhile; a live sender death restarts the sender.
+LINE_RETRYING = (f"20:49:02.966: [distroav] jxs-output '{OUTPUT}': cannot start the sender to '10.77.9.204:7100': "
+                 "10.77.9.204:7100: Network is unreachable (os error 101) -- retried every 2 s while it is wanted "
+                 "(issue 1387)")
+LINE_RETRY_OK = f"20:49:07.100: [distroav] jxs-output: '{OUTPUT}' started after 3 failed tries, 2 s apart (issue 1387)"
+LINE_RESTARTED = (f"21:30:00.000: [distroav] jxs-output '{OUTPUT}': the send socket failed: Network is down -- the "
+                  "sender is restarted (issue 1387)")
+LINE_WINDOW = (f"21:30:05.000: [distroav] jxs-output '{OUTPUT}': fps=30.00 frames=150 dropped_busy=0 offered=150 "
+               "(issue 1387)")
+
+
+def test_a_retrying_output_fails_naming_the_retry(tmp_path):
+    rows = _start_row(tmp_path, [LINE_CREATED, LINE_RETRYING, "20:49:04.000: later"])
+    assert len(rows) == 1 and rows[0].startswith("FAIL (jxs-output-start)"), rows
+    assert "retrying" in rows[0] and "Network is unreachable" in rows[0], rows
+
+
+def test_a_retry_that_succeeded_passes(tmp_path):
+    started = LINE_STARTED.replace("21:20:40.940", "20:49:07.101")
+    rows = _start_row(tmp_path, [LINE_CREATED, LINE_RETRYING, LINE_RETRY_OK, started, LINE_WINDOW])
+    assert rows[0].startswith("PASS (jxs-output-start)") and "20:49:07.101" in rows[0], rows
+
+
+def test_a_sender_being_restarted_fails_until_it_starts_again(tmp_path):
+    rows = _start_row(tmp_path / "a", [LINE_STARTED, LINE_RESTARTED, LINE_WINDOW])
+    assert rows[0].startswith("FAIL (jxs-output-start)") and "restarted" in rows[0], rows
+    again = LINE_STARTED.replace("21:20:40.940", "21:30:02.000")
+    assert _start_row(tmp_path / "b", [LINE_STARTED, LINE_RESTARTED, again])[0].startswith("PASS")
+
+
 def test_an_output_that_did_not_start_fails_naming_the_reason(tmp_path):
     rows = _start_row(tmp_path, [LINE_CREATED, LINE_FAILED, "20:55:00.000: later"])
     assert len(rows) == 1 and rows[0].startswith("FAIL (jxs-output-start)"), rows
@@ -277,6 +308,15 @@ def test_the_on_box_state_reads_the_log_after_the_start(tmp_path):
     assert _jxs_state(tmp_path / "c", [LINE_CREATED]) == "J=pending"
     assert _jxs_state(tmp_path / "d", [LINE_STARTED], fresh=False) == "J=pending"
     assert _jxs_state(tmp_path / "e", [LINE_FAILED], enabled=False) == "J=off"
+    assert _jxs_state(tmp_path / "f", [LINE_CREATED, LINE_RETRYING]) == "J=retrying"
+    assert _jxs_state(tmp_path / "g", [LINE_RETRYING, LINE_RETRY_OK, LINE_STARTED, LINE_WINDOW]) == "J=started"
+    assert _jxs_state(tmp_path / "h", [LINE_STARTED, LINE_RESTARTED, LINE_WINDOW]) == "J=restarting"
+
+
+def test_the_read_back_refuses_a_retrying_or_restarting_output():
+    for jxs in ("retrying", "restarting"):
+        out = _verdict(*BASE, jxs)
+        assert out.splitlines()[-1:] == ["RC=1"] and jxs.rstrip("ing") in out and "JPEG XS" in out, (jxs, out)
 
 
 def test_the_read_back_line_carries_the_field_and_the_verify_poll_grades_it():
