@@ -702,7 +702,7 @@ def test_panel_source_never_uses_the_deprecated_or_stacking_calls():
 def test_setup_strih_step_16d_installs_the_session_apps():
     s = SETUP.read_text()
     assert "TOTAL_STEPS=17" in s
-    step = s[s.index('step "16d"'):s.index('step 17 ')]
+    step = s[s.index('step "16d"'):s.index('step "16e"')]
     assert 'strih_session_apps_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER"' in step
     assert "|| fail" in step
     assert "systemctl --user start" not in step and "restart" not in step

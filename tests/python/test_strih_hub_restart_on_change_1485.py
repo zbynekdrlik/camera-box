@@ -51,7 +51,8 @@ def _box(tmp):
 def _run(tmp, body, *args, env=None):
     b = tmp / "box"
     e = dict(os.environ, FAKE_DIR=str(tmp), PATH="%s:%s" % (tmp / "fakebin", os.environ["PATH"]),
-             STRIH_HUB_LOOP_WINDOW_S="0")
+             STRIH_HUB_LOOP_WINDOW_S="0", STRIH_HUB_INVOCATION_ID="inv-1",
+             STRIH_HUB_LOADED_FILE=str(tmp / "state" / "intercom-hub.loaded"))
     e.update(env or {})
     files = [str(b / "hub"), str(b / "unit"), str(b / "dropins"), str(b / "toml")]
     script = ('set -euo pipefail\n. "%s"\nFP=(%s)\n%s'
@@ -111,6 +112,56 @@ def test_a_changed_unit_a_new_dropin_or_a_removed_dropin_restarts_it(tmp_path):
         assert "try-restart intercom-hub" in _calls(t), (i, r.stdout)
 
 
+def test_an_unchanged_run_records_what_the_running_hub_runs(tmp_path):
+    _changed_run(tmp_path, lambda b: None)
+    rec = (tmp_path / "state" / "intercom-hub.loaded").read_text().splitlines()
+    assert rec[0] == "invocation=inv-1" and len(rec) == 6, rec
+
+
+def test_a_failed_earlier_run_still_restarts_the_hub_on_the_next_run(tmp_path):
+    """Review round 1: run N wrote the new files and failed before the restart; run N+1 sees no change of
+    its own, but the record of what the running invocation was started on differs."""
+    _box(tmp_path)
+    r = _run(tmp_path, 'strih_intercom_hub_record_loaded "${FP[@]}"')
+    assert r.returncode == 0, r.stderr
+    (tmp_path / "box" / "hub").write_text("hub 1.9.13\n")   # the failed run's install
+    r = _run(tmp_path, 'B="$(strih_intercom_hub_install_fingerprint "${FP[@]}")"\n'
+                       'strih_intercom_hub_restart_if_changed "$B" "${FP[@]}"\necho "RC=$?"')
+    assert "RC=0" in r.stdout and "try-restart intercom-hub" in _calls(tmp_path), r.stdout + r.stderr
+
+
+def test_a_record_of_another_invocation_is_not_the_baseline(tmp_path):
+    """A hub restarted outside setup loaded the files on disk at its start: the record is stale then."""
+    _box(tmp_path)
+    _run(tmp_path, 'strih_intercom_hub_record_loaded "${FP[@]}"', env={"STRIH_HUB_INVOCATION_ID": "inv-0"})
+    (tmp_path / "box" / "hub").write_text("hub 1.9.13\n")
+    r = _run(tmp_path, 'B="$(strih_intercom_hub_install_fingerprint "${FP[@]}")"\n'
+                       'strih_intercom_hub_restart_if_changed "$B" "${FP[@]}"\necho "RC=$?"')
+    assert "RC=0" in r.stdout and "try-restart" not in _calls(tmp_path), r.stdout + r.stderr
+
+
+def test_the_fingerprint_survives_the_callers_failglob_and_nullglob(tmp_path):
+    _box(tmp_path)
+    for f in (tmp_path / "box" / "dropins").iterdir():
+        f.unlink()
+    for opt in ("failglob", "nullglob"):
+        r = _run(tmp_path, 'shopt -s %s\nstrih_intercom_hub_install_fingerprint "${FP[@]}"\necho END' % opt)
+        assert r.returncode == 0 and r.stdout.strip().endswith("END"), (opt, r.stdout, r.stderr)
+        assert len(r.stdout.splitlines()) == 4, (opt, r.stdout)
+
+
+def test_the_fingerprint_covers_every_toml_beside_the_routing_file(tmp_path):
+    _box(tmp_path)
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "intercom.toml").write_text("[hub]\n")
+    (etc / "turn.toml").write_text("key = 1\n")
+    r = _run(tmp_path, 'strih_intercom_hub_install_fingerprint "${FP[0]}" "${FP[1]}" "${FP[2]}" "$1"',
+             etc / "intercom.toml")
+    paths = [l.split("  ", 1)[1] for l in r.stdout.splitlines()]
+    assert str(etc / "turn.toml") in paths and paths.count(str(etc / "intercom.toml")) == 1, r.stdout
+
+
 def test_a_stopped_hub_is_never_started_or_restarted_here(tmp_path):
     r = _changed_run(tmp_path, lambda b: (b / "hub").write_text("hub 1.9.13\n"), env={"FAKE_ACTIVE": "0"})
     assert "RC=0" in r.stdout, r.stdout + r.stderr
@@ -140,7 +191,7 @@ def test_a_failed_restart_or_a_crash_loop_after_it_fails_by_name(tmp_path):
 
 # --- the setup-strih wiring ----------------------------------------------------------------------------------
 
-def test_setup_takes_the_fingerprint_before_any_hub_write_and_restarts_after_step_14():
+def test_setup_takes_the_fingerprint_before_any_hub_write_and_restarts_after_the_last_one():
     s = (SCRIPTS / "setup-strih.sh").read_text()
     fp = s.index('IH_BEFORE="$(strih_intercom_hub_install_fingerprint)"')
     assert fp < s.index('step 12 "'), "before step 12 / 13 write any hub file"
@@ -148,10 +199,12 @@ def test_setup_takes_the_fingerprint_before_any_hub_write_and_restarts_after_ste
     live = s[s.index('if WHY="$(obs_box_step_applies 13-hub-live)"'):s.index('step 15 "')]
     assert s.index('step 14 "') < s.index('if WHY="$(obs_box_step_applies 13-hub-live)"')
     start = live.index("systemctl start intercom-hub")
-    restart = live.index('strih_intercom_hub_restart_if_changed "${IH_BEFORE:-}"')
-    assert start < restart, "the start is for a stopped hub, the restart for a running one"
-    assert live[start:restart].count("else") == 1, "the restart is the running hub's branch"
-    assert "|| fail" in live[restart:restart + 200]
+    assert "strih_intercom_hub_record_loaded" in live[start:start + 400], "a started hub records its install"
+    assert s.count('strih_intercom_hub_restart_if_changed "${IH_BEFORE:-}"') == 1
+    restart = s.index('strih_intercom_hub_restart_if_changed "${IH_BEFORE:-}"')
+    assert s.index('step "16i"') < restart < s.index('step "16j"'), "right after 16i's TURN drop-in, before verify"
+    line = s[s.rindex("\n", 0, restart):s.index("\n", restart)]
+    assert "obs_box_step_applies 13-hub-live" in line and "|| fail" in line, line
 
 
 # --- the deploy read-back ------------------------------------------------------------------------------------
@@ -187,7 +240,7 @@ def test_the_remote_read_back_reads_the_running_hubs_version(tmp_path):
     # the printed remote command really runs: a fake curl answers the hub's /api/version shape
     fake = tmp_path / "bin"
     fake.mkdir()
-    (fake / "curl").write_text('#!/bin/sh\nprintf \'{"version":"1.9.13","dstack":"v0.6.25"}\'\n')
+    (fake / "curl").write_text('#!/bin/sh\nprintf \'{"version": "1.9.13-rc1", "build_version": "7.0"}\'\n')
     (fake / "systemctl").write_text("#!/bin/sh\necho active\n")
     for f in ("curl", "systemctl"):
         (fake / f).chmod(0o755)
@@ -196,7 +249,7 @@ def test_the_remote_read_back_reads_the_running_hubs_version(tmp_path):
     out = subprocess.run(["bash", "-c", r.stdout], capture_output=True, text=True, timeout=30,
                          env=dict(os.environ, HOME=str(home), PATH="%s:%s" % (fake, os.environ["PATH"])))
     fields = dict(f.split("=", 1) for f in out.stdout.split() if "=" in f)
-    assert fields.get("hub") == "1.9.13", out.stdout + out.stderr
+    assert fields.get("hub") == "1.9.13-rc1", out.stdout + out.stderr   # the JSON key, never a regex
 
 
 def test_the_deploy_wants_the_pinned_hub_on_the_strih_role_only():
