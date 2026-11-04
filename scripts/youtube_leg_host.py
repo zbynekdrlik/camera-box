@@ -188,13 +188,26 @@ class Host:
         """The verdict tool on the host: (rc, output); rc in TIMED_OUT = the bound ran out."""
         return self._tool("verdict", args, timeout, "the verdict tool")
 
-    def fetch(self, local_dir):
-        """The verdict JSON + the tick maps (+ their read counters) back to dev1; the names fetched."""
-        r = self.run('[ -d "$R/verdict" ] || exit 0; cd "$R/verdict"; find . -maxdepth 1 -type f \\( -name '
+    def run_point(self, sub, args, timeout):
+        """Issue 1387: the same tool on another measurement point (the restreamer-input capture), its
+        out dir `<stage>/<sub>` seeded with the recording's tick map from `verdict/` (the cache key is
+        the recording's path, so the recording is not decoded again). (rc, output)."""
+        if not re.fullmatch(r"[a-z]+", sub):
+            raise HostError(f"bad point dir {sub!r}")
+        self.run(f'mkdir -p "$R/{sub}"; [ ! -f "$R/verdict/ticks-rec-1.tsv" ] || cp -f "$R/verdict/ticks-rec-1.tsv" '
+                 f'"$R/{sub}/ticks-rec-1.tsv"', STAGE_TIMEOUT_S, f"seeding the {sub} point")
+        return self._tool(sub, args, timeout, f"the verdict tool on the {sub} point")
+
+    def fetch(self, local_dir, sub="verdict"):
+        """The verdict JSON + the tick maps (+ their read counters) of `<stage>/<sub>` back to dev1;
+        the names fetched."""
+        if not re.fullmatch(r"[a-z]+", sub):
+            raise HostError(f"bad point dir {sub!r}")
+        r = self.run(f'[ -d "$R/{sub}" ] || exit 0; cd "$R/{sub}"; find . -maxdepth 1 -type f \\( -name '
                      '"youtube-leg-verdict.json" -o -name "ticks-*.tsv" -o -name "*.reads.json" \\) -printf "%f\\0" '
-                     '| tar -c -f - --null -T -', FETCH_TIMEOUT_S, "fetching the verdict")
+                     '| tar -c -f - --null -T -', FETCH_TIMEOUT_S, f"fetching the {sub} verdict")
         if r.returncode != 0:
-            raise HostError(f"fetching the verdict from {self.describe()} failed: {_tail(r.stderr)}")
+            raise HostError(f"fetching the {sub} verdict from {self.describe()} failed: {_tail(r.stderr)}")
         os.makedirs(local_dir, exist_ok=True)
         got = []
         if r.stdout:
