@@ -721,7 +721,7 @@ fn obs_profile_and_collection_facts_reach_the_launcher_via_a_unit_dropin() {
     assert_eq!(c, 0, "{err}");
     assert_eq!(
         out,
-        "[Service]\nEnvironment=\"STRIH_OBS_PROFILE=strih-snv\"\nEnvironment=\"STRIH_OBS_COLLECTION=strih-snv\"\n",
+        "[Service]\nEnvironment=\"STRIH_OBS_PROFILE=strih-snv\"\nEnvironment=\"STRIH_OBS_COLLECTION=strih-snv\"\nEnvironment=\"STRIH_RIG_IP=10.77.9.202\"\n",
         "drop-in text"
     );
     // the launcher still reads exactly these two env names.
@@ -972,6 +972,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "\"remoteIp\": \"10.0.0.205\"",
         "Environment=\"STRIH_OBS_PROFILE=zz-profile\"",
         "Environment=\"STRIH_OBS_COLLECTION=zz-collection\"",
+        "Environment=\"STRIH_RIG_IP=10.0.0.5\"",
     ] {
         assert!(out.contains(want), "strih-zz output lacks `{want}`:\n{out}");
     }

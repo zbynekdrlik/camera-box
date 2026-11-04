@@ -125,7 +125,7 @@ case "$cmd" in
     pid=4242; restarts=0
     if [ -n "${STUB_CRASHLOOP:-}" ]; then pid=$((4242 + n)); restarts="$n"; fi
     if [ -n "${STUB_LATE_CRASHLOOP:-}" ] && [ "$n" -ge 3 ]; then pid=$((4242 + n)); restarts="$n"; fi
-    printf 'installed=%s obs_tag=%s active=%s pid=%s restarts=%s lib=%s tick=%s hub=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_OBS_TAG:-v9.9.5}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}" "${STUB_HUB-9.9.3}"; exit 0 ;;
+    printf 'installed=%s obs_tag=%s active=%s pid=%s restarts=%s lib=%s tick=%s hub=%s jxs=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_OBS_TAG:-v9.9.5}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}" "${STUB_HUB-9.9.3}" "${STUB_JXS:-off}"; exit 0 ;;
   *"--user start"*) exit "${STUB_START_RC:-0}" ;;
   *) exit "${STUB_SSH_RC:-0}" ;;
 esac
