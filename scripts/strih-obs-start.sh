@@ -56,14 +56,15 @@ strih_resolve_session_env() {
 # IPv4 address (nothing waited). A user unit cannot order on the system network-online.target, so the
 # launcher waits itself. Test seams: `ip` and `sleep` from PATH.
 strih_wait_rig_address() {
-  local ip="${1-}" bound="${2-}" d='[0123456789]{1,3}' i out
+  local ip="${1-}" bound="${2-}" d='[0123456789]{1,3}' i out src_re
   [[ "$ip" =~ ^${d}\.${d}\.${d}\.${d}$ ]] || return 2
+  src_re="src[[:space:]]${ip//./\\.}([[:space:]]|$)"
   [[ "$bound" =~ ^[0123456789]{1,5}$ ]] || bound=120
   for ((i = 0; i <= bound; i++)); do
     out="$(ip -o -4 addr show 2>/dev/null || true)"
     # the address AND its connected route (`... src IP ...`): NetworkManager adds a noprefixroute
     # address before the prefix route, and ENETUNREACH is a missing route.
-    if [[ "$out" == *" ${ip}/"* ]] && [[ "$(ip -4 route show 2>/dev/null || true)" == *" src ${ip} "* ]]; then
+    if [[ "$out" == *" ${ip}/"* ]] && [[ "$(ip -4 route show 2>/dev/null || true)" =~ $src_re ]]; then
       printf 'rig network: %s up after %d s\n' "$ip" "$i"
       return 0
     fi
