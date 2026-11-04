@@ -12,7 +12,8 @@
 # What this lib holds (the leg filter's PTP rule is strih_dante_nft_input in strih-dante-leg.sh):
 #   - the pin threshold: STRIH_DANTE_PTP_FIRST_DSTACK, the first dstack whose devices follow in process;
 #     a component (intercom | obs) is READY when its release pin's DSTACK_VERSION is at or above it
-#     (strih_dante_ptp_pin_ready). Until then nothing opens 319 (the leg rule, the sysctl) and the rows
+#     (strih_dante_ptp_pin_ready). Until then nothing opens 319 (the leg rule needs one, the box-wide
+#     sysctl both: strih_dante_ptp_leg_open / strih_dante_ptp_all_ready) and the rows
 #     below are NOTEs: the threshold follows the pins.
 #   - the right of the desktop-user OBS to bind 319 (design 6629112890): the box-wide sysctl
 #     `net.ipv4.ip_unprivileged_port_start = 319` in /etc/sysctl.d/60-strih-dante-ptp-port.conf on a box
@@ -80,11 +81,18 @@ strih_dante_ptp_pin_ready() {
 # (the dantesync#109 port collision the earlier rule guarded against).
 strih_dante_ptp_leg_open() { strih_dante_ptp_pin_ready intercom || strih_dante_ptp_pin_ready obs; }
 
-# _strih_dante_ptp_below -> the one-line reason the obs pin is not READY.
+# strih_dante_ptp_all_ready -> rc 0 iff EVERY dstack consumer on the box (the hub AND the OBS) is READY.
+# The 319 bind right (the sysctl) is box-wide: the hub, an unprivileged operator process
+# (DynamicUser=no + User=), gets it too, so an old hub dlink would start its follower beside dsync while
+# only the obs pin moved (review round 2).
+strih_dante_ptp_all_ready() { strih_dante_ptp_pin_ready intercom && strih_dante_ptp_pin_ready obs; }
+
+# _strih_dante_ptp_below -> the one-line reason the bind right is not granted yet.
 _strih_dante_ptp_below() {
-  local have
-  have="$(strih_dante_ptp_pin_dstack obs)"
-  printf "the obs pin's dstack %s is below %s (no in-process PTP follower yet)" "${have:-unreadable}" "$STRIH_DANTE_PTP_FIRST_DSTACK"
+  local ic ob
+  ic="$(strih_dante_ptp_pin_dstack intercom)"; ob="$(strih_dante_ptp_pin_dstack obs)"
+  printf "the pins' dstack (intercom %s, obs %s): one is below %s (the bind right is box-wide; a device below it has no in-process follower yet)" \
+    "${ic:-unreadable}" "${ob:-unreadable}" "$STRIH_DANTE_PTP_FIRST_DSTACK"
 }
 
 # --- the port sysctl ----------------------------------------------------------------------------------
@@ -104,13 +112,13 @@ strih_dante_ptp_port_text() {
 # _strih_dante_ptp_port_live -> the running value ('' when unreadable).
 _strih_dante_ptp_port_live() { head -n 1 "$(strih_dante_ptp_port_proc)" 2>/dev/null | tr -d '[:space:]' || true; }
 
-# strih_dante_ptp_port_install -> a Dante-program box. The obs pin READY: the drop-in (written only on a
+# strih_dante_ptp_port_install -> a Dante-program box. Every pin READY (strih_dante_ptp_all_ready): the drop-in (written only on a
 # difference) + the running value set to 319 (no restart: the follower binds at OBS's next start). Below the
 # threshold: the remove path (a 319 bind right for an old dlink would start its follower beside dsync).
 # rc 1 + a named reason on a failure.
 strih_dante_ptp_port_install() {
   local f proc owner="${STRIH_DANTE_RX_PIN_OWNER:-root:root}" out
-  if ! strih_dante_ptp_pin_ready obs; then
+  if ! strih_dante_ptp_all_ready; then
     echo "  dante-ptp: no 319 bind right yet: $(_strih_dante_ptp_below)"
     strih_dante_ptp_port_remove "$(_strih_dante_ptp_below)"
     return
@@ -153,7 +161,7 @@ strih_dante_ptp_port_remove() {
 strih_dante_ptp_port_grade() {
   local f live
   f="$(strih_dante_ptp_port_file)"; live="$(_strih_dante_ptp_port_live)"
-  if ! strih_dante_ptp_pin_ready obs; then
+  if ! strih_dante_ptp_all_ready; then
     if [ -e "$f" ]; then
       bad "(program-dante) ptp-port: ${f} is set but $(_strih_dante_ptp_below) -- re-run setup-strih.sh step 13 (it removes it)"
     else

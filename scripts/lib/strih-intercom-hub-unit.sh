@@ -460,20 +460,26 @@ strih_intercom_hub_cap_grade() {
 # (a weeks-long invocation is never held in a variable). A hub that is not running (no InvocationID) is a
 # NOTE, never a second FAIL beside item 16's active row; a journal that cannot be read is its own row
 # (FAIL once the intercom pin is READY), never read as "no line". Always rc 0.
-# Seams: STRIH_HUB_JOURNAL_FILE (the journal text instead of journalctl), STRIH_HUB_INVOCATION_ID.
+# Seams: STRIH_HUB_JOURNAL_FILE (the journal text instead of journalctl), STRIH_HUB_INVOCATION_ID,
+# STRIH_HUB_JOURNAL_EUID (the euid the journal is read as; a non-root read is named, never "no line").
 strih_intercom_hub_media_clock_grade() {
   local devs inv text rc
   devs="$(strih_lx_dante_devices 2>/dev/null || true)"
   case " ${devs} " in *-intercom=*) ;; *) return 0 ;; esac
   if [ -n "${STRIH_HUB_JOURNAL_FILE:-}" ]; then
-    text="$({ cat -- "$STRIH_HUB_JOURNAL_FILE"; echo "JOURNAL-RC $?"; } 2>/dev/null | LC_ALL=C grep -a -E 'media clock|^JOURNAL-RC ' || true)"
+    text="$({ cat -- "$STRIH_HUB_JOURNAL_FILE"; printf '\nJOURNAL-RC %s\n' "$?"; } 2>/dev/null | LC_ALL=C grep -a -E 'media clock|^JOURNAL-RC ' || true)"
   else
     inv="${STRIH_HUB_INVOCATION_ID-$(systemctl show -p InvocationID --value intercom-hub 2>/dev/null || true)}"
     if [ -z "$inv" ]; then
       note "(intercom-dante) media clock: the hub is not running (no InvocationID), not graded"
       return 0
     fi
-    text="$({ timeout 20 journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=${inv}"; echo "JOURNAL-RC $?"; } 2>/dev/null \
+    if [ "${STRIH_HUB_JOURNAL_EUID:-$(id -u)}" != 0 ]; then
+      # journalctl exits 0 with only a hint for a user who may not read the system journal
+      bad "(intercom-dante) media clock: the hub's journal is not readable as $(id -un) -- run verify-strih as root"
+      return 0
+    fi
+    text="$({ timeout 20 journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=${inv}"; printf '\nJOURNAL-RC %s\n' "$?"; } 2>/dev/null \
       | LC_ALL=C grep -a -E 'media clock|^JOURNAL-RC ' || true)"
   fi
   rc="$(printf '%s\n' "$text" | sed -n 's/^JOURNAL-RC //p' | tail -n 1)"

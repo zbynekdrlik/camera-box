@@ -146,9 +146,10 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     from `strih_dante_input_install`, header-checked file, the running value written to
     `/proc/sys/net/ipv4/ip_unprivileged_port_start`, no restart: the follower binds at OBS's next start);
     another box removes OUR file and puts a running 319 back to 1024 (a running 319 with no file of ours is
-    left: nothing records who set it). **Only once the obs pin is READY** (below): until then step 13 takes
-    the path of another box, since an older dlink that could bind 319 would start its follower beside dsync
-    (the dantesync#109 collision; review round 1). Cost: every unprivileged process may bind 319-1023 (live
+    left: nothing records who set it). **Only once BOTH pins are READY** (`strih_dante_ptp_all_ready`):
+    until then step 13 takes the path of another box, since an older dlink that could bind 319 would start
+    its follower beside dsync (the dantesync#109 collision; review round 1), and the right is box-wide, so
+    the hub (an operator process, `DynamicUser=no`) gets it too (review round 2). Cost: every unprivileged process may bind 319-1023 (live
     `ss -lntup` read on strih-snv 4.11.2026, validation comment 6629102078: only dsync 319/320, rsyslog 514,
     nginx 443 there; one operator account). Rejected: `setcap` on /usr/bin/obs (a secure exec: libdbus /
     GLib refuse the session bus, no core dumps, the `/proc/<obs>` files root-owned, re-applied after every
@@ -164,11 +165,13 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   - **The pin threshold** `STRIH_DANTE_PTP_FIRST_DSTACK=v0.6.23`: a component is READY when its pin's
     `*_RELEASE_DSTACK_VERSION` is at or above it (`strih_dante_ptp_pin_ready intercom|obs`, the repo's one
     version rule `release_version_cmp`, which `dtray_version_ge` uses too). Below it nothing opens 319: the
-    leg rule needs either pin READY (`strih_dante_ptp_leg_open`), the sysctl the obs pin; the capability
+    leg rule needs either pin READY (`strih_dante_ptp_leg_open`: it only admits packets), the box-wide sysctl
+    both (`strih_dante_ptp_all_ready`: the bind right is what starts an old follower); the capability
     and media clock rows are NOTEs. The threshold follows the pins, never a date.
   - **The hub's journal** is read for the current invocation only, filtered to the clock lines as it
     streams (a weeks-long invocation is never held whole), bounded 20 s; a hub that is not running is a
-    NOTE (item 16's active row already names it), a journalctl that fails is its own row, never "no line".
+    NOTE (item 16's active row already names it), a journalctl that fails, or a read as non-root (journalctl
+    then exits 0 with only a hint), is its own row, never "no line".
   - **The `media clock` rows** (`strih_dante_media_clock_grade LABEL COMPONENT < log`): the LAST dstack
     `media clock source source=<X>` line (target `dstack::clock::linked`); the OBS log carries it as
     `HH:MM:SS.mmm: dante-input dlink:  INFO dstack::clock::linked: media clock source source=Internal
