@@ -161,6 +161,14 @@ the obs release v0.2.0 deploy + the site file on strih-snv (issue 1487); live on
   socket_drops / rebootstraps / rx_written_late / obs_dropped increase = FAIL, unknown = FAIL; rx_late, overruns and
   late_blocks are timing only, the obs project's meanings, `.claude/rules/strih-dante-input.md`). Computed from the obs release's source and the TOML, not
   measured: the first live run states the measured A/V offset change against the VBAN R = 30 ms.
+- **Each dstack engine on its own CPU (4.11.2026, comment 6634395906):** the dlink pump `dstack-engine`
+  wakes every 0.33 ms and has a 5 ms margin; a late block is a skipped block (a lost slot on that path),
+  so the scheduling of these threads is part of the path's loss budget, not only its timing. Two engines
+  on one CPU collide (OBS 25 pump WARNs in 3 min), the hub's engine among other threads lost blocks
+  (24-30 per 3 min), each alone on its own cleared CPU = 0. So strih-snv reserves CPU 15 for OBS's
+  `dstack-engine` + `dstack-rx` and CPU 14 for the hub's, both at nice -10, nothing else of userland there
+  (`strih-dante-rx-pin.sh`, `strih-dante-reserved-cpu.sh`, `.claude/rules/strih-dante-input.md`). No
+  clock, latency or buffer changes: the device latency stays 10 ms and the clocks stay as above.
 - **Budget:** against the strih program's R = 30 ms (VBAN today) the 10 ms device latency is the smaller
   term, but neither total is known until the two projects state their source timelines. No double-sound
   row is added until the paths exist.

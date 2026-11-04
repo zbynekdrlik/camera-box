@@ -113,6 +113,57 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
       (any user sets it, verify runs as root), never inside an arithmetic subscript.
     - Another box: step 13 removes our two drop-ins (header-checked), never a foreign file.
     - A thread the two dstack threads create later inherits their mask and nice.
+  - **A SECOND reserved CPU for the intercom hub's own Dante device (4.11.2026, comment 6634395906;
+    design 6634500064).** Live on strih-snv, pump WARNs per 3 min: the hub's dstack-engine / dstack-rx
+    unpinned on 0-14 = hub ~30; beside OBS's on CPU 15 = OBS 25 (two engines on one CPU collide); on CPU 14
+    among the box's other threads (the hub's SCHED_FIFO `hub-mix`, NDI receivers, WebKit) = hub 24; alone
+    on a cleared CPU 14 = 0 / 0. Each engine needs its OWN CPU with no other thread on it:
+    - **By facts:** `strih_dante_hub_declared` (strih-dante-input.sh) = the Dante program AND a
+      `<box>-intercom=` entry in STRIH_DANTE_DEVICES; `_strih_dante_hub_flag` hands the rx-pin lib its
+      HUB argument (install + grade). Only then the plan (`strih_dante_rx_pin_plan ONLINE OBS 1`) prints
+      `<obs cpu> <obs mask> <hub cpu>`: the highest = OBS's (15), the next one down that is online and in
+      OBS's mask = the hub's (14), OBS on 2-13. A box without the hub device keeps ONE CPU, byte-identical
+      (no `hub=`, no hub drop-in; a drop-in of ours left there is removed). The SMT sibling of 15 is now
+      the hub's CPU 14 (one physical core for both engines; re-measure if a core-level collision shows).
+    - **The ONE source:** the plan, persisted as `hub=` in `/etc/strih-dante-rx-cpu.conf`, read by
+      `strih_dante_reserved_hub_cpu` and `strih_dante_reserved_cpus` (`15 14`). Everything else reads
+      those: the managers' drop-ins (`CPUAffinity=` online minus both = 0-13, a third comment line), the
+      JPEG XS cores (`strih_jxs_output_default_cores` takes the plan's OBS mask = 2-13; the operator
+      WARNING and the `(jxs-cores)` FAIL name every reserved CPU a value holds), the sampler
+      (`strih_program_audio_cpus` subtracts both; strih-snv stays 0-1). dstack v0.6.26's
+      `dlink::Config::pump_cpu` / `rx_cpu` (obs v0.4.11 reads them from dante-input.toml, the hub TOML
+      to follow) get written from these readers when the pins carry them, never a second derivation; the
+      pinner then keeps only the nice -10 (dstack sets none). Never an `AllowedCPUs=` cpuset that leaves a
+      reserved CPU out: the in-process pin (and our taskset) would be refused.
+    - **After every hub start:** `/etc/systemd/system/intercom-hub.service.d/60-strih-dante-rx-pin.conf`
+      (`strih_dante_rx_pin_hub_dropin_text`, header-checked) = `ExecStartPost=-+/usr/local/sbin/strih-dante-rx-pin hub`
+      and nothing else: `+` runs it as root outside the unit's `User=` / sandbox, `-` keeps a failed pin from
+      failing the hub; it sets no CapabilityBoundingSet / AmbientCapabilities / SecureBits (the released
+      unit's grant stays the only one, pinned by `tests/python/test_strih_dante_ptp_1485.py`). Written by
+      step 13 (`strih_dante_rx_pin_install USER 1`, from `strih_dante_input_install`, after step 13's own
+      daemon-reload), so a written or removed drop-in is followed by `timeout 30 systemctl daemon-reload`
+      (a failure fails the install by name). A crash restart re-pins too: no timer, no path unit.
+    - **The helper's hub mode** (`strih-dante-rx-pin hub`, root only, no sudo caller needed; the sudoers line
+      stays the no-argument OBS form, so the operator cannot run it): the process = the unit's MainPID
+      (`systemctl show -p MainPID --value intercom-hub`, never a name search), its `dstack-engine` +
+      `dstack-rx` threads to `hub=` at nice -10, read back, one `intercom-hub pid P: ... -> CPU 14 nice -10`
+      line. `HUB_BUDGET_S=30`: the threads appear ~0.2 s after the hub's start (measured on strih-snv
+      4.11.2026), and ExecStartPost holds the unit in `activating` until it returns, so the budget stays
+      far under the unit's 90 s start timeout. Every other hub thread (`hub-mix` SCHED_FIFO 10, tokio,
+      the dstack tx / mdns threads) stays on the managers' default.
+    - **verify item 9 (no verify-strih line changed, the rows come from the libs):** `(intercom-dante)
+      rx-pin` = the drop-in as rendered, the hub's main affinity off its CPU, both threads exactly on
+      `hub=` at nice -10 or lower; no running hub / no `hub=` FAIL; facts without the hub device but a
+      `hub=` or our drop-in on the box FAIL. `(intercom-dante) reserved-cpu` = the same /proc scan as CPU
+      15's, on CPU 14, allowing only the hub's two threads (a `hub-mix` or a crossed thread there is named);
+      the scan of CPU 15 now also names the hub's threads if they sit there. Both scans share the
+      reboot-pending NOTE. The emitter reads the verdict through `< <(...)`, never a pipe: a subshell's
+      `bad` would not count (the ALL CLEAR bug class).
+    - **Deploy (supervisor):** setup-strih on strih-snv writes `hub=14`, `obs=2-13`, the managers' 0-13 and
+      the hub drop-in (a daemon-reload; the managers re-exec). Then restart the hub (ExecStartPost pins its
+      threads: read the journal's `strih-dante-rx-pin: intercom-hub pid ...` line) and OBS (the launcher
+      takes 2-13), move the long-running processes off 14-15 or reboot, and read item 9's `rx-pin` and
+      `reserved-cpu` rows for both CPUs; then 3 min of pump WARNs = 0 on both.
   - **verify item 9's `(program-dante) rx-pin` rows** (`strih_dante_rx_pin_grade`, in the lib; verify-strih
     is at its line budget): FAIL when OBS's main `Cpus_allowed_list` still holds the reserved CPU, when a
     thread is missing, runs on anything but exactly that CPU, or has nice > -10; no conf / no running OBS

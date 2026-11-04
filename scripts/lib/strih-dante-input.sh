@@ -71,6 +71,20 @@ strih_program_dante_declared() {
   strih_dante_input_ports "$v" >/dev/null
 }
 
+# strih_dante_hub_declared -> rc 0 when the LOADED box takes its program from the Dante device AND its
+# intercom hub runs its own Dante device (a `<box>-intercom=` entry in STRIH_DANTE_DEVICES): then each
+# dstack engine gets its own reserved CPU (strih-dante-rx-pin.sh; comment 6634395906, 4.11.2026).
+strih_dante_hub_declared() {
+  local v
+  strih_program_dante_declared || return 1
+  v="$(strih_lx_dante_devices 2>/dev/null)" || return 1
+  case " ${v} " in *-intercom=*) return 0 ;; esac
+  return 1
+}
+
+# _strih_dante_hub_flag -> 1 / 0 for strih_dante_hub_declared (the rx-pin lib's HUB argument).
+_strih_dante_hub_flag() { if strih_dante_hub_declared; then printf 1; else printf 0; fi; }
+
 strih_dante_input_site_file() { printf '%s' "${STRIH_DANTE_INPUT_SITE_FILE:-/etc/camera-box/dante-input.site.conf}"; }
 
 # _strih_dante_input_field_ok TEXT -> rc 0 for 1..64 printable ASCII characters without `"`, `\` or `|`,
@@ -159,7 +173,7 @@ strih_dante_input_install() {
     else
       echo "  dante-input: no ${STRIH_DANTE_INPUT_DEVICE} Dante device on this box (STRIH_DANTE_DEVICES) -- no ${dest}"
     fi
-    strih_dante_rx_pin_remove
+    strih_dante_rx_pin_remove || return 1
     strih_dante_reserved_cpu_remove "$user"
     strih_dante_ptp_port_remove || return 1
     _strih_dante_input_jxs_cores "$home" "$user" || return 1
@@ -172,7 +186,7 @@ strih_dante_input_install() {
   install -d -m 0755 -o "$user" -g "$group" "$(dirname "$dest")" || return 1
   obs_box_write_if_changed_rendered "$dest" 0644 "${user}:${group}" "dante-input" strih_dante_input_toml "$iface" "$ports" "$chans" || return 1
   echo "  dante-input: ${STRIH_DANTE_INPUT_DEVICE} on ${iface}, $(printf '%s\n' "$chans" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
-  strih_dante_rx_pin_install "$user" || { echo "dante-input: the Dante threads' CPU reservation failed (above)" >&2; return 1; }
+  strih_dante_rx_pin_install "$user" "$(_strih_dante_hub_flag)" || { echo "dante-input: the Dante threads' CPU reservation failed (above)" >&2; return 1; }
   strih_dante_reserved_cpu_install "$user" || { echo "dante-input: the managers' default off the reserved CPU failed (above)" >&2; return 1; }
   strih_dante_ptp_port_install || { echo "dante-input: the right to bind UDP 319 for the in-process PTP follower failed (above)" >&2; return 1; }
   _strih_dante_input_jxs_cores "$home" "$user"
@@ -276,7 +290,7 @@ strih_dante_input_grade() {
   esac
   strih_dante_media_clock_grade "(program-dante)" obs < "$log"
   strih_dante_reserved_cpu_grade
-  strih_dante_rx_pin_grade
+  strih_dante_rx_pin_grade "$(_strih_dante_hub_flag)"
   return 0
 }
 

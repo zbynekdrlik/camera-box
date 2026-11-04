@@ -125,7 +125,7 @@ strih_jxs_program_target() {
 # ONLINE CPU, the reserved Dante CPU included, so a Dante box passes the OBS mask without it
 # (strih_jxs_output_default_cores). The value written is recorded as `jxs_cores_derived`, and the file's
 # jxs_cores is re-derived while it is empty or still equals that record; an operator's own value is kept,
-# a WARNING on stderr when it holds RESERVED (6th, the reserved Dante CPU; empty = none). An empty
+# a WARNING on stderr when it holds RESERVED (6th, the reserved Dante CPUs space-separated; empty = none). An empty
 # derived value drops the record (a box that stopped taking the Dante program). MODE `cores` changes
 # only these two keys of an existing FILE (setup-strih step 13). The WARNING is decided in bash with the
 # ONE cpulist check (`_strih_dante_cpulist_has`, the verify row's), never a second parser here.
@@ -140,14 +140,17 @@ strih_jxs_output_render() {
 # <value>` line turned into the WARNING when the value holds RESERVED (`_strih_dante_cpulist_has`, which
 # reads anything it cannot parse as holding it). Always rc 0.
 _strih_jxs_operator_cores_warn() {
-  local file="${1-}" res="${2-}" line v
+  local file="${1-}" res="${2-}" line v c
   while IFS= read -r line; do
     case "$line" in
       'OPERATOR-CORES '*)
         v="${line#OPERATOR-CORES }"
-        if [ -n "$res" ] && declare -F _strih_dante_cpulist_has >/dev/null && _strih_dante_cpulist_has "$v" "$res"; then
-          echo "  WARNING: ${file}: the operator's jxs_cores '${v}' holds the reserved Dante CPU ${res} -- the JPEG XS program encoder can run there (issue 1485); kept, remove it to get the derived set" >&2
-        fi
+        # RESERVED: every reserved Dante CPU, space-separated (OBS's, then the hub's)
+        for c in $res; do
+          if declare -F _strih_dante_cpulist_has >/dev/null && _strih_dante_cpulist_has "$v" "$c"; then
+            echo "  WARNING: ${file}: the operator's jxs_cores '${v}' holds the reserved Dante CPU ${c} -- the JPEG XS program encoder can run there (issue 1485); kept, remove it to get the derived set" >&2
+          fi
+        done
         ;;
       '') ;;
       *) printf '%s\n' "$line" >&2 ;;
@@ -216,23 +219,25 @@ PY
 # them), else rc 1 + a named line: a missing lib must never read as "not a Dante box" (review finding 9).
 _strih_jxs_dante_lib() {
   local f
-  for f in strih_program_dante_declared strih_dante_rx_pin_plan strih_dante_reserved_cpu _strih_dante_cpulist_has; do
+  for f in strih_program_dante_declared strih_dante_hub_declared strih_dante_rx_pin_plan strih_dante_reserved_cpus _strih_dante_cpulist_has; do
     declare -F "$f" >/dev/null || { echo "strih-jxs: ${f} is not defined -- source scripts/lib/strih-provision.sh (issue 1485)" >&2; return 1; }
   done
 }
 
-# strih_jxs_output_default_cores -> the OBS mask without the reserved Dante CPU on a box that declares
-# the Dante program (the same plan as strih_dante_rx_pin_install), else nothing; nothing too while the
-# OBS mask is not written yet (step 6 on a fresh box: step 13 derives it, strih_jxs_output_cores_reconcile).
-# rc 1 only when the Dante libs are not sourced.
+# strih_jxs_output_default_cores -> the OBS mask without the reserved Dante CPU(s) on a box that declares
+# the Dante program (the same plan as strih_dante_rx_pin_install, the hub's CPU too when the hub has its
+# own Dante device), else nothing; nothing too while the OBS mask is not written yet (step 6 on a fresh
+# box: step 13 derives it, strih_jxs_output_cores_reconcile). rc 1 only when the Dante libs are not sourced.
 strih_jxs_output_default_cores() {
-  local online base plan
+  local online base plan hub=0 cores
   _strih_jxs_dante_lib || return 1
   strih_program_dante_declared || return 0
+  ! strih_dante_hub_declared || hub=1
   online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
   base="$(head -n 1 "${STRIH_DANTE_RX_PIN_ROOT:-}/etc/strih-isolated-cpus.conf" 2>/dev/null || true)"
-  plan="$(strih_dante_rx_pin_plan "$online" "$base" 2>/dev/null)" || return 0
-  printf '%s\n' "${plan#* }"
+  plan="$(strih_dante_rx_pin_plan "$online" "$base" "$hub" 2>/dev/null)" || return 0
+  read -r _ cores _ <<<"$plan"
+  printf '%s\n' "$cores"
 }
 
 # strih_jxs_provision OBS_CFG DESKTOP_USER USER_HOME CHECKOUT -> setup-strih step 6 (module doc). rc 1 + a
@@ -280,7 +285,7 @@ strih_jxs_provision() {
   strih_user_home_dir "$home" "$user" "${file%/*}" || return 1
   rc=0
   cores="$(strih_jxs_output_default_cores)" || return 1
-  res="$(strih_dante_reserved_cpu)"
+  res="$(strih_dante_reserved_cpus)"
   out="$(strih_jxs_output_render "$file" "$target" "$STRIH_JXS_PROGRAM_STREAM_ID" "" "$cores" "$res")" || rc=$?
   if [ "$rc" = 3 ]; then
     # moved aside (a rename never follows a link at the destination; -T never moves INTO a directory)
@@ -313,7 +318,7 @@ strih_jxs_output_cores_reconcile() {
     echo "strih-jxs: the JPEG XS program encoder's jxs_cores cannot be derived on this Dante box (no OBS mask in ${STRIH_DANTE_RX_PIN_ROOT:-}/etc/strih-isolated-cpus.conf beside the online CPUs) -- ${file} left as it is (issue 1485)" >&2
     return 1
   fi
-  res="$(strih_dante_reserved_cpu)"
+  res="$(strih_dante_reserved_cpus)"
   out="$(strih_jxs_output_render "$file" "" 0 cores "$cores" "$res")" || rc=$?
   [ "$rc" = 0 ] && [ -n "$out" ] || { echo "strih-jxs: cannot patch jxs_cores of ${file} (rc ${rc})" >&2; return 1; }
   printf '%s\n' "$out" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" "JPEG XS program output cores (${cores:-every CPU})" || return 1
@@ -418,21 +423,31 @@ strih_jxs_config_verify_row() {
 # _strih_jxs_cores_row FILE -> verify item 49's `(jxs-cores)` row on a Dante box (issue 1485): an empty
 # jxs_cores (the encoder on every online CPU) or one holding the reserved Dante CPU FAILs.
 _strih_jxs_cores_row() {
-  local file="${1-}" cores res
+  local file="${1-}" cores res held
   if ! _strih_jxs_dante_lib 2>/dev/null || ! declare -F _strih_dante_cpulist_has >/dev/null; then
     bad "(jxs-cores) the Dante libs are not sourced -- the encoder's cores are not graded (issue 1485)"
     return 0
   fi
   strih_program_dante_declared || return 0
   cores="$(_strih_jxs_output_key "$file" jxs_cores)"
-  res="$(strih_dante_reserved_cpu)"
+  res="$(strih_dante_reserved_cpus)"
   if [ -z "$cores" ]; then
     bad "(jxs-cores) ${file}: jxs_cores is empty -- the JPEG XS program encoder runs on every online CPU, the reserved Dante CPU ${res:-?} included; re-run setup-strih.sh (step 13 derives it), then Stop/StartOutput (issue 1485)"
-  elif [ -n "$res" ] && _strih_dante_cpulist_has "$cores" "$res"; then
-    bad "(jxs-cores) ${file}: jxs_cores '${cores}' holds the reserved Dante CPU ${res} -- remove it (or empty it and re-run setup-strih.sh step 13), then Stop/StartOutput (issue 1485)"
+  elif held="$(_strih_jxs_cores_held "$cores" "$res")"; then
+    bad "(jxs-cores) ${file}: jxs_cores '${cores}' holds the reserved Dante CPU(s) ${held} -- remove it (or empty it and re-run setup-strih.sh step 13), then Stop/StartOutput (issue 1485)"
   else
     ok "(jxs-cores) ${file}: jxs_cores '${cores}' stays off the reserved Dante CPU ${res:-?} -- a running output takes a changed value at its next Stop/StartOutput"
   fi
+}
+
+# _strih_jxs_cores_held CORES RESERVED -> the CPUs of RESERVED (space-separated) that the cpulist CORES
+# holds, rc 0 when any. The ONE cpulist check (`_strih_dante_cpulist_has`).
+_strih_jxs_cores_held() {
+  local c out=""
+  for c in ${2-}; do
+    ! _strih_dante_cpulist_has "${1-}" "$c" || out="${out}${out:+ }${c}"
+  done
+  [ -n "$out" ] && printf '%s' "$out"
 }
 
 # _strih_jxs_output_key FILE KEY -> the string value of KEY (empty when absent, not a string, or the file

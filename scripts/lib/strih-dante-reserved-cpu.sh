@@ -26,8 +26,15 @@
 # root window, isolcpus, the IRQ split), so only the idea is shared, plus the user manager here.
 #
 #   strih_dante_reserved_cpu (strih-dante-rx-pin.sh) -> the reserved CPU from the conf, empty without one
-#   strih_dante_reserved_cpu_minus LIST CPU     -> LIST without CPU, compressed (pure; rc 1 when empty)
-#   strih_dante_reserved_cpu_manager_text CPUS RESERVED -> the drop-in (pure)
+#   strih_dante_reserved_cpus (strih-dante-rx-pin.sh) -> every reserved CPU (OBS's, then the hub's)
+#   strih_dante_reserved_cpu_minus LIST CPUS    -> LIST without every CPU of CPUS (space-separated),
+#                                                  compressed (pure; rc 1 when empty)
+#   strih_dante_reserved_cpu_manager_text CPUS RESERVED [HUB] -> the drop-in (pure)
+#
+# Two reserved CPUs (4.11.2026, comment 6634395906): when the conf also holds the intercom hub's CPU
+# (`hub=`, the hub's own Dante device), both leave the managers' default (strih-snv 0-13), and the grade
+# scans each: CPU `reserved=` may hold only OBS's two dstack threads, CPU `hub=` only the hub's (its
+# SCHED_FIFO `hub-mix` there is an offender like any other userland task).
 #   strih_dante_reserved_cpu_install [USER]     setup-strih step 13 after strih_dante_rx_pin_install (root)
 #   strih_dante_reserved_cpu_remove [USER]      the same step on any other box (root; silent when absent)
 #   strih_dante_reserved_cpu_offenders PROC RES OBS_PID -> `comm pid/tid` per task allowed on RES
@@ -52,35 +59,38 @@ strih_dante_reserved_cpu_manager_paths() {
   printf '%s/etc/systemd/user.conf.d/50-strih-dante-reserved-cpu.conf\n' "$root"
 }
 
-# strih_dante_reserved_cpu_minus LIST CPU -> LIST without CPU (an empty CPU removes nothing), compressed.
-# rc 1 + nothing when LIST is not a cpulist or nothing is left: never an empty affinity.
+# strih_dante_reserved_cpu_minus LIST CPUS -> LIST without every CPU of CPUS (space-separated; empty
+# removes nothing), compressed. rc 1 + nothing when LIST is not a cpulist or nothing is left: never an
+# empty affinity.
 strih_dante_reserved_cpu_minus() {
   local all c out=""
   all="$(obs_box_cpulist_expand "${1-}")" || return 1
   for c in $all; do
-    [ "$c" = "${2-}" ] || out="${out}${out:+ }${c}"
+    case " ${2-} " in *" ${c} "*) ;; *) out="${out}${out:+ }${c}" ;; esac
   done
   [ -n "$out" ] || return 1
   obs_box_cpulist_compress "$out"
 }
 
-# strih_dante_reserved_cpu_manager_text CPUS RESERVED -> the system.conf.d / user.conf.d drop-in.
+# strih_dante_reserved_cpu_manager_text CPUS RESERVED [HUB] -> the system.conf.d / user.conf.d drop-in.
+# Without HUB byte-identical to the one-CPU drop-in.
 strih_dante_reserved_cpu_manager_text() {
   printf '%s\n' "$STRIH_DANTE_RESERVED_CPU_HEADER"
   printf '# CPU %s is reserved for the strih OBS'"'"'s dstack-engine + dstack-rx threads (/etc/strih-dante-rx-cpu.conf);\n' "${2:?reserved cpu}"
+  [ -z "${3:-}" ] || printf '# CPU %s for the intercom hub'"'"'s own dstack-engine + dstack-rx threads (hub=, the same conf);\n' "$3"
   printf '# every unit and forked process starts off it. Affinity only: the rx-pin helper still moves the two threads there.\n'
   printf '[Manager]\nCPUAffinity=%s\n' "${1:?cpus}"
 }
 
-# strih_dante_reserved_cpu_want -> `<cpus> <reserved>` of this box, rc 1 + a named reason on stderr when
-# the conf has no reserved CPU or the online list leaves nothing.
+# strih_dante_reserved_cpu_want -> `<cpus> <reserved>[ <hub>]` of this box, rc 1 + a named reason on
+# stderr when the conf has no reserved CPU or the online list leaves nothing.
 strih_dante_reserved_cpu_want() {
   local online res cpus
-  res="$(strih_dante_reserved_cpu)"
+  res="$(strih_dante_reserved_cpus)"
   [ -n "$res" ] || { echo "dante-reserved-cpu: no reserved CPU in $(strih_dante_rx_pin_conf_path)" >&2; return 1; }
   online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
   cpus="$(strih_dante_reserved_cpu_minus "$online" "$res")" || {
-    echo "dante-reserved-cpu: the online CPUs '${online}' leave nothing beside the reserved CPU ${res}" >&2; return 1; }
+    echo "dante-reserved-cpu: the online CPUs '${online}' leave nothing beside the reserved CPU(s) ${res}" >&2; return 1; }
   printf '%s %s\n' "$cpus" "$res"
 }
 
@@ -90,17 +100,19 @@ strih_dante_reserved_cpu_want() {
 # on strih-snv 3.11.2026 both read the new mask at once), so new processes start off the reserved CPU
 # without a reboot; a failed re-exec is a WARN (the next boot applies it). Never a live move.
 strih_dante_reserved_cpu_install() {
-  local user="${1-}" owner="${STRIH_DANTE_RX_PIN_OWNER:-root:root}" want cpus res f text out changed=0
+  local user="${1-}" owner="${STRIH_DANTE_RX_PIN_OWNER:-root:root}" want cpus res hub f text out changed=0 what
   want="$(strih_dante_reserved_cpu_want)" || return 1
-  read -r cpus res <<<"$want"
-  text="$(strih_dante_reserved_cpu_manager_text "$cpus" "$res")" || return 1
+  read -r cpus res hub <<<"$want"
+  text="$(strih_dante_reserved_cpu_manager_text "$cpus" "$res" "$hub")" || return 1
   while IFS= read -r f; do
     install -d -m 0755 "$(dirname "$f")" || { echo "dante-reserved-cpu: cannot create $(dirname "$f")" >&2; return 1; }
     out="$(printf '%s\n' "$text" | obs_box_write_if_changed "$f" 0644 "$owner" "dante-reserved-cpu")" || { printf '%s\n' "$out"; return 1; }
     printf '%s\n' "$out"
     case "$out" in *" written") changed=1 ;; esac
   done < <(strih_dante_reserved_cpu_manager_paths)
-  echo "  dante-reserved-cpu: systemd + user managers default to CPUs ${cpus} (CPU ${res} only for the two dstack threads) -- a manager takes it when it re-reads its configuration, at the latest the next boot; running processes keep their masks until they restart"
+  what="CPU ${res} only for the two dstack threads"
+  [ -z "$hub" ] || what="CPU ${res} only for OBS's two dstack threads, CPU ${hub} only for the hub's"
+  echo "  dante-reserved-cpu: systemd + user managers default to CPUs ${cpus} (${what}) -- a manager takes it when it re-reads its configuration, at the latest the next boot; running processes keep their masks until they restart"
   [ "$changed" = 1 ] || return 0
   _strih_dante_reserved_cpu_reexec "$user"
 }
@@ -206,29 +218,42 @@ strih_dante_reserved_cpu_pending() {
   [ "$mt" -gt "$bt" ]
 }
 
-# strih_dante_reserved_cpu_grade -> verify-strih item 9's two `(program-dante) reserved-cpu` rows through
-# the caller's ok / note / bad: the manager drop-ins as rendered, and no task but the two dstack threads
-# (and kernel threads) allowed on the reserved CPU -- a NOTE naming them while the drop-ins are newer than
-# the boot (a deploy before its reboot), a FAIL after. Read-only, any user. Always rc 0.
+# strih_dante_reserved_cpu_grade -> verify-strih item 9's `(program-dante) reserved-cpu` rows through the
+# caller's ok / note / bad: the manager drop-ins as rendered, and no task but OBS's two dstack threads
+# (and kernel threads) allowed on the reserved CPU; with a hub CPU in the conf also an
+# `(intercom-dante) reserved-cpu` row: no task but the hub's two dstack threads allowed on it. A scan
+# with offenders is a NOTE naming them while the drop-ins are newer than the boot (a deploy before its
+# reboot), a FAIL after. Read-only, any user. Always rc 0.
 strih_dante_reserved_cpu_grade() {
-  local proc="${STRIH_DANTE_RX_PIN_PROC:-/proc}" want cpus res f bad_files="" obs out line name scanned=0 total=0 shown="" msg
-  local -A seen=()
-  local -a order=()
+  local proc="${STRIH_DANTE_RX_PIN_PROC:-/proc}" want cpus res hub f bad_files="" what
   if ! want="$(strih_dante_reserved_cpu_want 2>&1)"; then
     bad "(program-dante) reserved-cpu: ${want} -- re-run setup-strih.sh step 13"
     return 0
   fi
-  read -r cpus res <<<"$want"
+  read -r cpus res hub <<<"$want"
   while IFS= read -r f; do
-    cmp -s "$f" <(strih_dante_reserved_cpu_manager_text "$cpus" "$res") || bad_files="${bad_files} ${f}"
+    cmp -s "$f" <(strih_dante_reserved_cpu_manager_text "$cpus" "$res" "$hub") || bad_files="${bad_files} ${f}"
   done < <(strih_dante_reserved_cpu_manager_paths)
+  what="CPU ${res} kept for the dstack threads"
+  [ -z "$hub" ] || what="CPU ${res} kept for OBS's dstack threads, CPU ${hub} for the hub's"
   if [ -z "$bad_files" ]; then
-    ok "(program-dante) reserved-cpu: systemd + user managers default to CPUAffinity=${cpus} (CPU ${res} kept for the dstack threads)"
+    ok "(program-dante) reserved-cpu: systemd + user managers default to CPUAffinity=${cpus} (${what})"
   else
     bad "(program-dante) reserved-cpu: missing or different:${bad_files} -- re-run setup-strih.sh step 13"
   fi
-  obs="$(pgrep -n -x obs 2>/dev/null || true)"
-  out="$(strih_dante_reserved_cpu_offenders "$proc" "$res" "$obs" 2>/dev/null || true)"
+  _strih_dante_reserved_cpu_scan "(program-dante)" "$proc" "$res" "$(pgrep -n -x obs 2>/dev/null || true)" "OBS's" "$cpus" "$bad_files"
+  [ -z "$hub" ] || _strih_dante_reserved_cpu_scan "(intercom-dante)" "$proc" "$hub" "$(strih_dante_rx_pin_hub_pid)" "the intercom hub's" "$cpus" "$bad_files"
+  return 0
+}
+
+# _strih_dante_reserved_cpu_scan LABEL PROC CPU PID OWNER CPUS BAD_FILES -> one row through the caller's
+# ok / note / bad: no task under PROC but PID's two dstack threads (OWNER names them) and kernel threads
+# allowed on CPU. CPUS = the managers' default (the cure's taskset); BAD_FILES non-empty = never pending.
+_strih_dante_reserved_cpu_scan() {
+  local label="$1" proc="$2" cpu="$3" pid="$4" owner="$5" cpus="$6" bad_files="$7" out line name scanned=0 total=0 shown="" msg
+  local -A seen=()
+  local -a order=()
+  out="$(strih_dante_reserved_cpu_offenders "$proc" "$cpu" "$pid" 2>/dev/null || true)"
   while IFS= read -r line; do
     case "$line" in
       'scanned '*) scanned="${line#scanned }" ;;
@@ -242,17 +267,17 @@ strih_dante_reserved_cpu_grade() {
     esac
   done <<<"$out"
   if [ "$scanned" = 0 ]; then
-    bad "(program-dante) reserved-cpu: no task readable under ${proc} -- the reserved CPU is not graded"
+    bad "${label} reserved-cpu: no task readable under ${proc} -- the reserved CPU ${cpu} is not graded"
   elif [ "$total" = 0 ]; then
-    ok "(program-dante) reserved-cpu: of ${scanned} tasks only OBS's ${STRIH_DANTE_RX_PIN_THREADS// / + } (and kernel threads) may run on CPU ${res}"
+    ok "${label} reserved-cpu: of ${scanned} tasks only ${owner} ${STRIH_DANTE_RX_PIN_THREADS// / + } (and kernel threads) may run on CPU ${cpu}"
   else
     for name in "${order[@]:0:$STRIH_DANTE_RESERVED_CPU_NAMES_SHOWN}"; do shown="${shown}${shown:+, }${name} x${#seen[$name]}"; done
     [ "${#order[@]}" -le "$STRIH_DANTE_RESERVED_CPU_NAMES_SHOWN" ] || shown="${shown} (+$(( ${#order[@]} - STRIH_DANTE_RESERVED_CPU_NAMES_SHOWN )) more)"
-    msg="${total} of ${scanned} tasks may run on the reserved CPU ${res}: ${shown}"
+    msg="${total} of ${scanned} tasks may run on the reserved CPU ${cpu}: ${shown}"
     if [ -z "$bad_files" ] && strih_dante_reserved_cpu_pending "$proc"; then
-      note "(program-dante) reserved-cpu: reboot pending -- the manager default was written after this boot; until then ${msg}"
+      note "${label} reserved-cpu: reboot pending -- the manager default was written after this boot; until then ${msg}"
     else
-      bad "(program-dante) reserved-cpu: ${msg} -- restart them, or move a live one with taskset -a -p -c ${cpus} <pid>"
+      bad "${label} reserved-cpu: ${msg} -- restart them, or move a live one with taskset -a -p -c ${cpus} <pid>"
     fi
   fi
   return 0

@@ -24,11 +24,23 @@
 # OBS restart. A limits.d nice grant was rejected: it is a session-wide rlimit, like the retired
 # 95-<box>-genlock-rtprio.conf grant, and would let any thread of any process of the user lower its nice.
 #
-#   strih_dante_rx_pin_plan ONLINE OBS        -> `<reserved cpu> <obs mask without it>` (pure)
-#   strih_dante_rx_pin_install USER           setup-strih step 13 via strih_dante_input_install (root)
+#   strih_dante_rx_pin_plan ONLINE OBS [HUB]  -> `<reserved cpu> <obs mask without it>[ <hub cpu>]` (pure)
+#   strih_dante_rx_pin_install USER [HUB]     setup-strih step 13 via strih_dante_input_install (root)
 #   strih_dante_rx_pin_remove                 the same step on any other box (root; silent when absent)
-#   strih_dante_rx_pin_verdict RES MASK ROWS  -> `ok|bad <text>` lines (pure)
-#   strih_dante_rx_pin_grade                  verify-strih item 9's `(program-dante) rx-pin` rows
+#   strih_dante_rx_pin_verdict RES MASK ROWS [NAME] -> `ok|bad <text>` lines (pure)
+#   strih_dante_rx_pin_grade [HUB]            verify-strih item 9's `(program-dante)` + `(intercom-dante)` rx-pin rows
+#
+# The intercom hub's own Dante device (4.11.2026, comment 6634395906): its dstack-engine is a second
+# 0.33 ms pump, and two engines on one CPU collide (OBS 25 pump WARNs in 3 min with the hub's threads on
+# CPU 15 beside OBS's), so each needs its OWN CPU. On a box whose facts declare a hub Dante device
+# beside the Dante program (HUB=1, strih_dante_hub_declared) the plan takes the next CPU down for the
+# hub: strih-snv OBS 15, the hub 14, OBS on 2-13; the conf gains `hub=`. The same helper places the
+# hub's two threads (`strih-dante-rx-pin hub`, as root, the hub's MainPID from systemd) from a hub
+# drop-in's `ExecStartPost=-+`, so every hub start (a crash restart too) re-pins them; the threads
+# appear ~0.2 s after the hub's start (measured 4.11.2026), the budget is 30 s against the unit's 90 s
+# start timeout, and `-` keeps a failed pin from failing the hub. The drop-in sets ONLY ExecStartPost:
+# the released unit's capability lines stay the hub's only grant (strih-dante-ptp.sh). A HUB=0 box is
+# byte-identical to before (no `hub=`, no drop-in; a drop-in of ours left over is removed).
 #
 # The helper reads /proc itself and has no env seam (a root program never takes a path from its caller);
 # its tests rewrite its PATH= / PROC= / BUDGET_S= lines.
@@ -45,6 +57,9 @@ STRIH_DANTE_RX_PIN_NICE=-10
 strih_dante_rx_pin_conf_path() { printf '%s/etc/strih-dante-rx-cpu.conf\n' "${STRIH_DANTE_RX_PIN_ROOT:-}"; }
 strih_dante_rx_pin_helper_path() { printf '%s/usr/local/sbin/strih-dante-rx-pin\n' "${STRIH_DANTE_RX_PIN_ROOT:-}"; }
 strih_dante_rx_pin_sudoers_path() { printf '%s/etc/sudoers.d/strih-dante-rx-pin\n' "${STRIH_DANTE_RX_PIN_ROOT:-}"; }
+strih_dante_rx_pin_hub_dropin_path() { printf '%s/etc/systemd/system/intercom-hub.service.d/60-strih-dante-rx-pin.conf\n' "${STRIH_DANTE_RX_PIN_ROOT:-}"; }
+
+STRIH_DANTE_RX_PIN_HUB_HEADER="# issue 1485: written by camera-box setup-strih step 13 on a box whose hub Dante device has its own CPU; every run rewrites it."
 
 # strih_dante_reserved_cpu -> the conf's `reserved=` CPU when it is a number, else nothing. Always rc 0.
 # The one reader for every grade and install (strih-dante-reserved-cpu.sh, strih-program-audio.sh); the
@@ -56,73 +71,136 @@ strih_dante_reserved_cpu() {
   printf '%s' "$v"
 }
 
-# strih_dante_rx_pin_plan ONLINE OBS -> `<cpu> <rest>`: the highest CPU online and in OBS, and OBS's mask
-# without it (compressed). rc 1 when a list is unreadable, no OBS CPU is online, or fewer than two OBS
-# CPUs would remain.
+# strih_dante_reserved_hub_cpu -> the conf's `hub=` CPU (the intercom hub's dstack threads) when it is a
+# number, else nothing (a box with one reserved CPU). Always rc 0.
+strih_dante_reserved_hub_cpu() {
+  local v
+  v="$(sed -n 's/^hub=//p' "$(strih_dante_rx_pin_conf_path)" 2>/dev/null | head -n 1 || true)"
+  case "$v" in '' | *[!0123456789]*) v="" ;; esac
+  printf '%s' "$v"
+}
+
+# strih_dante_reserved_cpus -> every reserved CPU of the conf, space-separated: OBS's, then the hub's
+# (`15 14` on strih-snv); nothing without a conf. Always rc 0.
+strih_dante_reserved_cpus() {
+  local res hub
+  res="$(strih_dante_reserved_cpu)"
+  hub="$(strih_dante_reserved_hub_cpu)"
+  [ -n "$res" ] || hub=""
+  printf '%s' "${res}${hub:+ ${hub}}"
+}
+
+# strih_dante_rx_pin_plan ONLINE OBS [HUB] -> `<cpu> <rest>`: the highest CPU online and in OBS, and OBS's
+# mask without it (compressed). HUB=1 (the hub's Dante device has its own CPU): `<cpu> <rest> <hub>`, the
+# hub's = the next CPU down that is online and in OBS, `rest` without both. rc 1 when a list is
+# unreadable, a CPU to reserve is missing, fewer than two OBS CPUs would remain, or HUB is not 0 / 1.
 strih_dante_rx_pin_plan() {
-  local online obs c cpu="" rest="" n=0
+  local online obs c cpu="" hub="" rest="" n=0 want="${3:-0}"
+  case "$want" in 0 | 1) ;; *) return 1 ;; esac
   online="$(obs_box_cpulist_expand "${1-}")" || return 1
   obs="$(obs_box_cpulist_expand "${2-}")" || return 1
   for c in $obs; do
-    case " $online " in *" $c "*) cpu="$c" ;; esac
+    case " $online " in *" $c "*) hub="$cpu"; cpu="$c" ;; esac
   done
   [ -n "$cpu" ] || return 1
+  [ "$want" = 1 ] || hub=""
+  [ "$want" = 0 ] || [ -n "$hub" ] || return 1
   for c in $obs; do
-    [ "$c" = "$cpu" ] || { rest="${rest}${rest:+ }${c}"; n=$((n + 1)); }
+    [ "$c" = "$cpu" ] || [ "$c" = "$hub" ] || { rest="${rest}${rest:+ }${c}"; n=$((n + 1)); }
   done
   [ "$n" -ge 2 ] || return 1
-  printf '%s %s\n' "$cpu" "$(obs_box_cpulist_compress "$rest")"
+  printf '%s %s%s\n' "$cpu" "$(obs_box_cpulist_compress "$rest")" "${hub:+ ${hub}}"
 }
 
-# strih_dante_rx_pin_conf_text CPU REST BASE SIBLINGS -> the conf file. `base` = the OBS mask it was
+# strih_dante_rx_pin_conf_text CPU REST BASE SIBLINGS [HUB] -> the conf file. `base` = the OBS mask it was
 # derived from: the launcher uses `obs` only while /etc/strih-isolated-cpus.conf still reads `base`.
+# `hub=` only when the hub's Dante threads have their own CPU (a HUB-less conf is byte-identical to before).
 strih_dante_rx_pin_conf_text() {
   printf '# issue 1485: written by setup-strih step 13 on a Dante-program box; every run rewrites it.\n'
   printf '# reserved = the CPU of the dstack-engine + dstack-rx threads (nice %s); obs = OBS'"'"'s mask without it.\n' "$STRIH_DANTE_RX_PIN_NICE"
+  [ -z "${5:-}" ] || printf '# hub = the CPU of the intercom hub'"'"'s own dstack-engine + dstack-rx threads (nice %s).\n' "$STRIH_DANTE_RX_PIN_NICE"
   printf 'reserved=%s\nobs=%s\nbase=%s\nsmt_siblings=%s\n' "${1:?cpu}" "${2:?rest}" "${3:?base}" "${4:-unread}"
+  [ -z "${5:-}" ] || printf 'hub=%s\n' "$5"
+}
+
+# strih_dante_rx_pin_hub_dropin_text -> the intercom hub drop-in: after every hub start the root helper
+# places the hub's two Dante threads. ExecStartPost only (never a capability or SecureBits key: the
+# released unit's grant stays the only one, issue 1485 ROZHODNUTE 6628785864).
+strih_dante_rx_pin_hub_dropin_text() {
+  printf '%s\n' "$STRIH_DANTE_RX_PIN_HUB_HEADER"
+  printf '# After every hub start (a crash restart too) the root helper puts the hub'"'"'s dstack-engine + dstack-rx\n'
+  printf '# threads on the hub CPU of /etc/strih-dante-rx-cpu.conf at nice %s. `+` = as root, outside the unit'"'"'s\n' "$STRIH_DANTE_RX_PIN_NICE"
+  printf '# User= and sandbox; `-` = a failed pin never fails the hub (the helper logs it). Do NOT edit by hand.\n'
+  printf '[Service]\nExecStartPost=-+/usr/local/sbin/strih-dante-rx-pin hub\n'
 }
 
 # strih_dante_rx_pin_helper_text -> /usr/local/sbin/strih-dante-rx-pin.
 strih_dante_rx_pin_helper_text() {
   cat <<'EOF'
 #!/bin/bash
-# strih-dante-rx-pin -- issue 1485: put the strih OBS's dstack-engine + dstack-rx threads on the reserved
-# CPU (/etc/strih-dante-rx-cpu.conf) at nice -10. Run by strih-obs-start.sh through sudo after every OBS
-# launch. Takes no argument: the OBS is the newest `obs` of the sudo caller. Touches only threads of that
-# process whose comm is one of the two names; never another thread, never a realtime policy. Waits for
-# the threads (they start when OBS loads the module) for a bounded time. Idempotent.
+# strih-dante-rx-pin -- issue 1485: put a process's dstack-engine + dstack-rx threads on their reserved
+# CPU (/etc/strih-dante-rx-cpu.conf) at nice -10.
+#   (no argument)  the strih OBS: run by strih-obs-start.sh through sudo after every OBS launch; the
+#                  newest `obs` of the sudo caller, CPU `reserved=`.
+#   hub            the intercom hub: run as root by intercom-hub.service's ExecStartPost (a camera-box
+#                  drop-in) after every hub start; the unit's MainPID, CPU `hub=`.
+# Touches only threads of that process whose comm is one of the two names; never another thread, never
+# a realtime policy. Waits for the threads (they start when the Dante device starts) for a bounded
+# time. Idempotent.
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CONF=/etc/strih-dante-rx-cpu.conf
 PROC=/proc
 BUDGET_S=120
+HUB_BUDGET_S=30
 THREADS="dstack-engine dstack-rx"
 NICE=-10
 log() {
     echo "strih-dante-rx-pin: $*"
     logger -t strih-dante-rx-pin -- "$*" 2>/dev/null || true
 }
-if [ "$#" != 0 ]; then
-    echo "usage: strih-dante-rx-pin (no arguments)" >&2
+MODE=obs
+if [ "$#" = 1 ] && [ "$1" = hub ]; then
+    MODE=hub
+elif [ "$#" != 0 ]; then
+    echo "usage: strih-dante-rx-pin [hub]" >&2
     exit 2
 fi
 if [ "$(id -u)" != 0 ]; then
-    echo "strih-dante-rx-pin: run it through sudo" >&2
+    echo "strih-dante-rx-pin: run it as root (OBS: through sudo; the hub: its unit's ExecStartPost)" >&2
     exit 2
 fi
-case "${SUDO_UID:-}" in
-    '' | 0 | *[!0123456789]*)
-        echo "strih-dante-rx-pin: no non-root sudo caller (SUDO_UID='${SUDO_UID:-}')" >&2
-        exit 2
-        ;;
-esac
-CPU="$(sed -n 's/^reserved=//p' "$CONF" 2>/dev/null | head -n 1 || true)"
+if [ "$MODE" = obs ]; then
+    case "${SUDO_UID:-}" in
+        '' | 0 | *[!0123456789]*)
+            echo "strih-dante-rx-pin: no non-root sudo caller (SUDO_UID='${SUDO_UID:-}')" >&2
+            exit 2
+            ;;
+    esac
+    KEY=reserved
+    NAME=obs
+else
+    KEY=hub
+    NAME=intercom-hub
+    BUDGET_S="$HUB_BUDGET_S"
+fi
+CPU="$(sed -n "s/^${KEY}=//p" "$CONF" 2>/dev/null | head -n 1 || true)"
 case "$CPU" in
     '' | *[!0123456789]*)
-        log "FAIL: no reserved CPU in ${CONF} -- re-run setup-strih.sh step 13"
+        log "FAIL: no ${KEY} CPU in ${CONF} -- re-run setup-strih.sh step 13"
         exit 1
         ;;
 esac
+# find_pid -> the process to pin: the newest `obs` of the sudo caller, or the hub unit's main PID.
+find_pid() {
+    local p
+    if [ "$MODE" = obs ]; then
+        pgrep -n -x -u "$SUDO_UID" obs 2>/dev/null || true
+    else
+        p="$(systemctl show -p MainPID --value intercom-hub 2>/dev/null || true)"
+        case "$p" in '' | 0 | *[!0123456789]*) ;; *) printf '%s\n' "$p" ;; esac
+    fi
+}
 # pin_once PID -> rc 0 when every named thread of PID runs on CPU at NICE (read back), printing the
 # `name(tid)` list; rc 1 when a name has no thread yet or a read-back differs.
 pin_once() {
@@ -152,14 +230,14 @@ pin_once() {
 }
 pid=""
 for ((i = 0; i <= BUDGET_S; i++)); do
-    pid="$(pgrep -n -x -u "$SUDO_UID" obs 2>/dev/null || true)"
+    pid="$(find_pid)"
     if [ -n "$pid" ] && done_list="$(pin_once "$pid")"; then
-        log "obs pid ${pid}: ${done_list} -> CPU ${CPU} nice ${NICE}"
+        log "${NAME} pid ${pid}: ${done_list} -> CPU ${CPU} nice ${NICE}"
         exit 0
     fi
     [ "$i" -lt "$BUDGET_S" ] && sleep 1
 done
-log "FAIL: after ${BUDGET_S} s the ${THREADS// / + } threads of obs (pid ${pid:-none}) are not all on CPU ${CPU} at nice ${NICE} -- the dante_input module did not start them, or the move was refused"
+log "FAIL: after ${BUDGET_S} s the ${THREADS// / + } threads of ${NAME} (pid ${pid:-none}) are not all on CPU ${CPU} at nice ${NICE} -- its Dante device did not start them, or the move was refused"
 exit 1
 EOF
 }
@@ -170,19 +248,21 @@ strih_dante_rx_pin_sudoers_text() {
   printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/strih-dante-rx-pin ""\n' "${1:?strih_dante_rx_pin_sudoers_text: USER required}"
 }
 
-# strih_dante_rx_pin_install USER -> the conf, the helper and the sudoers line (root). rc 1 + a named
-# reason when the plan cannot be derived or the sudoers line does not parse. Nothing is restarted: OBS
-# takes the reduced mask and the pin at its next start (the unit restarts OBS through the launcher).
+# strih_dante_rx_pin_install USER [HUB] -> the conf, the helper and the sudoers line (root); HUB=1 (the
+# hub's Dante device has its own CPU, strih_dante_hub_declared) also the hub drop-in, HUB=0 removes a
+# drop-in of ours. rc 1 + a named reason when the plan cannot be derived, the sudoers line does not parse
+# or the reload after a drop-in change fails. Nothing is restarted: OBS takes the reduced mask and the
+# pin at its next start (the unit restarts OBS through the launcher), the hub at its next start.
 strih_dante_rx_pin_install() {
-  local user="${1:?strih_dante_rx_pin_install: USER required}" owner="${STRIH_DANTE_RX_PIN_OWNER:-root:root}"
-  local root="${STRIH_DANTE_RX_PIN_ROOT:-}" online base plan cpu rest sib tmp
+  local user="${1:?strih_dante_rx_pin_install: USER required}" hubwant="${2:-0}" owner="${STRIH_DANTE_RX_PIN_OWNER:-root:root}"
+  local root="${STRIH_DANTE_RX_PIN_ROOT:-}" online base plan cpu rest hub sib tmp
   online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
   base="$(head -n 1 "${root}/etc/strih-isolated-cpus.conf" 2>/dev/null || true)"
-  plan="$(strih_dante_rx_pin_plan "$online" "$base")" || {
-    echo "dante-rx-pin: no CPU to reserve (online '${online}', OBS mask '${base}' from ${root}/etc/strih-isolated-cpus.conf) -- step 11 writes the mask" >&2
+  plan="$(strih_dante_rx_pin_plan "$online" "$base" "$hubwant")" || {
+    echo "dante-rx-pin: no CPU to reserve (online '${online}', OBS mask '${base}' from ${root}/etc/strih-isolated-cpus.conf, hub CPU wanted: ${hubwant}) -- step 11 writes the mask" >&2
     return 1
   }
-  read -r cpu rest <<<"$plan"
+  read -r cpu rest hub <<<"$plan"
   sib="$(cat "${STRIH_DANTE_RX_PIN_SYSFS:-/sys/devices/system/cpu}/cpu${cpu}/topology/thread_siblings_list" 2>/dev/null || true)"
   tmp="$(mktemp)" || return 1
   strih_dante_rx_pin_sudoers_text "$user" >"$tmp"
@@ -194,14 +274,52 @@ strih_dante_rx_pin_install() {
   rm -f "$tmp"
   install -d -m 0755 "$(dirname "$(strih_dante_rx_pin_helper_path)")" "$(dirname "$(strih_dante_rx_pin_sudoers_path)")" || return 1
   obs_box_write_if_changed_rendered "$(strih_dante_rx_pin_conf_path)" 0644 "$owner" "dante-rx-pin conf" \
-    strih_dante_rx_pin_conf_text "$cpu" "$rest" "$base" "${sib:-unread}" || return 1
+    strih_dante_rx_pin_conf_text "$cpu" "$rest" "$base" "${sib:-unread}" "$hub" || return 1
   obs_box_write_if_changed_rendered "$(strih_dante_rx_pin_helper_path)" 0755 "$owner" "dante-rx-pin helper" strih_dante_rx_pin_helper_text || return 1
   obs_box_write_if_changed_rendered "$(strih_dante_rx_pin_sudoers_path)" 0440 "$owner" "dante-rx-pin sudoers" strih_dante_rx_pin_sudoers_text "$user" || return 1
   echo "  dante-rx-pin: CPU ${cpu} reserved for ${STRIH_DANTE_RX_PIN_THREADS// / + } at nice ${STRIH_DANTE_RX_PIN_NICE}; OBS on ${rest} (from ${base}); SMT siblings of CPU ${cpu}: ${sib:-unread} (the sibling stays OBS's) -- applied at OBS's next start"
+  if [ -n "$hub" ]; then
+    _strih_dante_rx_pin_hub_dropin_install "$owner" || return 1
+    echo "  dante-rx-pin: CPU ${hub} reserved for the intercom hub's ${STRIH_DANTE_RX_PIN_THREADS// / + } at nice ${STRIH_DANTE_RX_PIN_NICE} (its own Dante device; ExecStartPost of $(strih_dante_rx_pin_hub_dropin_path)) -- applied at the hub's next start"
+  else
+    _strih_dante_rx_pin_hub_dropin_remove || return 1
+  fi
 }
 
-# strih_dante_rx_pin_remove -> remove our conf, helper and sudoers line (a box without the Dante program).
-# Prints only when it removed something, so a box that never had them stays quiet.
+# _strih_dante_rx_pin_hub_dropin_install OWNER -> the hub drop-in, written on a difference; a written one is
+# followed by a daemon-reload (bounded) so the next hub start runs it. rc 1 named on a failure.
+_strih_dante_rx_pin_hub_dropin_install() {
+  local f out
+  f="$(strih_dante_rx_pin_hub_dropin_path)"
+  install -d -m 0755 "$(dirname "$f")" || { echo "dante-rx-pin: cannot create $(dirname "$f")" >&2; return 1; }
+  out="$(obs_box_write_if_changed_rendered "$f" 0644 "${1:?owner}" "dante-rx-pin hub drop-in" strih_dante_rx_pin_hub_dropin_text)" \
+    || { printf '%s\n' "$out"; return 1; }
+  printf '%s\n' "$out"
+  case "$out" in *" written") _strih_dante_rx_pin_reload ;; esac
+}
+
+# _strih_dante_rx_pin_hub_dropin_remove -> remove OUR hub drop-in (a header-less file of that name is
+# left, named), then reload. Prints only when it touched something. rc 1 when the reload fails.
+_strih_dante_rx_pin_hub_dropin_remove() {
+  local f
+  f="$(strih_dante_rx_pin_hub_dropin_path)"
+  [ -e "$f" ] || return 0
+  if ! head -n 1 "$f" 2>/dev/null | grep -qxF "$STRIH_DANTE_RX_PIN_HUB_HEADER"; then
+    echo "  WARNING: ${f} is not ours (no camera-box header) -- left alone" >&2
+    return 0
+  fi
+  rm -f "$f" || { echo "dante-rx-pin: cannot remove ${f}" >&2; return 1; }
+  echo "  dante-rx-pin: removed ${f} (the hub's Dante threads have no CPU of their own here)"
+  _strih_dante_rx_pin_reload
+}
+
+_strih_dante_rx_pin_reload() {
+  timeout 30 systemctl daemon-reload \
+    || { echo "dante-rx-pin: systemctl daemon-reload failed or timed out after the hub drop-in changed" >&2; return 1; }
+}
+
+# strih_dante_rx_pin_remove -> remove our conf, helper, sudoers line and hub drop-in (a box without the
+# Dante program). Prints only when it removed something, so a box that never had them stays quiet.
 strih_dante_rx_pin_remove() {
   local f
   for f in "$(strih_dante_rx_pin_conf_path)" "$(strih_dante_rx_pin_helper_path)" "$(strih_dante_rx_pin_sudoers_path)"; do
@@ -209,26 +327,36 @@ strih_dante_rx_pin_remove() {
       rm -f "$f" && echo "  dante-rx-pin: removed ${f} (this box takes no Dante program)"
     fi
   done
-  return 0
+  _strih_dante_rx_pin_hub_dropin_remove
 }
 
-# strih_dante_rx_pin_verdict RESERVED OBS_MASK ROWS -> `ok <text>` / `bad <text>` lines (pure). ROWS:
-# one `<comm> <tid> <cpus_allowed_list> <nice>` line per thread named in STRIH_DANTE_RX_PIN_THREADS.
+
+# strih_dante_rx_pin_verdict RESERVED MASK ROWS [NAME] -> `ok <text>` / `bad <text>` lines (pure). ROWS:
+# one `<comm> <tid> <cpus_allowed_list> <nice>` line per thread named in STRIH_DANTE_RX_PIN_THREADS. NAME
+# = obs (default: the strih OBS, MASK its main affinity) or hub (the intercom hub, RESERVED the conf's
+# `hub=`, MASK the hub's main affinity).
 strih_dante_rx_pin_verdict() {
-  local res="${1-}" mask="${2-}" rows="${3-}" name comm tid cpus nice found m
+  local res="${1-}" mask="${2-}" rows="${3-}" who="${4:-obs}" name comm tid cpus nice found m key proc label cure
+  if [ "$who" = hub ]; then
+    key=hub proc="intercom hub" label="the hub's"
+    cure="restart intercom-hub.service (the managers' default keeps it off the reserved CPUs; its ExecStartPost moves the two threads)"
+  else
+    key=reserved proc=OBS label="OBS's"
+    cure="restart OBS through strih-obs.service (the launcher takes the reduced mask)"
+  fi
   case "$res" in
-    '' | *[!0123456789]*) echo "bad rx-pin: no reserved CPU in $(strih_dante_rx_pin_conf_path) -- re-run setup-strih.sh step 13"; return 0 ;;
+    '' | *[!0123456789]*) echo "bad rx-pin: no ${key} CPU in $(strih_dante_rx_pin_conf_path) -- re-run setup-strih.sh step 13"; return 0 ;;
   esac
   if [ -z "$mask" ]; then
-    echo "bad rx-pin: no running OBS (or its mask is unreadable) -- the threads cannot be graded"
+    echo "bad rx-pin: no running ${proc} (or its mask is unreadable) -- the threads cannot be graded"
     return 0
   fi
   if ! m="$(obs_box_cpulist_expand "$mask" 2>/dev/null)"; then
-    echo "bad rx-pin: OBS's mask '${mask}' is unreadable"
+    echo "bad rx-pin: ${label} mask '${mask}' is unreadable"
   elif case " $m " in *" $res "*) true ;; *) false ;; esac; then
-    echo "bad rx-pin: OBS's main affinity ${mask} still includes the reserved CPU ${res} -- restart OBS through strih-obs.service (the launcher takes the reduced mask)"
+    echo "bad rx-pin: ${label} main affinity ${mask} still includes the reserved CPU ${res} -- ${cure}"
   else
-    echo "ok rx-pin: OBS's main affinity ${mask} leaves CPU ${res} to the Dante threads"
+    echo "ok rx-pin: ${label} main affinity ${mask} leaves CPU ${res} to the Dante threads"
   fi
   for name in $STRIH_DANTE_RX_PIN_THREADS; do
     found=0
@@ -243,35 +371,82 @@ strih_dante_rx_pin_verdict() {
         echo "ok rx-pin: ${name} tid ${tid} on CPU ${cpus} at nice ${nice}"
       fi
     done <<<"$rows"
-    [ "$found" = 1 ] || echo "bad rx-pin: no ${name} thread in the running OBS -- the dante_input device did not start, or OBS runs without it"
+    if [ "$found" = 0 ]; then
+      if [ "$who" = hub ]; then
+        echo "bad rx-pin: no ${name} thread in the running intercom hub -- its Dante device did not start (verify item 16's (intercom-dante) rows)"
+      else
+        echo "bad rx-pin: no ${name} thread in the running OBS -- the dante_input device did not start, or OBS runs without it"
+      fi
+    fi
   done
   return 0
 }
 
-# strih_dante_rx_pin_grade -> verify-strih item 9's `(program-dante) rx-pin` rows (through the caller's
-# ok / bad). Read-only, runs as the desktop user. Always rc 0.
-strih_dante_rx_pin_grade() {
-  local proc="${STRIH_DANTE_RX_PIN_PROC:-/proc}" res pid mask="" rows="" t comm stat line v
-  res="$(strih_dante_reserved_cpu)"
-  pid="$(pgrep -n -x obs 2>/dev/null || true)"
-  if [ -n "$pid" ]; then
-    mask="$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' "${proc}/${pid}/status" 2>/dev/null || true)"
-    for t in "${proc}/${pid}"/task/*; do
-      comm="$(cat "$t/comm" 2>/dev/null || true)"
-      case " ${STRIH_DANTE_RX_PIN_THREADS} " in *" ${comm} "*) ;; *) continue ;; esac
-      stat="$(cat "$t/stat" 2>/dev/null || true)"
-      stat="${stat##*) }"
-      # shellcheck disable=SC2086  # split the stat fields on purpose
-      v="$(set -- $stat; printf '%s' "${17:-}")"
-      line="$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' "$t/status" 2>/dev/null || true)"
-      rows="${rows}${comm} ${t##*/} ${line:-unread} ${v:-unread}"$'\n'
-    done
-  fi
+# _strih_dante_rx_pin_rows PROC PID -> `<mask>` on the first line, then one `<comm> <tid> <cpus> <nice>`
+# line per thread of PID named in STRIH_DANTE_RX_PIN_THREADS. Nothing for an empty PID. Always rc 0.
+_strih_dante_rx_pin_rows() {
+  local proc="$1" pid="${2-}" t comm stat line v
+  [ -n "$pid" ] || return 0
+  sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' "${proc}/${pid}/status" 2>/dev/null | head -n 1 || true
+  for t in "${proc}/${pid}"/task/*; do
+    comm="$(cat "$t/comm" 2>/dev/null || true)"
+    case " ${STRIH_DANTE_RX_PIN_THREADS} " in *" ${comm} "*) ;; *) continue ;; esac
+    stat="$(cat "$t/stat" 2>/dev/null || true)"
+    stat="${stat##*) }"
+    # shellcheck disable=SC2086  # split the stat fields on purpose
+    v="$(set -- $stat; printf '%s' "${17:-}")"
+    line="$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' "$t/status" 2>/dev/null || true)"
+    printf '%s %s %s %s\n' "$comm" "${t##*/}" "${line:-unread}" "${v:-unread}"
+  done
+  return 0
+}
+
+# _strih_dante_rx_pin_emit LABEL -> the verdict lines on stdin through the caller's ok / bad.
+_strih_dante_rx_pin_emit() {
+  local line
   while IFS= read -r line; do
     case "$line" in
-      ok\ *) ok "(program-dante) ${line#ok }" ;;
-      bad\ *) bad "(program-dante) ${line#bad }" ;;
+      ok\ *) ok "${1} ${line#ok }" ;;
+      bad\ *) bad "${1} ${line#bad }" ;;
     esac
-  done < <(strih_dante_rx_pin_verdict "$res" "$mask" "$rows")
+  done
+}
+
+# strih_dante_rx_pin_hub_pid -> the intercom hub unit's main PID, nothing when it does not run. rc 0.
+strih_dante_rx_pin_hub_pid() {
+  local p
+  p="$(systemctl show -p MainPID --value intercom-hub 2>/dev/null || true)"
+  case "$p" in '' | 0 | *[!0123456789]*) ;; *) printf '%s' "$p" ;; esac
+}
+
+# strih_dante_rx_pin_grade [HUB] -> verify-strih item 9's `(program-dante) rx-pin` rows and, HUB=1 (the
+# facts give the hub's Dante device its own CPU, strih_dante_hub_declared), the `(intercom-dante) rx-pin`
+# rows: the conf's `hub=`, the hub drop-in as rendered, the hub's two threads on it at nice -10. HUB=0
+# with a `hub=` in the conf or our drop-in left = a FAIL (the facts no longer declare it). Through the
+# caller's ok / bad. Read-only, any user. Always rc 0.
+strih_dante_rx_pin_grade() {
+  local proc="${STRIH_DANTE_RX_PIN_PROC:-/proc}" hubwant="${1:-0}" out mask rows hub f
+  out="$(_strih_dante_rx_pin_rows "$proc" "$(pgrep -n -x obs 2>/dev/null || true)")"
+  mask="$(printf '%s\n' "$out" | head -n 1)"
+  rows="$(printf '%s\n' "$out" | tail -n +2)"
+  # never a pipe into the emitter: its ok / bad must run in THIS shell (verify counts FAILS here)
+  _strih_dante_rx_pin_emit "(program-dante)" < <(strih_dante_rx_pin_verdict "$(strih_dante_reserved_cpu)" "$mask" "$rows" obs)
+  hub="$(strih_dante_reserved_hub_cpu)"
+  f="$(strih_dante_rx_pin_hub_dropin_path)"
+  if [ "$hubwant" != 1 ]; then
+    if [ -n "$hub" ] || [ -e "$f" ]; then
+      bad "(intercom-dante) rx-pin: the facts give the hub's Dante threads no CPU of their own, but $( [ -n "$hub" ] && printf 'the conf holds hub=%s' "$hub" || printf '%s is there' "$f" ) -- re-run setup-strih.sh step 13"
+    fi
+    return 0
+  fi
+  if cmp -s "$f" <(strih_dante_rx_pin_hub_dropin_text); then
+    ok "(intercom-dante) rx-pin: ${f} runs the helper after every hub start"
+  else
+    bad "(intercom-dante) rx-pin: ${f} missing or different -- re-run setup-strih.sh step 13, then restart intercom-hub"
+  fi
+  out="$(_strih_dante_rx_pin_rows "$proc" "$(strih_dante_rx_pin_hub_pid)")"
+  mask="$(printf '%s\n' "$out" | head -n 1)"
+  rows="$(printf '%s\n' "$out" | tail -n +2)"
+  _strih_dante_rx_pin_emit "(intercom-dante)" < <(strih_dante_rx_pin_verdict "$hub" "$mask" "$rows" hub)
   return 0
 }

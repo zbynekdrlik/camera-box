@@ -137,10 +137,10 @@ strih_program_audio_ecores() {
 # rc 1 + nothing + a stderr line when neither set can be derived (no OBS mask yet, an unreadable online
 # list): the install then fails by name instead of writing an every-CPU unit.
 # Seams: OBS_BOX_ONLINE_CPUS, STRIH_PROGRAM_AUDIO_ISOLATED_CONF (/etc/strih-isolated-cpus.conf), the
-# reserved CPU through strih_dante_reserved_cpu (STRIH_DANTE_RX_PIN_ROOT).
+# reserved CPU(s) through strih_dante_reserved_cpus (STRIH_DANTE_RX_PIN_ROOT).
 strih_program_audio_cpus() {
   local root="${1:-${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}}" res ecores online obs bg cpus
-  res="$(strih_dante_reserved_cpu)"
+  res="$(strih_dante_reserved_cpus)"   # OBS's and (a hub with its own Dante device) the hub's
   ecores="$(strih_program_audio_ecores "$root")"
   if [ -n "$ecores" ] && cpus="$(strih_dante_reserved_cpu_minus "$ecores" "$res")"; then
     printf '%s' "$cpus"
