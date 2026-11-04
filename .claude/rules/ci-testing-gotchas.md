@@ -1921,3 +1921,10 @@ whose match is not on its last line. The first cut of the (since removed) reserv
 `/proc/stat` this way and never saw a pending reboot; only a test with `btime` in the middle of the
 fixture caught it. Put the match in a `case` (status 0) inside the body, and keep the `||` for a
 redirection that fails.
+
+## A `"RC=1" in out` assertion passes on `RC=127` (issue 1387)
+
+A pytest that echoes a bash function's status (`fn; echo "RC=$?"`) and asserts `"RC=1" in r.stdout`
+passes when the function does not exist at all: `command not found` prints `RC=127`, which contains
+`RC=1`. A RED commit then shows a "passing" test for code that is not written. Compare the whole last
+line: `assert r.stdout.splitlines()[-1:] == ["RC=1"]`.
