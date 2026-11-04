@@ -263,10 +263,21 @@ strih_lx_session_units() {
 # one line `installed=<marker sha> active=<unit state> pid=<MainPID> restarts=<NRestarts>
 # lib=<sha256 of the installed libobs.so.30> tick=<1 when the newest OBS log is newer than the start
 # marker AND shows `render tick ENABLED`, else 0> hub=<the RUNNING intercom hub's /api/version, empty when
-# it does not answer>` (issue 1485).
+# it does not answer> jxs=<the JPEG XS program output: off | started | failed | pending, see
+# strih_lx_remote_jxs_state_cmd>` (issue 1485, issue 1387).
 strih_lx_remote_readback_cmd() {
   # shellcheck disable=SC2016  # expanded on the box, not here
-  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); L=$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -n 1); t=0; M=%s; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ] && LC_ALL=C grep -a -q "render tick ENABLED" "$L"; then t=1; fi; printf "installed=%%s obs_tag=%%s active=%%s pid=%%s restarts=%%s lib=%%s tick=%%s hub=%%s\\n" "$(tr -d "[:space:]" 2>/dev/null < /opt/obs-genlock/GENLOCK_BUILD_SHA.txt)" "$(sed -n "s/^tag=//p" /opt/obs-genlock/OBS_RELEASE.txt 2>/dev/null | head -n 1)" "$(systemctl --user is-active strih-obs.service 2>/dev/null)" "$(systemctl --user show -p MainPID --value strih-obs.service 2>/dev/null)" "$(systemctl --user show -p NRestarts --value strih-obs.service 2>/dev/null)" "$(sha256sum /usr/lib/x86_64-linux-gnu/libobs.so.30 2>/dev/null | cut -d" " -f1)" "$t" "$(curl -fsS --max-time 3 http://127.0.0.1:8790/api/version 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)[sys.argv[1]])" version 2>/dev/null)"\n' "'$1/obs-start.marker'"
+  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); L=$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -n 1); t=0; M=%s; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ] && LC_ALL=C grep -a -q "render tick ENABLED" "$L"; then t=1; fi; %s printf "installed=%%s obs_tag=%%s active=%%s pid=%%s restarts=%%s lib=%%s tick=%%s hub=%%s jxs=%%s\\n" "$(tr -d "[:space:]" 2>/dev/null < /opt/obs-genlock/GENLOCK_BUILD_SHA.txt)" "$(sed -n "s/^tag=//p" /opt/obs-genlock/OBS_RELEASE.txt 2>/dev/null | head -n 1)" "$(systemctl --user is-active strih-obs.service 2>/dev/null)" "$(systemctl --user show -p MainPID --value strih-obs.service 2>/dev/null)" "$(systemctl --user show -p NRestarts --value strih-obs.service 2>/dev/null)" "$(sha256sum /usr/lib/x86_64-linux-gnu/libobs.so.30 2>/dev/null | cut -d" " -f1)" "$t" "$(curl -fsS --max-time 3 http://127.0.0.1:8790/api/version 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)[sys.argv[1]])" version 2>/dev/null)" "$J"\n' "'$1/obs-start.marker'" "$(strih_lx_remote_jxs_state_cmd)"
+}
+
+# strih_lx_remote_jxs_state_cmd -> the on-box bash (one line, `;`-terminated) that sets J for the read-back,
+# with L = the newest OBS log and M = the start marker already set (issue 1387, 4.11.2026: a reboot left the
+# JPEG XS program output `did not start` and stream-snv black for ~30 min): `off` = no jxs-output.json that
+# says "enabled": true (nothing to start); else the newest start line of an OBS log newer than the marker:
+# `started` (`started --`), `failed` (`did not start:`), `pending` (none yet). Pure printer.
+strih_lx_remote_jxs_state_cmd() {
+  # shellcheck disable=SC2016  # expanded on the box, not here
+  printf '%s' 'J=off; C="$HOME/.config/obs-studio/plugin_config/distroav/jxs-output.json"; if [ -f "$C" ] && grep -q -E "\"enabled\"[[:space:]]*:[[:space:]]*true" "$C" 2>/dev/null; then J=pending; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ]; then S="$(LC_ALL=C grep -a -E "jxs-output.*(: started -- | did not start: )" "$L" 2>/dev/null | tail -n 1 || true)"; case "$S" in *" did not start: "*) J=failed ;; *": started -- "*) J=started ;; esac; fi; fi;'
 }
 
 strih_lx_bundle_state_url() {
@@ -325,7 +336,7 @@ RUNNER
 
 # --- pure verdicts --------------------------------------------------------------------------------
 
-# strih_lx_deploy_verdict WANT INSTALLED ACTIVE BS_SHA WANT_LIB LIB TICK [WANT_TAG TAG] [WANT_HUB HUB] -> `OK`
+# strih_lx_deploy_verdict WANT INSTALLED ACTIVE BS_SHA WANT_LIB LIB TICK [WANT_TAG TAG] [WANT_HUB HUB] [JXS] -> `OK`
 # (rc 0) or `FAIL: <why>` lines (rc 1). Fail-closed: an empty value anywhere is a FAIL, never "unknown =
 # fine". WANT_HUB (issue 1485) = the intercom pin's version on a box that runs a hub, empty on the stream role.
 strih_lx_deploy_verdict() {
@@ -354,6 +365,15 @@ strih_lx_deploy_verdict() {
   fi
   if [ "$bs" != "$want" ]; then
     echo "FAIL: :8899 genlock_build_sha=${bs:-<unreadable>} != canonical ${want}"; bad=1
+  fi
+  # issue 1387: the 12th argument (the read-back's jxs= field) is graded when the caller passes it.
+  if [ "$#" -ge 12 ]; then
+    case "${12}" in
+      off | started) ;;
+      failed) echo "FAIL: the JPEG XS program output did not start (the newest jxs-output start line of the OBS log reads 'did not start') -- the stream box gets no JPEG XS program; read that line, then StartOutput it or restart strih-obs.service"; bad=1 ;;
+      pending) echo "FAIL: the JPEG XS program output has not started yet (jxs-output.json enabled, no start line in the OBS log since this start)"; bad=1 ;;
+      *) echo "FAIL: the JPEG XS program output state is ${12:-<unreadable>}"; bad=1 ;;
+    esac
   fi
   [ "$bad" = 0 ] && { echo "OK"; return 0; }
   return 1
@@ -823,7 +843,7 @@ _strih_lx_verify() {
     line="$(_strih_lx_ssh "$(strih_lx_remote_readback_cmd "$STRIH_LX_PREP_STAGE")" 2>/dev/null)" || line=""
     pid="$(_strih_lx_field pid "$line")"; restarts="$(_strih_lx_field restarts "$line")"
     bs="$(curl -s -m 8 "$url" 2>/dev/null | jq -r '.genlock_build_sha // empty' 2>/dev/null)" || bs=""
-    if ! verdict="$(strih_lx_deploy_verdict "$sha" "$(_strih_lx_field installed "$line")" "$(_strih_lx_field active "$line")" "$bs" "$STRIH_LX_PREP_LIBSHA" "$(_strih_lx_field lib "$line")" "$(_strih_lx_field tick "$line")" "${STRIH_LX_PREP_TAG:-}" "$(_strih_lx_field obs_tag "$line")" "${STRIH_LX_PREP_HUB:-}" "$(_strih_lx_field hub "$line")")"; then
+    if ! verdict="$(strih_lx_deploy_verdict "$sha" "$(_strih_lx_field installed "$line")" "$(_strih_lx_field active "$line")" "$bs" "$STRIH_LX_PREP_LIBSHA" "$(_strih_lx_field lib "$line")" "$(_strih_lx_field tick "$line")" "${STRIH_LX_PREP_TAG:-}" "$(_strih_lx_field obs_tag "$line")" "${STRIH_LX_PREP_HUB:-}" "$(_strih_lx_field hub "$line")" "$(_strih_lx_field jxs "$line")")"; then
       have_first=0; continue
     fi
     if [ "$have_first" = 1 ]; then

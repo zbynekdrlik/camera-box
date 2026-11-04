@@ -373,3 +373,57 @@ if not isinstance(d, dict):
 print("%s %s %s" % (json.dumps(d.get("enabled")), d.get("jxs_target"), json.dumps(d.get("jxs_stream_id"))))
 PY
 }
+
+# --- issue 1387 (4.11.2026): after a reboot the program output failed once (`did not start`, ENETUNREACH:
+# OBS started before the rig NIC had a carrier) and nothing graded it. Both rows run on verify item 49's line.
+
+# The program output's name as the plugin logs it (obs_jxs_inputs.OUTPUT_NAME, pinned by pytest).
+STRIH_JXS_OUTPUT_NAME="camera-box JPEG XS program"
+
+# strih_jxs_output_start_row USER_HOME LOG -> verify item 49's `(jxs-output-start)` row (the caller's ok / bad /
+# note), strih role with an ENABLED jxs-output.json only (nothing printed otherwise; `(jxs-output)` grades the
+# file). The newest start line of the OBS log decides: `started --` = PASS, `did not start: <reason>` with no
+# later start = FAIL naming the reason, none = NOTE. Always rc 0.
+strih_jxs_output_start_row() {
+  local home="${1-}" log="${2-}" name="$STRIH_JXS_OUTPUT_NAME" last t reason
+  [ "$(strih_box_fact STRIH_ROLE 2>/dev/null)" = strih ] || return 0
+  case "$(_strih_jxs_output_fields "${home}/.config/obs-studio/${STRIH_JXS_OUTPUT_REL}")" in "true "*) ;; *) return 0 ;; esac
+  if [ -z "$log" ] || [ ! -r "$log" ]; then
+    note "(jxs-output-start) no OBS log to read the program output's start from (issue 1387)"
+    return 0
+  fi
+  last="$(LC_ALL=C grep -a -F -e "jxs-output '${name}': started -- " -e "jxs-output: '${name}' did not start: " "$log" | tail -n 1 || true)"
+  t="${last%%: *}"
+  case "$last" in
+    *" did not start: "*)
+      reason="${last#*" did not start: "}"
+      reason="${reason% (issue 1387)}"
+      bad "(jxs-output-start) '${name}' did not start at ${t}: ${reason} -- and no later start: the program link is down (the stream box gets no JPEG XS program); start it with StartOutput '${name}' over obs-websocket, or restart strih-obs.service (issue 1387)"
+      ;;
+    *": started -- "*)
+      ok "(jxs-output-start) '${name}' started at ${t} (the newest start line of the OBS log)"
+      ;;
+    *)
+      note "(jxs-output-start) no start line of '${name}' in the newest OBS log -- an OBS without the output, or before FINISHED_LOADING; (jxs-output-live) grades the running output (issue 1387)"
+      ;;
+  esac
+  return 0
+}
+
+# strih_obs_dropin_verify_row USER_HOME -> verify item 49's `(obs-net-wait)` row: the strih-obs.service drop-in
+# (10-box-facts.conf, setup-strih step 8) is byte-identical to strih_obs_box_facts_dropin_text, which since
+# issue 1387 carries STRIH_RIG_IP: strih-obs-start.sh waits for that address before it starts OBS. Always rc 0.
+strih_obs_dropin_verify_row() {
+  local f="${1-}/.config/systemd/user/strih-obs.service.d/10-box-facts.conf" want ip
+  if ! want="$(strih_obs_box_facts_dropin_text 2>/dev/null)"; then
+    bad "(obs-net-wait) the box facts do not render the strih-obs drop-in (issue 1387)"
+    return 0
+  fi
+  ip="$(strih_lx_ip 2>/dev/null || true)"
+  if [ -f "$f" ] && [ "$(cat "$f" 2>/dev/null)" = "$want" ]; then
+    ok "(obs-net-wait) ${f}: OBS waits for the rig address ${ip} before it starts"
+  else
+    bad "(obs-net-wait) ${f} is missing or differs from the box facts (no STRIH_RIG_IP: OBS starts before the rig network is up) -- re-run setup-strih.sh step 8 (issue 1387)"
+  fi
+  return 0
+}

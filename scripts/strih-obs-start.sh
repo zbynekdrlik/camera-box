@@ -47,6 +47,29 @@ strih_resolve_session_env() {
   return 1
 }
 
+# strih_wait_rig_address IP BOUND_S -> wait until `ip -o -4 addr show` lists the rig address IP (issue
+# 1387, 4.11.2026: after a reboot OBS started 4 s before the 10 GbE rig NIC had a carrier and the JPEG XS
+# program output failed once with ENETUNREACH). The same condition the dantesync unit's ExecStartPre
+# waits on (issue 1439). Polls once a second, at most BOUND_S seconds (a non-number = 120). rc 0 = the
+# address is up (one line names how long it took), 1 = not up after the bound, 2 = no IP or not an
+# IPv4 address (nothing waited). A user unit cannot order on the system network-online.target, so the
+# launcher waits itself. Test seams: `ip` and `sleep` from PATH.
+strih_wait_rig_address() {
+  local ip="${1-}" bound="${2-}" d='[0123456789]{1,3}' i out
+  [[ "$ip" =~ ^${d}\.${d}\.${d}\.${d}$ ]] || return 2
+  [[ "$bound" =~ ^[0123456789]{1,5}$ ]] || bound=120
+  for ((i = 0; i <= bound; i++)); do
+    out="$(ip -o -4 addr show 2>/dev/null || true)"
+    if [[ "$out" == *" ${ip}/"* ]]; then
+      printf 'rig network: %s up after %d s\n' "$ip" "$i"
+      return 0
+    fi
+    [ "$i" -lt "$bound" ] || break
+    sleep 1
+  done
+  return 1
+}
+
 # --- source-guard: when sourced (the unit tests), define funcs only -- never run the launch flow ---
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0 2>/dev/null || true
@@ -72,6 +95,17 @@ while IFS= read -r _kv; do
   export "${_kv?}"
   echo "session display: $_kv"
 done <<< "$SESSION_ENV"
+
+# issue 1387: the rig network first (STRIH_RIG_IP from the box-facts drop-in). Fail-open: a timeout is a
+# loud WARN and OBS starts anyway (the operator still gets a local OBS; verify item 49 names a program
+# output that then could not start).
+if strih_wait_rig_address "${STRIH_RIG_IP:-}" "${STRIH_RIG_NET_WAIT_S:-120}"; then
+  :
+elif [ "$?" = 1 ]; then
+  echo "WARN issue 1387: the rig address ${STRIH_RIG_IP} is not up after ${STRIH_RIG_NET_WAIT_S:-120} s -- starting OBS anyway; the JPEG XS program output may fail to start (verify-strih item 49 (jxs-output-start))"
+else
+  echo "NOTE issue 1387: no rig address in STRIH_RIG_IP ('${STRIH_RIG_IP:-}') -- not waiting for the network (re-run setup-strih.sh step 8 for the drop-in)"
+fi
 
 rm -rf "$OBS_CFG/.sentinel"/* 2>/dev/null || true
 
