@@ -186,8 +186,10 @@ strih_dante_ptp_port_grade() {
 # may hold spaces, so it is the rest of the line). ANSI colour codes are stripped first.
 strih_dante_media_clock_verdict() {
   LC_ALL=C sed -e 's/\x1b\[[0123456789;]*m//g' | LC_ALL=C awk '
-    /media clock source source=/ {
-      v = $0; sub(/.*media clock source source=/, "", v); split(v, a, /[ \t]/); last = a[1]
+    /media clock source[^=]*source=/ {
+      # `media clock source source=X` and the dstack v0.6.31 switch line `media clock source changed
+      # with a re-align source=X`; `media clock: the new source waits ...` names the candidate only.
+      v = $0; sub(/.*media clock source/, "", v); sub(/^[^=]*source=/, "", v); split(v, a, /[ \t]/); last = a[1]
       from = "-"; if (match($0, /from=[^ \t]+/)) from = substr($0, RSTART + 5, RLENGTH - 5)
       next
     }
