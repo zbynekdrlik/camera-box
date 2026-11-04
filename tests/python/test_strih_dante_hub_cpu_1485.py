@@ -444,6 +444,15 @@ def test_a_hub_that_started_before_its_drop_in_is_restart_pending_not_failed(tmp
     assert "BAD (intercom-dante)" not in r.stdout, r.stdout + r.stderr
     assert "NOTE (intercom-dante) rx-pin: restart pending -- the hub started before its drop-in was written" in r.stdout
     assert "until then: dstack-engine tid 5160 runs on 0-13, not the reserved CPU 14" in r.stdout
+    # only what a restart cures is pending: a missing thread (a dead Dante device) stays a FAIL (review round 2)
+    (tmp_path / "dead").mkdir()
+    root, proc, env2 = _rows_env(tmp_path / "dead", hub_threads={5150: ("intercom-hub", "0-13", 0),
+                                                                 5160: ("dstack-engine", "0-13", 0)})
+    (proc / "stat").write_text("btime 1700000000\n")
+    os.utime(root / DROPIN_REL, (1_700_003_600, 1_700_003_600))
+    r = rp._bash(body, env=env2)
+    assert "BAD (intercom-dante) rx-pin: no dstack-rx thread in the running intercom hub" in r.stdout, r.stdout
+    assert "NOTE (intercom-dante) rx-pin: restart pending" in r.stdout, "the unpinned engine is still pending"
     # a hub started AFTER its drop-in that still runs unpinned is a real FAIL
     (tmp_path / "b").mkdir()
     env = _pending_env(tmp_path / "b", dropin_after_start=False)
