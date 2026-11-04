@@ -1,6 +1,6 @@
 # program-audio-sampler — install note (issue 1404)
 
-The YouTube channel guard. The sampler runs on **strih-snv** as the operator's `--user` unit, off the OBS cores and the reserved Dante CPU (issue 1485: the E-cores, else the background set, 0-1 on the AMD strih-snv),
+The YouTube channel guard. The sampler runs on **strih-snv** as the operator's `--user` unit, off the OBS cores (issue 1485: the E-cores, else the background set, 0-1 on the AMD strih-snv),
 `program-audio-sampler.service`, rendered from the template `program-audio-sampler.strih-snv.service`:
 - setup-strih step 16e installs it (enable-only);
 - verify-strih item 41 grades it;
@@ -122,7 +122,7 @@ journalctl --user -u program-audio-sampler -n 12 --no-pager
 #   "scheduling nice=0 cpus=0-1 cpu.weight=..." (the background set on strih-snv, no WARNING)
 #   "serving http://0.0.0.0:8891/program-audio.json from /run/user/<uid>/program-audio-sampler"
 #   the start line ends "capture=thread"; within ~5 s "verdict UNKNOWN -> MEASUREMENT ... marker_chain=6..8"
-grep Cpus_allowed_list /proc/$(systemctl --user show -p MainPID --value program-audio-sampler.service)/status  # 0-1 (never the reserved Dante CPU 15)
+grep Cpus_allowed_list /proc/$(systemctl --user show -p MainPID --value program-audio-sampler.service)/status  # 0-1 (the background set, off OBS's cores)
 # from dev1:
 curl -s http://10.77.9.202:8891/program-audio.json; echo        # verdict MEASUREMENT, "queue_drops": 0, "lag_ms" tens of ms
 python3 ~/devel/camera-box/scripts/program_audio_guard.py       # (default URL = strih-snv) exit 0

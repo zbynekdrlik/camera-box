@@ -292,8 +292,8 @@ sibling. The E-core pin of the decode is empty on AMD (no `cpu_atom`).
 
 - **The slice:** `rig-background.slice`, `AllowedCPUs` = online CPUs minus `/etc/<BOX>-isolated-cpus.conf`,
   always derived (`obs_box_background_cpus`). strih-snv: 0-1, one physical core. imag: 0-1 + the E-cores.
-  The file keeps the full OBS block even where the launcher narrows OBS (strih-snv's Dante CPU 15, issue
-  1485, `strih-dante-input.md`), so the slice never gets that CPU.
+  The launcher runs OBS on that whole block (the issue-1485 Dante CPU reservation that narrowed it is
+  removed, `strih-dante-input.md`).
   `CPUWeight=1`, `IOWeight=1`, `MemoryHigh=30%`. Enabled and started by setup (`[Install]`
   multi-user.target), so the cpuset controller comes up at setup or boot, never when a backup starts
   during a broadcast. The genlock deploy runs setup with OBS down; a hand-run setup on a live box does not.

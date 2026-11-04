@@ -24,20 +24,21 @@
 #
 #   strih_dante_input_install USER HOME   setup-strih step 13 (after the leg: the iface is the leg's)
 #   strih_dante_input_grade LOG           verify-strih item 9's `(program-dante)` rows (ok/bad/note),
-#                                         the `rx-pin` rows included (strih-dante-rx-pin.sh) and the
-#                                         `reserved-cpu` rows (strih-dante-reserved-cpu.sh), the
-#                                         `media clock` + `ptp-port` rows (strih-dante-ptp.sh)
-#   strih_program_audio_declared / strih_program_audio_grade SCN WS LOG   item 9's dispatcher: Dante,
-#                                         else the obs-vban grade (strih-program-vban.sh)
+#                                         the `media clock` + `ptp-port` rows (strih-dante-ptp.sh)
+#   strih_program_audio_declared / strih_program_audio_grade SCN WS LOG   item 9's dispatcher: the
+#                                         `(dante-cpu)` leftover rows (strih-dante-cpu-leftovers.sh), then
+#                                         Dante, else the obs-vban grade (strih-program-vban.sh)
+#
+# No CPU pinning for the Dante threads (dstack v0.6.28, owner ruling relayed by dstack issue 1, 4.11.2026):
+# dlink's own default budget (15 ms, a 6 ms pump margin) is used, so the TOML carries no latency_ms, and
+# step 13 removes what the earlier CPU reservation left on a box (strih-dante-cpu-leftovers.sh).
 #
 # Seams: STRIH_DANTE_INPUT_SITE_FILE, STRIH_DANTE_INPUT_TOML (the destination), STRIH_DANTE_INPUT_IFACE
 # (skip the leg resolve), STRIH_DANTE_INPUT_KIND_FILE (the OBS input kind instead of the WS read),
 # STRIH_DANTE_INPUT_WAIT_S (the live window, 12 s).
 
-# shellcheck source=scripts/lib/strih-dante-rx-pin.sh
-. "$(dirname "${BASH_SOURCE[0]}")/strih-dante-rx-pin.sh"   # the Dante threads' own CPU (issue 1485)
-# shellcheck source=scripts/lib/strih-dante-reserved-cpu.sh
-. "$(dirname "${BASH_SOURCE[0]}")/strih-dante-reserved-cpu.sh"   # nothing else on that CPU (issue 1485)
+# shellcheck source=scripts/lib/strih-dante-cpu-leftovers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/strih-dante-cpu-leftovers.sh"   # the removed CPU reservation, off the box
 if ! declare -F strih_dante_ptp_pin_ready >/dev/null; then
   # shellcheck source=scripts/lib/strih-dante-ptp.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-ptp.sh"   # in-process PTP: the 319 bind right + the media clock row
@@ -46,7 +47,6 @@ fi
 STRIH_DANTE_INPUT_DEVICE="strih-obs"
 STRIH_DANTE_INPUT_SOURCE_KIND="dante_input"
 STRIH_DANTE_INPUT_NETWORK_RATE=96000
-STRIH_DANTE_INPUT_LATENCY_MS=10
 STRIH_DANTE_INPUT_HEADER="# ~/.camera-box/dante-input.toml -- written by camera-box setup-strih step 13 (issue 1485); every run rewrites it"
 
 # strih_dante_input_ports DEVICES -> `arc cmc flows rx_port_base` of the strih-obs device in DEVICES (the
@@ -70,21 +70,6 @@ strih_program_dante_declared() {
   v="$(strih_lx_dante_devices 2>/dev/null)" || return 1
   strih_dante_input_ports "$v" >/dev/null
 }
-
-# strih_dante_hub_declared -> rc 0 when the LOADED box takes its program from the Dante device AND its
-# intercom hub runs its own Dante device (an `*-intercom=` entry in STRIH_DANTE_DEVICES, the same match
-# item 16's (intercom-dante) rows use; the facts are per box, strih-snv's is `strih-snv-intercom=`): then each
-# dstack engine gets its own reserved CPU (strih-dante-rx-pin.sh; comment 6634395906, 4.11.2026).
-strih_dante_hub_declared() {
-  local v
-  strih_program_dante_declared || return 1
-  v="$(strih_lx_dante_devices 2>/dev/null)" || return 1
-  case " ${v} " in *-intercom=*) return 0 ;; esac
-  return 1
-}
-
-# _strih_dante_hub_flag -> 1 / 0 for strih_dante_hub_declared (the rx-pin lib's HUB argument).
-_strih_dante_hub_flag() { if strih_dante_hub_declared; then printf 1; else printf 0; fi; }
 
 strih_dante_input_site_file() { printf '%s' "${STRIH_DANTE_INPUT_SITE_FILE:-/etc/camera-box/dante-input.site.conf}"; }
 
@@ -129,7 +114,7 @@ strih_dante_input_site_rows() {
 
 # strih_dante_input_toml IFACE "ARC CMC FLOWS RXBASE" ROWS -> the dante-input.toml text (pure). ROWS =
 # strih_dante_input_site_rows' output. network_rate 96000 (the Dante network; dlink halves it to OBS's
-# 48 kHz), no sample_rate (OBS's own), latency 10 ms.
+# 48 kHz), no sample_rate (OBS's own), no latency_ms (dlink's default, 15 ms since dstack v0.6.28).
 strih_dante_input_toml() {
   local iface="${1:?iface required}" ports="${2:?ports required}" chans="${3:?rows required}"
   local arc cmc flows base label dev chan rx="" i=0 subs=""
@@ -141,8 +126,8 @@ strih_dante_input_toml() {
     subs="${subs}"$'\n'"[[subscribe]]"$'\n'"rx = ${i}"$'\n'"tx_channel = \"${chan}\""$'\n'"tx_device = \"${dev}\""$'\n'
   done <<<"$chans"
   printf '%s\n\n' "$STRIH_DANTE_INPUT_HEADER"
-  printf 'name = "%s"\niface = "%s"\nnetwork_rate = %s\nlatency_ms = %s\nrx = [%s]\n' \
-    "$STRIH_DANTE_INPUT_DEVICE" "$iface" "$STRIH_DANTE_INPUT_NETWORK_RATE" "$STRIH_DANTE_INPUT_LATENCY_MS" "$rx"
+  printf 'name = "%s"\niface = "%s"\nnetwork_rate = %s\nrx = [%s]\n' \
+    "$STRIH_DANTE_INPUT_DEVICE" "$iface" "$STRIH_DANTE_INPUT_NETWORK_RATE" "$rx"
   printf 'arc_port = %s\ncmc_port = %s\nflows_port = %s\nrx_port_base = %s\n' "$arc" "$cmc" "$flows" "$base"
   printf '%s' "$subs"
 }
@@ -162,10 +147,12 @@ _strih_dante_input_iface() {
 # strih_dante_input_install USER HOME -> setup-strih step 13. A Dante box: the file from the facts + the
 # site file, written as USER 0644 when it differs (obs_box_write_if_changed); a missing / malformed site
 # file or an unresolvable leg fails (rc 1, named). Any other box: a file carrying our header is removed
-# (an operator's own file is left, named). OBS reads it at its next start.
+# (an operator's own file is left, named). OBS reads it at its next start. Every box first loses the
+# removed CPU reservation's leftovers (strih_dante_cpu_leftovers_remove).
 strih_dante_input_install() {
   local user="${1:?desktop user required}" home="${2:?home required}" dest ports chans iface group
   dest="$(_strih_dante_input_dest "$home")"
+  strih_dante_cpu_leftovers_remove "$user" || { echo "dante-input: the removed CPU reservation's leftovers (above)" >&2; return 1; }
   if ! strih_program_dante_declared; then
     if [ -f "$dest" ] && head -n 1 "$dest" 2>/dev/null | grep -qxF "$STRIH_DANTE_INPUT_HEADER"; then
       rm -f "$dest" && echo "  dante-input: removed ${dest} (this box takes no Dante program)"
@@ -174,10 +161,7 @@ strih_dante_input_install() {
     else
       echo "  dante-input: no ${STRIH_DANTE_INPUT_DEVICE} Dante device on this box (STRIH_DANTE_DEVICES) -- no ${dest}"
     fi
-    strih_dante_rx_pin_remove || return 1
-    strih_dante_reserved_cpu_remove "$user"
     strih_dante_ptp_port_remove || return 1
-    _strih_dante_input_jxs_cores "$home" "$user" || return 1
     return 0
   fi
   ports="$(strih_dante_input_ports "$(strih_lx_dante_devices)")" || return 1
@@ -187,18 +171,7 @@ strih_dante_input_install() {
   install -d -m 0755 -o "$user" -g "$group" "$(dirname "$dest")" || return 1
   obs_box_write_if_changed_rendered "$dest" 0644 "${user}:${group}" "dante-input" strih_dante_input_toml "$iface" "$ports" "$chans" || return 1
   echo "  dante-input: ${STRIH_DANTE_INPUT_DEVICE} on ${iface}, $(printf '%s\n' "$chans" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
-  strih_dante_rx_pin_install "$user" "$(_strih_dante_hub_flag)" || { echo "dante-input: the Dante threads' CPU reservation failed (above)" >&2; return 1; }
-  strih_dante_reserved_cpu_install "$user" || { echo "dante-input: the managers' default off the reserved CPU failed (above)" >&2; return 1; }
   strih_dante_ptp_port_install || { echo "dante-input: the right to bind UDP 319 for the in-process PTP follower failed (above)" >&2; return 1; }
-  _strih_dante_input_jxs_cores "$home" "$user"
-}
-
-# _strih_dante_input_jxs_cores HOME USER -> the strih JPEG XS program encoder's cores re-derived now that
-# step 11's OBS mask exists (strih-jxs-provision.sh; step 6 ran before it). rc 1 named on a failure.
-_strih_dante_input_jxs_cores() {
-  declare -F strih_jxs_output_cores_reconcile >/dev/null \
-    || { echo "dante-input: strih_jxs_output_cores_reconcile is not defined -- source scripts/lib/strih-provision.sh" >&2; return 1; }
-  strih_jxs_output_cores_reconcile "$1" "$2" || { echo "dante-input: the JPEG XS program encoder's cores (above)" >&2; return 1; }
 }
 
 # strih_dante_input_field LINE KEY -> the value of KEY=<value> in a dante-input line.
@@ -290,8 +263,6 @@ strih_dante_input_grade() {
     *) bad "(program-dante) ${v#bad }" ;;
   esac
   strih_dante_media_clock_grade "(program-dante)" obs < "$log"
-  strih_dante_reserved_cpu_grade
-  strih_dante_rx_pin_grade "$(_strih_dante_hub_flag)"
   return 0
 }
 
@@ -299,7 +270,9 @@ strih_dante_input_grade() {
 # rows: the Dante device (issue 1485) or the console's VBAN (issue 1439).
 strih_program_audio_declared() { strih_program_dante_declared || strih_program_vban_declared; }
 
-# strih_program_audio_grade SCN_BIN WS_HOST LOG -> the Dante grade on a Dante box, else the obs-vban grade.
+# strih_program_audio_grade SCN_BIN WS_HOST LOG -> the removed CPU reservation's leftovers, then the Dante
+# grade on a Dante box, else the obs-vban grade.
 strih_program_audio_grade() {
+  strih_dante_cpu_leftovers_grade
   if strih_program_dante_declared; then strih_dante_input_grade "$@"; else strih_program_vban_grade "$@"; fi
 }

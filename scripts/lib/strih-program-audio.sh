@@ -30,8 +30,8 @@
 #     - the unit rendered from systemd/program-audio-sampler.strih-snv.service: CPUAffinity= =
 #       strih_program_audio_cpus (issue 1485): the box's own /sys/devices/cpu_atom/cpus (the E-cores,
 #       read the way strih_lx_lowprio_prefix reads them), else the background set (online minus the OBS
-#       mask, strih-snv 0-1), never the reserved Dante CPU and never every CPU (no set = the step
-#       fails), written to ~/.config/systemd/user only when it differs;
+#       mask, strih-snv 0-1), never every CPU (no set = the step fails), written to
+#       ~/.config/systemd/user only when it differs;
 #     - `systemctl --user enable` + a daemon-reload when the unit file changed + a `try-restart` when
 #       anything changed. A stopped sampler is NEVER started here (enable-only): rig-mode.sh test starts
 #       it, rig-mode.sh event stops it (scripts/lib/program-audio-mode.sh).
@@ -55,10 +55,10 @@ if ! declare -F strih_session_apps_put >/dev/null; then
   # shellcheck source=scripts/lib/strih-session-apps.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
 fi
-# issue 1485: the reserved Dante CPU (never the sampler's) + the cpulist / background-set helpers.
-if ! declare -F strih_dante_reserved_cpu_minus >/dev/null; then   # defined only by that lib
-  # shellcheck source=scripts/lib/strih-dante-reserved-cpu.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-reserved-cpu.sh"
+# issue 1485: the background set (online minus the OBS mask) the sampler runs on without E-cores.
+if ! declare -F obs_box_background_cpus >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-background.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-background.sh"
 fi
 
 STRIH_PROGRAM_AUDIO_UNIT="program-audio-sampler.service"
@@ -130,26 +130,23 @@ strih_program_audio_ecores() {
 }
 
 # strih_program_audio_cpus [SYSFS_ROOT] -> the sampler's CPU list (issue 1485), never every CPU:
-#   - a hybrid box: its E-cores (strih_program_audio_ecores) without the reserved Dante CPU;
-#   - otherwise (no cpu_atom, as on the AMD strih-snv, or E-cores that are only the reserved CPU): the
-#     box's BACKGROUND set = online minus the OBS mask (obs_box_background_cpus, the set
-#     rig-background.slice uses; strih-snv 0-1), without the reserved CPU.
+#   - a hybrid box: its E-cores (strih_program_audio_ecores);
+#   - otherwise (no cpu_atom, as on the AMD strih-snv): the box's BACKGROUND set = online minus the OBS
+#     mask (obs_box_background_cpus, the set rig-background.slice uses; strih-snv 0-1), off OBS's cores.
 # rc 1 + nothing + a stderr line when neither set can be derived (no OBS mask yet, an unreadable online
 # list): the install then fails by name instead of writing an every-CPU unit.
-# Seams: OBS_BOX_ONLINE_CPUS, STRIH_PROGRAM_AUDIO_ISOLATED_CONF (/etc/strih-isolated-cpus.conf), the
-# reserved CPU(s) through strih_dante_reserved_cpus (STRIH_DANTE_RX_PIN_ROOT).
+# Seams: OBS_BOX_ONLINE_CPUS, STRIH_PROGRAM_AUDIO_ISOLATED_CONF (/etc/strih-isolated-cpus.conf).
 strih_program_audio_cpus() {
-  local root="${1:-${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}}" res ecores online obs bg cpus
-  res="$(strih_dante_reserved_cpus)"   # OBS's and (a hub with its own Dante device) the hub's
+  local root="${1:-${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}}" ecores online obs bg
   ecores="$(strih_program_audio_ecores "$root")"
-  if [ -n "$ecores" ] && cpus="$(strih_dante_reserved_cpu_minus "$ecores" "$res")"; then
-    printf '%s' "$cpus"
+  if [ -n "$ecores" ]; then
+    printf '%s' "$ecores"
     return 0
   fi
   online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
   obs="$(head -n 1 "${STRIH_PROGRAM_AUDIO_ISOLATED_CONF:-/etc/strih-isolated-cpus.conf}" 2>/dev/null || true)"
-  if bg="$(obs_box_background_cpus "$online" "$obs")" && cpus="$(strih_dante_reserved_cpu_minus "$bg" "$res")"; then
-    printf '%s' "$cpus"
+  if bg="$(obs_box_background_cpus "$online" "$obs")" && [ -n "$bg" ]; then
+    printf '%s' "$bg"
     return 0
   fi
   echo "strih-program-audio: no CPU set for the sampler (no E-cores; online '${online}', OBS mask '${obs}' from ${STRIH_PROGRAM_AUDIO_ISOLATED_CONF:-/etc/strih-isolated-cpus.conf}) -- setup-strih step 11 writes the mask" >&2
@@ -281,7 +278,7 @@ strih_program_audio_install() {
     unit_written=1
     pa_changed=1
   fi
-  echo "  ${STRIH_PROGRAM_AUDIO_UNIT} ${w} (CPUAffinity=${cpus}: the E-cores, else the background set, never the reserved Dante CPU; normal priority)"
+  echo "  ${STRIH_PROGRAM_AUDIO_UNIT} ${w} (CPUAffinity=${cpus}: the E-cores, else the background set; normal priority)"
   chown -R "${user}:${user}" "$unitdir" 2>/dev/null || echo "  WARN: could not chown ${unitdir} to ${user}"
 
   if ! err="$(strih_session_apps_user_systemctl "$user" enable "$STRIH_PROGRAM_AUDIO_UNIT" 2>&1)"; then

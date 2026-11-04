@@ -543,8 +543,8 @@ not running under the supervisor".
   XWayland `DISPLAY=:0` when an X socket exists, else FAILS LOUD, via `strih_resolve_session_env`);
   the OBS binary at `/opt/obs-genlock/bin/obs` (not on `PATH`); NO taskset pin unless
   `STRIH_ISOLATED_CPUS` / `/etc/strih-isolated-cpus.conf` exists (never a guessed pin, the imag #841
-  lesson; issue 1485: a Dante-program box's `/etc/strih-dante-rx-cpu.conf` takes the highest CPU of that
-  mask out of OBS for the Dante threads, `strih-dante-input.md`); NO DRM lease. `--profile` / `--collection` are passed only when those OBS dirs
+  lesson; the issue-1485 Dante CPU reservation that narrowed it is removed, `strih-dante-input.md`); NO
+  DRM lease. `--profile` / `--collection` are passed only when those OBS dirs
   exist (a fresh box has none → default).
 - **The scene-seeder preflight + launch-time seed (issue 1317, DONE — was a follow-up).** After the
   `[ -x "$OBS_BIN" ]` check and BEFORE launching OBS, the start script preflights the seed's Python
