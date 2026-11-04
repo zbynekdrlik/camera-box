@@ -49,7 +49,7 @@ def _run(script, *args, env=None, cwd=None):
 def _fake_tools(tmp_path, appear_after):
     """`ip` prints the rig address from its Nth call on (0 = at once, -1 = never); `sleep` only logs."""
     bin_ = tmp_path / "bin"
-    bin_.mkdir()
+    bin_.mkdir(exist_ok=True)
     (tmp_path / "calls").write_text("0")
     (bin_ / "ip").write_text(
         "#!/bin/bash\n"
