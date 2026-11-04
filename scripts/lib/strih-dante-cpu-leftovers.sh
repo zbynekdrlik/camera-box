@@ -18,11 +18,14 @@
 #   strih_dante_cpu_leftovers_grade          verify item 9's `(dante-cpu)` rows (strih_program_audio_grade)
 #
 # A removed manager drop-in re-executes PID 1 and USER's user manager (daemon-reexec restarts no unit; a
-# failure is a WARNING, the next boot applies it); running processes keep the old mask until they restart
-# (reboot the box, or restart OBS + the hub). A removed hub drop-in is followed by a daemon-reload (a
-# failure fails the step). A file of a header-checked name without our header is left and named.
-# Seam: STRIH_DANTE_RX_PIN_ROOT (a prefix for every path, the Dante libs' one seam, shared with
-# strih-dante-ptp.sh).
+# failure is a WARNING). That does NOT widen a manager's own mask: systemd sets its affinity only when
+# CPUAffinity= is set, and the mask survives the exec, so PID 1 (and every unit it starts) stays on the
+# narrowed set until the box REBOOTS; a restart of OBS or the hub inherits the old mask. The remove WARNs
+# and the grade NOTEs while PID 1's mask is narrower than the online CPUs. A removed hub drop-in is
+# followed by a daemon-reload (a failure fails the step). A file of a header-checked name without our
+# header is left and named. A non-root grade cannot list /etc/sudoers.d (root 0750): it says so.
+# Seams: STRIH_DANTE_RX_PIN_ROOT (a prefix for every path, /proc included; the Dante libs' one seam, shared
+# with strih-dante-ptp.sh), OBS_BOX_ONLINE_CPUS (the online CPU list file).
 
 STRIH_DANTE_CPU_MANAGER_HEADER="# issue 1485: written by camera-box setup-strih step 13 on a Dante-program box; every run rewrites it."
 STRIH_DANTE_CPU_HUB_HEADER="# issue 1485: written by camera-box setup-strih step 13 on a box whose hub Dante device has its own CPU; every run rewrites it."
@@ -91,8 +94,26 @@ _strih_dante_cpu_leftovers_reexec() {
       echo "  WARNING: dante-cpu: the user manager of ${user}: daemon-reexec failed or timed out -- it drops the old default at the next boot" >&2
     fi
   fi
-  [ -z "$done" ] || echo "  dante-cpu: re-read: ${done} re-executed (daemon-reexec); running processes keep their mask until they restart"
+  [ -z "$done" ] || echo "  dante-cpu: re-read: ${done} re-executed (daemon-reexec)"
+  local narrowed
+  if narrowed="$(strih_dante_cpu_pid1_narrowed)"; then
+    echo "  WARNING: dante-cpu: PID 1 still runs on ${narrowed} -- a re-exec never widens it; reboot this box so every process gets every CPU again" >&2
+  fi
   return 0
+}
+
+# strih_dante_cpu_pid1_narrowed -> rc 0 + `<PID 1 mask> of the online <online>` when PID 1's
+# Cpus_allowed_list differs from the online CPU list (the removed manager default still in effect);
+# rc 1 when they match or either is unreadable (never a guess).
+strih_dante_cpu_pid1_narrowed() {
+  local mask online k v
+  mask=""
+  while IFS=$'\t' read -r k v; do
+    case "$k" in Cpus_allowed_list:) mask="$v" ;; esac
+  done 2>/dev/null < "${STRIH_DANTE_RX_PIN_ROOT:-}/proc/1/status" || true
+  online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
+  [ -n "$mask" ] && [ -n "$online" ] && [ "$mask" != "$online" ] || return 1
+  printf '%s of the online %s' "$mask" "$online"
 }
 
 # strih_dante_cpu_leftovers_grade -> one `(dante-cpu)` row per leftover (FAIL, a foreign file at the name
@@ -109,5 +130,13 @@ strih_dante_cpu_leftovers_grade() {
     fi
   done < <(strih_dante_cpu_leftover_paths)
   [ "$n" != 0 ] || ok "(dante-cpu) no Dante CPU reservation on this box (no pinning since dstack v0.6.28)"
+  local d narrowed
+  d="${STRIH_DANTE_RX_PIN_ROOT:-}/etc/sudoers.d"
+  if [ -d "$d" ] && ! { [ -r "$d" ] && [ -x "$d" ]; }; then
+    note "(dante-cpu) ${d} is not readable as $(id -un 2>/dev/null || echo this user) -- the sudoers leftover is graded only when verify runs as root (issue 1485)"
+  fi
+  if narrowed="$(strih_dante_cpu_pid1_narrowed)"; then
+    note "(dante-cpu) PID 1 still runs on ${narrowed}: the removed manager default stays in effect until a reboot (issue 1485)"
+  fi
   return 0
 }

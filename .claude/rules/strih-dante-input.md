@@ -68,12 +68,19 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     user manager ONLY when a manager drop-in went (each `timeout 30`, a failure a WARNING naming that
     manager), and `daemon-reload` ONLY when the hub drop-in went (a failure fails the step; the removed
     drop-in changes the hub's install fingerprint, so the running hub restarts after step 16i). A clean
-    box prints nothing and calls no systemctl. Running processes keep the old mask (0-13 / 0-14) until
-    they restart: reboot strih-snv after the deploy (or restart OBS, the hub and the long-running
-    services), then read `grep Cpus_allowed_list /proc/1/status` = every online CPU.
+    box prints nothing and calls no systemctl. **Only a REBOOT clears the old mask** (0-13 / 0-14):
+    systemd sets its own affinity only when `CPUAffinity=` is set, and the mask survives the
+    daemon-reexec, so PID 1 and the user manager keep it and every unit or OBS restarted later inherits
+    it. After the deploy reboot strih-snv, then read `grep Cpus_allowed_list /proc/1/status` = every
+    online CPU. The remove WARNs while PID 1's mask differs from the online list
+    (`strih_dante_cpu_pid1_narrowed`, review round 1).
   - **verify item 9 `(dante-cpu)`** (`strih_dante_cpu_leftovers_grade`, called by
     `strih_program_audio_grade` before the Dante / obs-vban dispatch): one FAIL row per leftover (a
-    foreign file at the name too), else one OK row.
+    foreign file at the name too), else one OK row; a NOTE while PID 1 still runs on the narrowed mask
+    (reboot pending), and a NOTE when a non-root verify cannot list `/etc/sudoers.d` (root 0750: the
+    sudoers leftover is graded only as root). Limit: a hub-fed strih (verify item 9's third branch, no
+    program declared) runs no `(dante-cpu)` rows; only strih-snv ever had the reservation, and setup
+    removes it on every box anyway.
   - **The JPEG XS program encoder** is back to the pre-1485 rule: `jxs_cores` is the operator's value,
     empty = every online CPU. setup-strih step 6 resets a value that still equals its
     `jxs_cores_derived` record to `""` and always drops the record (an operator's value is kept);

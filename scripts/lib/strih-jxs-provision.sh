@@ -116,12 +116,12 @@ strih_jxs_program_target() {
 # strih_jxs_output_render FILE TARGET STREAM_ID [disable] -> the jxs-output.json text (+ newline) with
 # enabled, jxs_target and jxs_stream_id set, every other key of the existing FILE kept (the operator's
 # bpp / cores / pace), the plugin's keys defaulted when absent; the plugin's key order first, then any
-# other key. `disable` keeps every key and sets only enabled false. setup runs as root in the desktop
+# other key. `disable` keeps every other key and sets enabled false. setup runs as root in the desktop
 # user's tree, so FILE is opened O_NOFOLLOW and must be a regular file: rc 4 (nothing printed) for a
 # symlink or anything else; rc 3 when it is not a JSON object.
 # jxs_cores is the operator's (empty = every online CPU). The issue-1485 Dante CPU reservation (removed:
 # no CPU pinning since dstack v0.6.28) wrote a derived value + a `jxs_cores_derived` record: a value that
-# still equals its record is reset to "", and the record is always dropped.
+# still equals its record is reset to "", and the record is always dropped (in `disable` mode too).
 strih_jxs_output_render() {
   python3 - "${1-}" "${2-}" "${3-}" "${4-}" <<'PY'
 import json, os, stat, sys
