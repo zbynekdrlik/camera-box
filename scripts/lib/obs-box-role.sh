@@ -34,6 +34,8 @@
 #   avsync-dock  nothing     step 16g seeds the A/V-sync dock into the saved OBS layout, verify item 47
 #                            grades that layout (issue 1470, scripts/lib/obs-box-avsync-dock.sh; the
 #                            plugin rows of item 47 run on every role)
+#   loudness-dock nothing    step 16g seeds the LUFS meter after it, item 47 grades it (issue 1436,
+#                            scripts/lib/obs-box-loudness-dock.sh)
 #   16i     HTTPS front      skipped (no intercom / shading page; the facts declare none, issue 1399)
 #   13-hub-live  verify item 16: an inactive hub FAILs   report-only (issue 1418)
 #
@@ -86,6 +88,7 @@ obs_box_stream_key() { strih_lx_hostname; }
 #          grade of them, issue 1465 item 3: the stream role gets the locked operator PipeWire instead).
 #   6-hdmi -- only a box with a fixed HDMI output (STRIH_HDMI_OUTPUT_BACKEND != none).
 #   avsync-dock -- the stream role only: the A/V-sync dock reads the measurement audio there (issue 1470).
+#   loudness-dock -- the stream role only: the LUFS meter is the stream operator's (issue 1436).
 obs_box_step_applies() {
   local step="${1:?step required}" v
   case "$step" in
@@ -122,6 +125,12 @@ obs_box_step_applies() {
       v="$(strih_box_role)" || return 0
       if [ "$v" != stream ]; then
         printf 'the A/V-sync dock reads the measurement audio on the stream box (issue 1470: stream role only)'
+        return 1
+      fi ;;
+    loudness-dock)
+      v="$(strih_box_role)" || return 0
+      if [ "$v" != stream ]; then
+        printf 'the LUFS meter is for the stream operator (issue 1436: stream role only)'
         return 1
       fi ;;
     16j-restreamer)
