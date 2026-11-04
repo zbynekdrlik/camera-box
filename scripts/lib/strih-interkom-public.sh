@@ -316,7 +316,7 @@ strih_interkom_public_install() {
   if [ "$w_drop" = written ]; then
     systemctl daemon-reload || { echo "strih-interkom-public: systemctl daemon-reload failed" >&2; return 1; }
     if systemctl is-active --quiet intercom-hub; then
-      echo "  NOTE: the running intercom hub loads the TURN key at its next restart (provisioning never restarts a running hub): supervisor, systemctl restart intercom-hub"
+      echo "  NOTE: the running intercom hub loads the TURN key at its restart: setup-strih try-restarts it right after this step (issue 1485); a single-step run: systemctl restart intercom-hub"
     fi
   fi
   j="$(_strih_public_janus --set "$(strih_public_turn_rest_url)")" || {

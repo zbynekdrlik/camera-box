@@ -135,6 +135,141 @@ strih_intercom_hub_crash_loop() {
   strih_intercom_hub_loop_verdict "$s1" "$s2"
 }
 
+# strih_intercom_hub_install_fingerprint [BIN] [UNIT] [DROPIN_DIR] [TOML] -> one `<sha256|absent>  <path>`
+# line per file the hub loads at its start: the binary, the unit, every DROPIN_DIR/*.conf, the routing TOML
+# and every other *.toml beside it (turn.toml), defaults the installed paths, sorted by path. A missing file
+# reads `absent`, a removed drop-in leaves the list. Not covered (known limits): /etc/ndi's discovery
+# config and the Janus room secret. Read-only, always rc 0, also under the caller's failglob / nullglob.
+strih_intercom_hub_install_fingerprint() {
+  local bin="${1:-/usr/local/bin/intercom-hub}" unit="${2:-/etc/systemd/system/intercom-hub.service}"
+  local dir="${3:-/etc/systemd/system/intercom-hub.service.d}" toml="${4:-/etc/intercom-hub/intercom.toml}"
+  local f s
+  local -a files=("$bin" "$unit" "$toml") more=()
+  mapfile -t more < <(compgen -G "${dir}/*.conf" || true; compgen -G "$(dirname -- "$toml")/*.toml" || true)
+  for f in "${more[@]}"; do [ "$f" = "$toml" ] || files+=("$f"); done
+  for f in "${files[@]}"; do
+    s="$(sha256sum -- "$f" 2>/dev/null | cut -d' ' -f1 || true)"
+    printf '%s  %s\n' "${s:-absent}" "$f"
+  done | LC_ALL=C sort -k2
+}
+
+# The fingerprint of the install the RUNNING hub was started on, keyed by its InvocationID: setup records
+# it whenever it starts, restarts or finds the hub current, so a setup run that failed after writing new
+# files still restarts the hub on the next run (review round 1). STRIH_HUB_LOADED_FILE = the record (test
+# seam), STRIH_HUB_INVOCATION_ID = the invocation (shared seam with the media clock grade).
+_strih_hub_loaded_file() { printf '%s' "${STRIH_HUB_LOADED_FILE:-/var/lib/camera-box/intercom-hub.loaded}"; }
+_strih_hub_invocation() {
+  printf '%s' "${STRIH_HUB_INVOCATION_ID-$(systemctl show -p InvocationID --value intercom-hub 2>/dev/null || true)}"
+}
+
+# strih_intercom_hub_record_loaded [fingerprint args] -> writes `invocation=<id>` + the fingerprint for the
+# running hub; nothing for a hub without an invocation. Always rc 0 (a failed write is a WARNING: the next
+# run then compares against its own first fingerprint, as without a record).
+strih_intercom_hub_record_loaded() {
+  local f inv fp tmp=""
+  f="$(_strih_hub_loaded_file)"; inv="$(_strih_hub_invocation)"
+  [ -n "$inv" ] || return 0
+  fp="$(strih_intercom_hub_install_fingerprint "$@")"
+  if ! { mkdir -p -- "$(dirname -- "$f")" && tmp="$(mktemp -- "${f}.XXXXXX")" \
+       && printf 'invocation=%s\n%s\n' "$inv" "$fp" > "$tmp" && mv -f -- "$tmp" "$f"; } 2>/dev/null; then
+    [ -z "$tmp" ] || rm -f -- "$tmp" 2>/dev/null || true
+    echo "  WARNING: could not record the running hub's install in ${f}" >&2
+  fi
+  return 0
+}
+
+# _strih_hub_started_epoch -> the running hub's main process start (epoch seconds), empty when unreadable.
+_strih_hub_started_epoch() {
+  local v
+  v="$(systemctl show -p ExecMainStartTimestamp --value --timestamp=unix intercom-hub 2>/dev/null || true)"
+  v="${v#@}"; v="${v%%.*}"
+  [[ "$v" =~ ^[0123456789]+$ ]] && printf '%s' "$v"
+  return 0
+}
+
+# _strih_hub_newest_mtime FINGERPRINT -> the newest mtime (epoch seconds) of the fingerprint's present files.
+_strih_hub_newest_mtime() {
+  local l m newest=""
+  while IFS= read -r l; do
+    [ -n "$l" ] && [ "${l%%  *}" != absent ] || continue
+    m="$(stat -c %Y -- "${l#*  }" 2>/dev/null || true)"
+    if [[ "$m" =~ ^[0123456789]+$ ]] && { [ -z "$newest" ] || [ "$m" -gt "$newest" ]; }; then newest="$m"; fi
+  done <<<"$1"
+  printf '%s' "$newest"
+}
+
+# _strih_hub_loaded_before -> the recorded fingerprint when it belongs to the hub's CURRENT invocation, else
+# nothing (no record, or the hub restarted outside setup: it then loaded the files on disk at its start).
+_strih_hub_loaded_before() {
+  local f inv first
+  f="$(_strih_hub_loaded_file)"; inv="$(_strih_hub_invocation)"
+  [ -n "$inv" ] && [ -f "$f" ] || return 0
+  first="$(head -n 1 -- "$f" 2>/dev/null || true)"
+  [ "$first" = "invocation=${inv}" ] || return 0
+  tail -n +2 -- "$f" 2>/dev/null || true
+}
+
+# strih_intercom_hub_restart_if_changed BEFORE [fingerprint args] -> setup-strih's restart of a RUNNING hub
+# (issue 1485, 4.11.2026: a new pinned release was installed and the old process kept running), run after
+# the last step that writes a hub file (16i's TURN drop-in). The baseline is the record of the install the
+# running hub was started on, else BEFORE = the fingerprint setup took before it wrote any hub file.
+# Changed + active = `systemctl try-restart intercom-hub` (never a start of a stopped hub) + the crash-loop
+# probe; unchanged = the hub is never touched (issue 1418); no baseline = nothing restarted, named. rc 1 +
+# a named line when the restart fails or the hub crash-loops after it; rc 0 otherwise.
+strih_intercom_hub_restart_if_changed() {
+  local before="${1-}" now l changed="" loop rec
+  shift || true
+  if ! systemctl is-active --quiet intercom-hub; then
+    echo "  intercom-hub.service is not running -- nothing to restart"
+    return 0
+  fi
+  rec="$(_strih_hub_loaded_before)"
+  [ -z "$rec" ] || before="$rec"
+  if [ -z "$before" ]; then
+    echo "  intercom-hub.service: no install fingerprint to compare against -- not restarted"
+    return 0
+  fi
+  now="$(strih_intercom_hub_install_fingerprint "$@")"
+  if [ "$now" = "$before" ] && [ -z "$rec" ]; then
+    # review round 2: with no record, this run's own fingerprint says nothing about what the RUNNING
+    # process loaded (the first rollout: new files on disk, the old process up). Its start time decides.
+    local start newest
+    start="$(_strih_hub_started_epoch)"; newest="$(_strih_hub_newest_mtime "$now")"
+    if [ -z "$start" ] || [ -z "$newest" ]; then
+      echo "  intercom-hub.service: no record of the install it runs and its start time is unreadable -- not restarted, not recorded"
+      return 0
+    fi
+    if [ "$start" -lt "$newest" ]; then
+      changed="the install (the running hub started before its files were written; no record of what it loaded)"
+    fi
+  fi
+  if [ "$now" = "$before" ] && [ -z "$changed" ]; then
+    echo "  intercom-hub.service: binary, unit, drop-ins and routing files unchanged -- the running hub is left alone"
+    strih_intercom_hub_record_loaded "$@"
+    return 0
+  fi
+  while IFS= read -r l; do   # an `if`, never `&&`: a false last test would end the loop rc 1 under set -e
+    if [ -n "$l" ] && [[ $'\n'"${before}"$'\n' != *$'\n'"${l}"$'\n'* ]]; then
+      changed="${changed}${changed:+, }${l#*  }"
+    fi
+  done <<<"$now"
+  while IFS= read -r l; do
+    if [ -n "$l" ] && [[ $'\n'"${now}"$'\n' != *"  ${l#*  }"$'\n'* ]]; then
+      changed="${changed}${changed:+, }${l#*  } (removed)"
+    fi
+  done <<<"$before"
+  if ! systemctl try-restart intercom-hub; then
+    echo "strih-intercom-hub-unit: systemctl try-restart intercom-hub failed after ${changed} changed" >&2
+    return 1
+  fi
+  if loop="$(strih_intercom_hub_crash_loop)"; then
+    echo "strih-intercom-hub-unit: intercom-hub.service ${loop} after the restart on ${changed}" >&2
+    return 1
+  fi
+  strih_intercom_hub_record_loaded "$@"
+  echo "  intercom-hub.service restarted: ${changed} changed, the running hub loads the new install"
+}
+
 # strih_intercom_hub_hdmi_leg_grade STATE_URL -> verify item 9's rows for the hub's HDMI audio legs
 # (issue 1424 part 3, the strih-pp vestibule on HDMI-1) through the caller's ok / bad / note: one row per
 # `alsa_hdmi` participant on the hub's /api/state. PASS = resolved to its hw PCM, aplay running, blocks
@@ -497,7 +632,9 @@ strih_intercom_hub_media_clock_grade() {
     fi
     return 0
   fi
-  printf '%s\n' "$text" | strih_dante_media_clock_grade "(intercom-dante)" intercom
+  # a here-string, never a pipe: the grader must run in THIS shell, or its `bad` counts in a subshell and
+  # verify-strih ends ALL CLEAR under a FAIL row (4.11.2026; tests/python/test_verify_fail_counted_1485.py)
+  strih_dante_media_clock_grade "(intercom-dante)" intercom <<<"$text"
 }
 
 # --- issue 1439: the stream role runs no intercom hub ------------------------------------------------

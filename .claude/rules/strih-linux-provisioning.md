@@ -254,7 +254,13 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
 - **verify item 16 FAILs a crash-looping hub** (`strih_intercom_hub_crash_loop`: two `systemctl show`
   samples 6 s apart -- longer than RestartSec=5 -- `failed`, `auto-restart` or a climbing NRestarts);
   since issue 1418 an inactive, disabled or missing hub FAILs on the strih role too (`13-hub-live`; setup
-  starts a stopped hub there right after step 14, never restarts a running one) and stays a NOTE on the
+  starts a stopped hub there right after step 14, and since issue 1485 try-restarts a running one only
+  when its install changed: `strih_intercom_hub_install_fingerprint` (binary, unit, every drop-in, every
+  `/etc/intercom-hub/*.toml`) right after step 16i (its TURN drop-in) against the record of the
+  install the running invocation was started on (`/var/lib/camera-box/intercom-hub.loaded`, keyed by
+  InvocationID, so a run that failed after writing still restarts on the next run), else against the
+  fingerprint taken before step 12; `strih_intercom_hub_restart_if_changed`; an unchanged running hub is
+  never touched) and stays a NOTE on the
   stream role. Its
   `(intercom-hub)` row grades the role drop-in (a
   Janus-less box without it FAILs; a Janus box must have the secret file and no reset).
@@ -859,7 +865,8 @@ with an old inline block that ran its tail unconditionally.
   exactly as setup-strih writes them (`strih_session_apps_install "${HERE}/.." ...`,
   `strih_operator_install ...`, `obs_box_panel_install ...`). One kiosk item alone is its own
   function from the step-11 lib (`obs_box_gpu_ready_install`, which `obs_box_kiosk` calls), never the
-  whole `obs_box_kiosk`. Step 13 never restarts a running hub, so a matrix change also needs
+  whole `obs_box_kiosk`. A matrix change in a FULL run restarts a running hub
+  (issue 1485, the install fingerprint); a run of single steps does not, so it also needs
   `systemctl restart intercom-hub`. Used for the post-production deploy of 21.10.2026 (issues
   1441/1454/1456/1457/1458); it never touches OBS. A full run without `STRIH_LX_BUNDLE_SRC` does not
   install OBS either (step 4 only warns), and while OBS runs some steps skip their OBS-file part with
@@ -1626,3 +1633,13 @@ no toggle. Item 14b (REPORT-ONLY, never FAIL; pure helpers in the source-only
   strih-snv with no keyring dialog; which of `ok-live`/`ok-built` the box reads is itself a finding
   worth recording here.
 
+
+## A verify row printer never runs in a subshell (issue 1485, 4.11.2026)
+
+verify-strih printed `FAIL (intercom-dante) media clock: source=Service` and then ALL CLEAR: the hub's
+media clock grade piped the journal INTO the grader (`printf ... | strih_dante_media_clock_grade`), so
+its `bad` counted in a subshell copy of `FAILS`. Feed a grader from a here-string (`grader <<<"$text"`),
+a file (`< "$f"`) or a `while ... done < <(producer)` whose BODY calls `ok`/`bad`, never `producer |
+grader`, `$(grader)` or `producer | while ... bad ...`. `tests/python/test_verify_fail_counted_1485.py`
+sweeps every function that reaches `bad` (transitively, heredoc bodies skipped) in scripts/lib/*.sh +
+verify-strih.sh for those shapes; a new row printer is covered with no test edit.
