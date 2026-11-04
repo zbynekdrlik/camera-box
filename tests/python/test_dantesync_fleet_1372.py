@@ -77,7 +77,7 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     # owner 13.10.2026 ("ako to ze na iem pc nei je upgradovany dantesync?!!!"): the SNV IEM mixing PC
     # (Windows) and the SNV Companion box (Linux) run dantesync on the video clock and were outside the
     # table, so no roll ever reached them (1.8.28 / 1.8.20 against the 1.17.0 pin).
-    assert rows["iem-snv"] == "iem-snv|iem-snv.lan|windows|video|always|-|"
+    assert rows["iem-snv"] == "iem-snv|iem-snv.lan|windows|audio|always|-|"  # on the audio VLAN since the IEM role moved (4.11.2026)
     assert rows["companion-snv"] == "companion-snv|companion-snv.lan|linux|video|always|-|"
     # issue 1468 (owner 23.10.2026: "zaradil ho medzi udrziavanu flotilu dantesyncov"): the Alex
     # notebook on the audio VLAN, a `reach` node (read only while its ssh answers), login alexnb
