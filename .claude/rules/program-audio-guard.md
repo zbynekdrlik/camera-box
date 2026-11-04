@@ -238,15 +238,45 @@ IN the program.
   - The peak is taken by MAGNITUDE (review round 1). A console channel with its polarity flipped, a
     miswired balanced cable or an inverting hop put the song in with the sign flipped, and a signed
     maximum read that ABSENT. `ncc` keeps its sign (negative = inverted).
-  - PRESENT (peak |NCC| >= `DETECT_NCC` 0.07) -> FOREIGN, with the ncc and lag in the reason.
+  - The decision table (`judge` per window, then `confirm`):
+
+    | peak \|NCC\| | earlier window at its lag (any kind, \|ncc\| >= 0.04, last 2, <= 5 s) | reads |
+    |---|---|---|
+    | >= `STRONG_NCC` 0.12 | not needed | PRESENT -> FOREIGN |
+    | `DETECT_NCC` 0.07 .. 0.12 | yes | PRESENT -> FOREIGN |
+    | `DETECT_NCC` 0.07 .. 0.12 | no | ABSENT `unconfirmed` |
+    | < 0.07 | -- | ABSENT |
+    | not computable | -- | UNDECIDED -> FOREIGN (fail closed) |
+
+  - PRESENT -> FOREIGN, with the ncc and lag in the reason.
   - **Confirmed across windows** (`confirm`, E2E 41742028800, 4.11.2026): ten isolated windows read
     PRESENT at |ncc| 0.071-0.083 with lags that jumped (+2734 / -998 / +623 ms) while mbc carried only the
     marker -- the live null reaches past 0.07 on the busy rig, the 990-window dev1 null did not. A real
     CG in the program correlates at ONE lag window after window (the 4 s segments overlap by 2 s). So a
-    PRESENT with |ncc| >= `STRONG_NCC` 0.12 counts at once; a weaker one only when the same source's
-    previous window (raw) was PRESENT within `LAG_AGREE_MS` 5 ms, else it reads ABSENT `unconfirmed`.
-    Cost: a CG under ~-20 dB in the program is caught one window (2 s) later; the synthetic song 24 dB
-    under the marker (0.072) is caught in its second window.
+    PRESENT with |ncc| >= `STRONG_NCC` 0.12 counts at once; a weaker one only when one of the same
+    source's last `CONFIRM_WINDOWS` (2) earlier raw windows, ended at most `CONFIRM_SPAN_S` (5 s)
+    before it, peaked within `LAG_AGREE_MS` 5 ms of its lag at |ncc| >= `AGREE_FLOOR_NCC` 0.04, of ANY
+    kind; else it reads ABSENT `unconfirmed`.
+    - **Why any kind (review of 3662dfa599):** keyed on a previous PRESENT, a song whose |ncc| at its
+      one lag went 0.09 / 0.05 / 0.08 / 0.06 / 0.10 never read FOREIGN: each ABSENT window broke the
+      chain. Now the 0.05 window vouches and the third window reads FOREIGN.
+    - **The memory** (`remember`, kept per source in `CgArm.state`): the computed windows with their
+      judged segment end (`Correlation.seg_end`). A window on a segment already held replaces it and
+      never agrees with itself, so a frozen program ring (the sampler's no-audio UNKNOWN path calls the
+      arm every window) or a repeated read never self-confirms. An UNDECIDED carries no lag and is not
+      kept (it is FOREIGN on its own). A source that goes silent, and every source when the arm runs
+      without a program ring, forgets its memory.
+    - **The null chance of a same-lag agreement:** a null window peaks at a uniform lag of the 32001
+      lags of -1000..+3000 ms at 8 kHz; +-5 ms is 81 of them, so p = 0.0025 per earlier window, at most
+      0.005 for the 2 windows (the floor ignored). With the floor (the 990-window dev1 null: p50 0.030,
+      p99.9 0.042) only a few % of null windows can vouch: ~2.5e-4 per weak null PRESENT. At the live
+      weak-PRESENT rate of E2E 41742028800 (10 in ~120 windows) that is ~2e-5 per window, ~0.6 % of
+      300-window runs. Unmeasured: the segments overlap by 2 s, so a null peak driven by the shared 2 s
+      could repeat at one lag (the live null's lags jumped; measure before lowering the floor).
+    - Cost: a CG under ~-20 dB in the program is caught one or two windows (2-4 s) later; the synthetic
+      song 24 dB under the marker is caught within its first three windows on advancing rings.
+    - Tests: `tests/python/test_program_audio_cg_confirm_1404.py` (the shapes, the floor, the span, the
+      window count, a frozen ring, the forget branches, an UNDECIDED between two PRESENT windows).
   - ABSENT -> no FOREIGN from that source; the payload source shows `in_program` ABSENT and the
     block status reads `not-in-program`.
   - UNDECIDED -> today's strict FOREIGN, with `not proven absent from the stream program (<why>)`
@@ -282,8 +312,9 @@ IN the program.
   - Clock-rate mismatch was measured at +50 ppm only. A larger crystal error loses coherence over
     the 4 s segment first in the top of the band.
   - Known limit: a passage more than ~24 dB under the program level can read ABSENT in one window.
-    One PRESENT window latches the guard's 30 s hold, and a song has louder passages, so the 3.11
-    shape (15-20 dB under the marker) is caught.
+    A strong PRESENT (>= 0.12), or a weak one an earlier window confirms at its lag, latches the
+    guard's 30 s hold, and a song has louder passages, so the 3.11 shape (15-20 dB under the marker)
+    is caught.
   - Re-calibrate only from real audio: two audio-only probe receivers (`program_audio_ndi`, nice 19)
     record `np.save` arrays and stamps; slices then go through `judge` as frames. Never tune the
     threshold to pass one run.
