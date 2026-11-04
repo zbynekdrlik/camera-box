@@ -494,7 +494,13 @@ fn strih_lx_execute_stages_first_then_stops_sets_up_starts_and_verifies_1317() {
     let rc = r.at("setup-strih.rc");
     let start = r.at("--user start");
     let readback = r.at("GENLOCK_BUILD_SHA.txt");
-    let bs = r.at("curl ");
+    // dev1's own :8899 curl (a calls.log line of the curl stub), never the read-back's remote text,
+    // which since issue 1485 also runs curl on the box (the hub's /api/version)
+    let bs = r
+        .calls
+        .lines()
+        .position(|l| l.starts_with("curl "))
+        .unwrap_or_else(|| panic!("no dev1 curl call:\n{}", r.calls));
     assert!(
         pre < prep
             && prep < sweep
