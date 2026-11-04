@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (defines functions + constants only, no top-level statements) --
+# airuleset:script-ok source-only lib (defines functions + constants only; its only top-level statement
+# sources the equally source-only obs-box-background lib) --
 # the scripts/lib/*.sh convention: sourcing runs in the CALLER's shell, so strict mode here would leak.
 #
 # scripts/lib/strih-dante-cpu-leftovers.sh -- issue 1485, dstack v0.6.28 (owner ruling relayed by dstack
@@ -21,11 +22,16 @@
 # failure is a WARNING). That does NOT widen a manager's own mask: systemd sets its affinity only when
 # CPUAffinity= is set, and the mask survives the exec, so PID 1 (and every unit it starts) stays on the
 # narrowed set until the box REBOOTS; a restart of OBS or the hub inherits the old mask. The remove WARNs
-# and the grade NOTEs while PID 1's mask is narrower than the online CPUs. A removed hub drop-in is
+# and the grade NOTEs while PID 1's mask lacks an online CPU. A removed hub drop-in is
 # followed by a daemon-reload (a failure fails the step). A file of a header-checked name without our
 # header is left and named. A non-root grade cannot list /etc/sudoers.d (root 0750): it says so.
 # Seams: STRIH_DANTE_RX_PIN_ROOT (a prefix for every path, /proc included; the Dante libs' one seam, shared
 # with strih-dante-ptp.sh), OBS_BOX_ONLINE_CPUS (the online CPU list file).
+
+if ! declare -F obs_box_cpulist_expand >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-background.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-background.sh"   # obs_box_cpulist_expand
+fi
 
 STRIH_DANTE_CPU_MANAGER_HEADER="# issue 1485: written by camera-box setup-strih step 13 on a Dante-program box; every run rewrites it."
 STRIH_DANTE_CPU_HUB_HEADER="# issue 1485: written by camera-box setup-strih step 13 on a box whose hub Dante device has its own CPU; every run rewrites it."
@@ -102,18 +108,24 @@ _strih_dante_cpu_leftovers_reexec() {
   return 0
 }
 
-# strih_dante_cpu_pid1_narrowed -> rc 0 + `<PID 1 mask> of the online <online>` when PID 1's
-# Cpus_allowed_list differs from the online CPU list (the removed manager default still in effect);
-# rc 1 when they match or either is unreadable (never a guess).
+# strih_dante_cpu_pid1_narrowed -> rc 0 + `<PID 1 mask> of the online <online>` when an ONLINE CPU is
+# missing from PID 1's Cpus_allowed_list (the removed manager default still in effect; a boot-time PID 1
+# holds every POSSIBLE CPU, so a mask wider than the online list is healthy); rc 1 when none is missing
+# or either list is unreadable (never a guess).
 strih_dante_cpu_pid1_narrowed() {
-  local mask online k v
+  local mask online k v m o c
   mask=""
   while IFS=$'\t' read -r k v; do
     case "$k" in Cpus_allowed_list:) mask="$v" ;; esac
   done 2>/dev/null < "${STRIH_DANTE_RX_PIN_ROOT:-}/proc/1/status" || true
   online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
-  [ -n "$mask" ] && [ -n "$online" ] && [ "$mask" != "$online" ] || return 1
-  printf '%s of the online %s' "$mask" "$online"
+  [ -n "$mask" ] && [ -n "$online" ] || return 1
+  m="$(obs_box_cpulist_expand "$mask" 2>/dev/null)" || return 1
+  o="$(obs_box_cpulist_expand "$online" 2>/dev/null)" || return 1
+  for c in $o; do
+    case " ${m} " in *" ${c} "*) ;; *) printf '%s of the online %s' "$mask" "$online"; return 0 ;; esac
+  done
+  return 1
 }
 
 # strih_dante_cpu_leftovers_grade -> one `(dante-cpu)` row per leftover (FAIL, a foreign file at the name

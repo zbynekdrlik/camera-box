@@ -72,7 +72,7 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     systemd sets its own affinity only when `CPUAffinity=` is set, and the mask survives the
     daemon-reexec, so PID 1 and the user manager keep it and every unit or OBS restarted later inherits
     it. After the deploy reboot strih-snv, then read `grep Cpus_allowed_list /proc/1/status` = every
-    online CPU. The remove WARNs while PID 1's mask differs from the online list
+    online CPU. The remove WARNs while an online CPU is missing from PID 1's mask (a wider mask, every POSSIBLE CPU at boot, is healthy)
     (`strih_dante_cpu_pid1_narrowed`, review round 1).
   - **verify item 9 `(dante-cpu)`** (`strih_dante_cpu_leftovers_grade`, called by
     `strih_program_audio_grade` before the Dante / obs-vban dispatch): one FAIL row per leftover (a
