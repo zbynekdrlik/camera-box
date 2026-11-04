@@ -12,7 +12,8 @@
 # What this lib holds (the leg filter's PTP rule is strih_dante_nft_input in strih-dante-leg.sh):
 #   - the pin threshold: STRIH_DANTE_PTP_FIRST_DSTACK, the first dstack whose devices follow in process;
 #     a component (intercom | obs) is READY when its release pin's DSTACK_VERSION is at or above it
-#     (strih_dante_ptp_pin_ready). Until then the rows below are NOTEs: the threshold follows the pins.
+#     (strih_dante_ptp_pin_ready). Until then nothing opens 319 (the leg rule, the sysctl) and the rows
+#     below are NOTEs: the threshold follows the pins.
 #   - the right of the desktop-user OBS to bind 319 (design 6629112890): the box-wide sysctl
 #     `net.ipv4.ip_unprivileged_port_start = 319` in /etc/sysctl.d/60-strih-dante-ptp-port.conf on a box
 #     whose program comes from Dante (strih_program_dante_declared). Not a file capability on /usr/bin/obs
@@ -40,21 +41,19 @@ STRIH_DANTE_PTP_PORT_DEFAULT=1024
 STRIH_DANTE_PTP_PORT_HEADER="# issue 1485: written by camera-box setup-strih step 13 on a Dante-program box; every run rewrites it."
 STRIH_DANTE_PTP_LIB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+if ! declare -F release_version_cmp >/dev/null; then
+  # shellcheck source=scripts/lib/release-version.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/release-version.sh"   # the ONE version-order rule (issue 1476)
+fi
+
 # --- the pin threshold --------------------------------------------------------------------------------
 
-# _strih_dante_ptp_version_ge A B -> rc 0 iff vX.Y.Z A >= B (number by number); rc 2 when either is not
-# vX.Y.Z (ASCII digits only, whatever the locale).
-_strih_dante_ptp_version_ge() {
-  local a="${1#v}" b="${2#v}" re='^[0123456789]+\.[0123456789]+\.[0123456789]+$' i
-  local -a x y
-  [[ "$a" =~ $re ]] && [[ "$b" =~ $re ]] || return 2
-  IFS=. read -r -a x <<<"$a"
-  IFS=. read -r -a y <<<"$b"
-  for i in 0 1 2; do
-    if ((10#${x[i]} > 10#${y[i]})); then return 0; fi
-    if ((10#${x[i]} < 10#${y[i]})); then return 1; fi
-  done
-  return 0
+# strih_dante_ptp_version_ge A B -> rc 0 iff vA >= vB by the repo's one version-order rule
+# (release_version_cmp, a leading `v` dropped); rc 1 when below, rc 2 when either is not a version.
+strih_dante_ptp_version_ge() {
+  local c
+  c="$(release_version_cmp "${1#v}" "${2#v}")" || return 2
+  [ "$c" != -1 ]
 }
 
 # strih_dante_ptp_pin_dstack intercom|obs -> the dstack version that component's release pin carries
@@ -72,7 +71,20 @@ strih_dante_ptp_pin_dstack() {
 # strih_dante_ptp_pin_ready intercom|obs -> rc 0 iff that pin's dstack is at or above
 # STRIH_DANTE_PTP_FIRST_DSTACK (an unreadable version reads as below).
 strih_dante_ptp_pin_ready() {
-  _strih_dante_ptp_version_ge "$(strih_dante_ptp_pin_dstack "${1-}")" "$STRIH_DANTE_PTP_FIRST_DSTACK"
+  strih_dante_ptp_version_ge "$(strih_dante_ptp_pin_dstack "${1-}")" "$STRIH_DANTE_PTP_FIRST_DSTACK"
+}
+
+# strih_dante_ptp_leg_open -> rc 0 iff either pinned device (the hub, the OBS) follows PTP in process, so
+# the leg admits the PTP group (strih_dante_nft_input). Before that nothing on the leg binds 319 on
+# purpose: a dstack below the threshold that could bind it would start its old follower beside dsync
+# (the dantesync#109 port collision the earlier rule guarded against).
+strih_dante_ptp_leg_open() { strih_dante_ptp_pin_ready intercom || strih_dante_ptp_pin_ready obs; }
+
+# _strih_dante_ptp_below -> the one-line reason the obs pin is not READY.
+_strih_dante_ptp_below() {
+  local have
+  have="$(strih_dante_ptp_pin_dstack obs)"
+  printf "the obs pin's dstack %s is below %s (no in-process PTP follower yet)" "${have:-unreadable}" "$STRIH_DANTE_PTP_FIRST_DSTACK"
 }
 
 # --- the port sysctl ----------------------------------------------------------------------------------
@@ -92,13 +104,20 @@ strih_dante_ptp_port_text() {
 # _strih_dante_ptp_port_live -> the running value ('' when unreadable).
 _strih_dante_ptp_port_live() { head -n 1 "$(strih_dante_ptp_port_proc)" 2>/dev/null | tr -d '[:space:]' || true; }
 
-# strih_dante_ptp_port_install -> the drop-in (written only on a difference) + the running value set to
-# 319 (no restart: the follower binds at the device's next start). rc 1 + a named reason on a failure.
+# strih_dante_ptp_port_install -> a Dante-program box. The obs pin READY: the drop-in (written only on a
+# difference) + the running value set to 319 (no restart: the follower binds at OBS's next start). Below the
+# threshold: the remove path (a 319 bind right for an old dlink would start its follower beside dsync).
+# rc 1 + a named reason on a failure.
 strih_dante_ptp_port_install() {
   local f proc owner="${STRIH_DANTE_RX_PIN_OWNER:-root:root}" out
+  if ! strih_dante_ptp_pin_ready obs; then
+    echo "  dante-ptp: no 319 bind right yet: $(_strih_dante_ptp_below)"
+    strih_dante_ptp_port_remove "$(_strih_dante_ptp_below)"
+    return
+  fi
   f="$(strih_dante_ptp_port_file)"; proc="$(strih_dante_ptp_port_proc)"
   install -d -m 0755 "$(dirname "$f")" || { echo "dante-ptp: cannot create $(dirname "$f")" >&2; return 1; }
-  out="$(strih_dante_ptp_port_text | obs_box_write_if_changed "$f" 0644 "$owner" "dante-ptp")" || { printf '%s\n' "$out"; return 1; }
+  out="$(obs_box_write_if_changed_rendered "$f" 0644 "$owner" "dante-ptp" strih_dante_ptp_port_text)" || { printf '%s\n' "$out"; return 1; }
   printf '%s\n' "$out"
   if [ "$(_strih_dante_ptp_port_live)" != "$STRIH_DANTE_PTP_PORT" ]; then
     { printf '%s\n' "$STRIH_DANTE_PTP_PORT" > "$proc"; } 2>/dev/null \
@@ -109,11 +128,12 @@ strih_dante_ptp_port_install() {
   echo "  dante-ptp: unprivileged processes may bind UDP ${STRIH_DANTE_PTP_PORT} (the OBS dante-input's in-process PTP follower) -- it binds at OBS's next start"
 }
 
-# strih_dante_ptp_port_remove -> a box without the Dante program: OUR drop-in removed (header-checked; a
-# foreign file of the name is left and named) and a running value of 319 put back to 1024. Prints only
-# when it touched something. rc 1 named when the running value cannot be put back.
+# strih_dante_ptp_port_remove [WHY] -> OUR drop-in removed (header-checked; a foreign file of the name is
+# left and named) and a running value of 319 put back to 1024. WHY names the reason (default: no Dante
+# program). Prints only when it touched something. rc 1 named when the running value cannot be put back.
+# A running 319 with no drop-in of ours is not ours to judge (nothing records who set it) and is left.
 strih_dante_ptp_port_remove() {
-  local f proc
+  local f proc why="${1:-this box takes no Dante program}"
   f="$(strih_dante_ptp_port_file)"; proc="$(strih_dante_ptp_port_proc)"
   [ -e "$f" ] || return 0
   if ! head -n 1 "$f" 2>/dev/null | grep -qxF "$STRIH_DANTE_PTP_PORT_HEADER"; then
@@ -121,18 +141,25 @@ strih_dante_ptp_port_remove() {
     return 0
   fi
   rm -f "$f" || { echo "dante-ptp: cannot remove ${f}" >&2; return 1; }
-  echo "  dante-ptp: removed ${f} (this box takes no Dante program)"
+  echo "  dante-ptp: removed ${f} (${why})"
   [ "$(_strih_dante_ptp_port_live)" = "$STRIH_DANTE_PTP_PORT" ] || return 0
   { printf '%s\n' "$STRIH_DANTE_PTP_PORT_DEFAULT" > "$proc"; } 2>/dev/null \
     || { echo "dante-ptp: cannot put ${proc} back to ${STRIH_DANTE_PTP_PORT_DEFAULT}" >&2; return 1; }
   echo "  dante-ptp: ${proc} back to ${STRIH_DANTE_PTP_PORT_DEFAULT}"
 }
 
-# strih_dante_ptp_port_grade -> verify item 9's `(program-dante) ptp-port` row (ok / bad). Always rc 0.
+# strih_dante_ptp_port_grade -> verify item 9's `(program-dante) ptp-port` row (ok / bad / note). Below the
+# threshold the right must NOT be there (a NOTE when absent, a FAIL when our drop-in is). Always rc 0.
 strih_dante_ptp_port_grade() {
   local f live
   f="$(strih_dante_ptp_port_file)"; live="$(_strih_dante_ptp_port_live)"
-  if ! [ -f "$f" ] || ! cmp -s "$f" <(strih_dante_ptp_port_text); then
+  if ! strih_dante_ptp_pin_ready obs; then
+    if [ -e "$f" ]; then
+      bad "(program-dante) ptp-port: ${f} is set but $(_strih_dante_ptp_below) -- re-run setup-strih.sh step 13 (it removes it)"
+    else
+      note "(program-dante) ptp-port: not set, $(_strih_dante_ptp_below)"
+    fi
+  elif ! [ -f "$f" ] || ! cmp -s "$f" <(strih_dante_ptp_port_text); then
     bad "(program-dante) ptp-port: ${f} missing or drifted -- the OBS dante-input cannot bind UDP ${STRIH_DANTE_PTP_PORT} for its in-process PTP follower; re-run setup-strih.sh step 13"
   elif [ "$live" != "$STRIH_DANTE_PTP_PORT" ]; then
     bad "(program-dante) ptp-port: net.ipv4.ip_unprivileged_port_start reads '${live:-unreadable}', not ${STRIH_DANTE_PTP_PORT} -- re-run setup-strih.sh step 13 (it sets the running value)"

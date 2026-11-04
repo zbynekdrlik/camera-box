@@ -445,7 +445,7 @@ strih_intercom_hub_cap_grade() {
   [ -z "$file" ] || why="${why}a file capability on the binary (${file}) "
   state="AmbientCapabilities=${amb:-none}, CapabilityBoundingSet=$( [ "${#bnd}" -le 40 ] && printf '%s' "${bnd:-none}" || printf 'the full set' ), file: ${file:-none}"
   if ! strih_dante_ptp_pin_ready intercom; then
-    note "(intercom-hub) capabilities not graded: the intercom pin's dstack $(strih_dante_ptp_pin_dstack intercom) is below ${STRIH_DANTE_PTP_FIRST_DSTACK} (no in-process PTP follower yet); ${state}"
+    note "(intercom-hub) capabilities not graded: the intercom pin's dstack $(v="$(strih_dante_ptp_pin_dstack intercom)"; printf '%s' "${v:-unreadable}") is below ${STRIH_DANTE_PTP_FIRST_DSTACK} (no in-process PTP follower yet); ${state}"
   elif [ -z "$why" ]; then
     ok "(intercom-hub) exactly CAP_NET_BIND_SERVICE (ambient + bounding set, no file capability): the dstack device binds UDP 319 for its in-process PTP follower"
   else
@@ -456,21 +456,34 @@ strih_intercom_hub_cap_grade() {
 
 # strih_intercom_hub_media_clock_grade -> verify item 16's `(intercom-dante) media clock` row on a box whose
 # facts declare the hub's Dante device (`*-intercom=` in STRIH_DANTE_DEVICES): the last dstack `media clock
-# source` line of the hub's CURRENT invocation's journal (strih-dante-ptp.sh). Always rc 0.
-# Seam: STRIH_HUB_JOURNAL_FILE (the journal text instead of journalctl).
+# source` line of the hub's CURRENT invocation's journal (strih-dante-ptp.sh); only those lines are kept
+# (a weeks-long invocation is never held in a variable). A hub that is not running (no InvocationID) is a
+# NOTE, never a second FAIL beside item 16's active row; a journal that cannot be read is its own row
+# (FAIL once the intercom pin is READY), never read as "no line". Always rc 0.
+# Seams: STRIH_HUB_JOURNAL_FILE (the journal text instead of journalctl), STRIH_HUB_INVOCATION_ID.
 strih_intercom_hub_media_clock_grade() {
-  local devs inv text
+  local devs inv text rc
   devs="$(strih_lx_dante_devices 2>/dev/null || true)"
   case " ${devs} " in *-intercom=*) ;; *) return 0 ;; esac
   if [ -n "${STRIH_HUB_JOURNAL_FILE:-}" ]; then
-    text="$(cat -- "$STRIH_HUB_JOURNAL_FILE" 2>/dev/null || true)"
+    text="$({ cat -- "$STRIH_HUB_JOURNAL_FILE"; echo "JOURNAL-RC $?"; } 2>/dev/null | LC_ALL=C grep -a -E 'media clock|^JOURNAL-RC ' || true)"
   else
-    inv="$(systemctl show -p InvocationID --value intercom-hub 2>/dev/null || true)"
+    inv="${STRIH_HUB_INVOCATION_ID-$(systemctl show -p InvocationID --value intercom-hub 2>/dev/null || true)}"
     if [ -z "$inv" ]; then
-      text=""
-    else
-      text="$(timeout 20 journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=${inv}" 2>/dev/null || true)"
+      note "(intercom-dante) media clock: the hub is not running (no InvocationID), not graded"
+      return 0
     fi
+    text="$({ timeout 20 journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=${inv}"; echo "JOURNAL-RC $?"; } 2>/dev/null \
+      | LC_ALL=C grep -a -E 'media clock|^JOURNAL-RC ' || true)"
+  fi
+  rc="$(printf '%s\n' "$text" | sed -n 's/^JOURNAL-RC //p' | tail -n 1)"
+  if [ "${rc:-?}" != 0 ]; then
+    if strih_dante_ptp_pin_ready intercom; then
+      bad "(intercom-dante) media clock: the hub's journal could not be read (rc ${rc:-?}; journalctl as root, bounded 20 s) -- not graded"
+    else
+      note "(intercom-dante) media clock: the hub's journal could not be read (rc ${rc:-?}), and the intercom pin is below ${STRIH_DANTE_PTP_FIRST_DSTACK}"
+    fi
+    return 0
   fi
   printf '%s\n' "$text" | strih_dante_media_clock_grade "(intercom-dante)" intercom
 }

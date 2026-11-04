@@ -27,6 +27,13 @@
 # the only writer of the system clock; Linux's default IP_MULTICAST_ALL also hands the group's packets to
 # its own INADDR_ANY:319 sockets, and its gm_allowlist keeps it on video-clock.lan.
 
+# The rule is rendered only once a pinned device's dstack follows in process (strih_dante_ptp_leg_open,
+# strih-dante-ptp.sh): before that a dstack that reached 319 would start its old follower beside dsync.
+if ! declare -F strih_dante_ptp_leg_open >/dev/null; then
+  # shellcheck source=scripts/lib/strih-dante-ptp.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-ptp.sh"
+fi
+
 # the PTP multicast group + the two ports dsync's follower binds (dsync-ptp net_linux.rs)
 STRIH_DANTE_PTP_GROUP=224.0.1.129
 STRIH_DANTE_PTP_PORTS="319, 320"
@@ -96,8 +103,10 @@ strih_dante_nft_input() {
   printf '        iifname "%s" ip saddr %s udp dport { %s } counter accept\n' "$ifc" "$net" "$(strih_dante_in_ports "$dev")"
   printf '        iifname "%s" ip saddr %s udp sport { %s } udp dport %s counter accept\n' "$ifc" "$net" \
     "$(strih_dante_peer_ports "$dev")" "$STRIH_DANTE_EPHEMERAL_PORTS"
-  printf '        iifname "%s" ip saddr %s ip daddr %s udp dport { %s } counter accept\n' "$ifc" "$net" \
-    "$STRIH_DANTE_PTP_GROUP" "$STRIH_DANTE_PTP_PORTS"
+  if strih_dante_ptp_leg_open; then
+    printf '        iifname "%s" ip saddr %s ip daddr %s udp dport { %s } counter accept\n' "$ifc" "$net" \
+      "$STRIH_DANTE_PTP_GROUP" "$STRIH_DANTE_PTP_PORTS"
+  fi
   printf '        iifname "%s" ip protocol igmp counter accept\n' "$ifc"
 }
 

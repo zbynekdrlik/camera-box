@@ -676,10 +676,13 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
 - **PTP in process (ROZHODNUTÉ 6628785864, owner 4.11.2026):** the dstack devices follow Dante PTP themselves
   (dsync's follower in dstack v0.6.23: UDP 319 + 320 on INADDR_ANY, joined to 224.0.1.129 on the leg, receive
   only). One input rule admits exactly that group to 319/320 from the /24 (`STRIH_DANTE_PTP_GROUP` /
-  `_PORTS`), before the drop; no output rule (it never sends; IGMP already passes). The dsync service stays
-  the only writer of the system clock. Linux's default `IP_MULTICAST_ALL` also hands the group to dsync's own
-  INADDR_ANY:319 sockets; its gm_allowlist keeps it on video-clock.lan (the clock watchdog pages a foreign
-  grandmaster). Who may bind 319: `.claude/rules/strih-dante-input.md`.
+  `_PORTS`), before the drop, rendered only once the intercom or the obs pin carries dstack v0.6.23
+  (`strih_dante_ptp_leg_open`; before that a device that reached 319 would run its old follower beside
+  dsync); no output rule (it never sends; IGMP already passes). The dsync service stays the only writer
+  of the system clock. Linux's default `IP_MULTICAST_ALL` also hands the group to dsync's own
+  INADDR_ANY:319 sockets; by its config its gm_allowlist keeps it on video-clock.lan (NOT measured with the
+  audio grandmaster's packets arriving: read dsync's `/status` grandmaster after the first deploy; the clock
+  watchdog pages a foreign one). Who may bind 319: `.claude/rules/strih-dante-input.md`.
 - **`rp_filter=2` on the leg:** an inbound multicast's reverse lookup has no `from` match and resolves
   through the rig NIC.
 - **Unproven until the first live run:** `man nm-settings-nmcli` says `ipv4.route-table` affects device-routes

@@ -271,18 +271,16 @@ dtray_devices_apply() {
 
 # --- the dtray --print grade ---------------------------------------------------------------------------
 
-# dtray_version_ge A B -> rc 0 iff vX.Y.Z A >= B (number by number); rc 2 when either is not vX.Y.Z.
+# dtray_version_ge A B -> rc 0 iff vA >= vB by the repo's ONE version-order rule (release_version_cmp,
+# scripts/lib/release-version.sh, a leading `v` dropped); rc 1 below, rc 2 when either is not a version.
 dtray_version_ge() {
-  local a="${1#v}" b="${2#v}" re='^[0123456789]+\.[0123456789]+\.[0123456789]+$' i
-  local -a x y
-  [[ "$a" =~ $re ]] && [[ "$b" =~ $re ]] || return 2
-  IFS=. read -r -a x <<<"$a"
-  IFS=. read -r -a y <<<"$b"
-  for i in 0 1 2; do
-    if ((10#${x[i]} > 10#${y[i]})); then return 0; fi
-    if ((10#${x[i]} < 10#${y[i]})); then return 1; fi
-  done
-  return 0
+  local c
+  if ! declare -F release_version_cmp >/dev/null; then
+    # shellcheck source=scripts/lib/release-version.sh
+    . "${DTRAY_LIB_ROOT}/scripts/lib/release-version.sh" || return 2
+  fi
+  c="$(release_version_cmp "${1#v}" "${2#v}")" || return 2
+  [ "$c" != -1 ]
 }
 
 # dtray_device_shows -> rc 0 iff both pinned dstack users (the intercom hub, the obs release) run a dstack at

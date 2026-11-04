@@ -32,7 +32,8 @@ the boxes and keeps the glue: `strih-intercom-hub-unit.sh`, `strih-interkom-publ
   the reinstall line. Plus the capability row (ROZHODNUTÉ 6628785864, 4.11.2026: the hub's dstack device
   follows Dante PTP in process on UDP 319): once the pin's `INTERCOM_RELEASE_DSTACK_VERSION` >= v0.6.23 the
   unit must grant EXACTLY `AmbientCapabilities=CAP_NET_BIND_SERVICE` + `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`
-  and the binary no file capability (release 1.9.12's unit); missing or any other capability FAILs, below the
+  and the binary no file capability (the intercom project, 4.11.2026: its release 1.9.12's unit, once the
+  pin moves to it); missing or any other capability FAILs, below the
   threshold a NOTE. No camera-box drop-in may set either key or `SecureBits=` (an empty one resets the list and
   takes 319 away; pinned by `tests/python/test_strih_dante_ptp_1485.py`). Plus `(intercom-dante) media clock`
   (`scripts/lib/strih-dante-ptp.sh`, `.claude/rules/strih-dante-input.md`). The dsync service stays the only

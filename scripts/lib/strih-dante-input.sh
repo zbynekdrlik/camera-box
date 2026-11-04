@@ -244,6 +244,7 @@ strih_dante_input_grade() {
   else
     bad "(program-dante) OBS '${name}' is '${kind:-absent}', not the ${STRIH_DANTE_INPUT_SOURCE_KIND} source -- restart OBS so strih_scenes.py --bootstrap switches it (the bundle must be the obs release with dante-input.so)"
   fi
+  strih_dante_ptp_port_grade   # reads no log: graded even when the log is not readable
   if [ -z "$log" ] || [ ! -r "$log" ]; then bad "(program-dante) no readable OBS log -- the device is not graded"; return 0; fi
   start="$(LC_ALL=C grep -a 'dante-input start: config=' "$log" | tail -n 1 || true)"
   if [ -z "$start" ]; then
@@ -274,7 +275,6 @@ strih_dante_input_grade() {
     *) bad "(program-dante) ${v#bad }" ;;
   esac
   strih_dante_media_clock_grade "(program-dante)" obs < "$log"
-  strih_dante_ptp_port_grade
   strih_dante_reserved_cpu_grade
   strih_dante_rx_pin_grade
   return 0
