@@ -1133,7 +1133,9 @@ once, and stream-snv's program stayed black ~30 min. No check noticed: nobody ru
 reboot, and the stream's `JXS PGM src` kept writing `fps=0.00 frames=0 lost_slices=0` windows, which
 item 49 read as PASS.
 - **The launcher waits for the rig address:** `strih_wait_rig_address` in `strih-obs-start.sh` polls
-  `ip -o -4 addr show` for ` <STRIH_IP>/` (the dantesync ExecStartPre condition) once a second, at most
+  `ip -o -4 addr show` for ` <STRIH_IP>/` (the dantesync ExecStartPre condition) AND `ip -4 route show`
+  for its connected route (` src <STRIH_IP> `: NetworkManager adds a noprefixroute address before the
+  route, and ENETUNREACH is a missing route) once a second, at most
   `STRIH_RIG_NET_WAIT_S` (120 s), before OBS launches; a timeout is a WARN and OBS starts anyway. The
   IP comes from the box-facts drop-in (`STRIH_RIG_IP`). A `--user` unit cannot order on the system
   `network-online.target`, so the launcher waits itself.
@@ -1146,6 +1148,13 @@ item 49 read as PASS.
   (`strih_lx_remote_jxs_state_cmd`, the log newer than the start marker); `strih_lx_deploy_verdict`'s
   12th argument refuses all but `off` / `started`, so the poll waits for the start.
 - The handover `jxs` item already read the stream side (a stream link at frames=0 = FORGOT).
+- Limits: the v0.4.14 retry / restart lines in the tests are typed from the obs project's note, not
+  rendered from a shipped source (the vendored `jxs-output.cpp` predates them): render them from the
+  release's format strings when `scripts/obs-release.pin` reaches v0.4.14. `(obs-net-wait)` grades the
+  drop-in FILE, not the loaded unit environment (a missing `daemon-reload` reads PASS). A box away from
+  its declared venue never sees its STRIH_IP and waits the full bound at every OBS start (fail-open).
+  frames=0 FAILs a declared camera input whose cambox is off: one receive, no backup, the EVENT
+  `jxs_live` rule.
 - Tests: `tests/python/test_strih_obs_net_wait_1387.py`.
 
 ## The EVENT contract grades every JPEG XS link (1.11.2026, item `jxs_live`)

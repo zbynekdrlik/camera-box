@@ -47,7 +47,8 @@ strih_resolve_session_env() {
   return 1
 }
 
-# strih_wait_rig_address IP BOUND_S -> wait until `ip -o -4 addr show` lists the rig address IP (issue
+# strih_wait_rig_address IP BOUND_S -> wait until `ip -o -4 addr show` lists the rig address IP and
+# `ip -4 route show` its connected route (issue
 # 1387, 4.11.2026: after a reboot OBS started 4 s before the 10 GbE rig NIC had a carrier and the JPEG XS
 # program output failed once with ENETUNREACH). The same condition the dantesync unit's ExecStartPre
 # waits on (issue 1439). Polls once a second, at most BOUND_S seconds (a non-number = 120). rc 0 = the
@@ -60,7 +61,9 @@ strih_wait_rig_address() {
   [[ "$bound" =~ ^[0123456789]{1,5}$ ]] || bound=120
   for ((i = 0; i <= bound; i++)); do
     out="$(ip -o -4 addr show 2>/dev/null || true)"
-    if [[ "$out" == *" ${ip}/"* ]]; then
+    # the address AND its connected route (`... src IP ...`): NetworkManager adds a noprefixroute
+    # address before the prefix route, and ENETUNREACH is a missing route.
+    if [[ "$out" == *" ${ip}/"* ]] && [[ "$(ip -4 route show 2>/dev/null || true)" == *" src ${ip} "* ]]; then
       printf 'rig network: %s up after %d s\n' "$ip" "$i"
       return 0
     fi
