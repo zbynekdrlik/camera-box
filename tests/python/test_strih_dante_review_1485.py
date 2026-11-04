@@ -196,6 +196,13 @@ def test_the_dante_lib_not_sourced_is_an_error_by_name(tmp_path):
     assert r.returncode == 1 and "strih_program_dante_declared" in r.stderr, r.stdout + r.stderr
 
 
+def test_the_cpulist_check_not_sourced_is_an_error_by_name_too(tmp_path):
+    # the operator-cores WARNING and the (jxs-cores) row decide with it: never skipped silently
+    r = jx._bash('strih_box_load strih-snv >/dev/null\nunset -f _strih_dante_cpulist_has\n'
+                 'strih_jxs_output_default_cores', env=_env(tmp_path, "2-15"), baseline=True)
+    assert r.returncode == 1 and "_strih_dante_cpulist_has" in r.stderr, r.stdout + r.stderr
+
+
 # --- finding 7 / 8: the managers' re-exec ----------------------------------------------------------------------
 
 def _reexec_env(tmp, fail=""):
