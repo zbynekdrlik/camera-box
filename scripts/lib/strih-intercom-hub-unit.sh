@@ -461,7 +461,8 @@ strih_intercom_hub_cap_grade() {
 # NOTE, never a second FAIL beside item 16's active row; a journal that cannot be read is its own row
 # (FAIL once the intercom pin is READY), never read as "no line". Always rc 0.
 # Seams: STRIH_HUB_JOURNAL_FILE (the journal text instead of journalctl), STRIH_HUB_INVOCATION_ID,
-# STRIH_HUB_JOURNAL_EUID (the euid the journal is read as; a non-root read is named, never "no line").
+# STRIH_HUB_JOURNAL_EUID / STRIH_HUB_JOURNAL_GROUPS (the euid + groups the journal is read as: root or a
+# member of systemd-journal / adm reads it; anyone else is named, never read as "no line").
 strih_intercom_hub_media_clock_grade() {
   local devs inv text rc
   devs="$(strih_lx_dante_devices 2>/dev/null || true)"
@@ -474,9 +475,14 @@ strih_intercom_hub_media_clock_grade() {
       note "(intercom-dante) media clock: the hub is not running (no InvocationID), not graded"
       return 0
     fi
-    if [ "${STRIH_HUB_JOURNAL_EUID:-$(id -u)}" != 0 ]; then
+    if [ "${STRIH_HUB_JOURNAL_EUID:-$(id -u)}" != 0 ] \
+         && ! [[ " ${STRIH_HUB_JOURNAL_GROUPS-$(id -nG 2>/dev/null || true)} " =~ \ (systemd-journal|adm)\  ]]; then
       # journalctl exits 0 with only a hint for a user who may not read the system journal
-      bad "(intercom-dante) media clock: the hub's journal is not readable as $(id -un) -- run verify-strih as root"
+      if strih_dante_ptp_pin_ready intercom; then
+        bad "(intercom-dante) media clock: the hub's journal is not readable as $(id -un) -- run verify-strih as root"
+      else
+        note "(intercom-dante) media clock: the hub's journal is not readable as $(id -un), and the intercom pin is below ${STRIH_DANTE_PTP_FIRST_DSTACK}"
+      fi
       return 0
     fi
     text="$({ timeout 20 journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=${inv}"; printf '\nJOURNAL-RC %s\n' "$?"; } 2>/dev/null \
