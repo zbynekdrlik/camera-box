@@ -239,6 +239,14 @@ IN the program.
     miswired balanced cable or an inverting hop put the song in with the sign flipped, and a signed
     maximum read that ABSENT. `ncc` keeps its sign (negative = inverted).
   - PRESENT (peak |NCC| >= `DETECT_NCC` 0.07) -> FOREIGN, with the ncc and lag in the reason.
+  - **Confirmed across windows** (`confirm`, E2E 41742028800, 4.11.2026): ten isolated windows read
+    PRESENT at |ncc| 0.071-0.083 with lags that jumped (+2734 / -998 / +623 ms) while mbc carried only the
+    marker -- the live null reaches past 0.07 on the busy rig, the 990-window dev1 null did not. A real
+    CG in the program correlates at ONE lag window after window (the 4 s segments overlap by 2 s). So a
+    PRESENT with |ncc| >= `STRONG_NCC` 0.12 counts at once; a weaker one only when the same source's
+    previous window (raw) was PRESENT within `LAG_AGREE_MS` 5 ms, else it reads ABSENT `unconfirmed`.
+    Cost: a CG under ~-20 dB in the program is caught one window (2 s) later; the synthetic song 24 dB
+    under the marker (0.072) is caught in its second window.
   - ABSENT -> no FOREIGN from that source; the payload source shows `in_program` ABSENT and the
     block status reads `not-in-program`.
   - UNDECIDED -> today's strict FOREIGN, with `not proven absent from the stream program (<why>)`

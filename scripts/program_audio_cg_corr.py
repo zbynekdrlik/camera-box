@@ -93,6 +93,8 @@ MIN_COVERAGE = 0.95         # each segment's share of samples actually delivered
 MIN_CG_DBFS = -80.0         # only an effectively empty CG segment never decides (was -50: issue 1404, E2E 41703531109)
 MIN_BAND_DBFS = -90.0       # a side with less than this in the correlation band has nothing to compare
 DETECT_NCC = 0.07           # the PRESENT threshold on |ncc|: ~1.7 x the live null maximum (module doc)
+STRONG_NCC = 0.12           # a PRESENT at or over this counts at once; under it only when the previous window agreed (confirm)
+LAG_AGREE_MS = 5.0          # two windows "agree" when their PRESENT lags are within this
 RING_S = PROGRAM_SEGMENT_S + (LAG_MAX_MS - LAG_MIN_MS) / 1e3 + MAX_SEGMENT_AGE_S + 1.0
 RING_MAX_RATE_HZ = 192000   # the sample cap assumes at most this rate: a healthy ring never reaches it
 RING_MAX_SAMPLES = int(RING_S * RING_MAX_RATE_HZ)  # a frozen / backward sender stamp cannot grow a ring past this
@@ -114,6 +116,23 @@ class Correlation(NamedTuple):
 
 def _undecided(why: str) -> Correlation:
     return Correlation(UNDECIDED, why=why)
+
+
+def confirm(prev: "Correlation | None", cur: Correlation) -> Correlation:
+    """The decision across windows (E2E 41742028800, 4.11.2026: isolated PRESENT windows at |ncc|
+    0.071-0.083 with jumping lags while the program carried only the marker). A real CG in the program
+    correlates at ONE lag window after window (the 4 s segments overlap by 2 s), the null at a random
+    one. So a PRESENT with |ncc| >= STRONG_NCC counts at once; a weaker one only when `prev` (the same
+    source's previous window, raw) was PRESENT within LAG_AGREE_MS; otherwise it reads ABSENT
+    `unconfirmed`. ABSENT and UNDECIDED pass through unchanged. Pure."""
+    if cur.kind != PRESENT or cur.ncc is None or abs(cur.ncc) >= STRONG_NCC:
+        return cur
+    if (prev is not None and prev.kind == PRESENT and prev.lag_ms is not None and cur.lag_ms is not None
+            and abs(prev.lag_ms - cur.lag_ms) <= LAG_AGREE_MS):
+        return cur
+    return cur._replace(kind=ABSENT, why=f"unconfirmed: |ncc| {abs(cur.ncc):.3f} < {STRONG_NCC:g} and no "
+                                          f"PRESENT within {LAG_AGREE_MS:g} ms of lag {cur.lag_ms:+.0f} ms "
+                                          "in the previous window")
 
 
 class AudioRing:

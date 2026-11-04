@@ -422,6 +422,7 @@ class CgArm:
         self.box = box
         self.monitors = list(monitors)
         self.home_probe = home_probe
+        self._last = {}  # source -> its previous window's RAW correlation (program_audio_cg_corr.confirm)
 
     @property
     def sources(self) -> list[str]:
@@ -435,8 +436,12 @@ class CgArm:
         for m in self.monitors:
             r = m.reading(now)
             if prog is not None and _loud(r):
-                r = r._replace(correlation=(pcc.Correlation(pcc.UNDECIDED, why=f"the CG source: {r.error}")
-                                            if r.error else _correlate(prog, m)))
+                raw = (pcc.Correlation(pcc.UNDECIDED, why=f"the CG source: {r.error}")
+                       if r.error else _correlate(prog, m))
+                r = r._replace(correlation=pcc.confirm(self._last.get(m.source), raw))
+                self._last[m.source] = raw
+            else:
+                self._last.pop(m.source, None)
             readings.append(r)
         return CgState(self.box, self.home_probe.home, tuple(readings))
 
