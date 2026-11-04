@@ -35,6 +35,7 @@ if kind == "obs" and marker and os.path.exists(marker):
 sub = {{"session": lambda a: next((x for x in a if x in ("start", "status", "stop", "wait-ready", "wait-done")), "?"),
         "obs": lambda a: a[-1],
         "guard": lambda a: "guard",
+        "tap": lambda a: next((x for x in a if x in ("start", "stop", "purge")), "?"),
         "verdict": lambda a: "verdict"}}[kind](argv)
 path = os.path.join(d, f"{{kind}}.{{sub}}.q")
 lines = open(path).read().splitlines() if os.path.exists(path) else []
@@ -140,7 +141,7 @@ class Fakes:
         self.env = dict(os.environ)
         self.marker = self.d / "youtube-leg-live.json"  # never the real dev1 marker
         self.env["YOUTUBE_LEG_MARKER"] = str(self.marker)
-        for kind in ("session", "obs", "guard"):
+        for kind in ("session", "obs", "guard", "tap"):  # tap: issue 1387's restreamer-input capture
             exe = self.d / kind
             exe.write_text(FAKE.format(py=sys.executable, kind=kind, d=str(self.d)))
             exe.chmod(0o755)
@@ -194,6 +195,8 @@ class Fakes:
                 out.append("session." + next(x for x in argv if x in ("start", "status", "stop", "wait-ready", "wait-done")))
             elif kind == "obs":
                 out.append("obs." + argv[-1])
+            elif kind == "tap":
+                out.append("tap." + next(x for x in argv if x in ("start", "stop", "purge")))
             else:
                 out.append(kind)
         return out
