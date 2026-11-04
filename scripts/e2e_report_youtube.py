@@ -176,6 +176,49 @@ def _both(a, b):
     return True if a is True and b is True else None
 
 
+POINT_LABELS = {"restreamer_input": "vstup restreamera (lokálne RTMP na stream boxe)",
+                "restreamer_output": "výstup restreamera (delivery VPS → YouTube)"}
+
+
+def _jumps_text(details, count):
+    if not details:
+        return "žiadne" if count == 0 else ("?" if count is None else f"{count}")
+    return ", ".join(f"{t:.2f} s: {ms:+.2f} ms" for t, ms in details)
+
+
+def _point_rows(label, windows):
+    rows = []
+    for w in windows or []:
+        av = _ms(w.get("av_delta_ms"))
+        err = "; ".join(w.get("errors") or [])
+        rows.append(f"| {label} | {w.get('name')} | {av} | "
+                    f"{_jumps_text(w.get('audio_lag_jump_details'), w.get('audio_lag_jumps'))}"
+                    + (f" ({err})" if err else "") + " |")
+    return rows
+
+
+def points_lines(b):
+    """Issue 1387, REPORT-ONLY: the A/V offset and the audio steps per measurement point between the stream
+    OBS and the VOD, so a step is placed where it first appears. Never a pass/fail glyph."""
+    pts = (b or {}).get("points")
+    if not isinstance(pts, dict):
+        return []
+    lines = ["", "### Kde vzniká zvukový schod (len report, neblokuje)", "",
+             "Každý bod meria ten istý nástroj ako VOD proti tej istej stream nahrávke; čas schodu je čas v stream "
+             "nahrávke, takže ten istý schod má na každom bode ten istý čas.", "",
+             "| Bod | Okno | A/V bod − nahrávka | Zvukové schody (čas: veľkosť) |", "|---|---|---|---|"]
+    for key in ("restreamer_input", "restreamer_output"):
+        p = pts.get(key)
+        if not isinstance(p, dict):
+            continue
+        if p.get("measured"):
+            lines += _point_rows(POINT_LABELS[key], p.get("windows"))
+        else:
+            lines.append(f"| {POINT_LABELS[key]} | — | nemerané | {p.get('reason') or '?'} |")
+    lines += _point_rows(f"YouTube VOD {b.get('vod_id') or ''}".strip(), b.get("windows"))
+    return lines
+
+
 STAGE_UNFINISHED = ("the YouTube stage started, but no verdict was folded: the job ended or crashed "
                     "before the measurement")
 
@@ -213,6 +256,7 @@ def points_markdown(verdict, run_url=None, stage_attempted=False):
                  f"| {_glyph(x_ok)} {x_txt} |")
     if b and b.get("reasons"):
         lines += ["", "YouTube: " + "; ".join(str(r) for r in b["reasons"][:5])]
+    lines += points_lines(b)
     if run_url:
         lines += ["", f"Plný detail: {run_url}"]
     return "\n".join(lines) + "\n"

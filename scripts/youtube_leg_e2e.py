@@ -34,9 +34,15 @@ Every outcome other than a verdict PASS blocks the run (a refused delivery, a gu
 a tool UNKNOWN, a window left unmeasured): never a skip. State: <dir>/state.json (+ state.lock).
 Exit 0 = OK / PASS, 1 = the stage failed (the reason is in the state and the block).
 
+Issue 1387 (REPORT-ONLY, `start --tap-inpoint`): right after StartStream the stage also records what
+restreamer RECEIVES (scripts/youtube_leg_tap.py: an ffmpeg copy of restreamer's local inpoint on the
+stream box, idle priority, off the OBS cores); `stop` ends it, and `measure` judges it after the VOD
+with the same tool and windows (the block's `points`, scripts/youtube_leg_points.py), so the A/V step
+the VOD shows can be placed before or after restreamer. It never changes the verdict.
+
 Test seams (an executable taking the same arguments): YOUTUBE_LEG_SESSION_CMD, YOUTUBE_LEG_OBS_CMD,
-YOUTUBE_LEG_GUARD_CMD, YOUTUBE_LEG_SSH_CMD (ssh to the measurement host); YOUTUBE_LEG_MARKER (the dev1
-marker path).
+YOUTUBE_LEG_GUARD_CMD, YOUTUBE_LEG_TAP_CMD, YOUTUBE_LEG_SSH_CMD (ssh to the measurement host);
+YOUTUBE_LEG_MARKER (the dev1 marker path).
 """
 import argparse
 import contextlib
@@ -53,6 +59,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import youtube_leg_host as ylh  # noqa: E402
+import youtube_leg_points as ylp  # noqa: E402
 from youtube_leg_proc import install_cleanup, run_bounded  # noqa: E402
 
 SCHEMA = 1
@@ -61,6 +68,7 @@ WINDOW_HEAD_S = 3.0   # skip the start of each segment (the cut + the genlock se
 WINDOW_TAIL_S = 2.0   # end before the next cut / the StopStream (the tool wants >= 1 s)
 WINDOW_MIN_S = 10.0
 GUARD_TIMEOUT_S, STEP_TIMEOUT_S = 20, 90
+TAP_START_TIMEOUT_S, TAP_STOP_TIMEOUT_S = 90, 120  # issue 1387: the restreamer-input capture (report-only)
 OURS_TOLERANCE_S = 120.0  # a leftover stream is ours when its own start is this close to our publish
 BUSY_WAIT_S = 300.0       # restreamer keeps the slot while it tears our recovered session down
 DEFAULT_MARKER = os.path.join(os.path.expanduser("~"), ".camera-box", "youtube-leg-live.json")
@@ -188,6 +196,8 @@ class Ctx:
         self.obs = _cmd("YOUTUBE_LEG_OBS_CMD", "youtube_leg_obs.py") + ["--host", a.host]
         self.guard = _cmd("YOUTUBE_LEG_GUARD_CMD", "program_audio_guard.py")
         self.marker = a.marker or os.environ.get("YOUTUBE_LEG_MARKER") or DEFAULT_MARKER
+        self.tap = _cmd("YOUTUBE_LEG_TAP_CMD", "youtube_leg_tap.py") + [
+            "--host", a.host, "--user", a.user, "--key", ylh.stage_key(a.dir)[:64]]
 
     def measure_host(self, stage):
         return ylh.Host(self.a.measure_host, ylh.stage_key(stage.dir), self.a.measure_workers)
@@ -222,11 +232,44 @@ def do_stop(ctx, stage, why, stream_only=False, record_stopped=False):
             else:
                 ok = False
                 _note(st, f"restreamer session stop FAILED ({why}): {d.get('reason')}")
+        _tap_stop(ctx, st, why)
         if ok and st.get("phase") in ("starting", "live"):
             st["phase"] = "stopped"
         if ok and st.get("session_id"):
             marker_clear(ctx.marker, st["session_id"])
         return ok
+
+
+def _tap_start(ctx, stage):
+    """Issue 1387 (report-only): record what restreamer receives, from right after StartStream. A
+    failure is recorded on the state, never fails the stage."""
+    rc, d, _ = run_json(ctx.obs + ["stream-service"], STEP_TIMEOUT_S)
+    if rc != 0 or not d.get("url"):
+        tap = {"started": False, "reason": f"no restreamer inpoint URL: {d.get('reason')}"}
+    else:
+        rc, d, _ = run_json(ctx.tap + ["start", "--url", d["url"]], TAP_START_TIMEOUT_S)
+        tap = ({k: v for k, v in d.items() if k != "ok"} if rc == 0 and d.get("started")
+               else {"started": False, "reason": d.get("reason")})
+    note = (f"the restreamer-input capture runs on {tap.get('cpus')} ({tap.get('priority')})" if tap.get("started")
+            else f"no restreamer-input capture (report-only point): {tap.get('reason')}")
+    _set(stage, note, tap=tap)
+
+
+def _tap_stop(ctx, st, why):
+    """End the restreamer-input capture once (it ends by itself when the publisher stops); the state
+    `st` is held under the stage lock by the caller."""
+    tap = st.get("tap") or {}
+    if not tap.get("started") or tap.get("stopped"):
+        return
+    rc, d, _ = run_json(ctx.tap + ["stop"], TAP_STOP_TIMEOUT_S)
+    if rc == 0:
+        tap.update(stopped=True, how=d.get("how"), bytes=d.get("bytes"), path=d.get("path") or tap.get("path"),
+                   ffmpeg_log=d.get("ffmpeg_log"))
+        _note(st, f"the restreamer-input capture ended ({d.get('how')}, {d.get('bytes')} bytes; {why})")
+    else:
+        tap["stop_reason"] = d.get("reason")
+        _note(st, f"the restreamer-input capture stop FAILED ({why}): {d.get('reason')}")
+    st["tap"] = tap
 
 
 def do_recover(ctx, with_session):
@@ -317,6 +360,8 @@ def do_start(ctx, stage):
             _set(stage, "StopStream after a stop raced the StartStream: " + ("done" if rc2 == 0 else
                  f"FAILED: {d2.get('reason')}"), stream_stopped=rc2 == 0)
             return 1
+        if a.tap_inpoint:
+            _tap_start(ctx, stage)
         rc, d, _ = run_json(ctx.session + ["wait-ready", "--id", sid, "--deadline", str(a.ready_deadline)],
                             a.ready_deadline + 120)
         if rc != 0:
@@ -399,7 +444,8 @@ def summarize(result):
         ds, au, av = w.get("dupskip") or {}, w.get("audio") or {}, w.get("av") or {}
         rows.append({"name": w.get("name"), "errors": w.get("errors") or [],
                      "dup": ds.get("dup"), "skip": ds.get("skip"),
-                     "audio_lag_jumps": au.get("lag_jumps"), "audio_low_corr": au.get("low_corr"),
+                     "audio_lag_jumps": au.get("lag_jumps"), "audio_lag_jump_details": ylp.lag_jump_details(au),
+                     "audio_low_corr": au.get("low_corr"),
                      "audio_silent": au.get("silent"), "av_delta_ms": av.get("delta_ms"),
                      "av_vod_ms": av.get("vod_ms"), "av_rec_ms": av.get("rec_ms")})
     return rows
@@ -431,10 +477,11 @@ def fold(verdict_json, block):
     return True
 
 
-def _verdict_args(a, st, windows, host, rec):
-    """The verdict tool's arguments on the measurement host (its paths in the host's stage dir)."""
-    args = ["--vod", st["vod_id"], "--recording", f"{rec}@{st['record_start_utc']:.3f}",
-            "--markers", host.path("in", "markers.csv"), "--out", host.path("verdict"),
+def _verdict_args(a, st, windows, host, rec, vod=None, out="verdict"):
+    """The verdict tool's arguments on the measurement host (its paths in the host's stage dir); `vod`
+    + `out` judge another point (a file on the host) the same way (issue 1387)."""
+    args = ["--vod", vod or st["vod_id"], "--recording", f"{rec}@{st['record_start_utc']:.3f}",
+            "--markers", host.path("in", "markers.csv"), "--out", host.path(out),
             "--probe-bin", host.path("in", "recording-verdict")]
     for w in window_args(windows):
         args += ["--windows", w]
@@ -597,6 +644,7 @@ def _measure_on_host(ctx, stage, host, windows, dropped):
     st = stage.read()
     t0 = time.monotonic()
     rc, out = host.run_tool(_verdict_args(a, st, windows, host, host.path(name)), a.tool_timeout)
+    _set(stage, tool_ran=True)
     stopped = stopped_reason("the YouTube-leg verdict tool", rc, time.monotonic() - t0, a.tool_timeout)
     print(out[-3000:], flush=True)
     if stopped:
@@ -693,6 +741,37 @@ def _cleanup_host(ctx, stage):
         return False
 
 
+def _measure_input_point(ctx, stage, windows):
+    """Issue 1387, REPORT-ONLY: the restreamer-input capture judged on the measurement host with the
+    same tool and windows as the VOD (after it, under its own bound). Never raises; the capture on the
+    stream box is deleted once the host has it."""
+    a, st = ctx.a, stage.read()
+    tap = st.get("tap")
+    why = ylp.input_skip_reason(tap, bool(st.get("tool_ran") and windows))
+    if why:
+        return ylp.not_measured(why)
+    try:
+        host = ctx.measure_host(stage)
+        host.check()
+        host.pull(a.user, os.environ.get("AV_GATE_SSH_PASSWORD", ""), a.host, tap["path"], ylp.CAPTURE_NAME)
+        run_json(ctx.tap + ["purge"], STEP_TIMEOUT_S)  # the host has it now
+        args = _verdict_args(a, st, windows, host, host.path(recording_name(a.stream_path)),
+                             vod=host.path(ylp.CAPTURE_NAME), out=ylp.SUB)
+        t0 = time.monotonic()
+        rc, out = host.run_point(ylp.SUB, args, a.inpoint_timeout)
+        print(out[-2000:], flush=True)
+        stopped = stopped_reason("the restreamer-input verdict", rc, time.monotonic() - t0, a.inpoint_timeout)
+        host.fetch(os.path.join(a.dir, ylp.SUB), sub=ylp.SUB)
+        if stopped:
+            return ylp.not_measured(stopped)
+        with open(os.path.join(a.dir, ylp.SUB, "youtube-leg-verdict.json")) as f:
+            return ylp.point_digest(json.load(f), rc)
+    except Exception as e:  # noqa: BLE001 -- a report-only point never fails or crashes the stage
+        return ylp.not_measured(f"the restreamer-input point failed: {type(e).__name__}: {e}")
+    finally:
+        _set(stage, "the restreamer-input point is judged (report-only)")
+
+
 def read_decode_reads(verdict_dir):
     """The decodes' read counters (`<tick map>.reads.json`) by tick map name."""
     out = {}
@@ -715,6 +794,7 @@ def do_measure(ctx, stage):
         traceback.print_exc()
         verdict, reasons, result, tool_exit, windows, dropped = (
             "UNKNOWN", [f"the YouTube stage's measurement crashed: {type(e).__name__}: {e}"], None, None, [], [])
+    input_point = _measure_input_point(ctx, stage, windows)
     if stage.read().get("measure_host"):  # the host was used: its stage dir goes, the videos with it
         _cleanup_host(ctx, stage)
     if dropped:
@@ -722,6 +802,7 @@ def do_measure(ctx, stage):
                              + ", ".join(dropped)]
     block = make_block(verdict, reasons, stage.read(), result, tool_exit, windows, dropped)
     block["decode_reads"] = read_decode_reads(os.path.join(stage.dir, "verdict"))
+    block["points"] = ylp.points(input_point, stage.read().get("tap"))
     with open(os.path.join(stage.dir, "youtube-leg-block.json"), "w") as f:
         json.dump(block, f, indent=1)
     try:
@@ -757,6 +838,8 @@ def main(argv=None):
     p.add_argument("--title", default="camera-box E2E")
     p.add_argument("--ready-deadline", type=float, default=float(os.environ.get("YOUTUBE_LEG_READY_DEADLINE_S", 420)))
     p.add_argument("--busy-poll", type=float, default=15.0)
+    p.add_argument("--tap-inpoint", action="store_true",
+                   help="issue 1387: also record restreamer's input on the stream box (a report-only point)")
     p = sub.add_parser("stop")
     p.add_argument("--why", default="the E2E stopped recording")
     p.add_argument("--stream-only", action="store_true", help="only the StopStream half (cleanup()'s quick first step)")
@@ -780,6 +863,8 @@ def main(argv=None):
     p.add_argument("--done-deadline", type=float, default=float(os.environ.get("YOUTUBE_LEG_DONE_DEADLINE_S", 900)))
     p.add_argument("--tool-timeout", type=float, default=tool_timeout)
     p.add_argument("--decode-timeout", type=float, default=tool_timeout)
+    p.add_argument("--inpoint-timeout", type=float, default=float(os.environ.get("YOUTUBE_LEG_INPOINT_TIMEOUT_S", 1500)),
+                   help="issue 1387: the bound of the restreamer-input point's verdict run (report-only)")
     a = ap.parse_args(argv)
     install_cleanup()
     ctx = Ctx(a)

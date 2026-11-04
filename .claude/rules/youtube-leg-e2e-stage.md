@@ -4,6 +4,10 @@ paths:
   - "scripts/youtube_leg_e2e.py"
   - "scripts/youtube_leg_obs.py"
   - "scripts/youtube_leg_host.py"
+  - "scripts/youtube_leg_tap.py"
+  - "scripts/youtube_leg_points.py"
+  - "tests/python/test_youtube_leg_tap_1387.py"
+  - "tests/python/test_youtube_leg_inpoint_1387.py"
   - "scripts/e2e_report_youtube.py"
   - "scripts/lib/youtube-leg.sh"
   - "tests/python/test_av_gate_session_1404.py"
@@ -238,6 +242,42 @@ window from record start + 5 s to the recording's stop - 3 s (`stop --record-sto
   (`pull-requests: write`). A missing verdict still posts "nothing verified".
 - Job timeout 105 min (75 + the stage), the lease hold ceiling `RIG_LEASE_MAX_HOLD_SECS` 6300 with it
   (pinned by `test_the_default_hold_ceiling_matches_the_full_path_job_timeout`).
+
+## The restreamer hop: a REPORT-ONLY point at restreamer's input (issue 1387, 4.11.2026)
+
+The VOD shows audio steps (`lag_jumps`, 3-18 ms) at YouTube's 5 s segment starts that the stream
+recording lacks. What sits between them (read on stream-snv, finding 6628405129):
+- Restreamer (`restreamer.service` --user, `/usr/bin/Restreamer`, no ffmpeg child) takes the stream OBS's
+  RTMP on :1234 (`rtmp://127.0.0.1:1234/live/stream-snv`), cuts it into 1 s chunks and uploads them to
+  Hetzner object storage;
+- a per-session delivery VPS (`rs_delivery`) fetches the chunks and pushes them to YouTube (primary +
+  backup ingest) with its own RTMP pusher: remux, no transcode, every 2 s chunk RE-TIMED onto a
+  2000 ms grid (`first_ts = 2000*k + 1` in the copied delivery log
+  `~/.config/restreamer/delivery-logs/<...>.log`; `av_skew_ms` 0/-6/-11/-16 there is only the chunk's
+  last-tag difference).
+- Tappable: restreamer's INPUT (its inpoint serves players, like the headphone monitor). NOT tappable:
+  its output, which exists only on the VPS (a change in restreamer, or its S3 credentials).
+
+The stage therefore records the input (`start --tap-inpoint`, passed by the lib):
+- `scripts/youtube_leg_tap.py` on the stream box over the session's ssh: the stream OBS's own
+  `GetStreamServiceSettings` gives the URL (`youtube_leg_obs.py stream-service`, only restreamer's local
+  inpoint, a foreign key never printed); `ffmpeg -c copy -map 0 -copyts -f matroska`; through
+  `obs-box-background-run` when sudo allows it, always `chrt --idle 0` + `taskset` = online minus every
+  `/etc/*-isolated-cpus.conf` mask minus CPU 15 (stream-snv: 0-1,12-14,16-19); no free CPU = no capture.
+  Started right after StartStream, before the ready wait; ended by the full `stop` after the session stop
+  (it ends by itself at the publisher's EOF, else INT then KILL of its group); never by `--stream-only`.
+- `measure` judges it AFTER the VOD verdict with the same tool, windows, recording, markers and probe
+  (`--vod <capture on dev2> --out <stage>/inpoint`, the recording's tick map copied in), bounded by
+  `YOUTUBE_LEG_INPOINT_TIMEOUT_S` (1500 s), then deletes the capture on the stream box; a capture never
+  measured stays until the next run's start sweeps day-old dirs.
+- The block's `points` (`scripts/youtube_leg_points.py`): `restreamer_input` (per window A/V capture
+  minus recording, `audio_lag_jump_details` as [recording time s, ms]) and `restreamer_output`
+  (`measured: false` + why). The VOD windows carry `audio_lag_jump_details` too, so the same step reads
+  the same recording time at every point. REPORT-ONLY: nothing in `points` changes `verdict`.
+- The per-point page adds "Kde vzniká zvukový schod (len report, neblokuje)" without a pass/fail glyph.
+- Reading it: a step at the input = born in the stream OBS output path before restreamer; absent at the
+  input but in the VOD = after restreamer's input (the pusher's re-timing or YouTube), and only
+  restreamer can expose its output to split those two.
 
 ## Not in this slice (handed to the supervisor as follow-up candidates)
 
