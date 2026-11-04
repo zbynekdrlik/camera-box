@@ -56,8 +56,10 @@ def test_a_real_song_dipping_under_the_threshold_at_its_one_lag_is_confirmed():
     assert got == [pcc.ABSENT, pcc.ABSENT, pcc.PRESENT, pcc.ABSENT, pcc.PRESENT]
 
 
-def test_the_live_false_positive_shape_never_confirms():
-    # E2E 41742028800: isolated 0.071-0.083 at jumping lags, with the null's ordinary windows between
+def test_isolated_weak_presents_at_jumping_lags_never_confirm():
+    # A SYNTHETIC shape around E2E 41742028800's live PRESENT values (0.071-0.083 at jumping lags); the
+    # ABSENT windows between them are invented (the run kept no per-window ncc/lag). The measured null
+    # replay is in program-audio-guard.md (992 live windows, 4.11.2026: none PRESENT, none confirmed).
     nccs = [0.031, 0.083, 0.028, 0.035, 0.071, 0.030, 0.072, 0.026, 0.044, 0.079]
     lags = [1210.0, 2734.0, -310.0, 455.0, -998.0, 2001.0, 623.0, -742.0, 1888.0, 80.0]
     assert pcc.PRESENT not in _run(_shape(nccs, lags))
@@ -65,8 +67,20 @@ def test_the_live_false_positive_shape_never_confirms():
 
 def test_an_earlier_window_under_the_agreement_floor_never_vouches():
     floor = pcc.AGREE_FLOOR_NCC
-    assert _run(_shape([floor - 0.005, 0.08])) == [pcc.ABSENT, pcc.ABSENT]
-    assert _run(_shape([floor, 0.08])) == [pcc.ABSENT, pcc.PRESENT]
+    two = 2 * W                                    # one segment apart: no shared audio
+    assert _run([_c(pcc.ABSENT, floor - 0.005, 600.0, TS0), _c(pcc.PRESENT, 0.08, 600.0, TS0 + two)]) == \
+        [pcc.ABSENT, pcc.ABSENT]
+    assert _run([_c(pcc.ABSENT, floor, 600.0, TS0), _c(pcc.PRESENT, 0.08, 600.0, TS0 + two)]) == \
+        [pcc.ABSENT, pcc.PRESENT]
+
+
+def test_an_overlapping_window_vouches_only_when_it_was_present_itself():
+    # review round 2: the next window shares 2 s of program with this one, so its null peak can sit at
+    # the same lag; an overlapping earlier window must be PRESENT (the old rule), a disjoint one any kind
+    assert _run([_c(pcc.ABSENT, 0.06, 600.0, TS0), _c(pcc.PRESENT, 0.08, 600.0, TS0 + W)]) == \
+        [pcc.ABSENT, pcc.ABSENT]
+    assert _run([_c(pcc.PRESENT, 0.08, 600.0, TS0), _c(pcc.PRESENT, 0.08, 600.0, TS0 + W)]) == \
+        [pcc.ABSENT, pcc.PRESENT]
 
 
 def test_an_undecided_window_between_two_presents_does_not_break_the_chain():
@@ -127,14 +141,16 @@ def _scripted_arm(monkeypatch, raws):
     return pcg.CgArm("resolume-snv", [m], _Probe()), m
 
 
-def test_the_arm_forgets_a_source_that_went_silent(monkeypatch):
+def test_the_arm_keeps_its_memory_across_a_quiet_window(monkeypatch):
+    # review round 2: a song passage under the silence bar for one window is the loudness twin of the
+    # ABSENT dip; the memory ages by the judged segments' end stamps (CONFIRM_SPAN_S), never by quiet
     arm, m = _scripted_arm(monkeypatch, [_c(pcc.PRESENT, 0.08, 600.0, TS0), _c(pcc.PRESENT, 0.08, 600.0, TS0 + 2 * W)])
     prog = pcc.AudioRing()
     assert arm.state(program=prog).readings[0].correlation.kind == pcc.ABSENT
-    m.level = None                                     # silent: never correlated, the memory dropped
+    m.level = None                                     # quiet: never correlated
     assert arm.state(program=prog).readings[0].correlation is None
     m.level = -20.0
-    assert arm.state(program=prog).readings[0].correlation.kind == pcc.ABSENT
+    assert arm.state(program=prog).readings[0].correlation.kind == pcc.PRESENT
 
 
 def test_the_arm_forgets_everything_without_a_program_ring(monkeypatch):

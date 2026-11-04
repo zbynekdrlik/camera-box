@@ -122,11 +122,36 @@ def test_a_box_that_stops_taking_the_dante_program_drops_the_derived_value(tmp_p
     assert d["jxs_cores"] == "" and "jxs_cores_derived" not in d, d
 
 
-def test_the_live_file_still_renders_byte_identical(tmp_path):
+def test_the_live_file_renders_byte_identical_where_nothing_is_derived(tmp_path):
     f = tmp_path / "jxs-output.json"
     f.write_text(jx.LIVE_OUTPUT)
     r = jx._bash('strih_jxs_output_render "$1" 10.77.9.204:7100 100 "" "" 15', f)
     assert r.returncode == 0 and r.stdout == jx.LIVE_OUTPUT, r.stdout + r.stderr
+
+
+def test_the_live_strih_snv_file_gets_its_cores_once_then_renders_unchanged(tmp_path):
+    f = tmp_path / "jxs-output.json"
+    f.write_text(jx.LIVE_OUTPUT)
+    r = jx._bash('strih_jxs_output_render "$1" 10.77.9.204:7100 100 "" 2-14 15', f)
+    assert r.returncode == 0, r.stderr
+    d = json.loads(r.stdout)
+    assert d["jxs_cores"] == "2-14" and d["jxs_cores_derived"] == "2-14" and "WARNING" not in r.stderr
+    f.write_text(r.stdout)
+    again = jx._bash('strih_jxs_output_render "$1" 10.77.9.204:7100 100 "" 2-14 15', f)
+    assert again.returncode == 0 and again.stdout == r.stdout
+
+
+def test_a_failed_reconcile_fails_step_13_on_a_non_dante_box_too(tmp_path):
+    out = tmp_path / "home" / OUT_REL
+    out.parent.mkdir(parents=True)
+    out.symlink_to(tmp_path / "elsewhere.json")
+    # setup-strih calls step 13 as `strih_dante_input_install ... || fail`: errexit is OFF inside it
+    env = rc._box(tmp_path)
+    env.update({"STRIH_DANTE_INPUT_TOML": str(tmp_path / "home" / ".camera-box" / "dante-input.toml")})
+    body = ('. "%s"; strih_box_load strih-pp >/dev/null; '
+            'strih_dante_input_install "$1" "$2" || { echo "STEP13-FAILED" >&2; exit 1; }') % rc.BASE
+    r = rc._bash(rc.PROVISION, body, _user(), tmp_path / "home", env=env)
+    assert r.returncode == 1 and "is a symlink" in r.stderr and "STEP13-FAILED" in r.stderr, r.stdout + r.stderr
 
 
 # --- finding 2: verify item 49's (jxs-cores) row --------------------------------------------------------------
@@ -153,6 +178,14 @@ def test_verify_fails_cores_that_hold_the_reserved_cpu(tmp_path):
 def test_verify_passes_cores_off_the_reserved_cpu(tmp_path):
     rows = _verify(tmp_path, "2-14")
     assert len(rows) == 1 and rows[0].startswith("PASS (jxs-cores)"), rows
+    assert "next Stop/StartOutput" in rows[0]
+
+
+def test_verify_grades_no_cores_without_an_enabled_output_file(tmp_path):
+    env = dict(_env(tmp_path, "2-15"), STRIH_JXS_OBS_PORT=str(jx._closed_port()), STRIH_OPERATOR_OBS_RUNNING_CMD="false")
+    r = jx._bash('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
+                 'strih_box_load "$1" >/dev/null\nstrih_jxs_config_verify_row "$2"', "strih-snv", tmp_path / "home", env=env)
+    assert "FAIL (jxs-output)" in r.stdout and "(jxs-cores)" not in r.stdout, r.stdout
 
 
 # --- finding 9 -----------------------------------------------------------------------------------------------
@@ -212,6 +245,12 @@ def test_a_failed_user_manager_re_exec_is_its_own_warning(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     warn = [ln for ln in r.stderr.splitlines() if "WARNING" in ln]
     assert len(warn) == 1 and "user manager of %s" % _user() in warn[0] and "PID 1" not in warn[0], warn
+
+
+def test_each_manager_that_re_executed_is_named(tmp_path):
+    env, _log = _reexec_env(tmp_path, fail="daemon-reexec")
+    r = _reserved_install(tmp_path, _user(), env)
+    assert "re-read: the user manager of %s re-executed (daemon-reexec)" % _user() in r.stdout, r.stdout
 
 
 def test_removing_the_drop_ins_re_executes_both_managers(tmp_path):
