@@ -268,10 +268,10 @@ IN the program.
       without a program ring, forgets its memory.
     - **The null chance of a same-lag agreement:** a null window peaks at a uniform lag of the 32001
       lags of -1000..+3000 ms at 8 kHz; +-5 ms is 81 of them, so p = 0.0025 per earlier window, at most
-      0.005 for the 2 windows (the floor ignored). With the floor (the 990-window dev1 null: p50 0.030,
-      p99.9 0.042) only a few % of null windows can vouch: ~2.5e-4 per weak null PRESENT. At the live
-      weak-PRESENT rate of E2E 41742028800 (10 in ~120 windows) that is ~2e-5 per window, ~0.6 % of
-      300-window runs. Unmeasured: the segments overlap by 2 s, so a null peak driven by the shared 2 s
+      0.005 for the 2 windows (the floor ignored). With the floor, 15 of the 992 windows of the
+      4.11.2026 long null (below) reached |ncc| >= 0.04 (1.5 %): 2 x 0.015 x 0.0025 = ~8e-5 per weak
+      null PRESENT. At the live weak-PRESENT rate of E2E 41742028800 (10 in ~120 windows) that is
+      ~6e-6 per window, ~0.2 % of 300-window runs. Unmeasured: the segments overlap by 2 s, so a null peak driven by the shared 2 s
       could repeat at one lag (the live null's lags jumped; measure before lowering the floor).
     - Cost: a CG under ~-20 dB in the program is caught one or two windows (2-4 s) later; the synthetic
       song 24 dB under the marker is caught within its first three windows on advancing rings.
@@ -308,7 +308,20 @@ IN the program.
     60/120/180 s: 990 windows ABSENT (2 UNDECIDED: the CG segment under -50 dBFS), |NCC| p50 0.030,
     p99.9 0.042, max 0.043, none at or over 0.07. One E2E grades a few hundred windows, so the margin
     holds against false refusals. Recipe: `~/.claude/work-products/issue-1404-cg-corr/` (probe
-    `probe_sp.py`, `longnull.py`).
+    `probe_sp.py`, `longnull.py`; `longnull2.py` adds the level scaling and replays `confirm`).
+  - **The -80..-50 dBFS band (review finding 4, 4.11.2026 02:26-02:36 UTC):** the same recipe again,
+    600 s each of `STREAM-SNV (stream)` and `RESOLUME-SNV (SP-program)` from dev1 at nice 19, 992
+    windows (the CG shifted by 0/60/120/180 s). SP-program was NOT idle then (window level p5 -43.1,
+    p50 -39.3 dBFS), so the idle -52..-60 dBFS signal itself was not caught; each window's CG was
+    then scaled to -60, -70 and -80 dBFS:
+    - at its own level, -60 and -70 dBFS: 992 ABSENT, |ncc| p50 0.031, p99 0.042, p99.9 0.045, max
+      0.046, none >= 0.07, none confirmed (the whitened NCC is level-independent while the band
+      clears `MIN_BAND_DBFS`);
+    - at -80 dBFS: 444 ABSENT, 548 UNDECIDED (533 the CG segment under `MIN_CG_DBFS`, a hair under
+      the window's -80.0; 15 no band energy over -90 dBFS), so the floor's edge fails closed;
+    - so no false PRESENT anywhere in the band and the floor stays at -80. Not covered: the real
+      noise floor of an idle sender (dither, a gate) at -70 differs from a scaled song; catch an idle
+      SP-program with `probe_sp.py` before lowering anything.
   - Clock-rate mismatch was measured at +50 ppm only. A larger crystal error loses coherence over
     the 4 s segment first in the top of the band.
   - Known limit: a passage more than ~24 dB under the program level can read ABSENT in one window.
