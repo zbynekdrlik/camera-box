@@ -166,16 +166,36 @@ _strih_hub_invocation() {
 # running hub; nothing for a hub without an invocation. Always rc 0 (a failed write is a WARNING: the next
 # run then compares against its own first fingerprint, as without a record).
 strih_intercom_hub_record_loaded() {
-  local f inv fp
+  local f inv fp tmp=""
   f="$(_strih_hub_loaded_file)"; inv="$(_strih_hub_invocation)"
   [ -n "$inv" ] || return 0
   fp="$(strih_intercom_hub_install_fingerprint "$@")"
-  if ! { mkdir -p -- "$(dirname -- "$f")" && printf 'invocation=%s\n%s\n' "$inv" "$fp" > "${f}.tmp" \
-       && mv -f -- "${f}.tmp" "$f"; } 2>/dev/null; then
-    rm -f -- "${f}.tmp" 2>/dev/null || true
+  if ! { mkdir -p -- "$(dirname -- "$f")" && tmp="$(mktemp -- "${f}.XXXXXX")" \
+       && printf 'invocation=%s\n%s\n' "$inv" "$fp" > "$tmp" && mv -f -- "$tmp" "$f"; } 2>/dev/null; then
+    [ -z "$tmp" ] || rm -f -- "$tmp" 2>/dev/null || true
     echo "  WARNING: could not record the running hub's install in ${f}" >&2
   fi
   return 0
+}
+
+# _strih_hub_started_epoch -> the running hub's main process start (epoch seconds), empty when unreadable.
+_strih_hub_started_epoch() {
+  local v
+  v="$(systemctl show -p ExecMainStartTimestamp --value --timestamp=unix intercom-hub 2>/dev/null || true)"
+  v="${v#@}"; v="${v%%.*}"
+  [[ "$v" =~ ^[0123456789]+$ ]] && printf '%s' "$v"
+  return 0
+}
+
+# _strih_hub_newest_mtime FINGERPRINT -> the newest mtime (epoch seconds) of the fingerprint's present files.
+_strih_hub_newest_mtime() {
+  local l m newest=""
+  while IFS= read -r l; do
+    [ -n "$l" ] && [ "${l%%  *}" != absent ] || continue
+    m="$(stat -c %Y -- "${l#*  }" 2>/dev/null || true)"
+    if [[ "$m" =~ ^[0123456789]+$ ]] && { [ -z "$newest" ] || [ "$m" -gt "$newest" ]; }; then newest="$m"; fi
+  done <<<"$1"
+  printf '%s' "$newest"
 }
 
 # _strih_hub_loaded_before -> the recorded fingerprint when it belongs to the hub's CURRENT invocation, else
@@ -210,7 +230,20 @@ strih_intercom_hub_restart_if_changed() {
     return 0
   fi
   now="$(strih_intercom_hub_install_fingerprint "$@")"
-  if [ "$now" = "$before" ]; then
+  if [ "$now" = "$before" ] && [ -z "$rec" ]; then
+    # review round 2: with no record, this run's own fingerprint says nothing about what the RUNNING
+    # process loaded (the first rollout: new files on disk, the old process up). Its start time decides.
+    local start newest
+    start="$(_strih_hub_started_epoch)"; newest="$(_strih_hub_newest_mtime "$now")"
+    if [ -z "$start" ] || [ -z "$newest" ]; then
+      echo "  intercom-hub.service: no record of the install it runs and its start time is unreadable -- not restarted, not recorded"
+      return 0
+    fi
+    if [ "$start" -lt "$newest" ]; then
+      changed="the install (the running hub started before its files were written; no record of what it loaded)"
+    fi
+  fi
+  if [ "$now" = "$before" ] && [ -z "$changed" ]; then
     echo "  intercom-hub.service: binary, unit, drop-ins and routing files unchanged -- the running hub is left alone"
     strih_intercom_hub_record_loaded "$@"
     return 0
