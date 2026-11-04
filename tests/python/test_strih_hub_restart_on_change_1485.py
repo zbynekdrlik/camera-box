@@ -129,12 +129,12 @@ def test_a_failed_restart_or_a_crash_loop_after_it_fails_by_name(tmp_path):
     t1 = tmp_path / "a"
     t1.mkdir()
     r = _changed_run(t1, lambda b: (b / "hub").write_text("new\n"), env={"FAKE_RESTART_RC": "1"})
-    assert r.returncode != 0 or "RC=1" in r.stdout, r.stdout
+    assert r.returncode != 0 and "RC=" not in r.stdout, r.stdout   # rc 1 ends the caller's set -e
     assert "try-restart" in r.stderr + r.stdout, r.stdout + r.stderr
     t2 = tmp_path / "b"
     t2.mkdir()
     r = _changed_run(t2, lambda b: (b / "hub").write_text("new\n"), env={"FAKE_SUB": "auto-restart"})
-    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert r.returncode != 0 and "RC=" not in r.stdout, r.stdout + r.stderr   # rc 1 ends the caller's set -e
     assert "crash-looping" in r.stdout + r.stderr, r.stdout + r.stderr
 
 
