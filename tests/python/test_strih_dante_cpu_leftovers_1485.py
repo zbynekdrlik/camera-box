@@ -224,6 +224,54 @@ def test_verify_fails_a_foreign_file_at_a_leftover_name_too(tmp_path):
     assert "BAD (dante-cpu)" in r.stdout and PATHS["user"] in r.stdout, r.stdout
 
 
+# review round 1: daemon-reexec never widens a manager's own mask (systemd sets its affinity only when
+# CPUAffinity= is set), so PID 1 keeps the narrowed set until a reboot; the remove and the grade name it.
+def _pid1(root, mask, online="0-15"):
+    st = root / "proc" / "1" / "status"
+    st.parent.mkdir(parents=True, exist_ok=True)
+    st.write_text("Name:\tsystemd\nCpus_allowed:\t3fff\nCpus_allowed_list:\t%s\n" % mask)
+    (root / "online").write_text(online + "\n")
+    return {"OBS_BOX_ONLINE_CPUS": str(root / "online")}
+
+
+def test_a_narrowed_pid_1_after_the_removal_asks_for_a_reboot(tmp_path):
+    root, _, env = _box(tmp_path, which=("system",))
+    env.update(_pid1(root, "0-13"))
+    r = _remove(env, "")
+    assert r.returncode == 0, r.stderr
+    assert "reboot" in r.stderr and "0-13" in r.stderr and "0-15" in r.stderr, r.stderr
+
+
+def test_the_grade_notes_a_pid_1_still_on_the_old_mask(tmp_path):
+    root, _, env = _box(tmp_path, which=())
+    env.update(_pid1(root, "0-13"))
+    r = _bash(GRADE, env=env)
+    assert "NOTE (dante-cpu)" in r.stdout and "reboot" in r.stdout and "0-13" in r.stdout, r.stdout
+    assert "BAD" not in r.stdout, r.stdout
+
+
+def test_the_grade_is_quiet_on_pid_1_with_every_online_cpu(tmp_path):
+    root, _, env = _box(tmp_path, which=())
+    env.update(_pid1(root, "0-15"))
+    r = _bash(GRADE, env=env)
+    assert r.stdout.splitlines() == [l for l in r.stdout.splitlines() if l.startswith("OK")], r.stdout
+    assert "NOTE" not in r.stdout, r.stdout
+
+
+def test_a_non_root_grade_names_an_unreadable_sudoers_dir(tmp_path):
+    if os.geteuid() == 0:
+        raise AssertionError("run this test as a non-root user: root reads a 0750 dir anyway")
+    root, _, env = _box(tmp_path, which=())
+    d = root / "etc" / "sudoers.d"
+    d.mkdir(parents=True)
+    d.chmod(0o000)   # no read, no search: the operator's view of a root 0750 dir
+    try:
+        r = _bash(GRADE, env=env)
+    finally:
+        d.chmod(0o755)
+    assert "NOTE (dante-cpu)" in r.stdout and "sudoers" in r.stdout and "root" in r.stdout, r.stdout
+
+
 def test_item9_grades_the_leftovers_on_both_program_audio_paths():
     lib = (SCRIPTS / "lib" / "strih-dante-input.sh").read_text()
     body = lib.split("strih_program_audio_grade() {", 1)[1].split("\n}", 1)[0]
