@@ -421,3 +421,48 @@ def test_the_libs_wire_the_facts_flag_and_verify_strih_stays_untouched():
     for f in ("verify-strih.sh", "setup-strih.sh"):
         t = (REPO / "scripts" / f).read_text()
         assert "rx_pin" not in t and "hub_flag" not in t, f
+
+
+# --- review round 1 (fresh-context review of 3a97b3cd26..baeb5dabc6) ---------------------------------------------
+
+def _pending_env(tmp, dropin_after_start):
+    root, proc, env = _rows_env(tmp, hub_threads={5150: ("intercom-hub", "0-13", 0), 5160: ("dstack-engine", "0-13", 0),
+                                                  5161: ("dstack-rx", "0-13", 0)})
+    btime = 1_700_000_000
+    (proc / "stat").write_text("cpu  1 2 3 4\nbtime %d\nprocesses 9\n" % btime)   # the hub started at btime
+    t = btime + (3600 if dropin_after_start else -3600)
+    os.utime(root / DROPIN_REL, (t, t))
+    return env
+
+
+def test_a_hub_that_started_before_its_drop_in_is_restart_pending_not_failed(tmp_path):
+    """Setup never restarts a running hub (issue 1418), so the first deploy's acceptance verify reads the
+    old process: its rows are NOTEs naming the restart, never a FAIL that stops the deploy."""
+    env = _pending_env(tmp_path, dropin_after_start=True)
+    body = 'ok() { echo "OK $*"; }; note() { echo "NOTE $*"; }; bad() { echo "BAD $*"; }; strih_dante_rx_pin_grade 1'
+    r = rp._bash(body, env=env)
+    assert "BAD (intercom-dante)" not in r.stdout, r.stdout + r.stderr
+    assert "NOTE (intercom-dante) rx-pin: restart pending -- the hub started before its drop-in was written" in r.stdout
+    assert "until then: dstack-engine tid 5160 runs on 0-13, not the reserved CPU 14" in r.stdout
+    # a hub started AFTER its drop-in that still runs unpinned is a real FAIL
+    (tmp_path / "b").mkdir()
+    env = _pending_env(tmp_path / "b", dropin_after_start=False)
+    r = rp._bash(body, env=env)
+    assert "BAD (intercom-dante) rx-pin: dstack-engine tid 5160 runs on 0-13, not the reserved CPU 14" in r.stdout, r.stdout
+
+
+def test_hub_mode_takes_the_pid_systemd_hands_its_exec_start_post(tmp_path):
+    h, env, log, proc = _hub_helper(tmp_path, mainpid=0)      # systemctl would say: not running
+    env["MAINPID"] = str(HUB_PID)
+    r = rp._run(h, env, "hub")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert read_thread(proc, 5160, HUB_PID) == ("14", -10)
+    assert "show -p MainPID" not in log.read_text(), "no D-Bus round trip when systemd gave the PID"
+
+
+def test_the_install_line_names_the_sibling_as_the_hubs_cpu(tmp_path):
+    root, env, log = _install_env(tmp_path)
+    r = rp._bash(INSTALL, "newlevel", "1", env=env)
+    assert "SMT siblings of CPU 15: 14-15 (CPU 14 is the hub's own)" in r.stdout, r.stdout
+    assert "the sibling stays OBS's" not in r.stdout
+    assert "restart intercom-hub.service (setup never restarts a running hub)" in r.stdout
