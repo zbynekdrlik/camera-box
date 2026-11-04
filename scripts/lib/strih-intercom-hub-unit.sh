@@ -497,7 +497,9 @@ strih_intercom_hub_media_clock_grade() {
     fi
     return 0
   fi
-  printf '%s\n' "$text" | strih_dante_media_clock_grade "(intercom-dante)" intercom
+  # a here-string, never a pipe: the grader must run in THIS shell, or its `bad` counts in a subshell and
+  # verify-strih ends ALL CLEAR under a FAIL row (4.11.2026; tests/python/test_verify_fail_counted_1485.py)
+  strih_dante_media_clock_grade "(intercom-dante)" intercom <<<"$text"
 }
 
 # --- issue 1439: the stream role runs no intercom hub ------------------------------------------------
