@@ -170,15 +170,17 @@ def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
     port = root / "proc" / "sys" / "net" / "ipv4" / "ip_unprivileged_port_start"   # ROZHODNUTE 6628785864
     port.parent.mkdir(parents=True)
     port.write_text("1024\n")
-    obs_pin = tmp_path / "obs-release.pin"   # the obs pin READY (strih_dante_ptp_pin_ready obs)
+    obs_pin = tmp_path / "obs-release.pin"   # both pins READY (strih_dante_ptp_all_ready)
     obs_pin.write_text("OBS_RELEASE_DSTACK_VERSION=v0.6.23\n")
+    ic_pin = tmp_path / "intercom-release.pin"
+    ic_pin.write_text("INTERCOM_RELEASE_DSTACK_VERSION=v0.6.23\n")
     (tmp_path / "online").write_text("0-15\n")
     (tmp_path / "bin").mkdir()
     stub(tmp_path / "bin", "visudo", "exit 0\n")
     env = {"STRIH_DANTE_INPUT_TOML": str(dest), "STRIH_DANTE_INPUT_IFACE": "enp7s0.70",
            "STRIH_DANTE_INPUT_SITE_FILE": str(site), "STRIH_DANTE_RX_PIN_ROOT": str(root),
            "STRIH_DANTE_RX_PIN_OWNER": "%s:%s" % (user, group), "OBS_BOX_ONLINE_CPUS": str(tmp_path / "online"),
-           "STRIH_DANTE_PTP_OBS_PIN": str(obs_pin),
+           "STRIH_DANTE_PTP_OBS_PIN": str(obs_pin), "STRIH_DANTE_PTP_INTERCOM_PIN": str(ic_pin),
            "PATH": "%s:%s" % (tmp_path / "bin", os.environ["PATH"])}
     rx_conf = root / "etc" / "strih-dante-rx-cpu.conf"
     body = ('. scripts/lib/obs-box-baseline.sh; fail() { echo "FAIL $*" >&2; exit 1; }; strih_box_load strih-snv >/dev/null; '
@@ -228,6 +230,8 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     log.write_text("\n".join([MEDIA_CLOCK] + log_lines) + "\n")
     pin = tmp_path / "obs-release.pin"
     pin.write_text("OBS_RELEASE_DSTACK_VERSION=v0.6.23\n")
+    ic_pin = tmp_path / "intercom-release.pin"
+    ic_pin.write_text("INTERCOM_RELEASE_DSTACK_VERSION=v0.6.23\n")
     kf = tmp_path / "kind"
     kf.write_text(kind)
     dest = tmp_path / "dante-input.toml"
@@ -265,6 +269,7 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
                            "STRIH_DANTE_INPUT_WAIT_S": "0", "STRIH_DANTE_RX_PIN_ROOT": str(root),
                            "OBS_BOX_ONLINE_CPUS": str(tmp_path / "rxonline"),
                            "STRIH_DANTE_RX_PIN_PROC": str(proc), "STRIH_DANTE_PTP_OBS_PIN": str(pin),
+                           "STRIH_DANTE_PTP_INTERCOM_PIN": str(ic_pin),
                            "PATH": "%s:%s" % (tmp_path / "rxbin", os.environ["PATH"])},
                           **({"STRIH_LX_USER": user} if user else {})))
 

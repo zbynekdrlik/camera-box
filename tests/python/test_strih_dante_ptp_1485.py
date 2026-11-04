@@ -387,7 +387,8 @@ def test_an_unreadable_journal_is_named_never_read_as_no_line(tmp_path):
     b.mkdir()
     (b / "journalctl").write_text("#!/bin/sh\necho 'Failed to open journal' >&2\nexit 1\n")
     (b / "journalctl").chmod(0o755)
-    env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="abc123", PATH="%s:%s" % (b, os.environ["PATH"]))
+    env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="abc123", STRIH_HUB_JOURNAL_EUID="0",
+               PATH="%s:%s" % (b, os.environ["PATH"]))
     r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
     assert r.returncode == 0, r.stderr
     assert r.stdout.startswith("BAD (intercom-dante) media clock: the hub's journal could not be read (rc 1"), r.stdout
@@ -422,7 +423,8 @@ def test_the_journal_is_read_for_the_current_invocation_only(tmp_path):
     (b / "journalctl").write_text('#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\n'
                                   'printf "noise\\nINFO dstack::clock::linked: media clock source source=Internal from=None\\n"\n' % log)
     (b / "journalctl").chmod(0o755)
-    env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="abc123", PATH="%s:%s" % (b, os.environ["PATH"]))
+    env = dict(_pins(tmp_path), STRIH_HUB_INVOCATION_ID="abc123", STRIH_HUB_JOURNAL_EUID="0",
+               PATH="%s:%s" % (b, os.environ["PATH"]))
     r = _bash('strih_box_load strih-snv >/dev/null\nstrih_intercom_hub_media_clock_grade', env=env, lib=PROVISION)
     assert r.stdout.startswith("OK (intercom-dante) media clock: source=Internal"), r.stdout + r.stderr
     assert "_SYSTEMD_INVOCATION_ID=abc123" in log.read_text().splitlines()
