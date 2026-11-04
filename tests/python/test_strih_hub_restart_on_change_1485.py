@@ -27,7 +27,11 @@ printf '%s\n' "$*" >> "$FAKE_DIR/systemctl.log"
 case "$1" in
   is-active) [ "${FAKE_ACTIVE:-1}" = 1 ] && exit 0; exit 3 ;;
   try-restart) exit "${FAKE_RESTART_RC:-0}" ;;
-  show) printf 'ActiveState=%s\nSubState=%s\nNRestarts=0\nResult=success\n' "${FAKE_STATE:-active}" "${FAKE_SUB:-running}" ;;
+  show)
+    case "$*" in
+      *ExecMainStartTimestamp*) printf '%s\n' "${FAKE_START-@9999999999}" ;;
+      *) printf 'ActiveState=%s\nSubState=%s\nNRestarts=0\nResult=success\n' "${FAKE_STATE:-active}" "${FAKE_SUB:-running}" ;;
+    esac ;;
   *) exit 0 ;;
 esac
 '''
@@ -130,6 +134,21 @@ def test_a_failed_earlier_run_still_restarts_the_hub_on_the_next_run(tmp_path):
     assert "RC=0" in r.stdout and "try-restart intercom-hub" in _calls(tmp_path), r.stdout + r.stderr
 
 
+def test_no_record_and_a_hub_started_before_the_install_is_restarted(tmp_path):
+    """Review round 2: the first rollout on strih-snv -- the new files are on disk (so this run's own
+    fingerprint sees no change), there is no record, and the running hub started before they were
+    written. It must restart, and the record must never stamp the old process with the new install."""
+    r = _changed_run(tmp_path, lambda b: None, env={"FAKE_START": "@1"})
+    assert "RC=0" in r.stdout and "try-restart intercom-hub" in _calls(tmp_path), r.stdout + r.stderr
+    assert "started before" in r.stdout, r.stdout
+
+
+def test_no_record_and_an_unreadable_start_time_records_nothing(tmp_path):
+    r = _changed_run(tmp_path, lambda b: None, env={"FAKE_START": ""})
+    assert "RC=0" in r.stdout and "try-restart" not in _calls(tmp_path), r.stdout + r.stderr
+    assert not (tmp_path / "state" / "intercom-hub.loaded").exists(), "an unverified baseline is never recorded"
+
+
 def test_a_record_of_another_invocation_is_not_the_baseline(tmp_path):
     """A hub restarted outside setup loaded the files on disk at its start: the record is stale then."""
     _box(tmp_path)
@@ -202,7 +221,8 @@ def test_setup_takes_the_fingerprint_before_any_hub_write_and_restarts_after_the
     assert "strih_intercom_hub_record_loaded" in live[start:start + 400], "a started hub records its install"
     assert s.count('strih_intercom_hub_restart_if_changed "${IH_BEFORE:-}"') == 1
     restart = s.index('strih_intercom_hub_restart_if_changed "${IH_BEFORE:-}"')
-    assert s.index('step "16i"') < restart < s.index('step "16j"'), "right after 16i's TURN drop-in, before verify"
+    assert s.index("strih_interkom_public_install ||") < restart < s.index('step "16j"'), \
+        "right after 16i's TURN drop-in is written, before step 16j"
     line = s[s.rindex("\n", 0, restart):s.index("\n", restart)]
     assert "obs_box_step_applies 13-hub-live" in line and "|| fail" in line, line
 
