@@ -27,9 +27,10 @@ the boxes and keeps the glue: `strih-intercom-hub-unit.sh`, `strih-interkom-publ
   setup-strih from a checkout, before step 12 (the purge decision reads the routing file).
 - **Another installed version:** replaced by rename (a running hub stays on its old inode), the old one
   kept as `intercom-hub.pre-<version>`. A running hub is
-  `try-restart`ed by setup-strih after step 14 only when its install changed (issue 1485, 4.11.2026: v1.9.13
-  installed, the old process kept running): the fingerprint of binary, unit, drop-ins and routing TOML from
-  before step 12 against the one after (`strih_intercom_hub_restart_if_changed`), then the crash-loop probe;
+  try-restarted by setup-strih right after step 16i only when its install changed (issue 1485, 4.11.2026:
+  v1.9.13 installed, the old process kept running): the fingerprint of binary, unit, drop-ins and TOMLs
+  against the record of what the running invocation was started on, else the one from before step 12
+  (`strih_intercom_hub_restart_if_changed`), then the crash-loop probe;
   unchanged = never touched, stopped = the 13-hub-live start. The strih deploy's read-back FAILs a running
   hub (`/api/version` on the box) that is not the pin's version on a strih-role box.
 - **verify item 16:** the running hub (else `<bin>.version`) against the pin, a difference = a NOTE with

@@ -255,9 +255,12 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   samples 6 s apart -- longer than RestartSec=5 -- `failed`, `auto-restart` or a climbing NRestarts);
   since issue 1418 an inactive, disabled or missing hub FAILs on the strih role too (`13-hub-live`; setup
   starts a stopped hub there right after step 14, and since issue 1485 try-restarts a running one only
-  when its install changed: `strih_intercom_hub_install_fingerprint` (binary, unit, every drop-in, the
-  routing TOML) taken before step 12 vs after step 14, `strih_intercom_hub_restart_if_changed`; an
-  unchanged running hub is never touched) and stays a NOTE on the
+  when its install changed: `strih_intercom_hub_install_fingerprint` (binary, unit, every drop-in, every
+  `/etc/intercom-hub/*.toml`) right after step 16i (its TURN drop-in) against the record of the
+  install the running invocation was started on (`/var/lib/camera-box/intercom-hub.loaded`, keyed by
+  InvocationID, so a run that failed after writing still restarts on the next run), else against the
+  fingerprint taken before step 12; `strih_intercom_hub_restart_if_changed`; an unchanged running hub is
+  never touched) and stays a NOTE on the
   stream role. Its
   `(intercom-hub)` row grades the role drop-in (a
   Janus-less box without it FAILs; a Janus box must have the secret file and no reset).
