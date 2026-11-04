@@ -125,7 +125,7 @@ case "$cmd" in
     pid=4242; restarts=0
     if [ -n "${STUB_CRASHLOOP:-}" ]; then pid=$((4242 + n)); restarts="$n"; fi
     if [ -n "${STUB_LATE_CRASHLOOP:-}" ] && [ "$n" -ge 3 ]; then pid=$((4242 + n)); restarts="$n"; fi
-    printf 'installed=%s obs_tag=%s active=%s pid=%s restarts=%s lib=%s tick=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_OBS_TAG:-v9.9.5}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}"; exit 0 ;;
+    printf 'installed=%s obs_tag=%s active=%s pid=%s restarts=%s lib=%s tick=%s hub=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_OBS_TAG:-v9.9.5}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}" "${STUB_HUB-9.9.3}"; exit 0 ;;
   *"--user start"*) exit "${STUB_START_RC:-0}" ;;
   *) exit "${STUB_SSH_RC:-0}" ;;
 esac
@@ -648,6 +648,10 @@ fn strih_lx_readback_refuses_a_wrong_sha_dead_or_crashlooping_obs_1317() {
         (("STUB_LIB", "libobs-bytes-stale"), "libobs.so.30"),
         (("STUB_TICK", "0"), "render tick ENABLED"),
         (("STUB_CRASHLOOP", "1"), "MainPID"),
+        // issue 1485: the running intercom hub must be the pinned release (a new install left on the
+        // old process, 4.11.2026), and an unreadable /api/version is no pass.
+        (("STUB_HUB", "9.9.2"), "intercom hub"),
+        (("STUB_HUB", ""), "intercom hub"),
     ] {
         let r = run_exec(&[env]);
         assert_eq!(r.code, 4, "{env:?} must refuse.\nerr={}", r.err);
