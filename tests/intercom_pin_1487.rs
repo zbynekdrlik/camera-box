@@ -138,12 +138,12 @@ fn the_hubs_dante_ports_are_the_ones_the_leg_declares() {
         "arc_port = 4441",
         "cmc_port = 8801",
         "flows_port = 4456",
-        "rx_port_base = 47100",
+        "rx_port_base = 30100",
     ] {
         assert!(toml.contains(want), "the hub TOML must carry `{want}`");
     }
     let env = read(&root().join("scripts/strih-boxes/strih-snv.env"));
-    assert!(env.contains("strih-snv-intercom=4441:8801:4456:47100-47131"));
+    assert!(env.contains("strih-snv-intercom=4441:8801:4456:30100-30131"));
 }
 
 /// Issue 1485: the dstack version the pinned hub runs (the dtray `--print` threshold reads it from the pin,

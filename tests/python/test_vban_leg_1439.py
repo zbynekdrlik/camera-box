@@ -49,7 +49,7 @@ RIG_UUID = "872cb3ca-c619-31f0-b224-66ef70bbeab0"
 STRIH_RIG = "enp7s0"
 STRIH_VLAN_IF = "enp7s0.70"
 STRIH_LEG_ADDR = "10.77.7.202"
-STRIH_DEVICES = "strih-snv-intercom=4441:8801:4456:47100-47131 strih-obs=4440:8800:4455:30000-30031"
+STRIH_DEVICES = "strih-snv-intercom=4441:8801:4456:30100-30131 strih-obs=4440:8800:4455:30000-30031"
 STRIH_SENDER = "10.77.7.30:6980,6981"  # Ableton-FOH: the hub's fohabl-strih + the OBS strih-obs (owner 23.10.2026)
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
          "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "NDI_DISCOVERY_SENDER_HOSTS",
@@ -542,7 +542,7 @@ def test_the_fake_nft_lists_the_dante_ruleset_like_the_real_one():
 
 def test_the_dante_rules_admit_both_devices_and_keep_the_vban_and_ping():
     t = _dante_text()
-    for want in ("4440-4441", "4455-4456", "5353", "8700", "8702", "8708", "8800-8801", "47100-47131", "30000-30031"):
+    for want in ("4440-4441", "4455-4456", "5353", "8700", "8702", "8708", "8800-8801", "30000-30031", "30100-30131"):
         assert re.search(r"udp dport \{[^}]*\b%s\b[^}]*\} counter accept" % want, t), want
     assert 'ip saddr 10.77.7.30 udp dport { 6980, 6981 } counter accept' in t
     assert 'icmp type echo-request counter accept' in t and 'icmp type echo-reply counter accept' in t
