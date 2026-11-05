@@ -143,7 +143,7 @@ def test_the_toml_is_the_example_format_from_the_facts_and_the_site_file(tmp_pat
     d = tomllib.loads(r.stdout)
     assert d == {"name": "strih-obs", "iface": "enp7s0.70", "network_rate": 96000,
                  "rx": ["Program L", "Program R"], "arc_port": 4440, "cmc_port": 8800, "flows_port": 4455,
-                 "rx_port_base": 47200,
+                 "rx_port_base": 30000,
                  "subscribe": [{"rx": 1, "tx_channel": "MASTER-L", "tx_device": "foh-tx"},
                                {"rx": 2, "tx_channel": "MASTER-R", "tx_device": "foh-tx"}]}
     assert "sample_rate" not in d and "latency_ms" not in d   # dlink's default (15 ms since dstack v0.6.28)
@@ -529,7 +529,7 @@ def test_the_obs_dante_rx_ports_lie_below_the_os_ephemeral_range():
     for env in sorted(BOXES.glob("*.env")):
         f = dict(l.split("=", 1) for l in env.read_text().splitlines() if l and l[0] != "#" and "=" in l)
         for dev in f.get("STRIH_DANTE_DEVICES", "none").split():
-            name, ports = dev.split("=", 1)
+            name, _, ports = dev.partition("=")
             if name != "strih-obs":
                 continue
             first, last = (int(p) for p in ports.split(":")[3].split("-"))
