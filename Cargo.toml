@@ -30,7 +30,7 @@ path = "src/main.rs"
 # Shared VBAN codec: the appliance's `src/vban.rs` re-exports this crate from the intercom project's
 # release (issue 1487). The tag must equal scripts/intercom-release.pin (tests/intercom_pin_1487.rs).
 # Pure (only `anyhow`, already a root dep), cross-platform.
-intercom-vban = { git = "https://github.com/zbynekdrlik/intercom", tag = "v1.9.18" }
+intercom-vban = { git = "https://github.com/zbynekdrlik/intercom", tag = "v1.9.19" }
 
 # Issue 1487: the JPEG XS link, the rig primitives and the QPSK marker protocol live in vstack; a
 # tag names one version of all of them. src/lib.rs re-exports them at their old paths. The tag must
