@@ -52,7 +52,7 @@ def _vban_era_boxes():
     for old, new in (("STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n"),
                      ("STRIH_PROGRAM_VBAN_PORT=none\n", "STRIH_PROGRAM_VBAN_PORT=6981\n"),
                      ("STRIH_PROGRAM_VBAN_RESERVE_MS=none\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=30\n"),
-                     (" strih-obs=4440:8800:4455:47200-47231\n", "\n")):
+                     (" strih-obs=4440:8800:4455:30000-30031\n", "\n")):
         assert t.count(old) == 1, old
         t = t.replace(old, new)
     f.write_text(t)

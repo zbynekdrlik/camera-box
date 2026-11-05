@@ -211,7 +211,7 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_PROGRAM_VBAN_LEG_ADDR=10.77.7.202",
         "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,6981",
         // issue 1485: the hub's Dante device + the coming OBS device, each with its own ports.
-        "STRIH_DANTE_DEVICES=strih-snv-intercom=4441:8801:4456:47100-47131 strih-obs=4440:8800:4455:47200-47231",
+        "STRIH_DANTE_DEVICES=strih-snv-intercom=4441:8801:4456:47100-47131 strih-obs=4440:8800:4455:30000-30031",
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
         "STRIH_CAMERA_DEV1_NET=direct",

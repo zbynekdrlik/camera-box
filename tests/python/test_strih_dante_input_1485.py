@@ -90,7 +90,7 @@ def test_strih_snv_has_no_vban_program_and_keeps_its_input_name():
     f = dict(l.split("=", 1) for l in (BOXES / "strih-snv.env").read_text().splitlines() if l and l[0] != "#")
     assert (f["STRIH_PROGRAM_VBAN_STREAMS"], f["STRIH_PROGRAM_VBAN_PORT"], f["STRIH_PROGRAM_VBAN_RESERVE_MS"]) == ("none",) * 3
     assert f["STRIH_PROGRAM_AUDIO_INPUT"] == "ASIO zvuk"
-    assert "strih-obs=4440:8800:4455:47200-47231" in f["STRIH_DANTE_DEVICES"].split()
+    assert "strih-obs=4440:8800:4455:30000-30031" in f["STRIH_DANTE_DEVICES"].split()
     assert "master-asio-dante" not in (BOXES / "strih-snv.env").read_text(), "site data never in the public repo"
 
 
