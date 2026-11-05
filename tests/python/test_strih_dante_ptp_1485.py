@@ -107,6 +107,9 @@ def test_the_real_pins_are_read():
       "source=Internal from=Service offset_ns=Some(-441612)",
       "x INFO dstack::clock::linked: media clock source changed with a re-align source=Internal from=Service "
       "offset_ns=Some(-455303) waited=60"], "internal Service -"),
+    # dstack v0.6.33 (live strih-snv OBS log, 5.11.2026): the seamless switch line.
+    ([SERVICE, "04:52:02.662: dante-input dlink:  INFO dstack::clock::linked: media clock source handed over, "
+      "no re-align source=Internal from=Service offset_ns=Some(-23454)"], "internal Service -"),
 ])
 def test_the_last_source_line_decides(lines, want):
     r = _bash("strih_dante_media_clock_verdict", stdin="\n".join(lines) + "\n")
