@@ -520,3 +520,17 @@ def test_the_strih_snv_manifest_parses_to_the_dante_seed():
     assert PAV.program_audio_want(PAV.DANTE_SEED, "pulse", {"d": 1}) == ("dante_input", {})
     with pytest.raises(ValueError):
         PAV.parse_program_audio_vban('{"program_audio_dante": 1}')
+
+
+def test_the_obs_dante_rx_ports_lie_below_the_os_ephemeral_range():
+    # dstack 5.11.2026: a fixed RX flow port inside Linux's ephemeral range (32768-60999) can be taken
+    # by any socket the OS numbers itself; strih-snv's OBS Dante device failed to start on it
+    # ("RX flow port 47217: Address already in use") and the program stayed silent.
+    for env in sorted(BOXES.glob("*.env")):
+        f = dict(l.split("=", 1) for l in env.read_text().splitlines() if l and l[0] != "#" and "=" in l)
+        for dev in f.get("STRIH_DANTE_DEVICES", "none").split():
+            name, ports = dev.split("=", 1)
+            if name != "strih-obs":
+                continue
+            first, last = (int(p) for p in ports.split(":")[3].split("-"))
+            assert last < 32768, f"{env.name}: {name} RX ports {first}-{last} reach the ephemeral range"
