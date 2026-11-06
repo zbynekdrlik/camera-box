@@ -116,7 +116,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # Bumped 2026-10-07: v1.16.0 (dantesync PR 128, a991f13 -- the daily-mode nightly date step is rounded
 # to a 200 ms quantum (`date_daily_step_quantum_ms`), a whole number of frames at 25/30/50/60 fps, so
 # the 02:00 UTC step no longer shifts any genlock grid's phase; camera-box issue 1372 part A).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.27.0}"
+# Bumped 2026-11-05: v1.28.0 (dsync) -- at a grandmaster change within 1 ms (each FOH reboot) the
+# ~110 us residual after relock is slewed (tau 20 s), no longer stepped; the step had re-anchored
+# SongPlayer's Dante output on resolume-snv (one lost pump block, 5.11.2026 07:35:47 UTC).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.28.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

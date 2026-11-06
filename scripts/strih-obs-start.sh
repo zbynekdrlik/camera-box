@@ -14,9 +14,6 @@ set -euo pipefail
 #   * NO taskset CPU pin unless STRIH_ISOLATED_CPUS / /etc/strih-isolated-cpus.conf exists (never a
 #     guessed pin -- the imag #841 lesson); since issue 1357 the shared baseline's obs_box_cpu_affinity
 #     persists the TOPOLOGY-DERIVED P-core block there (AFFINITY-ONLY, like imag's taskset pin);
-#     issue 1485: on a Dante-program box /etc/strih-dante-rx-cpu.conf takes that block's highest CPU out
-#     of OBS's mask, and the root helper strih-dante-rx-pin (sudo, no arguments) puts the dante_input
-#     source's dstack-engine + dstack-rx threads there at nice -10 after each launch;
 #   * issue 1346 (owner 24.9.2026): the HDMI output is the in-OBS DRM-lease output (issue 1152),
 #     selectable Program / built-in Multiview. When ~/.camera-box/drm-output.json arms it, the
 #     launcher takes that connector OUT of the X layout before the OBS launch (the lease takes the
@@ -50,6 +47,33 @@ strih_resolve_session_env() {
   return 1
 }
 
+# strih_wait_rig_address IP BOUND_S -> wait until `ip -o -4 addr show` lists the rig address IP and
+# `ip -4 route show` its connected route (issue
+# 1387, 4.11.2026: after a reboot OBS started 4 s before the 10 GbE rig NIC had a carrier and the JPEG XS
+# program output failed once with ENETUNREACH). The same condition the dantesync unit's ExecStartPre
+# waits on (issue 1439). Polls once a second, at most BOUND_S seconds (a non-number = 120). rc 0 = the
+# address is up (one line names how long it took), 1 = not up after the bound, 2 = no IP or not an
+# IPv4 address (nothing waited). A user unit cannot order on the system network-online.target, so the
+# launcher waits itself. Test seams: `ip` and `sleep` from PATH.
+strih_wait_rig_address() {
+  local ip="${1-}" bound="${2-}" d='[0123456789]{1,3}' i out src_re
+  [[ "$ip" =~ ^${d}\.${d}\.${d}\.${d}$ ]] || return 2
+  src_re="src[[:space:]]${ip//./\\.}([[:space:]]|$)"
+  [[ "$bound" =~ ^[0123456789]{1,5}$ ]] || bound=120
+  for ((i = 0; i <= bound; i++)); do
+    out="$(ip -o -4 addr show 2>/dev/null || true)"
+    # the address AND its connected route (`... src IP ...`): NetworkManager adds a noprefixroute
+    # address before the prefix route, and ENETUNREACH is a missing route.
+    if [[ "$out" == *" ${ip}/"* ]] && [[ "$(ip -4 route show 2>/dev/null || true)" =~ $src_re ]]; then
+      printf 'rig network: %s up after %d s\n' "$ip" "$i"
+      return 0
+    fi
+    [ "$i" -lt "$bound" ] || break
+    sleep 1
+  done
+  return 1
+}
+
 # --- source-guard: when sourced (the unit tests), define funcs only -- never run the launch flow ---
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0 2>/dev/null || true
@@ -76,6 +100,17 @@ while IFS= read -r _kv; do
   echo "session display: $_kv"
 done <<< "$SESSION_ENV"
 
+# issue 1387: the rig network first (STRIH_RIG_IP from the box-facts drop-in). Fail-open: a timeout is a
+# loud WARN and OBS starts anyway (the operator still gets a local OBS; verify item 49 names a program
+# output that then could not start).
+if strih_wait_rig_address "${STRIH_RIG_IP:-}" "${STRIH_RIG_NET_WAIT_S:-120}"; then
+  :
+elif [ "$?" = 1 ]; then
+  echo "WARN issue 1387: the rig address ${STRIH_RIG_IP} is not up after ${STRIH_RIG_NET_WAIT_S:-120} s -- starting OBS anyway; the JPEG XS program output may fail to start (verify-strih item 49 (jxs-output-start))"
+else
+  echo "NOTE issue 1387: no rig address in STRIH_RIG_IP ('${STRIH_RIG_IP:-}') -- not waiting for the network (re-run setup-strih.sh step 8 for the drop-in)"
+fi
+
 rm -rf "$OBS_CFG/.sentinel"/* 2>/dev/null || true
 
 # Optional CPU pin -- ONLY from an explicit source (STRIH_ISOLATED_CPUS env or the persisted file);
@@ -85,25 +120,6 @@ ISOLATED_CPUS="${STRIH_ISOLATED_CPUS:-}"
 if [ -z "$ISOLATED_CPUS" ] && [ -r /etc/strih-isolated-cpus.conf ]; then
   ISOLATED_CPUS="$(cat /etc/strih-isolated-cpus.conf 2>/dev/null || true)"
 fi
-
-# issue 1485: a Dante-program box (setup-strih step 13 wrote the file) reserves one CPU of that mask for
-# the dante_input source's dstack-engine + dstack-rx threads; OBS runs on the rest, and the root helper
-# moves the two threads there once they exist. The reduced mask counts only while the file was derived
-# from the mask in use (`base`); a stale file is named and ignored. No file (every other box) = unchanged.
-RX_PIN=0
-RX_PIN_CONF="${STRIH_DANTE_RX_PIN_CONF:-/etc/strih-dante-rx-cpu.conf}"
-if [ -n "$ISOLATED_CPUS" ] && [ -r "$RX_PIN_CONF" ]; then
-  RX_PIN_BASE="$(sed -n 's/^base=//p' "$RX_PIN_CONF" | head -n 1 || true)"
-  RX_PIN_OBS="$(sed -n 's/^obs=//p' "$RX_PIN_CONF" | head -n 1 || true)"
-  if [ -n "$RX_PIN_OBS" ] && [ "$RX_PIN_BASE" = "$ISOLATED_CPUS" ]; then
-    echo "issue 1485: OBS on ${RX_PIN_OBS}, CPU $(sed -n 's/^reserved=//p' "$RX_PIN_CONF" | head -n 1 || true) is the Dante threads'"
-    ISOLATED_CPUS="$RX_PIN_OBS"
-    RX_PIN=1
-  else
-    echo "WARN issue 1485: ${RX_PIN_CONF} was derived from '${RX_PIN_BASE}', the OBS mask is '${ISOLATED_CPUS}' -- no CPU reserved; re-run setup-strih.sh step 13"
-  fi
-fi
-# issue 1485 end of the mask step
 
 # --profile / --collection ONLY when those OBS dirs exist -- a fresh box has none, so the launcher
 # must fall back to the default (never pass a flag for a profile/collection OBS has not seeded yet).
@@ -167,12 +183,6 @@ else
 fi
 OBS_PID=$!
 echo "obs launched (pid $OBS_PID)"
-# issue 1485: the root helper waits (bounded) for the Dante threads and pins them; in the background, so
-# a slow module load never delays the WS wait below. Never fatal: verify item 9 names an unpinned thread.
-if [ "$RX_PIN" = 1 ]; then
-  ( sudo -n "${STRIH_DANTE_RX_PIN_BIN:-/usr/local/sbin/strih-dante-rx-pin}" \
-      || echo "WARN issue 1485: the Dante thread pin did not complete (above) -- the threads run on OBS's CPUs at nice 0" ) &
-fi
 
 deadline=$((SECONDS + 90))
 until (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; do

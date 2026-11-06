@@ -9,6 +9,7 @@ that to YouTube. This tool only starts / stops that output and reads when the re
   youtube_leg_obs.py --host H [--password P] stream-stop    -> {"unpublish_utc": t, "was_active": b}
   youtube_leg_obs.py --host H [--password P] stream-status  -> {"active": b, "since_utc": t | null}
   youtube_leg_obs.py --host H [--password P] record-start   -> {"record_start_utc": t}
+  youtube_leg_obs.py --host H [--password P] stream-service -> {"url": restreamer's local inpoint URL}
 
 exit 0 OK, 2 refused / failed / timed out (one JSON object on stdout either way, `reason` on a
 failure). It goes through obs_phase2's client (`_conn` / `_rpc`, so its bounded requests and its
@@ -85,8 +86,22 @@ def record_start(rpc, now=time.time):
     return {"record_start_utc": now() - dur / 1000.0}
 
 
+def stream_service(rpc):
+    """Read-only (issue 1387): restreamer's local inpoint URL the stream OBS publishes to, so the
+    restreamer-input capture plays exactly that stream. Any other server is not restreamer on this box:
+    no URL, and its key is never printed."""
+    import youtube_leg_tap  # lazy: only this action needs it
+
+    st = rpc("GetStreamServiceSettings") or {}
+    s = st.get("streamServiceSettings") or {}
+    url = youtube_leg_tap.local_inpoint_url(s.get("server"), s.get("key"))
+    if url is None:
+        raise Refused(f"the stream OBS does not publish to restreamer's local inpoint (server {s.get('server')!r})")
+    return {"url": url}
+
+
 ACTIONS = {"stream-start": stream_start, "stream-stop": stream_stop, "stream-status": stream_status,
-           "record-start": record_start}
+           "record-start": record_start, "stream-service": stream_service}
 
 
 def main(argv=None):

@@ -867,10 +867,10 @@ shim + numpy next to restreamer's broadcast encoder).
   operator's `--user` `program-audio-sampler.service`:
   - `CPUAffinity=` = `strih_program_audio_cpus` (issue 1485), never every CPU and never empty:
     - a hybrid box: its own `/sys/devices/cpu_atom/cpus`, read the way `strih_lx_lowprio_prefix`
-      reads it, minus the reserved Dante CPU (`/etc/strih-dante-rx-cpu.conf` `reserved=`);
-    - no cpu_atom (the AMD strih-snv), or E-cores that are only the reserved CPU: the BACKGROUND set,
-      `obs_box_background_cpus` = online minus `/etc/strih-isolated-cpus.conf` (the
-      `rig-background.slice` set; strih-snv 0-1), minus the reserved CPU;
+      reads it;
+    - no cpu_atom (the AMD strih-snv): the BACKGROUND set, `obs_box_background_cpus` = online minus
+      `/etc/strih-isolated-cpus.conf` (the `rig-background.slice` set; strih-snv 0-1), off OBS's cores
+      (the issue-1485 reserved Dante CPU it was also kept off is removed, `strih-dante-input.md`);
     - neither derivable (no OBS mask yet): step 16e FAILS by name and item 41 reads `unit=no-cpu-set`.
     - Why: the old rule dropped the line when cpu_atom was absent, so on strih-snv the sampler (with
       the CG receivers + correlation, ~11-20 % CPU) ran on 0-15. On CPU 15 it cost the dstack engine

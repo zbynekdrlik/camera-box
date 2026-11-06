@@ -503,7 +503,7 @@ elif [ -f /etc/systemd/system/intercom-hub.service ]; then
   elif [ "${IH_EN}/${IH_ACT}" = enabled/active ]; then ok "intercom-hub.service enabled + active"
   elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service enabled=${IH_EN:-unknown} active=${IH_ACT:-unknown} -- the interkom is down (issue 1418): systemctl enable --now intercom-hub; journalctl -u intercom-hub"
   else note "intercom-hub.service installed (enabled=${IH_EN:-unknown}, active=${IH_ACT:-unknown}) -- ${WHY}"; fi
-  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d; strih_intercom_hub_memlock_grade "http://${WS_HOST}:8790/api/state"; strih_intercom_hub_dante_rx_grade "http://${WS_HOST}:8790/api/state"; strih_intercom_hub_version_grade "http://${WS_HOST}:8790" "$(strih_box_loaded_name)"   # issue 1412 role drop-in; issue 1401 memory lock; issue 1467 hub version
+  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d; strih_intercom_hub_memlock_grade "http://${WS_HOST}:8790/api/state"; strih_intercom_hub_dante_rx_grade "http://${WS_HOST}:8790/api/state"; strih_intercom_hub_version_grade "http://${WS_HOST}:8790" "$(strih_box_loaded_name)"; strih_intercom_hub_media_clock_grade   # issue 1412 role drop-in; issue 1401 memory lock; issue 1467 hub version; issue 1485 media clock
 elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1418: the interkom runs on it)"
 else note "intercom-hub.service not installed -- ${WHY}"; fi
 
@@ -852,7 +852,7 @@ strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel
 # 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh: nginx + each name's cert + the upstreams + renewal) + issue 1453 tunnel + TURN (strih-interkom-public.sh).
 if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; strih_interkom_public_grade_report || bad "(https-public) the grader did not print both rows"; else note "(https) not graded: ${WHY}"; fi
 if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_grade_report || bad "(log-sink) the grader did not print all of its rows"; else note "(log-sink) not graded: ${WHY}"; fi   # 46) issue 1394 cambox log sink (scripts/lib/strih-cambox-log-sink.sh: files, units, listeners)
-obs_box_avsync_dock_grade_report "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}" "${STRIH_SHAREDIR:-/usr/share}" "${LOG:-}" "${USER_HOME}/.config/obs-studio/user.ini" || bad "(avsync-dock) the grader did not print all of its rows"   # 47) issue 1470 A/V-sync dock (scripts/lib/obs-box-avsync-dock.sh: installed + loaded on every role, the saved layout on the stream role)
+obs_box_avsync_dock_grade_report "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}" "${STRIH_SHAREDIR:-/usr/share}" "${LOG:-}" "${USER_HOME}/.config/obs-studio/user.ini" || bad "(avsync-dock) the grader did not print all of its rows"; obs_box_loudness_dock_grade_report "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}" "${STRIH_SHAREDIR:-/usr/share}" "${LOG:-}" "${USER_HOME}/.config/obs-studio/user.ini" || bad "(loudness-dock) the grader did not print all of its rows"   # 47) issue 1470 A/V-sync dock + issue 1436 LUFS meter (scripts/lib/obs-box-{avsync,loudness}-dock.sh: installed + loaded on every role, the saved layout on the stream role)
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
@@ -910,7 +910,7 @@ fi
 strih_nic_grade_report /sys "$(ip -o -4 addr show 2>/dev/null || true)" || bad "(nic) the rig-NIC grader printed no row"
 obs_audio_buffering_verify_row "$(strih_lx_audio_buffering_ms)" "$USER_HOME" "$LOG"   # 48) the FIXED OBS audio buffering == the box fact (issue 1425)
 strih_jxs_verify_row "$LOG"   # 49) every running JPEG XS source: lost_slices=0 over its last minute (issue 1387, scripts/lib/strih-jxs-verify.sh)
-strih_jxs_config_verify_row "$USER_HOME"   # 49) + the JPEG XS config vs the box facts: manifest, inputs, program output (issue 1387, strih-jxs-provision.sh)
+strih_jxs_config_verify_row "$USER_HOME"; strih_jxs_output_start_row "$USER_HOME" "$LOG"; strih_obs_dropin_verify_row "$USER_HOME"   # 49) + the JPEG XS config vs the box facts (manifest, inputs, program output), the output's start, the OBS network wait (issue 1387, strih-jxs-provision.sh)
 
 # 35) Downstream Keyer OBS plugin (issue 1361): setup-strih.sh step 4c installs the pinned upstream
 #     plugin into the /usr prefix OBS loads; FAIL unless the installed .so has the pinned sha256 (the

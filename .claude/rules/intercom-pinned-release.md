@@ -26,11 +26,23 @@ the boxes and keeps the glue: `strih-intercom-hub-unit.sh`, `strih-interkom-publ
 - **Who fetches:** the strih deploy on dev1, into its staged tree (the box needs no network for it); else
   setup-strih from a checkout, before step 12 (the purge decision reads the routing file).
 - **Another installed version:** replaced by rename (a running hub stays on its old inode), the old one
-  kept as `intercom-hub.pre-<version>`. Provisioning never restarts a running hub: restart it after a pin
-  bump, or the crash restart loads the new pair.
+  kept as `intercom-hub.pre-<version>`. A running hub is
+  try-restarted by setup-strih right after step 16i only when its install changed (issue 1485, 4.11.2026:
+  v1.9.13 installed, the old process kept running): the fingerprint of binary, unit, drop-ins and TOMLs
+  against the record of what the running invocation was started on, else the one from before step 12
+  (`strih_intercom_hub_restart_if_changed`), then the crash-loop probe;
+  unchanged = never touched, stopped = the 13-hub-live start. The strih deploy's read-back FAILs a running
+  hub (`/api/version` on the box) that is not the pin's version on a strih-role box.
 - **verify item 16:** the running hub (else `<bin>.version`) against the pin, a difference = a NOTE with
-  the reinstall line. Plus a FAIL row on CAP_NET_BIND_SERVICE on the binary or the unit (dantesync stays
-  the only PTP owner, `audio-clock-map.md`).
+  the reinstall line. Plus the capability row (ROZHODNUTÉ 6628785864, 4.11.2026: the hub's dstack device
+  follows Dante PTP in process on UDP 319): once the pin's `INTERCOM_RELEASE_DSTACK_VERSION` >= v0.6.23 the
+  unit must grant EXACTLY `AmbientCapabilities=CAP_NET_BIND_SERVICE` + `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`
+  and the binary no file capability (the intercom project, 4.11.2026: its release 1.9.12's unit, once the
+  pin moves to it); missing or any other capability FAILs, below the
+  threshold a NOTE. No camera-box drop-in may set either key or `SecureBits=` (an empty one resets the list and
+  takes 319 away; pinned by `tests/python/test_strih_dante_ptp_1485.py`). Plus `(intercom-dante) media clock`
+  (`scripts/lib/strih-dante-ptp.sh`, `.claude/rules/strih-dante-input.md`). The dsync service stays the only
+  writer of the system clock (`audio-clock-map.md`).
 - **`StateDirectory=intercom-hub`** in the released unit: `/var/lib/intercom-hub/dlink.toml` keeps what Dante
   Controller sets. The drop-in's `DynamicUser=no` + `User=` make it owned by the operator.
 

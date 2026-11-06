@@ -1125,6 +1125,38 @@ FAILs naming it; a clean one PASSes; a source that stopped writing and no source
 The OBS indicator reads DEGRADED from the same counters. Pytest:
 `tests/python/test_strih_jxs_verify_1387.py` (the lines rendered from the SHIPPED C format string).
 
+## A dead program output after a reboot is caught (4.11.2026, issue 1387)
+
+strih-snv rebooted at 20:48; `strih-obs.service` started OBS 4 s before the 10 GbE rig NIC had a
+carrier, the output logged `cannot start the sender ... Network is unreachable` / `did not start`
+once, and stream-snv's program stayed black ~30 min. No check noticed: nobody runs verify after a
+reboot, and the stream's `JXS PGM src` kept writing `fps=0.00 frames=0 lost_slices=0` windows, which
+item 49 read as PASS.
+- **The launcher waits for the rig address:** `strih_wait_rig_address` in `strih-obs-start.sh` polls
+  `ip -o -4 addr show` for ` <STRIH_IP>/` (the dantesync ExecStartPre condition) AND `ip -4 route show`
+  for its connected route (` src <STRIH_IP> `: NetworkManager adds a noprefixroute address before the
+  route, and ENETUNREACH is a missing route) once a second, at most
+  `STRIH_RIG_NET_WAIT_S` (120 s), before OBS launches; a timeout is a WARN and OBS starts anyway. The
+  IP comes from the box-facts drop-in (`STRIH_RIG_IP`). A `--user` unit cannot order on the system
+  `network-online.target`, so the launcher waits itself.
+- **verify item 49 (same line):** `(obs-net-wait)` = the drop-in byte for byte; `(jxs-output-start)`
+  (strih role, enabled jxs-output.json) = the newest of `started --` / `did not start:` / obs v0.4.14's
+  `cannot start the sender to ... -- retried every 2 s` (INACTIVE while it retries) / `-- the sender is
+  restarted`: only `started --` passes; the lost-slices row FAILs a running source whose newest window
+  has `frames=0`.
+- **The deploy read-back** carries `jxs=off|started|failed|retrying|restarting|pending`
+  (`strih_lx_remote_jxs_state_cmd`, the log newer than the start marker); `strih_lx_deploy_verdict`'s
+  12th argument refuses all but `off` / `started`, so the poll waits for the start.
+- The handover `jxs` item already read the stream side (a stream link at frames=0 = FORGOT).
+- Limits: the v0.4.14 retry / restart lines in the tests are typed from the obs project's note, not
+  rendered from a shipped source (the vendored `jxs-output.cpp` predates them): render them from the
+  release's format strings when `scripts/obs-release.pin` reaches v0.4.14. `(obs-net-wait)` grades the
+  drop-in FILE, not the loaded unit environment (a missing `daemon-reload` reads PASS). A box away from
+  its declared venue never sees its STRIH_IP and waits the full bound at every OBS start (fail-open).
+  frames=0 FAILs a declared camera input whose cambox is off: one receive, no backup, the EVENT
+  `jxs_live` rule.
+- Tests: `tests/python/test_strih_obs_net_wait_1387.py`.
+
 ## The EVENT contract grades every JPEG XS link (1.11.2026, item `jxs_live`)
 
 - **Why:** on the SNV event morning the cameras were moved and rebooted after the rig was set up,
@@ -1214,10 +1246,10 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
   - strih role: upserts `~/.config/obs-studio/plugin_config/distroav/jxs-output.json` = enabled +
     `jxs_target` = the VENUE's stream box (the stream-role fact file of the same `STRIH_VENUE`: its
     `STRIH_IP` + `STRIH_JXS_PROGRAM_PORT`, `strih_jxs_program_target`) + `jxs_stream_id` 100. The
-    operator's `jxs_bpp_*` / `jxs_cores` / `jxs_pace_mbps` and any other key are KEPT. On a box with no
-    Dante program the render of the live file is the live file byte-for-byte (147 bytes); on a Dante box
-    (strih-snv) the first run writes the derived `jxs_cores` + `jxs_cores_derived` (issue 1485,
-    `strih-dante-input.md`, step 13 on a fresh box), later runs are unchanged. Root works in the user's tree, so a symlinked
+    operator's `jxs_bpp_*` / `jxs_cores` / `jxs_pace_mbps` and any other key are KEPT; the render of the
+    live file is the live file byte-for-byte (147 bytes). A `jxs_cores` the removed issue-1485 Dante CPU
+    reservation derived (it still equals its `jxs_cores_derived` record) is reset to `""` and the record
+    dropped (`strih-dante-input.md`). Root works in the user's tree, so a symlinked
     file is REFUSED, every read is O_NOFOLLOW + a regular-file check, and an unparseable file is moved
     aside with `mv -T` (never copied through a planted link), then rewritten. A venue with no program
     port gets an ENABLED file disabled (`"enabled": false`, every other key kept) so setup converges to
@@ -1253,8 +1285,8 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
     hand-enabled file on a venue that declares no program FAILs (setup step 6 disables it).
 - Read-only check of the live boxes on 31.10.2026: `obs_jxs_inputs.py --verify` from dev1 against
   strih-snv and stream-snv PASSes every input with the declared facts, so the first setup-strih run there
-  is a pure read for the inputs; jxs-output.json gets the issue-1485 `jxs_cores` (+ `jxs_cores_derived`)
-  on strih-snv once, then reads `unchanged`.
+  is a pure read for the inputs; jxs-output.json on strih-snv loses its issue-1485 derived `jxs_cores`
+  (+ `jxs_cores_derived`) once, then reads `unchanged`.
 - Tests: `tests/python/test_strih_jxs_provision_1387.py` (the facts + validator, the manifest, the
   program target, the output render, step 6 end to end on temp paths, the verify rows, the wiring and
   budgets), `tests/python/test_obs_jxs_inputs_1387.py` (the seeder against a fake obs-websocket, the
@@ -1272,8 +1304,8 @@ so nothing JPEG XS is provisioned there; the PP rollout is four fact lines.
    Then `./scripts/verify-device.sh CAMn`: `(ay)` PASS.
 2. strih-snv + stream-snv: the next genlock deploy runs setup-strih (or `sudo ./scripts/setup-strih.sh
    --box <box>` from a checkout): step 6 prints `jxs-seed.json written` and, the first time,
-   `jxs-output.json written` on strih-snv (the issue-1485 derived `jxs_cores`; `unchanged` after that;
-   the running output takes it at its next Stop/StartOutput). The inputs are healed at the next OBS start (a pure read on the live state: every live
+   `jxs-output.json written` on strih-snv (the issue-1485 derived `jxs_cores` reset to every CPU;
+   `unchanged` after that; the running output takes it at its next Stop/StartOutput). The inputs are healed at the next OBS start (a pure read on the live state: every live
    input already matches); a hand `python3 /usr/local/bin/obs_jxs_inputs.py --bootstrap` refuses every
    write while OBS streams or records. The saved collection gets the 36 ms pin when OBS next saves it
    (on exit).

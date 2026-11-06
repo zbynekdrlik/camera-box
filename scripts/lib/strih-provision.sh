@@ -83,6 +83,11 @@ if ! declare -F obs_box_avsync_dock_seed >/dev/null; then
   # shellcheck source=scripts/lib/obs-box-avsync-dock.sh
   . "$(dirname "${BASH_SOURCE[0]}")/obs-box-avsync-dock.sh"
 fi
+# issue 1436: the LUFS meter on the stream role (step 16g after the A/V-sync dock, item 47).
+if ! declare -F obs_box_loudness_dock_seed >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-loudness-dock.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-loudness-dock.sh"
+fi
 # issue 1412: the per-box step gate (setup-strih / verify-strih skip a step by a box fact).
 if ! declare -F obs_box_step_applies >/dev/null; then
   # shellcheck source=scripts/lib/obs-box-role.sh

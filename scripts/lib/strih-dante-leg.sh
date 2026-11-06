@@ -18,8 +18,25 @@
 # this box's own devices, so a peer device on other ports needs its port added. Multicast: mDNS, the info
 # group 224.0.0.231:8702, the heartbeat group 224.0.0.233:8708. IGMP goes both ways or a snooping switch
 # ages the groups out. No conntrack: its hooks would see every NDI packet of this box. avahi stays off
-# the leg by its uid (an avahi restart risks the NDI announcement). UDP 319/320 and dsync's 31900 are
-# never admitted: dantesync stays the box's only PTP owner.
+# the leg by its uid (an avahi restart risks the NDI announcement).
+#
+# PTP (ROZHODNUTE 6628785864, owner 4.11.2026): every dstack device here follows Dante PTP IN PROCESS
+# (dsync's follower in dstack v0.6.23: UDP 319 event + 320 general on INADDR_ANY, joined to 224.0.1.129
+# on the leg, receive only, it never sends). So one input rule admits exactly that group to 319/320 from
+# the /24; no output rule (IGMP already passes). dsync's own 31900 stays shut. The dsync service stays
+# the only writer of the system clock; Linux's default IP_MULTICAST_ALL also hands the group's packets to
+# its own INADDR_ANY:319 sockets, and its gm_allowlist keeps it on video-clock.lan.
+
+# The rule is rendered only once a pinned device's dstack follows in process (strih_dante_ptp_leg_open,
+# strih-dante-ptp.sh): before that a dstack that reached 319 would start its old follower beside dsync.
+if ! declare -F strih_dante_ptp_leg_open >/dev/null; then
+  # shellcheck source=scripts/lib/strih-dante-ptp.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-ptp.sh"
+fi
+
+# the PTP multicast group + the two ports dsync's follower binds (dsync-ptp net_linux.rs)
+STRIH_DANTE_PTP_GROUP=224.0.1.129
+STRIH_DANTE_PTP_PORTS="319, 320"
 
 STRIH_DANTE_MDNS_PORT=5353
 STRIH_DANTE_INFO_PORT=8700
@@ -86,6 +103,10 @@ strih_dante_nft_input() {
   printf '        iifname "%s" ip saddr %s udp dport { %s } counter accept\n' "$ifc" "$net" "$(strih_dante_in_ports "$dev")"
   printf '        iifname "%s" ip saddr %s udp sport { %s } udp dport %s counter accept\n' "$ifc" "$net" \
     "$(strih_dante_peer_ports "$dev")" "$STRIH_DANTE_EPHEMERAL_PORTS"
+  if strih_dante_ptp_leg_open; then
+    printf '        iifname "%s" ip saddr %s ip daddr %s udp dport { %s } counter accept\n' "$ifc" "$net" \
+      "$STRIH_DANTE_PTP_GROUP" "$STRIH_DANTE_PTP_PORTS"
+  fi
   printf '        iifname "%s" ip protocol igmp counter accept\n' "$ifc"
 }
 

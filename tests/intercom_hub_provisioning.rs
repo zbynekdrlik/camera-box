@@ -34,7 +34,9 @@ fn setup_strih_installs_the_unit_and_toml_enable_only() {
         "setup-strih must ENABLE the intercom-hub unit"
     );
     // issue 1418: a STOPPED hub is started on the strih role only (behind the 13-hub-live gate and an
-    // is-active check); a running hub is never restarted by provisioning.
+    // is-active check). Issue 1485: a RUNNING hub is try-restarted only when its install changed, through
+    // the lib (strih_intercom_hub_restart_if_changed, tests/python/test_strih_hub_restart_on_change_1485.py);
+    // setup-strih itself never runs a plain restart.
     let gate = s
         .find("if WHY=\"$(obs_box_step_applies 13-hub-live)\"")
         .expect("the hub start is gated on the strih role");
@@ -56,7 +58,7 @@ fn setup_strih_installs_the_unit_and_toml_enable_only() {
     );
     assert!(
         !s.contains("systemctl restart intercom-hub"),
-        "setup-strih must NOT restart a running intercom-hub"
+        "setup-strih never runs a plain restart of the hub (a changed install is try-restarted by the lib)"
     );
     assert!(
         s.contains("TOTAL_STEPS=17"),

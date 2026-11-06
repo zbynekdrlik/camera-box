@@ -4,8 +4,10 @@ paths:
   - "scripts/dante_input_continuity.py"
   - "scripts/lib/program-audio-continuity.sh"
   - "tests/python/test_strih_dante_input_1485.py"
-  - "scripts/lib/strih-dante-rx-pin.sh"
-  - "tests/python/test_strih_dante_rx_pin_1485.py"
+  - "scripts/lib/strih-dante-cpu-leftovers.sh"
+  - "tests/python/test_strih_dante_cpu_leftovers_1485.py"
+  - "scripts/lib/strih-dante-ptp.sh"
+  - "tests/python/test_strih_dante_ptp_1485.py"
 ---
 
 # strih-snv's program audio over Dante: the obs release's `dante_input` source (issue 1485)
@@ -21,7 +23,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
 - **The file:** `~/.camera-box/dante-input.toml` of the OBS user, read ONCE at OBS start (no file = no
   device and no source kind). setup-strih step 13 writes it after the leg (`strih_dante_input_install`):
   name `strih-obs`, iface = the leg's (`enp7s0.70`), `network_rate = 96000`, no `sample_rate`,
-  `latency_ms = 10`, the fact's ports, one `[[subscribe]]` per RX channel. Another box removes a file
+  no `latency_ms` (dlink's default: 15 ms with a 6 ms pump margin since dstack v0.6.28, the old 10 ms on
+  the releases before it; writing 10 would pin OBS under the new default), the fact's ports, one `[[subscribe]]` per RX channel. Another box removes a file
   carrying our header and leaves an operator's own.
 - **Site data is never in git (the repo is public):** the per-box untracked
   `/etc/camera-box/dante-input.site.conf` (`STRIH_DANTE_INPUT_SITE_FILE`), placed by the supervisor:
@@ -47,89 +50,97 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   no rx_holes and reads UNKNOWN; in v0.2.0 `underruns` mixed late blocks with skips, so it proves nothing), clock=free or holdover=1, or a `dante-input error:` in the window = FAIL; no
   opening line, a restart, a counter backwards, no delivered frames = UNKNOWN = FAIL. The closing line is
   the second status line after the stop.
-- **The Dante threads' own CPU (`scripts/lib/strih-dante-rx-pin.sh`, 3.11.2026, the obs project's ask
-  beside their v0.4.0).** dlink's pump thread `dstack-engine` wakes every 0.33 ms; among ~10 runnable OBS
-  threads per CPU at SCHED_OTHER nice 0 its blocks finished up to 6.7 ms late against a 5 ms margin and
-  audio was skipped (underruns, rebootstraps). So on a Dante-program box only:
-  - **The CPU is derived:** the highest CPU that is online AND in `/etc/strih-isolated-cpus.conf`
-    (`strih_dante_rx_pin_plan`); strih-snv = CPU 15, OBS on 2-14. Its SMT sibling (14 on strih-snv,
-    written to the conf as `smt_siblings`) stays OBS's: the two threads get their own run queue (the
-    wake-up latency is the fault), not a whole physical core. Taking 14 too would cost OBS another CPU;
-    re-measure before doing it.
-  - **The mask file stays the full block.** The background slice (`rig-background.slice` = online minus
-    that file, 0-1) and the baseline `affinity` row read it unchanged. setup-strih step 13
-    (`strih_dante_input_install`) writes `/etc/strih-dante-rx-cpu.conf` (`reserved=`, `obs=`, `base=`,
-    `smt_siblings=`); `strih-obs-start.sh` launches OBS under `obs=` only while `base=` equals the mask in
-    use (a stale file is named and ignored; no file = every other box, unchanged).
-  - **nice -10 by a root helper, never a limits.d grant.** `/usr/local/sbin/strih-dante-rx-pin`, allowed
-    by ONE sudoers line with no arguments (`... NOPASSWD: /usr/local/sbin/strih-dante-rx-pin ""`, checked
-    by `visudo -cf` before the write), the obs-box-background-run pattern (issue 1387). A limits.d nice
-    grant is a session-wide rlimit like the retired `95-<box>-genlock-rtprio.conf` (obs-box-baseline.md)
-    and would let every thread of every process of the user lower its nice. No realtime policy anywhere;
-    rtprio stays off.
-  - **The helper:** the newest `obs` of the sudo caller (`pgrep -n -x -u $SUDO_UID`), only its tasks whose
-    `comm` is `dstack-engine` or `dstack-rx`; `taskset -p -c <cpu>` + `renice --priority -10` (absolute)
-    per thread, read back from `/proc`; waits up to 120 s for the threads (they start when OBS loads the
-    module); one log line (`obs pid P: dstack-engine tid T, dstack-rx tid U -> CPU 15 nice -10`, also to
-    the journal via `logger -t strih-dante-rx-pin`). Idempotent. No env seam (a root program takes no path
-    from its caller); its tests rewrite its `PATH=` / `PROC=` / `BUDGET_S=` / `CONF=` lines.
-  - **Every OBS start:** the launcher runs it in the background right after the launch (`sudo -n`), so an
-    OBS restart by the unit re-pins. A failure is a WARN in `/tmp/strih-obs-start.log`, never fatal.
-  - **Exclusive since the A/B of 3.11.2026 (`scripts/lib/strih-dante-reserved-cpu.sh`).** The rx pin
-    alone kept only OBS's MAIN mask off CPU 15: PID 1 and everything it forked had 0-15 (bkshading, the
-    hub, Xorg, dsync, the session apps), and the program-audio sampler on 0-15 cost the engine a
-    rebootstrap in every 10-15 min window (moved live to 0-1: a 15.5-min window clean). Now:
-    - **ONE manager-level default, a Dante box only:** step 13 (`strih_dante_reserved_cpu_install`,
-      right after the rx pin) writes `/etc/systemd/system.conf.d/` AND `/etc/systemd/user.conf.d/`
-      `50-strih-dante-reserved-cpu.conf` = `[Manager] CPUAffinity=<online minus reserved>` (0-14), so
-      every unit and every forked process of both managers starts off CPU 15, units we do not own
-      included (the camboxes' `cambox-housekeeping-cpus.sh` precedent, plus the user manager). Rejected: a per-unit `CPUAffinity=` drop-in (every new unit must remember it, foreign
-      units stay on 15) and a cpuset `AllowedCPUs=` (a cpuset BOUNDS sched_setaffinity, so the helper
-      could no longer put the dstack threads there).
-    - **Affinity, not a bound:** `sched_setaffinity` is limited by the cgroup cpuset and the online CPUs
-      only, never by a parent's or the manager's mask, so the helper's `taskset -p -c 15` still works
-      (pinned by a test that widens a narrowed mask) and OBS's `taskset -c 2-14` is a subset.
-    - **A manager takes it when it re-reads its configuration, at the latest at the next boot** (PID 1
-      may already on a daemon-reload; not verified on a box, so nothing relies on it). Every process
-      started after that inherits it; running processes keep their masks until they restart. When a
-      drop-in was written (install) or removed (another box), step 13 re-executes PID 1 and the
-      operator's user manager (`daemon-reexec`, no unit restarts; each under `timeout 30`; a failure is
-      a WARNING naming THAT manager, the next boot applies it; no user = PID 1 only). Setup never moves
-      a live process; after a deploy the supervisor reboots strih-snv (or moves the running ones:
-      `taskset -a -p -c 0-14 <pid>`), then reads `grep Cpus_allowed_list /proc/1/status` and verify
-      item 9.
-    - **The sampler is placed off it too** (`strih_program_audio_cpus`, `program-audio-guard.md`).
-    - **verify item 9's `(program-dante) reserved-cpu` rows** (`strih_dante_reserved_cpu_grade`, before
-      the rx-pin rows): the two drop-ins byte-identical to the render, and a /proc scan (bash builtins,
-      no fork per task) that FAILs every task allowed on the reserved CPU except OBS's two dstack threads
-      and kernel threads (PF_KTHREAD), named by comm with a count (first 8, then `(+N more)`). Another
-      process's own `dstack-*` threads (the hub's) are offenders. While the drop-ins are NEWER than the
-      boot (`btime` in /proc/stat vs the system drop-in's mtime: a deploy before its reboot) the same
-      list is a NOTE `reboot pending`, so step 17 and the genlock deploy's acceptance verify do not fail
-      on it; after any later boot it is a FAIL. Missing or different drop-ins are never pending. A task
-      that exits between its `status` and its `stat` read is skipped; a process name is counted as text
-      (any user sets it, verify runs as root), never inside an arithmetic subscript.
-    - Another box: step 13 removes our two drop-ins (header-checked), never a foreign file.
-    - A thread the two dstack threads create later inherits their mask and nice.
-  - **verify item 9's `(program-dante) rx-pin` rows** (`strih_dante_rx_pin_grade`, in the lib; verify-strih
-    is at its line budget): FAIL when OBS's main `Cpus_allowed_list` still holds the reserved CPU, when a
-    thread is missing, runs on anything but exactly that CPU, or has nice > -10; no conf / no running OBS
-    FAIL too.
-  - Another box: step 13 removes our conf, helper and sudoers line if present, silent when absent.
-  - **The strih JPEG XS program encoder too (3.11.2026):** `jxs_cores` empty = every ONLINE CPU (vstack's
-    `affinity::online_cores`, an explicit sched_setaffinity, so the OBS mask does not bound it): its
-    `jxs-feed` / `jxs-send` threads ran on CPU 15. The OBS mask without the reserved CPU
-    (`strih_jxs_output_default_cores`, the rx-pin plan) goes into `jxs_cores` of `jxs-output.json`:
-    - **step 13 derives it** (`strih_jxs_output_cores_reconcile`, called by `strih_dante_input_install`
-      after the managers' default; render mode `cores` changes only the two keys below). Step 6 runs
-      before baseline step 11 writes `/etc/strih-isolated-cpus.conf`, so on a FRESH box it writes `""`
-      (review of the 1485 commits). A Dante box whose set cannot be derived at step 13 fails by name;
-    - **the derived value is recorded** as `jxs_cores_derived` and re-derived while `jxs_cores` is empty
-      or still equals it (the reserved CPU moved = a new set). An operator's own value is kept, a
-      WARNING when it holds the reserved CPU. A box that stops taking the Dante program gets the derived
-      value cleared (`""`, the record dropped);
-    - **verify item 49 `(jxs-cores)`** (strih-jxs-provision.sh, a Dante box with a program target):
-      an empty `jxs_cores` or one holding the reserved CPU FAILs;
-    - the Dante libs not sourced is an error by name, never "not a Dante box";
-    - the output reads the file at its next start (or Stop/StartOutput over WS).
+- **No CPU pinning for the Dante threads (dstack v0.6.28; owner ruling relayed by dstack issue 1,
+  4.11.2026: nobody can guard cores on every PC).** On 3.-4.11.2026 camera-box reserved CPU 15 for OBS's
+  `dstack-engine` + `dstack-rx` and CPU 14 for the hub's (a root helper behind a sudoers line, OBS
+  launched on the reduced mask, systemd + user-manager CPUAffinity drop-ins, a hub ExecStartPost drop-in,
+  the JPEG XS encoder's cores derived from it) after pump WARNs at a 5 ms margin. dstack v0.6.28 raised
+  dlink's default budget to 15 ms with a 6 ms pump margin instead and removed `pump_cpu` / `io_cpu` /
+  `rx_cpu`. That machinery is GONE; never bring a reservation back, and never write a dlink latency
+  (`latency_ms`) for the OBS device. The hub's TOML is the intercom project's.
+  - **The leftovers (`scripts/lib/strih-dante-cpu-leftovers.sh`, `strih_dante_cpu_leftover_paths`):**
+    `/etc/strih-dante-rx-cpu.conf`, `/usr/local/sbin/strih-dante-rx-pin`, `/etc/sudoers.d/strih-dante-rx-pin`
+    (always ours by name), `/etc/systemd/{system,user}.conf.d/50-strih-dante-reserved-cpu.conf` and
+    `/etc/systemd/system/intercom-hub.service.d/60-strih-dante-rx-pin.conf` (ours only with the camera-box
+    header line; a file of that name without it is left and named).
+  - **setup-strih step 13** (`strih_dante_input_install`, EVERY box, first thing) runs
+    `strih_dante_cpu_leftovers_remove USER`: removes ours, then `daemon-reexec` of PID 1 + the operator's
+    user manager ONLY when a manager drop-in went (each `timeout 30`, a failure a WARNING naming that
+    manager), and `daemon-reload` ONLY when the hub drop-in went (a failure fails the step; the removed
+    drop-in changes the hub's install fingerprint, so the running hub restarts after step 16i). A clean
+    box prints nothing and calls no systemctl. **Only a REBOOT clears the old mask** (0-13 / 0-14):
+    systemd sets its own affinity only when `CPUAffinity=` is set, and the mask survives the
+    daemon-reexec, so PID 1 and the user manager keep it and every unit or OBS restarted later inherits
+    it. After the deploy reboot strih-snv, then read `grep Cpus_allowed_list /proc/1/status` = every
+    online CPU. The remove WARNs while an online CPU is missing from PID 1's mask (a wider mask, every POSSIBLE CPU at boot, is healthy)
+    (`strih_dante_cpu_pid1_narrowed`, review round 1).
+  - **verify item 9 `(dante-cpu)`** (`strih_dante_cpu_leftovers_grade`, called by
+    `strih_program_audio_grade` before the Dante / obs-vban dispatch): one FAIL row per leftover (a
+    foreign file at the name too), else one OK row; a NOTE while PID 1 still runs on the narrowed mask
+    (reboot pending), and a NOTE when a non-root verify cannot list `/etc/sudoers.d` (root 0750: the
+    sudoers leftover is graded only as root). Limit: a hub-fed strih (verify item 9's third branch, no
+    program declared) runs no `(dante-cpu)` rows; only strih-snv ever had the reservation, and setup
+    removes it on every box anyway.
+  - **The JPEG XS program encoder** is back to the pre-1485 rule: `jxs_cores` is the operator's value,
+    empty = every online CPU. setup-strih step 6 resets a value that still equals its
+    `jxs_cores_derived` record to `""` and always drops the record (an operator's value is kept);
+    verify item 49's `(jxs-cores)` FAILs a record left in the file. The running output takes it at its
+    next Stop/StartOutput.
+  - **The program-audio sampler** keeps its own set: the E-cores, else the background set (online minus
+    the OBS mask, strih-snv 0-1), `strih_program_audio_cpus`.
+  - Tests: `tests/python/test_strih_dante_cpu_leftovers_1485.py` (the remove against a temp root with a
+    logging `systemctl` / `timeout`, every branch; step 13 on a Dante and a non-Dante box; the grade; the
+    removed machinery; the TOML; the JPEG XS render and row).
+- **PTP in process (ROZHODNUTÉ 6628785864, owner 4.11.2026; design 6629112890; `scripts/lib/strih-dante-ptp.sh`).**
+  Every dstack device here (the hub's `strih-snv-intercom`, OBS's `strih-obs`) follows Dante PTP itself: dstack
+  v0.6.23's `ClockSource::Linked` starts dsync's follower (UDP 319 + 320 on INADDR_ANY, joined to 224.0.1.129 on
+  the leg, receive only) and falls back to the dsync service's clock. The dsync service stays the ONLY writer
+  of the system clock and the clock of the rest of the box; "dsync is the only PTP owner" is superseded for
+  these devices.
+  - **The leg:** one input rule for the group to 319/320 (`obs-vban-receive.md`, the Dante variant).
+  - **OBS's right to bind 319 = the box-wide sysctl** `net.ipv4.ip_unprivileged_port_start = 319` in
+    `/etc/sysctl.d/60-strih-dante-ptp-port.conf`, step 13 on a Dante-program box (`strih_dante_ptp_port_install`
+    from `strih_dante_input_install`, header-checked file, the running value written to
+    `/proc/sys/net/ipv4/ip_unprivileged_port_start`, no restart: the follower binds at OBS's next start);
+    another box removes OUR file and puts a running 319 back to 1024 (a running 319 with no file of ours is
+    left: nothing records who set it). **Only once BOTH pins are READY** (`strih_dante_ptp_all_ready`):
+    until then step 13 takes the path of another box, since an older dlink that could bind 319 would start
+    its follower beside dsync (the dantesync#109 collision; review round 1), and the right is box-wide, so
+    the hub (an operator process, `DynamicUser=no`) gets it too (review round 2). Cost: every unprivileged process may bind 319-1023 (live
+    `ss -lntup` read on strih-snv 4.11.2026, validation comment 6629102078: only dsync 319/320, rsyslog 514,
+    nginx 443 there; one operator account). Rejected: `setcap` on /usr/bin/obs (a secure exec: libdbus /
+    GLib refuse the session bus, no core dumps, the `/proc/<obs>` files root-owned, re-applied after every
+    bundle install) and an ambient capability through the user manager (pam_systemd v259's
+    `apply_user_record_settings` -> `capability_ambient_set_apply` REPLACES the manager's ambient set with
+    CAP_WAKE_ALARM, read in systemd's source and matched by the live manager's CapPrm; a PAM / userdb
+    change + a restart of the whole user session). Considered, not done: narrowing it with a cgroup bind
+    filter (`SocketBindAllow=udp:319 udp:320` + `SocketBindDeny=` below 1024 on `user-.slice`), an option
+    if the 320-1023 exposure ever matters. Verify item 9 `(program-dante) ptp-port` (graded before the
+    log check, it reads no log): the file as rendered + the running value 319; below the threshold a NOTE
+    when absent, a FAIL when our file is still there.
+  - **The hub's right** comes from its released unit (item 16, `intercom-pinned-release.md`).
+  - **The pin threshold** `STRIH_DANTE_PTP_FIRST_DSTACK=v0.6.23`: a component is READY when its pin's
+    `*_RELEASE_DSTACK_VERSION` is at or above it (`strih_dante_ptp_pin_ready intercom|obs`, the repo's one
+    version rule `release_version_cmp`, which `dtray_version_ge` uses too). Below it nothing opens 319: the
+    leg rule needs either pin READY (`strih_dante_ptp_leg_open`: it only admits packets), the box-wide sysctl
+    both (`strih_dante_ptp_all_ready`: the bind right is what starts an old follower); the capability
+    and media clock rows are NOTEs. The threshold follows the pins, never a date.
+  - **The hub's journal** is read for the current invocation only, filtered to the clock lines as it
+    streams (a weeks-long invocation is never held whole), bounded 20 s; a hub that is not running is a
+    NOTE (item 16's active row already names it), a journalctl that fails, or a read as non-root (journalctl
+    then exits 0 with only a hint), is its own row, never "no line".
+  - **The `media clock` rows** (`strih_dante_media_clock_grade LABEL COMPONENT < log`): the LAST dstack
+    `media clock source source=<X>` line (target `dstack::clock::linked`); the OBS log carries it as
+    `HH:MM:SS.mmm: dante-input dlink:  INFO dstack::clock::linked: media clock source source=Internal
+    from=Service` (two spaces before the level, no ANSI); the hub's journal of its CURRENT invocation
+    (`_SYSTEMD_INVOCATION_ID`) has ANSI codes on, stripped before the parse. `Internal` = OK; `Service`,
+    `None` (`media clock: no source ready`), no line or another value = FAIL once READY, a NOTE below;
+    the last `in-process follower did not start ... reason="..."` warning is named. Item 9 `(program-dante)
+    media clock` (OBS log), item 16 `(intercom-dante) media clock` (only on a box whose facts declare a
+    `*-intercom=` device). Seams: `STRIH_DANTE_PTP_INTERCOM_PIN` / `_OBS_PIN`, `STRIH_HUB_JOURNAL_FILE`,
+    `STRIH_HUB_AMBIENT_CAPS` / `STRIH_HUB_BOUNDING_CAPS`, and the Dante libs' `STRIH_DANTE_RX_PIN_ROOT` prefix
+    for `/etc` + `/proc`.
+  - **Deploy (supervisor):** with the intercom + obs pins on dstack v0.6.23: setup-strih (the leg filter
+    unit is restarted by step 13, the sysctl set live), restart the hub and OBS, then read both `media clock`
+    rows `source=Internal` and measure the Dante path (rx_loss, holes, re_anchors) before and after.
 - Clocks + latency: `.claude/rules/audio-clock-map.md` (Dante on strih-snv).

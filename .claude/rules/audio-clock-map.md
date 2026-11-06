@@ -29,7 +29,7 @@ constants named here. Never present a computed number as measured.
 | FLEET | `CLOCK_MONOTONIC` rate-disciplined by dantesync (PTP via the Dante grandmaster). The hub's mix grid, both OBS audio paths, the camboxes' own disciplined clocks. |
 | DANTE | The console / Dante network sample clock (mbc, lv1, fohabl's Dante side). On the PTP grandmaster the fleet follows. Its VBAN *packets* still leave on the sender PC's own timing. |
 | CAMBOX ADC | A cambox headset's USB audio crystal (cam1 measured ~+540 ppm, `capture 48026 samp/s`, 19.9.2026). |
-| DANTE MEDIA (dlink) | The media time of a dstack device: PTP ns = `CLOCK_MONOTONIC` + k, k read from the system clocks (`crates/dstack/src/clock.rs`). So it is the FLEET clock, on the one grandmaster the fleet follows. dantesync stays the box's only PTP owner: dlink's own follower needs CAP_NET_BIND_SERVICE for UDP 319, which is never granted, so it logs that it did not start and reads the clock dantesync disciplines (issue 1485). |
+| DANTE MEDIA (dlink) | The media time of a dstack device: PTP ns = `CLOCK_MONOTONIC` + k, k read from the system clocks (`crates/dstack/src/clock.rs`). So it is the FLEET clock, on the one grandmaster the fleet follows. Since ROZHODNUTÉ 6628785864 (owner 4.11.2026, dstack v0.6.23 `ClockSource::Linked`) each device follows Dante PTP IN PROCESS: dsync's follower on UDP 319/320 (the hub: its unit's CAP_NET_BIND_SERVICE; the strih OBS: the sysctl `ip_unprivileged_port_start = 319`), and falls back to the dsync service's clock when the follower is not locked or did not start. The dsync service stays the only writer of the system clock and the clock of the rest of the box. Graded: the `media clock` rows (`source=Internal`, `.claude/rules/strih-dante-input.md`). |
 | CARD | The cutters' USB card crystal: the MiniFuse 4 (strih-snv), the Yamaha MG-XU (strih-pp). |
 | HDMI | The HDMI audio clock of the strih-pp vestibule output (the GPU's HDA codec). |
 | BROWSER | A phone's WebRTC / Opus clock (Janus mixes on the box's own timer). |
@@ -100,7 +100,7 @@ between the hub, the cutters' card and OBS can add a buffer or a crossing (`.cla
 
 | Path | Source clock -> crossings -> listener | Fixed latency at the listener (computed) |
 |---|---|---|
-| Program into the strih OBS (issue 1485, from the pinned obs release v0.2.0 on; v0.3.0 since 3.11.2026) | FOH Dante TX (`master-asio-dante`, the stereo program; names in the untracked site file) at 96 kHz on DANTE -> dlink RX device `strih-obs` on VLAN 70 (`enp7s0.70`) on DANTE MEDIA = FLEET -> dlink 2:1 to 48 kHz -> `dante_input` source -> OBS mix (FLEET). No resampler: the same grandmaster on both ends (below) | device latency **10 ms** (`latency_ms`, `~/.camera-box/dante-input.toml`) + the 2:1 decimation filter (dlink, not stated yet) + the OBS genlock audio path. Before (VBAN): R = 30 ms |
+| Program into the strih OBS (issue 1485, from the pinned obs release v0.2.0 on; v0.3.0 since 3.11.2026) | FOH Dante TX (`master-asio-dante`, the stereo program; names in the untracked site file) at 96 kHz on DANTE -> dlink RX device `strih-obs` on VLAN 70 (`enp7s0.70`) on DANTE MEDIA = FLEET -> dlink 2:1 to 48 kHz -> `dante_input` source -> OBS mix (FLEET). No resampler: the same grandmaster on both ends (below) | dlink's DEFAULT device latency (the TOML writes no `latency_ms` since dstack v0.6.28: 15 ms, P = 13.042 ms RX-only 96/48 by dstack's notice; 10 ms on the releases before it) + the OBS genlock audio path. Before (VBAN): R = 30 ms |
 | Program into the strih OBS (before issue 1485, rollback) | FOH console `strih-obs` VBAN (port 6981, VLAN 70) -> obs-vban receive timeline (sender rate fitted, fixed R) -> OBS mix (FLEET) | R = **30 ms** (`STRIH_PROGRAM_VBAN_RESERVE_MS`) + the OBS genlock audio path (`.claude/rules/obs-vban-receive.md`) |
 | Program in the cutters' cans | `fohabl-strih` (96 kHz, decimated) and `lv1-strih` VBAN -> hub program legs (resampler) -> mix -> card playback pipe (egress resampler) -> MiniFuse | 37.3 ms + the aplay pipe 640 frames (13.3 ms) + the look-ahead 0.3 ms + the ALSA buffer kept full 1024 (21.3 ms) + the period aplay holds 256 (5.3 ms) = **~77.5 ms** |
 | Cameramen -> cutters' cans | cambox ADC VBAN -> hub cambox leg (resampler) -> mix -> card playback | 16 ms + ~40 ms = **~56 ms** (+ the cambox's own capture buffering, not mapped) |
@@ -140,8 +140,13 @@ the obs release v0.2.0 deploy + the site file on strih-snv (issue 1487); live on
 | Path | Source clock -> crossings -> listener | Fixed latency (computed) |
 |---|---|---|
 | dasio TX -> hub device `strih-snv-intercom` (`foh_dante`) | DANTE -> dlink RX on DANTE MEDIA (= FLEET by the code above) -> hub resampler leg -> mix | device latency 10 ms (dlink's `LATENCY_NS`) + the hub's leg, stated by the intercom project |
-| FOH TX (`master-asio-dante`) -> OBS device `strih-obs` (obs release v0.4.4, `plugins/dante-input`) | DANTE 96 kHz -> dlink RX on DANTE MEDIA (= FLEET) -> dlink `Rated` sinc 96 -> 48 kHz (dstack #90; `network_rate = 96000`, no `sample_rate`; the start line reads `device_rate=96000 converts=true`) -> the `dante_input` source on OBS's mix (FLEET) | device latency **10 ms** + the converter's RX delay 1.3125 ms (measured by obs; v0.4.0's halving was 0.3125 ms; owner 3.11.2026: dlink 10 ms default is fine) + the source's timeline, stated by the obs project |
+| FOH TX (`master-asio-dante`) -> OBS device `strih-obs` (obs release v0.4.18, `plugins/dante-input`, dstack v0.6.45: the RX flow ports 30000-30031 bound before any TX socket, issue 1485) | DANTE 96 kHz -> dlink RX on DANTE MEDIA (= FLEET) -> dlink `Rated` sinc 96 -> 48 kHz (dstack #90; `network_rate = 96000`, no `sample_rate`; the start line reads `device_rate=96000 converts=true`) -> the `dante_input` source on OBS's mix (FLEET) | no `latency_ms` in the TOML since dstack v0.6.28 (dlink's default; ~/.camera-box/dante-input.toml): the default budget is **15 ms** with a 6 ms pump margin, P = **13.042 ms** for the RX-only 96/48 OBS device, the 96 -> 48 converter's RX delay **0.625 ms** (dstack v0.6.28's notice, 4.11.2026; the start line `dante-input start: latency split dante_latency_ns= rx_path_ns=` reads the realized split). On obs v0.4.10 (dstack v0.6.25, pinned today) the default is the old 10 ms: Dante latency 7.333 ms + RX path into OBS 10 ms. + the source's timeline, stated by the obs project |
 
+- **The device's own PTP (ROZHODNUTÉ 6628785864, 4.11.2026, with the intercom + obs pins on dstack v0.6.23):**
+  each device's media time comes from its in-process follower of the Dante grandmaster on the leg (UDP
+  319/320 on 224.0.1.129), like a DVS; the dsync-disciplined system clock is only its fallback. So the RX
+  clock is the TX's own PTP, not the box clock. Not measured yet: the supervisor measures the Dante path
+  (rx_loss, holes, re_anchors) before and after the switch.
 - **Crossing:** by the code, TX and RX are on one grandmaster, so no clock domain is crossed. That is
   computed from dstack's source and dstack#20, nothing here is measured. mbc and strih-snv reported the
   same `gm_uuid` over 40 s (finding 6562170531); that read does not prove the rate match. Measure
@@ -150,13 +155,20 @@ the obs release v0.2.0 deploy + the site file on strih-snv (issue 1487); live on
   dlink RX both run on the Dante grandmaster's media clock; dlink's media time is `CLOCK_MONOTONIC` + k
   (dsync-disciplined, the FLEET clock); OBS mixes on that same disciplined clock. So the only rate change
   is the exact 2:1 decimation 96 -> 48 kHz (an integer ratio, no asynchronous resampler, never a dropped
-  or inserted sample). The fixed latency is the 10 ms device latency, set once in the TOML at OBS start and
-  never adapted. Graded: verify-strih item 9 `(program-dante)` (clock=media, holdover 0, the counters) and
+  or inserted sample). The fixed latency is dlink's default device latency (15 ms since dstack v0.6.28),
+  set once at OBS start and never adapted; camera-box writes no `latency_ms`. Graded: verify-strih item 9 `(program-dante)` (clock=media, holdover 0, the counters) and
   the E2E program-audio gate over the recording window (any rx_loss / rx_holes / underruns / rx_gaps /
   socket_drops / rebootstraps / rx_written_late / obs_dropped increase = FAIL, unknown = FAIL; rx_late, overruns and
   late_blocks are timing only, the obs project's meanings, `.claude/rules/strih-dante-input.md`). Computed from the obs release's source and the TOML, not
   measured: the first live run states the measured A/V offset change against the VBAN R = 30 ms.
-- **Budget:** against the strih program's R = 30 ms (VBAN today) the 10 ms device latency is the smaller
+- **No CPU pinning (dstack v0.6.28, owner ruling relayed by dstack issue 1, 4.11.2026):** the dlink pump
+  `dstack-engine` wakes every 0.33 ms, and a late block is a skipped block (a lost slot on that path), so
+  its scheduling is part of the path's loss budget. The 4.11.2026 answer was a reserved CPU per engine
+  (OBS 15, the hub 14). The owner ruled CPU-core pinning out for dlink apps (nobody can guard cores on
+  every PC); dstack v0.6.28 raises dlink's default budget to 15 ms with a 6 ms pump margin instead and
+  removed `pump_cpu` / `io_cpu` / `rx_cpu`. camera-box writes no reservation and removes the old one
+  (`scripts/lib/strih-dante-cpu-leftovers.sh`, `.claude/rules/strih-dante-input.md`).
+- **Budget:** against the strih program's R = 30 ms (VBAN today) the 15 ms device latency is the smaller
   term, but neither total is known until the two projects state their source timelines. No double-sound
   row is added until the paths exist.
 

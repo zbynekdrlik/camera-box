@@ -211,7 +211,7 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_PROGRAM_VBAN_LEG_ADDR=10.77.7.202",
         "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,6981",
         // issue 1485: the hub's Dante device + the coming OBS device, each with its own ports.
-        "STRIH_DANTE_DEVICES=strih-snv-intercom=4441:8801:4456:47100-47131 strih-obs=4440:8800:4455:47200-47231",
+        "STRIH_DANTE_DEVICES=strih-snv-intercom=4441:8801:4456:30100-30131 strih-obs=4440:8800:4455:30000-30031",
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
         "STRIH_CAMERA_DEV1_NET=direct",
@@ -721,7 +721,7 @@ fn obs_profile_and_collection_facts_reach_the_launcher_via_a_unit_dropin() {
     assert_eq!(c, 0, "{err}");
     assert_eq!(
         out,
-        "[Service]\nEnvironment=\"STRIH_OBS_PROFILE=strih-snv\"\nEnvironment=\"STRIH_OBS_COLLECTION=strih-snv\"\n",
+        "[Service]\nEnvironment=\"STRIH_OBS_PROFILE=strih-snv\"\nEnvironment=\"STRIH_OBS_COLLECTION=strih-snv\"\nEnvironment=\"STRIH_RIG_IP=10.77.9.202\"\n",
         "drop-in text"
     );
     // the launcher still reads exactly these two env names.
@@ -972,6 +972,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "\"remoteIp\": \"10.0.0.205\"",
         "Environment=\"STRIH_OBS_PROFILE=zz-profile\"",
         "Environment=\"STRIH_OBS_COLLECTION=zz-collection\"",
+        "Environment=\"STRIH_RIG_IP=10.0.0.5\"",
     ] {
         assert!(out.contains(want), "strih-zz output lacks `{want}`:\n{out}");
     }

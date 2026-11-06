@@ -933,12 +933,14 @@ strih_lx_obs_collection() { strih_box_fact STRIH_OBS_COLLECTION; }
 
 # strih_obs_box_facts_dropin_text -> the strih-obs.service --user drop-in that hands the box's OBS
 # profile/collection facts to strih-obs-start.sh (it reads STRIH_OBS_PROFILE / STRIH_OBS_COLLECTION
-# from its environment), so the launcher itself installs verbatim on every strih box.
+# from its environment), so the launcher itself installs verbatim on every strih box. Issue 1387: also
+# the rig address (STRIH_RIG_IP = the fact STRIH_IP) the launcher waits for before it starts OBS.
 strih_obs_box_facts_dropin_text() {
-  local prof coll
+  local prof coll ip
   prof="$(strih_lx_obs_profile)" || return 1
   coll="$(strih_lx_obs_collection)" || return 1
-  printf '[Service]\nEnvironment="STRIH_OBS_PROFILE=%s"\nEnvironment="STRIH_OBS_COLLECTION=%s"\n' "$prof" "$coll"
+  ip="$(strih_lx_ip)" || return 1
+  printf '[Service]\nEnvironment="STRIH_OBS_PROFILE=%s"\nEnvironment="STRIH_OBS_COLLECTION=%s"\nEnvironment="STRIH_RIG_IP=%s"\n' "$prof" "$coll" "$ip"
 }
 
 # strih_lx_dantesync_client_args -> the dantesync CLIENT invocation args `--ntp-server <upstream>`,

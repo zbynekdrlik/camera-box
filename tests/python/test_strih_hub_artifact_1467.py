@@ -26,6 +26,7 @@ def _run(script, *args, env=None):
     """Run SCRIPT under the callers' `set -euo pipefail` with ARGS as $1.. (never in the text)."""
     full = {k: v for k, v in os.environ.items() if k not in LEAKY}
     full["STRIH_HUB_AMBIENT_CAPS"] = ""
+    full["STRIH_HUB_BOUNDING_CAPS"] = ""
     if env:
         full.update(env)
     return subprocess.run(["bash", "-c", "set -euo pipefail\n" + script, "harness", *map(str, args)],
@@ -112,23 +113,8 @@ def test_a_state_larger_than_one_environment_string_is_still_graded(tmp_path):
     assert "failed" not in r.stdout
 
 
-# --- issue 1485: dantesync stays the only PTP owner ----------------------------------------------------
-
-def _cap(tmp_path, ambient):
-    script = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\n. "$1"\n. "$2"\n'
-              'strih_intercom_hub_cap_grade "$3"\necho END')
-    return _run(script, RELEASE, HUB_UNIT, tmp_path / "no-such-hub", env={"STRIH_HUB_AMBIENT_CAPS": ambient})
-
-
-def test_the_hub_without_the_capability_passes(tmp_path):
-    r = _cap(tmp_path, "")
-    assert "PASS (intercom-hub) no CAP_NET_BIND_SERVICE" in r.stdout, r.stdout + r.stderr
-
-
-def test_the_capability_on_the_unit_fails_naming_dantesync(tmp_path):
-    r = _cap(tmp_path, "cap_net_bind_service")
-    assert r.returncode == 0 and "FAIL (intercom-hub) CAP_NET_BIND_SERVICE" in r.stdout, r.stdout + r.stderr
-    assert "dantesync" in r.stdout and r.stdout.rstrip().endswith("END")
+# issue 1485: the capability row (ROZHODNUTE 6628785864 superseded "dantesync is the only PTP owner": the
+# hub now MUST carry CAP_NET_BIND_SERVICE) moved to tests/python/test_strih_dante_ptp_1485.py.
 
 
 def test_verify_item_16_grades_the_hub_version():

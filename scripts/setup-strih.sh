@@ -642,7 +642,7 @@ fi
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
 # issue 1487: the pinned intercom release, verified, before step 12's purge decision reads its routing file.
-if WHY="$(obs_box_step_applies 13)"; then IH_BUNDLE="$(strih_intercom_release_ensure "${HERE}/..")" || fail "the pinned intercom release (above)"; fi
+if WHY="$(obs_box_step_applies 13)"; then IH_BUNDLE="$(strih_intercom_release_ensure "${HERE}/..")" || fail "the pinned intercom release (above)"; IH_BEFORE="$(strih_intercom_hub_install_fingerprint)"; fi   # issue 1485: a running hub restarts on a change
 step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344); stream role: the locked operator PipeWire (issue 1465); a strih box that needs none: PipeWire purged (issue 1440)"
 # Root cause (design 20.9., live diagnosis issuecomment-5751113173): the OBS program (${AUDIO_NAME}) is a NETWORK
 # stream (fohabl-strih VBAN), NOT the MiniFuse (the operator TALKBACK mic, the hub reads it). The hub writes the
@@ -679,9 +679,9 @@ if strih_program_dante_declared; then echo "  the OBS program-audio input = the 
 [ -n "${STRIH_PW_PURGED:-}" ] || echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
-step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the strih role when stopped, never restarted)"
+step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the strih role when stopped; issue 1485: restarted when its install changed)"
 # The strih intercom hub IS the interkom (the N-1 mix for the VBAN camboxes + the phones) since 20.9.2026:
-# unit + routing TOML + drop-ins, enabled; STARTED on the strih role after step 14, never restarted here.
+# unit + routing TOML + drop-ins, enabled; STARTED (stopped) or RESTARTED (its install changed) on the strih role after step 14.
 if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs no hub (lib: strih_intercom_hub_remove)
   # issue 1487: binary, unit and routing file come from the ONE bundle of the pinned intercom release.
   strih_intercom_hub_binary_install /usr/local/bin/intercom-hub "$IH_BUNDLE" "${HERE}/.." || fail "intercom-hub install from ${IH_BUNDLE} failed (above)"
@@ -766,12 +766,12 @@ else echo "  SKIP: ${WHY}"; fi
 
 # issue 1418: start a stopped hub on the strih role only now -- its LoadCredential needs the room secret
 # the Janus provisioning just wrote. `systemctl start` returns before that exec-time load, so the crash-loop probe
-# (verify item 16's) confirms it. A running hub is never restarted.
+# (verify item 16's) confirms it. A running hub is restarted only when its install changed (issue 1485).
 if WHY="$(obs_box_step_applies 13-hub-live)"; then
   if ! systemctl is-active --quiet intercom-hub; then
     systemctl start intercom-hub || fail "intercom-hub.service would not start -- journalctl -u intercom-hub (issue 1418: the interkom runs on it)"
     if IH_LOOP="$(strih_intercom_hub_crash_loop)"; then fail "intercom-hub.service ${IH_LOOP} after the start -- journalctl -u intercom-hub"; fi
-    echo "  intercom-hub.service started (it was not running)"
+    echo "  intercom-hub.service started (it was not running)"; strih_intercom_hub_record_loaded   # issue 1485
   fi
 else
   echo "  intercom-hub.service not started here: ${WHY}"
@@ -940,8 +940,8 @@ if WHY="$(obs_box_step_applies 16f)"; then strih_tally_install "${HERE}/.." "$DE
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-step "16g" "Operator surface (issue 1418): Multiview click + projector keys in user.ini, the second NIC off the rig subnet; issue 1470: the A/V-sync dock in the saved OBS layout (stream role)"
-strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" "${OBS_CFG}/basic/scenes/$(strih_lx_obs_collection).json" || fail "issue 1418: the operator surface could not be provisioned (above)"; obs_box_avsync_dock_seed "${OBS_CFG}/user.ini" "$DESKTOP_USER"
+step "16g" "Operator surface (issue 1418): Multiview click + projector keys in user.ini, the second NIC off the rig subnet; issue 1470/1436: the A/V-sync dock + the LUFS meter in the saved OBS layout (stream role)"
+strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" "${OBS_CFG}/basic/scenes/$(strih_lx_obs_collection).json" || fail "issue 1418: the operator surface could not be provisioned (above)"; obs_box_avsync_dock_seed "${OBS_CFG}/user.ini" "$DESKTOP_USER"; obs_box_loudness_dock_seed "${OBS_CFG}/user.ini" "$DESKTOP_USER"
 
 # ---------------------------------------------------------------------------------------------
 step "16h" "Kiosk panel (issue 1420): tint2 taskbar + tray + clock -- --user unit, enable-only"
@@ -952,6 +952,9 @@ else echo "  SKIP: ${WHY}"; fi
 step "16i" "HTTPS front end (issue 1399): nginx + the intercom/shading sites, certs issued + renewed ON this box (never dev1); issue 1453: the outbound interkom tunnel + TURN"
 if WHY="$(obs_box_step_applies 16i)"; then strih_https_install || fail "issue 1399: the HTTPS front end could not be provisioned (above)"; strih_interkom_public_install || fail "issue 1453: the intercom tunnel / TURN could not be provisioned (above)"
 else echo "  SKIP: ${WHY}"; fi
+# issue 1485: a RUNNING hub whose binary / unit / drop-in / routing files changed (step 13, 16i's TURN drop-in,
+# or a failed earlier run: the record of what it was started on) is try-restarted; an unchanged one never.
+if obs_box_step_applies 13-hub-live >/dev/null; then strih_intercom_hub_restart_if_changed "${IH_BEFORE:-}" || fail "intercom-hub.service did not come back from its restart on the new install (above) -- journalctl -u intercom-hub"; fi
 
 # ---------------------------------------------------------------------------------------------
 step "16j" "Restreamer control-room host (restreamer issue 388): Google Chrome from its signed repo + xvfb -- stream role"

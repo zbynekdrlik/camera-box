@@ -18,6 +18,11 @@
 # empty LoadCredential= clears every earlier one; the live workaround that brought the hub up, NRestarts 0).
 # A box that runs step 14 keeps the base unit's credential and has the drop-in removed.
 
+if ! declare -F strih_dante_ptp_pin_ready >/dev/null; then
+  # shellcheck source=scripts/lib/strih-dante-ptp.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-ptp.sh"   # issue 1485: the in-process PTP pin threshold
+fi
+
 STRIH_HUB_CRED_DROPIN_NAME="20-no-janus-credential.conf"
 
 # strih_intercom_hub_cred_dropin_text -> the role drop-in for a box without the Janus phones leg.
@@ -128,6 +133,141 @@ strih_intercom_hub_crash_loop() {
       s2="$(systemctl "${q[@]}" 2>/dev/null || true)" ;;
   esac
   strih_intercom_hub_loop_verdict "$s1" "$s2"
+}
+
+# strih_intercom_hub_install_fingerprint [BIN] [UNIT] [DROPIN_DIR] [TOML] -> one `<sha256|absent>  <path>`
+# line per file the hub loads at its start: the binary, the unit, every DROPIN_DIR/*.conf, the routing TOML
+# and every other *.toml beside it (turn.toml), defaults the installed paths, sorted by path. A missing file
+# reads `absent`, a removed drop-in leaves the list. Not covered (known limits): /etc/ndi's discovery
+# config and the Janus room secret. Read-only, always rc 0, also under the caller's failglob / nullglob.
+strih_intercom_hub_install_fingerprint() {
+  local bin="${1:-/usr/local/bin/intercom-hub}" unit="${2:-/etc/systemd/system/intercom-hub.service}"
+  local dir="${3:-/etc/systemd/system/intercom-hub.service.d}" toml="${4:-/etc/intercom-hub/intercom.toml}"
+  local f s
+  local -a files=("$bin" "$unit" "$toml") more=()
+  mapfile -t more < <(compgen -G "${dir}/*.conf" || true; compgen -G "$(dirname -- "$toml")/*.toml" || true)
+  for f in "${more[@]}"; do [ "$f" = "$toml" ] || files+=("$f"); done
+  for f in "${files[@]}"; do
+    s="$(sha256sum -- "$f" 2>/dev/null | cut -d' ' -f1 || true)"
+    printf '%s  %s\n' "${s:-absent}" "$f"
+  done | LC_ALL=C sort -k2
+}
+
+# The fingerprint of the install the RUNNING hub was started on, keyed by its InvocationID: setup records
+# it whenever it starts, restarts or finds the hub current, so a setup run that failed after writing new
+# files still restarts the hub on the next run (review round 1). STRIH_HUB_LOADED_FILE = the record (test
+# seam), STRIH_HUB_INVOCATION_ID = the invocation (shared seam with the media clock grade).
+_strih_hub_loaded_file() { printf '%s' "${STRIH_HUB_LOADED_FILE:-/var/lib/camera-box/intercom-hub.loaded}"; }
+_strih_hub_invocation() {
+  printf '%s' "${STRIH_HUB_INVOCATION_ID-$(systemctl show -p InvocationID --value intercom-hub 2>/dev/null || true)}"
+}
+
+# strih_intercom_hub_record_loaded [fingerprint args] -> writes `invocation=<id>` + the fingerprint for the
+# running hub; nothing for a hub without an invocation. Always rc 0 (a failed write is a WARNING: the next
+# run then compares against its own first fingerprint, as without a record).
+strih_intercom_hub_record_loaded() {
+  local f inv fp tmp=""
+  f="$(_strih_hub_loaded_file)"; inv="$(_strih_hub_invocation)"
+  [ -n "$inv" ] || return 0
+  fp="$(strih_intercom_hub_install_fingerprint "$@")"
+  if ! { mkdir -p -- "$(dirname -- "$f")" && tmp="$(mktemp -- "${f}.XXXXXX")" \
+       && printf 'invocation=%s\n%s\n' "$inv" "$fp" > "$tmp" && mv -f -- "$tmp" "$f"; } 2>/dev/null; then
+    [ -z "$tmp" ] || rm -f -- "$tmp" 2>/dev/null || true
+    echo "  WARNING: could not record the running hub's install in ${f}" >&2
+  fi
+  return 0
+}
+
+# _strih_hub_started_epoch -> the running hub's main process start (epoch seconds), empty when unreadable.
+_strih_hub_started_epoch() {
+  local v
+  v="$(systemctl show -p ExecMainStartTimestamp --value --timestamp=unix intercom-hub 2>/dev/null || true)"
+  v="${v#@}"; v="${v%%.*}"
+  [[ "$v" =~ ^[0123456789]+$ ]] && printf '%s' "$v"
+  return 0
+}
+
+# _strih_hub_newest_mtime FINGERPRINT -> the newest mtime (epoch seconds) of the fingerprint's present files.
+_strih_hub_newest_mtime() {
+  local l m newest=""
+  while IFS= read -r l; do
+    [ -n "$l" ] && [ "${l%%  *}" != absent ] || continue
+    m="$(stat -c %Y -- "${l#*  }" 2>/dev/null || true)"
+    if [[ "$m" =~ ^[0123456789]+$ ]] && { [ -z "$newest" ] || [ "$m" -gt "$newest" ]; }; then newest="$m"; fi
+  done <<<"$1"
+  printf '%s' "$newest"
+}
+
+# _strih_hub_loaded_before -> the recorded fingerprint when it belongs to the hub's CURRENT invocation, else
+# nothing (no record, or the hub restarted outside setup: it then loaded the files on disk at its start).
+_strih_hub_loaded_before() {
+  local f inv first
+  f="$(_strih_hub_loaded_file)"; inv="$(_strih_hub_invocation)"
+  [ -n "$inv" ] && [ -f "$f" ] || return 0
+  first="$(head -n 1 -- "$f" 2>/dev/null || true)"
+  [ "$first" = "invocation=${inv}" ] || return 0
+  tail -n +2 -- "$f" 2>/dev/null || true
+}
+
+# strih_intercom_hub_restart_if_changed BEFORE [fingerprint args] -> setup-strih's restart of a RUNNING hub
+# (issue 1485, 4.11.2026: a new pinned release was installed and the old process kept running), run after
+# the last step that writes a hub file (16i's TURN drop-in). The baseline is the record of the install the
+# running hub was started on, else BEFORE = the fingerprint setup took before it wrote any hub file.
+# Changed + active = `systemctl try-restart intercom-hub` (never a start of a stopped hub) + the crash-loop
+# probe; unchanged = the hub is never touched (issue 1418); no baseline = nothing restarted, named. rc 1 +
+# a named line when the restart fails or the hub crash-loops after it; rc 0 otherwise.
+strih_intercom_hub_restart_if_changed() {
+  local before="${1-}" now l changed="" loop rec
+  shift || true
+  if ! systemctl is-active --quiet intercom-hub; then
+    echo "  intercom-hub.service is not running -- nothing to restart"
+    return 0
+  fi
+  rec="$(_strih_hub_loaded_before)"
+  [ -z "$rec" ] || before="$rec"
+  if [ -z "$before" ]; then
+    echo "  intercom-hub.service: no install fingerprint to compare against -- not restarted"
+    return 0
+  fi
+  now="$(strih_intercom_hub_install_fingerprint "$@")"
+  if [ "$now" = "$before" ] && [ -z "$rec" ]; then
+    # review round 2: with no record, this run's own fingerprint says nothing about what the RUNNING
+    # process loaded (the first rollout: new files on disk, the old process up). Its start time decides.
+    local start newest
+    start="$(_strih_hub_started_epoch)"; newest="$(_strih_hub_newest_mtime "$now")"
+    if [ -z "$start" ] || [ -z "$newest" ]; then
+      echo "  intercom-hub.service: no record of the install it runs and its start time is unreadable -- not restarted, not recorded"
+      return 0
+    fi
+    if [ "$start" -lt "$newest" ]; then
+      changed="the install (the running hub started before its files were written; no record of what it loaded)"
+    fi
+  fi
+  if [ "$now" = "$before" ] && [ -z "$changed" ]; then
+    echo "  intercom-hub.service: binary, unit, drop-ins and routing files unchanged -- the running hub is left alone"
+    strih_intercom_hub_record_loaded "$@"
+    return 0
+  fi
+  while IFS= read -r l; do   # an `if`, never `&&`: a false last test would end the loop rc 1 under set -e
+    if [ -n "$l" ] && [[ $'\n'"${before}"$'\n' != *$'\n'"${l}"$'\n'* ]]; then
+      changed="${changed}${changed:+, }${l#*  }"
+    fi
+  done <<<"$now"
+  while IFS= read -r l; do
+    if [ -n "$l" ] && [[ $'\n'"${now}"$'\n' != *"  ${l#*  }"$'\n'* ]]; then
+      changed="${changed}${changed:+, }${l#*  } (removed)"
+    fi
+  done <<<"$before"
+  if ! systemctl try-restart intercom-hub; then
+    echo "strih-intercom-hub-unit: systemctl try-restart intercom-hub failed after ${changed} changed" >&2
+    return 1
+  fi
+  if loop="$(strih_intercom_hub_crash_loop)"; then
+    echo "strih-intercom-hub-unit: intercom-hub.service ${loop} after the restart on ${changed}" >&2
+    return 1
+  fi
+  strih_intercom_hub_record_loaded "$@"
+  echo "  intercom-hub.service restarted: ${changed} changed, the running hub loads the new install"
 }
 
 # strih_intercom_hub_hdmi_leg_grade STATE_URL -> verify item 9's rows for the hub's HDMI audio legs
@@ -422,19 +562,79 @@ PYHUBV
   return 0
 }
 
-# strih_intercom_hub_cap_grade BIN -> verify item 16's capability row (issue 1485): CAP_NET_BIND_SERVICE on
-# the hub would start dlink's own PTP follower on UDP 319 beside dantesync, the box's only PTP owner (a port
-# collision upset the clock once, dantesync#109). FAIL names where it came from; always rc 0.
-# STRIH_HUB_AMBIENT_CAPS = the test seam for the unit's AmbientCapabilities.
+# strih_intercom_hub_cap_grade BIN -> verify item 16's capability row (issue 1485, ROZHODNUTE 6628785864):
+# the hub's dstack device follows Dante PTP in process and binds UDP 319, so once the intercom pin carries
+# STRIH_DANTE_PTP_FIRST_DSTACK (strih-dante-ptp.sh) the released unit must grant EXACTLY
+# `AmbientCapabilities=CAP_NET_BIND_SERVICE` + `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and the binary no
+# file capability (the unit is the one grant): missing, or any other capability, FAILs. Below the threshold
+# a NOTE names the state. The dsync service stays the only writer of the system clock. Always rc 0.
+# Seams: STRIH_HUB_AMBIENT_CAPS / STRIH_HUB_BOUNDING_CAPS (the unit's two properties, systemctl show).
 strih_intercom_hub_cap_grade() {
-  local bin="${1:-/usr/local/bin/intercom-hub}" file="" amb
+  local bin="${1:-/usr/local/bin/intercom-hub}" file="" amb bnd want=cap_net_bind_service why="" state
   if command -v getcap >/dev/null 2>&1; then file="$(getcap "$bin" 2>/dev/null || true)"; fi
   amb="${STRIH_HUB_AMBIENT_CAPS-$(systemctl show -p AmbientCapabilities --value intercom-hub 2>/dev/null || true)}"
-  if [[ "${file,,}" == *cap_net_bind_service* ]] || [[ "${amb,,}" == *cap_net_bind_service* ]]; then
-    bad "(intercom-hub) CAP_NET_BIND_SERVICE granted (file: ${file:-none}, unit: ${amb:-none}) -- dlink would start its own PTP follower beside dantesync, the only PTP owner"
+  bnd="${STRIH_HUB_BOUNDING_CAPS-$(systemctl show -p CapabilityBoundingSet --value intercom-hub 2>/dev/null || true)}"
+  amb="$(printf '%s' "${amb,,}" | xargs 2>/dev/null || true)"; bnd="$(printf '%s' "${bnd,,}" | xargs 2>/dev/null || true)"
+  [ "$amb" = "$want" ] || why="${why}AmbientCapabilities='${amb:-none}' "
+  [ "$bnd" = "$want" ] || why="${why}CapabilityBoundingSet='${bnd:-none}' "
+  [ -z "$file" ] || why="${why}a file capability on the binary (${file}) "
+  state="AmbientCapabilities=${amb:-none}, CapabilityBoundingSet=$( [ "${#bnd}" -le 40 ] && printf '%s' "${bnd:-none}" || printf 'the full set' ), file: ${file:-none}"
+  if ! strih_dante_ptp_pin_ready intercom; then
+    note "(intercom-hub) capabilities not graded: the intercom pin's dstack $(v="$(strih_dante_ptp_pin_dstack intercom)"; printf '%s' "${v:-unreadable}") is below ${STRIH_DANTE_PTP_FIRST_DSTACK} (no in-process PTP follower yet); ${state}"
+  elif [ -z "$why" ]; then
+    ok "(intercom-hub) exactly CAP_NET_BIND_SERVICE (ambient + bounding set, no file capability): the dstack device binds UDP 319 for its in-process PTP follower"
   else
-    ok "(intercom-hub) no CAP_NET_BIND_SERVICE: dantesync stays the only PTP owner"
+    bad "(intercom-hub) capabilities: ${why% } -- the unit must grant exactly AmbientCapabilities=CAP_NET_BIND_SERVICE + CapabilityBoundingSet=CAP_NET_BIND_SERVICE (the intercom release's unit; reinstall it with setup-strih.sh step 13)"
   fi
+  return 0
+}
+
+# strih_intercom_hub_media_clock_grade -> verify item 16's `(intercom-dante) media clock` row on a box whose
+# facts declare the hub's Dante device (`*-intercom=` in STRIH_DANTE_DEVICES): the last dstack `media clock
+# source` line of the hub's CURRENT invocation's journal (strih-dante-ptp.sh); only those lines are kept
+# (a weeks-long invocation is never held in a variable). A hub that is not running (no InvocationID) is a
+# NOTE, never a second FAIL beside item 16's active row; a journal that cannot be read is its own row
+# (FAIL once the intercom pin is READY), never read as "no line". Always rc 0.
+# Seams: STRIH_HUB_JOURNAL_FILE (the journal text instead of journalctl), STRIH_HUB_INVOCATION_ID,
+# STRIH_HUB_JOURNAL_EUID / STRIH_HUB_JOURNAL_GROUPS (the euid + groups the journal is read as: root or a
+# member of systemd-journal / adm reads it; anyone else is named, never read as "no line").
+strih_intercom_hub_media_clock_grade() {
+  local devs inv text rc
+  devs="$(strih_lx_dante_devices 2>/dev/null || true)"
+  case " ${devs} " in *-intercom=*) ;; *) return 0 ;; esac
+  if [ -n "${STRIH_HUB_JOURNAL_FILE:-}" ]; then
+    text="$({ cat -- "$STRIH_HUB_JOURNAL_FILE"; printf '\nJOURNAL-RC %s\n' "$?"; } 2>/dev/null | LC_ALL=C grep -a -E 'media clock|^JOURNAL-RC ' || true)"
+  else
+    inv="${STRIH_HUB_INVOCATION_ID-$(systemctl show -p InvocationID --value intercom-hub 2>/dev/null || true)}"
+    if [ -z "$inv" ]; then
+      note "(intercom-dante) media clock: the hub is not running (no InvocationID), not graded"
+      return 0
+    fi
+    if [ "${STRIH_HUB_JOURNAL_EUID:-$(id -u)}" != 0 ] \
+         && ! [[ " ${STRIH_HUB_JOURNAL_GROUPS-$(id -nG 2>/dev/null || true)} " =~ \ (systemd-journal|adm)\  ]]; then
+      # journalctl exits 0 with only a hint for a user who may not read the system journal
+      if strih_dante_ptp_pin_ready intercom; then
+        bad "(intercom-dante) media clock: the hub's journal is not readable as $(id -un) -- run verify-strih as root"
+      else
+        note "(intercom-dante) media clock: the hub's journal is not readable as $(id -un), and the intercom pin is below ${STRIH_DANTE_PTP_FIRST_DSTACK}"
+      fi
+      return 0
+    fi
+    text="$({ timeout 20 journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=${inv}"; printf '\nJOURNAL-RC %s\n' "$?"; } 2>/dev/null \
+      | LC_ALL=C grep -a -E 'media clock|^JOURNAL-RC ' || true)"
+  fi
+  rc="$(printf '%s\n' "$text" | sed -n 's/^JOURNAL-RC //p' | tail -n 1)"
+  if [ "${rc:-?}" != 0 ]; then
+    if strih_dante_ptp_pin_ready intercom; then
+      bad "(intercom-dante) media clock: the hub's journal could not be read (rc ${rc:-?}; journalctl as root, bounded 20 s) -- not graded"
+    else
+      note "(intercom-dante) media clock: the hub's journal could not be read (rc ${rc:-?}), and the intercom pin is below ${STRIH_DANTE_PTP_FIRST_DSTACK}"
+    fi
+    return 0
+  fi
+  # a here-string, never a pipe: the grader must run in THIS shell, or its `bad` counts in a subshell and
+  # verify-strih ends ALL CLEAR under a FAIL row (4.11.2026; tests/python/test_verify_fail_counted_1485.py)
+  strih_dante_media_clock_grade "(intercom-dante)" intercom <<<"$text"
 }
 
 # --- issue 1439: the stream role runs no intercom hub ------------------------------------------------
