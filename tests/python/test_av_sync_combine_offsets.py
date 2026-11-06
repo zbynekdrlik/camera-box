@@ -167,3 +167,30 @@ class TestCLI:
             combiner.main()
         assert exc.value.code == 2
         assert capsys.readouterr().out.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# (d) issue 1482: the residual against the expected offset, never the raw offset against 0
+# ---------------------------------------------------------------------------
+
+class TestExpectedOffset:
+    def test_combines_the_residual_against_the_expected_offset(self):
+        # E2E 42109440021 attempt 3 (6.11.2026), the direct feed, expected = the -46 ms source constant.
+        av = {"cam2": _entry(-50.77), "cam3": _entry(-51.98), "cam5": _entry(-51.92)}
+        offset, cams_used = combiner.combine(av, expected_ms=-46.0)
+        assert offset == pytest.approx(-51.92 + 46.0, abs=0.001)
+        assert cams_used == ["cam2", "cam3", "cam5"]
+
+    def test_expected_zero_keeps_the_raw_median(self):
+        av = {"cam1": _entry(-10.0), "cam2": _entry(-20.0)}
+        assert combiner.combine(av)[0] == pytest.approx(-15.0)
+        assert combiner.combine(av, expected_ms=0.0)[0] == pytest.approx(-15.0)
+
+    def test_cli_takes_expected_ms(self, tmp_path, capsys, monkeypatch):
+        p = tmp_path / "verdict.json"
+        p.write_text(json.dumps({"all_cambox_av_sync": {"cam2": _entry(-50.0), "cam3": _entry(-52.0)}}))
+        monkeypatch.setattr(
+            sys, "argv", ["av_sync_combine_offsets.py", "--verdict-json", str(p), "--expected-ms", "-46"]
+        )
+        combiner.main()
+        assert float(capsys.readouterr().out.strip()) == pytest.approx(-5.0)

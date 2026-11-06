@@ -164,30 +164,26 @@ def test_recording_e2e_gives_the_cam2_burn_unit_the_intercom_env():
     assert s.index('. "$HERE/lib/rig-test-feed.sh"') < s.index("$(rig_test_feed_burn_setenv)")
 
 
-def test_the_production_av_pin_is_never_tuned_from_the_direct_feed():
-    # The direct feed has no camera in its video path (production and the optical feed do): two of three direct-feed
-    # E2E runs (40233177561, 40246131760) read -51 / -52 ms where every optical run read within +-18 ms, and each time
-    # the #856 cleanup apply moved the production stream pin 1087 -> 1120 ms. Restored by hand, read-back verified.
-    hold = _lib("rig_test_feed_av_apply_hold")
-    assert hold.returncode == 0 and "issue 1482" in hold.stdout and "direct" in hold.stdout
-    assert _lib("rig_test_feed_av_apply_hold", {"RIG_TEST_FEED": "optical"}).stdout == ""
-
-
-def test_recording_e2e_holds_the_av_apply_in_the_direct_feed():
+def test_the_direct_feed_never_holds_the_av_correction():
+    # Owner 6.11.2026 ("preco proste nie je 0ms"): the hold kept every downstream A/V change (the JPEG XS switch,
+    # the mbc 10 -> 40 ms raise) uncorrected. The correction now runs on the residual against the source constant.
     s = E2E.read_text()
-    call = '_avs_feed_hold="$(rig_test_feed_av_apply_hold || true)"'
+    assert "rig_test_feed_av_apply_hold" not in s
+    assert "rig_test_feed_av_apply_hold" not in (REPO / "scripts" / "lib" / "rig-test-feed.sh").read_text()
+
+
+def test_recording_e2e_combines_the_residual_against_the_expected_offset():
+    s = E2E.read_text()
+    call = 'av_sync_combine_offsets.py" --verdict-json "$REPORT_JSON" --expected-ms "$AV_EXPECTED_MS"'
     assert s.count(call) == 1
-    guard = s.index('_avs_hold="$(av_sync_apply_guard_decide')
-    apply = s.index('[cleanup] #856: applying')
-    assert s.index('AV_SYNC_PROPOSED_OFFSET_MS="$AV_SYNC_APPLY_OFFSET_MS"') < s.index(call) < guard < apply
-    block = s[s.index(call):guard]
-    assert 'AV_SYNC_APPLY_OFFSET_MS=""' in block and "AV_SYNC_HELD_REASON=" in block
+    assert s.index('VERDICT_ARGS+=(--av-expected-ms "$AV_EXPECTED_MS")') < s.index(call)
 
 
 def test_the_av_gate_expects_the_direct_feeds_own_offset():
-    # Every direct-feed measurement since the jack switch (8 E2E + soak windows, 25.-27.10.2026): -38..-52 ms,
-    # median -46.5, uniform over the cameras (ROZHODNUTE on the ticket, 27.10.2026). The camera+monitor feed keeps 0.
-    assert _lib("rig_test_feed_av_expected_ms").stdout == "-74"
+    # The direct feed differs from production only at the source (cam2 HDMI, the jack), so the reading that means
+    # "production A/V = 0" is a source constant: -46, the 25.-27.10.2026 median at the production pins the
+    # camera+monitor feed had tuned to 0. Never a later run's result (ROZHODNUTE 6687710720). The camera+monitor feed keeps 0.
+    assert _lib("rig_test_feed_av_expected_ms").stdout == "-46"
     assert _lib("rig_test_feed_av_expected_ms", {"RIG_TEST_FEED": "optical"}).stdout == "0"
 
 
