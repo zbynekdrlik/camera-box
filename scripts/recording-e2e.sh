@@ -2273,13 +2273,8 @@ fi"
   # #1265: remember the DAMPED proposed offset BEFORE the guard runs, so the end-of-#856 history
   # append can record it even when a HOLD below clears AV_SYNC_APPLY_OFFSET_MS.
   AV_SYNC_PROPOSED_OFFSET_MS="$AV_SYNC_APPLY_OFFSET_MS"
-  # issue 1482: a direct-test-feed run never tunes the production A/V pin (named HOLD, offset cleared).
-  _avs_feed_hold="$(rig_test_feed_av_apply_hold || true)"
-  if [ -n "$_avs_feed_hold" ] && [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
-    echo "[cleanup] HOLD the A/V apply: $_avs_feed_hold -- stream genlock latency left at the just-restored prod value" >&2
-    AV_SYNC_HELD_REASON="$_avs_feed_hold"
-    AV_SYNC_APPLY_OFFSET_MS=""
-  fi
+  # issue 1482: the offset is already the residual against the feed's expected value (--expected-ms), so the
+  # direct feed corrects like every feed (ROZHODNUTE 6687710720, owner 6.11.2026).
   # issue 1387: on the JPEG XS path the stream pin is a box fact -> print the recommended fact, HOLD.
   program_inputs_av_pin_hold
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
@@ -5880,8 +5875,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     # stomp anything applied here).
     # ============================================================================
     AV_SYNC_COMBINE_LOG="$OUTDIR/av-sync-combine-${RUN_ID}.log"
-    if AV_SYNC_APPLY_OFFSET_MS="$(python3 "$HERE/av_sync_combine_offsets.py" --verdict-json "$REPORT_JSON" 2>"$AV_SYNC_COMBINE_LOG")"; then
-      echo "    [8/8g] #856: rig-wide A/V correction = ${AV_SYNC_APPLY_OFFSET_MS}ms (median of this run's own verdict==\"measured\" cameras) -- applied LAST in cleanup(), after the delivery-verify restore"
+    if AV_SYNC_APPLY_OFFSET_MS="$(python3 "$HERE/av_sync_combine_offsets.py" --verdict-json "$REPORT_JSON" --expected-ms "$AV_EXPECTED_MS" 2>"$AV_SYNC_COMBINE_LOG")"; then
+      echo "    [8/8g] #856: rig-wide A/V correction = ${AV_SYNC_APPLY_OFFSET_MS}ms (median residual vs expected) -- applied LAST in cleanup(), after the delivery-verify restore"
     else
       echo "    [8/8g] #856: refusing to compute a rig-wide A/V correction this run (see $AV_SYNC_COMBINE_LOG) -- stream genlock latency left untouched"
       AV_SYNC_APPLY_OFFSET_MS=""

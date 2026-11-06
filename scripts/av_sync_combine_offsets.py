@@ -87,10 +87,14 @@ def measured_offsets(all_cambox_av_sync):
     return out
 
 
-def combine(all_cambox_av_sync, min_cams=MIN_MEASURED_CAMS, max_spread_ms=MAX_SPREAD_MS):
+def combine(all_cambox_av_sync, min_cams=MIN_MEASURED_CAMS, max_spread_ms=MAX_SPREAD_MS, expected_ms=0.0):
     """The real #856 decision. Returns (offset_ms, cams_used) on success, or (None, reasons)
-    on refusal -- see the module doc for the two fail-closed guards."""
-    pairs = measured_offsets(all_cambox_av_sync)
+    on refusal -- see the module doc for the two fail-closed guards.
+
+    issue 1482: each camera's RESIDUAL (measured - expected_ms) is combined, never the raw offset against
+    0. expected_ms is the gate's own expected offset: 0 for the camera+monitor feed, the direct feed's
+    source constant there, so the correction moves the program toward production A/V = 0."""
+    pairs = [(cam, off - expected_ms) for cam, off in measured_offsets(all_cambox_av_sync)]
     if len(pairs) < min_cams:
         return None, [
             f"only {len(pairs)} camera(s) reached verdict==\"measured\" this run "
@@ -114,6 +118,7 @@ def main():
     ap.add_argument("--verdict-json", required=True)
     ap.add_argument("--min-cams", type=int, default=MIN_MEASURED_CAMS)
     ap.add_argument("--max-spread-ms", type=float, default=MAX_SPREAD_MS)
+    ap.add_argument("--expected-ms", type=float, default=0.0)
     args = ap.parse_args()
 
     with open(args.verdict_json) as f:
@@ -127,13 +132,15 @@ def main():
         )
         sys.exit(2)
 
-    offset, info = combine(av_sync, args.min_cams, args.max_spread_ms)
+    offset, info = combine(av_sync, args.min_cams, args.max_spread_ms, args.expected_ms)
     if offset is None:
         for reason in info:
             sys.stderr.write(f"[av-sync-combine] refusing: {reason}\n")
         sys.exit(2)
 
-    sys.stderr.write(f"[av-sync-combine] combined offset={offset:.2f}ms from cameras {info}\n")
+    sys.stderr.write(
+        f"[av-sync-combine] combined residual={offset:.2f}ms (expected {args.expected_ms:.1f}ms) from cameras {info}\n"
+    )
     print(f"{offset:.2f}")
 
 

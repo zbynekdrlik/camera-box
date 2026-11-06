@@ -158,7 +158,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   acceptance, defined once in the decision module.
 - **The verdict's own defaults are single sources too:** the soak never passes `--burn-*-run-id`
   (it deploys no burn). `--av-expected-ms` is the TEST FEED's leg, the same one the E2E passes
-  (issue 1482: `rig_test_feed_av_expected_ms`, -74 ms on the direct feed (issue 1387, the JPEG XS strih pin), 0 optical; an explicit
+  (issue 1482: `rig_test_feed_av_expected_ms`, -46 ms on the direct feed (the source constant, ROZHODNUTÉ 6687710720), 0 optical; an explicit
   `AV_EXPECTED_MS` wins). The 30.10.2026 1 h run graded the direct feed's -27..-42 ms against 0 and
   read FAIL while the E2E on the same rig passed; re-graded against -45 every sample was in bound.
 

@@ -128,31 +128,19 @@ rig_test_feed_burn_setenv() {
   if [ "$f" = direct ]; then printf '%s' '--setenv=CAMERA_BOX_INTERCOM=off '; fi
 }
 
-# The A/V offset every camera measures in the direct feed. Every direct-feed reading since the jack switch
-# (25.-27.10.2026, E2E runs + soak windows): -38..-52 ms, uniform over the cameras, median -46.5 (the ROZHODNUTE on
-# the ticket). The direct feed has no camera filming cam2's monitor and takes its marker from the jack, not a mic,
-# so its leg differs from the camera+monitor feed and from production. A property of the test feed only.
-# Issue 1387: -74 since the program takes the JPEG XS inputs: their strih pin is 36 ms against NDI's 3 ms, so the video
-# comes 33 ms later (-46.5 - 33 = -79.5). E2E 41338338452 on the JPEG XS path measured cam2 -73.6, cam3 -76.5, cam5 -73.3.
-RIG_DIRECT_AV_EXPECTED_MS="${RIG_DIRECT_AV_EXPECTED_MS:--74}"
+# The A/V offset the direct feed reads when PRODUCTION A/V is 0. The direct feed differs from production only at the
+# SOURCE (cam2 HDMI instead of the camera, the QPSK marker from the jack instead of a mic); every hop after it
+# (splitter, grabber, cambox, JPEG XS, strih, stream, mbc) is shared, so this value does not move with any pin.
+# Measured 25.-27.10.2026 at the production pins the camera+monitor feed had tuned to 0 (NDI 2ME PGM 1087, mbc 66):
+# -38..-52 ms, median -46.5, uniform over the cameras. Never re-baseline it to a run's result: the old -74 did that
+# and hid a 28 ms video lead after the JPEG XS switch (ROZHODNUTE 6687710720 on issue 1482).
+RIG_DIRECT_AV_EXPECTED_MS="${RIG_DIRECT_AV_EXPECTED_MS:--46}"
 
 # rig_test_feed_av_expected_ms -> the A/V gate's expected offset for this feed (0 camera+monitor, the direct leg).
 rig_test_feed_av_expected_ms() {
   local f
   f="$(rig_test_feed)" || return 2
   if [ "$f" = direct ]; then printf '%s' "$RIG_DIRECT_AV_EXPECTED_MS"; else printf '0'; fi
-}
-
-# rig_test_feed_av_apply_hold -> a HOLD reason (non-empty) when this feed must never tune the production A/V pin, else
-# nothing. The E2E's cleanup #856 apply moves the stream 'NDI 2ME PGM' pin + the mbc sync offset; only the optical feed
-# has a camera in its video path like production (direct-feed runs read -51 / -3 / -52 ms where optical runs read
-# within +-18 ms), so a direct-feed measurement would detune production.
-rig_test_feed_av_apply_hold() {
-  local f
-  f="$(rig_test_feed)" || return 2
-  if [ "$f" = direct ]; then
-    printf '%s' 'issue 1482: the direct test feed has no camera in its video path, so its A/V offset never tunes the production stream pin'
-  fi
 }
 
 # rig_test_feed_painter_dropin_cmds -> remote bash (run as root on cam2, BEFORE the steady-state handoff): the
