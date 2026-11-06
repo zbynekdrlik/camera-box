@@ -482,6 +482,49 @@ class TestCLI:
         printed = json.loads(out.split("content:\n", 1)[1])
         assert printed == persisted
 
+    def _pin_fact_run(self, monkeypatch, tmp_path, *, live_pin, raw, audio_ms=66):
+        fake = FakeObs(latency_ms=live_pin, audio_ms=audio_ms)
+        monkeypatch.setattr(av_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(av_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.setenv("AV_SYNC_PIN_FACT_MS", "1064")
+        json_path = tmp_path / "last.json"
+        monkeypatch.setattr(sys, "argv", [
+            "av_sync_calibrate.py", "--host", "10.77.9.204", "--source", "JXS PGM src",
+            "--offset-ms", str(0.4 * raw), "--apply", "--json-path", str(json_path),
+            "--loop-gain", "0.4", "--combined-offset-ms", str(raw)])
+        return fake, json_path
+
+    def test_pin_fact_mode_trims_only_the_audio_and_never_writes_the_pin_1482(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        # issue 1482: the JPEG XS pin is a box fact; the sub-frame residual goes to the mbc offset.
+        fake, json_path = self._pin_fact_run(monkeypatch, tmp_path, live_pin=1064, raw=-14.16)
+        av_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert fake.set_calls() == []
+        assert fake.audio_set_calls() == [{"inputName": "mbc", "inputAudioSyncOffset": 55}]
+        assert fake.latency_ms == 1064 and fake.audio_ms == 55
+        persisted = json.loads(json_path.read_text())
+        assert persisted["audio_offset_ms"] == 55 and persisted["audio_source"] == "mbc"
+        assert "pin is the box fact" in out
+
+    def test_pin_fact_mode_holds_both_when_the_pin_must_move_a_frame_1482(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        fake, json_path = self._pin_fact_run(monkeypatch, tmp_path, live_pin=1064, raw=-100.0)
+        av_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert fake.set_calls() == [] and fake.audio_set_calls() == []
+        assert not json_path.exists()
+        assert "STRIH_JXS_PROGRAM_PIN_MS=" in out and "HOLD" in out
+
+    def test_pin_fact_mode_refuses_a_live_pin_off_the_fact_1482(self, monkeypatch, tmp_path):
+        fake, json_path = self._pin_fact_run(monkeypatch, tmp_path, live_pin=1054, raw=-14.16)
+        with pytest.raises(SystemExit) as e:
+            av_sync_calibrate.main()
+        assert "1054" in str(e.value) and "1064" in str(e.value)
+        assert fake.set_calls() == [] and fake.audio_set_calls() == [] and not json_path.exists()
+
     def test_default_path_on_box_does_not_print_remote_push_plan(self, monkeypatch, tmp_path, capsys):
         # If PROGRAMDATA IS set (running ON the Windows box), default_last_json_path() already
         # resolves to the canonical stream-box path -- no push needed.
