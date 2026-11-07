@@ -140,6 +140,8 @@ ONE missing frame per crossing.
     instead: the stamp then sat a quarter slot off and followed each tooth until the line walked
     back in (up to 180 s; 5 crossings for a 1.8-slot burst on a sawtooth card vs 2 now, pinned by
     `a_burst_on_a_sawtooth_card_moves_the_stamp_only_by_its_own_slots_1482`). Never a clamp.
+    The band never falls below `SOURCE_REANCHOR_MIN_BAND_NS` (3 ms): the teeth are fixed in
+    time, so at 120 fps a quarter slot (2.08 ms) would ratchet the line onto each tooth peak.
     Read a cambox's `handoff_age` minus `capture_age` on the `jxs send:` line: beyond ~1 slot
     the stamp trails the capture. Pinned by
     `a_burst_of_card_steps_never_leaves_the_stamp_a_slot_behind_the_capture_1482`.

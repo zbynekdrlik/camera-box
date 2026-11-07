@@ -90,6 +90,10 @@ impl SourcePhase {
     /// [`super::SOURCE_MAX_OFFSET_DIVISOR`].
     pub(super) fn shift(&mut self, delta_ns: i64) {
         for (_, t) in self.window.iter_mut() {
+            let moved = i128::from(*t) + i128::from(delta_ns);
+            // The sums hold only differences, so a saturated point would break them: unreachable
+            // with boot-relative times, asserted like the short fit's own step absorb.
+            debug_assert!((0..=i128::from(u64::MAX)).contains(&moved));
             *t = t.saturating_add_signed(delta_ns);
         }
     }

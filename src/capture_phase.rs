@@ -868,12 +868,20 @@ fn nominal_period_ns(interval_ns: u64) -> f64 {
 /// window, until the line walked back in.
 pub const SOURCE_MAX_OFFSET_DIVISOR: u64 = 4;
 
+/// The re-anchor band never falls below this (ns): the card's sawtooth is a fixed ~2 ms in time
+/// (steps up to 2.9 ms live), so at a high frame rate a quarter slot (2.08 ms at 120 fps) would
+/// fire on the teeth and ratchet the line onto a tooth peak.
+pub const SOURCE_REANCHOR_MIN_BAND_NS: u64 = 3_000_000;
+
 /// How far the source prediction `source_ns` must move to land on `short_ns`, or `None` while it
-/// sits within `interval_ns /` [`SOURCE_MAX_OFFSET_DIVISOR`] of it.
+/// sits within the band: `interval_ns /` [`SOURCE_MAX_OFFSET_DIVISOR`], at least
+/// [`SOURCE_REANCHOR_MIN_BAND_NS`]. A distance an `i64` cannot hold (a broken fit) is `None` too.
 pub fn source_reanchor_ns(source_ns: u64, short_ns: u64, interval_ns: u64) -> Option<i64> {
-    let band = interval_ns / SOURCE_MAX_OFFSET_DIVISOR;
-    (source_ns.abs_diff(short_ns) > band)
-        .then(|| (i128::from(short_ns) - i128::from(source_ns)) as i64)
+    let band = (interval_ns / SOURCE_MAX_OFFSET_DIVISOR).max(SOURCE_REANCHOR_MIN_BAND_NS);
+    if source_ns.abs_diff(short_ns) <= band {
+        return None;
+    }
+    i64::try_from(i128::from(short_ns) - i128::from(source_ns)).ok()
 }
 
 /// The tracker + slot chooser of one capture stream, as the capture loop uses it.
@@ -914,6 +922,8 @@ impl CapturePhase {
             // that, the short fit's prediction, as before.
             // E2E 42361059715: a BURST of card steps is a real phase move the 180 s line
             // averages away; past a quarter slot the source line is re-anchored onto the short fit.
+            // The re-anchor runs in every locked state, also a frame the rate band below sends to
+            // the raw path: the line is the source phase either way, and is counted.
             Some(t) if interval_ns > 0 => match self.tracker.source_prediction_ns() {
                 Some(s) => match source_reanchor_ns(s, t, interval_ns) {
                     Some(delta) => {
@@ -991,12 +1001,12 @@ impl CapturePhase {
         self.tracker.jitter_rms_ns().map(|ns| ns / 1000.0)
     }
 
-    /// Crossings the slot chooser has placed since the start (one per camera-edge crossing).
     /// Times the source line was re-anchored onto the short fit (a burst of card steps).
     pub fn source_reanchors(&self) -> u64 {
         self.source_reanchors
     }
 
+    /// Crossings the slot chooser has placed since the start (one per camera-edge crossing).
     pub fn crossings(&self) -> u64 {
         self.crossings
     }
