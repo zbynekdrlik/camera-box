@@ -300,9 +300,13 @@ fn a_burst_of_card_steps_never_leaves_the_stamp_a_slot_behind_the_capture_1482()
             worst = worst.max((mid - capture).abs());
         }
     }
+    eprintln!("burst: worst {:.1} ms", worst / 1e6);
     assert_eq!((p.phase_steps(), p.reseeds()), (5, 0));
-    // One slot: half a slot (the slot middle) + the hysteresis + a step's ~0.5 s of held stamps
-    // on the old phase (the step-1 cost, 6 ms here) fit inside it; two slots old does not.
+    // The bound is the requirement, not the result: a stamp a slot old is what underran the strih
+    // FIFO live. Expected worst: half a slot (the slot middle, 8.3 ms) + the re-anchor band
+    // (a quarter slot, 4.2 ms: the source line may sit that far off before it moves) + the
+    // hysteresis (0.5 ms) + jitter = ~13 ms; measured 13.7 ms here (14.7 ms on the sawtooth card,
+    // 7.11.2026). Two slots old (the unclamped line, 25.7 ms) fails it.
     assert!(
         worst <= I60 as f64,
         "the stamped slot's middle sat {:.1} ms from the capture (bound {:.1} ms)",
