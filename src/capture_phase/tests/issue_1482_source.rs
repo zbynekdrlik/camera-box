@@ -301,10 +301,12 @@ fn a_burst_of_card_steps_never_leaves_the_stamp_a_slot_behind_the_capture_1482()
         }
     }
     assert_eq!((p.phase_steps(), p.reseeds()), (5, 0));
+    // One slot: half a slot (the slot middle) + the hysteresis + a step's ~0.5 s of held stamps
+    // on the old phase (the step-1 cost, 6 ms here) fit inside it; two slots old does not.
     assert!(
-        worst <= 0.75 * I60 as f64,
+        worst <= I60 as f64,
         "the stamped slot's middle sat {:.1} ms from the capture (bound {:.1} ms)",
         worst / 1e6,
-        0.75 * I60 as f64 / 1e6
+        I60 as f64 / 1e6
     );
 }
