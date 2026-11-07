@@ -129,6 +129,15 @@ ONE missing frame per crossing.
     `SOURCE_FIT_MIN_SECONDS` (60 s), the smoothed instant is the SOURCE prediction at the frame's
     `x`; before that the short fit's, as before step 2. The slot chooser, the gate, the band check
     (still on the short fit's rate) and the sender path are unchanged.
+  - **The source prediction is clamped to the short fit +- a quarter slot**
+    (`clamp_source_to_short`, `SOURCE_MAX_OFFSET_DIVISOR` 4 = 4.17 ms at 60 fps; E2E 42361059715,
+    7.11.2026). A BURST of card catch-ups (cam2: +2..+8 ms every 1-4 s) is a real phase move the
+    180 s line averages away: unclamped it trailed the capture by ~45 ms (`handoff_age` 63-73 ms
+    vs `capture_age` 18 ms), frames left cam2 stamped two slots old and the strih FIFO (pin
+    36 ms) underran + dropped. Inside the band the line still averages the ~2 ms sawtooth.
+    Read a cambox's `handoff_age` minus `capture_age` on the `jxs send:` line: beyond ~1 slot
+    the stamp trails the capture. Pinned by
+    `a_burst_of_card_steps_never_leaves_the_stamp_a_slot_behind_the_capture_1482`.
   - A pass-through card (cam3/cam5): both fits agree within jitter (the unit test bounds the
     difference under 60 us), so its stamps are today's.
   - Cost: for the first 60 s after a start or a real re-seed a stepping card still stamps from
