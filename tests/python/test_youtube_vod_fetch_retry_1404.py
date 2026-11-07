@@ -97,7 +97,7 @@ def test_a_vod_that_stays_short_fails_at_the_deadline_naming_both_durations_1482
 
 
 def test_the_broadcast_bound_is_the_publish_to_unpublish_span_less_the_slack_1482():
-    assert v.vod_min_duration([100.0, 150.0], [514.2]) == 414.2 - v.VOD_SHORT_SLACK_S
+    assert v.vod_min_duration([100.0, 150.0], [514.2]) == pytest.approx(414.2 - v.VOD_SHORT_SLACK_S)
     assert v.vod_min_duration([], [514.2]) is None
     assert v.vod_min_duration([100.0], []) is None
     assert v.VOD_SHORT_SLACK_S == 90.0
