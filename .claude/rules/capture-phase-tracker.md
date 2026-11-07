@@ -129,12 +129,17 @@ ONE missing frame per crossing.
     `SOURCE_FIT_MIN_SECONDS` (60 s), the smoothed instant is the SOURCE prediction at the frame's
     `x`; before that the short fit's, as before step 2. The slot chooser, the gate, the band check
     (still on the short fit's rate) and the sender path are unchanged.
-  - **The source prediction is clamped to the short fit +- a quarter slot**
-    (`clamp_source_to_short`, `SOURCE_MAX_OFFSET_DIVISOR` 4 = 4.17 ms at 60 fps; E2E 42361059715,
-    7.11.2026). A BURST of card catch-ups (cam2: +2..+8 ms every 1-4 s) is a real phase move the
-    180 s line averages away: unclamped it trailed the capture by ~45 ms (`handoff_age` 63-73 ms
-    vs `capture_age` 18 ms), frames left cam2 stamped two slots old and the strih FIFO (pin
-    36 ms) underran + dropped. Inside the band the line still averages the ~2 ms sawtooth.
+  - **Past a quarter slot off the short fit, the source line is RE-ANCHORED onto it**
+    (`source_reanchor_ns` + `SourcePhase::shift`, `SOURCE_MAX_OFFSET_DIVISOR` 4 = 4.17 ms at
+    60 fps; E2E 42361059715, 7.11.2026; counter `CapturePhase::source_reanchors`). A BURST of card
+    catch-ups (cam2: +2..+8 ms every 1-4 s) is a real phase move the 180 s line averages away:
+    left alone it trailed the capture by ~45 ms (`handoff_age` 63-73 ms vs `capture_age` 18 ms),
+    frames left cam2 stamped two slots old and the strih FIFO (pin 36 ms) underran + dropped.
+    The shift moves every window point (intercept only, rate kept), so the line keeps averaging
+    the ~2 ms sawtooth on the new phase. The first fix CLAMPED the prediction to the band edge
+    instead: the stamp then sat a quarter slot off and followed each tooth until the line walked
+    back in (up to 180 s; 5 crossings for a 1.8-slot burst on a sawtooth card vs 2 now, pinned by
+    `a_burst_on_a_sawtooth_card_moves_the_stamp_only_by_its_own_slots_1482`). Never a clamp.
     Read a cambox's `handoff_age` minus `capture_age` on the `jxs send:` line: beyond ~1 slot
     the stamp trails the capture. Pinned by
     `a_burst_of_card_steps_never_leaves_the_stamp_a_slot_behind_the_capture_1482`.

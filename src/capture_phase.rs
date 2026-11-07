@@ -627,6 +627,11 @@ impl CapturePhaseTracker {
         self.source.predict_ns(self.last_x)
     }
 
+    /// The 7.11.2026 burst re-anchor: move the source line by `delta_ns` (rate kept).
+    fn shift_source(&mut self, delta_ns: i64) {
+        self.source.shift(delta_ns);
+    }
+
     /// Issue 1482 step 2: the long-horizon source fit.
     pub fn source(&self) -> &SourcePhase {
         &self.source
@@ -856,15 +861,19 @@ fn nominal_period_ns(interval_ns: u64) -> f64 {
 /// Issue 1482: the farthest the SOURCE fit's prediction may sit from the short fit's, as a
 /// fraction of the emit interval (a quarter: 4.17 ms at 60 fps). Inside it the source line
 /// averages a re-timing card's sawtooth (teeth ~2 ms); past it the card's phase really moved (a
-/// burst of catch-ups, live 7.11.2026: the 180 s line trailed the capture by ~45 ms) and the stamp
-/// follows the short fit's side of the band.
+/// burst of catch-ups, live 7.11.2026: the 180 s line trailed the capture by ~45 ms), so the whole
+/// source line is RE-ANCHORED onto the short fit's prediction (only its intercept moves, the rate
+/// is kept) and keeps averaging the teeth from there. A clamp to the band edge was rejected: it
+/// left the stamp a quarter slot off the capture and following each tooth for up to the 180 s
+/// window, until the line walked back in.
 pub const SOURCE_MAX_OFFSET_DIVISOR: u64 = 4;
 
-/// The source prediction `source_ns`, clamped to `short_ns` +- `interval_ns /`
-/// [`SOURCE_MAX_OFFSET_DIVISOR`].
-pub fn clamp_source_to_short(source_ns: u64, short_ns: u64, interval_ns: u64) -> u64 {
+/// How far the source prediction `source_ns` must move to land on `short_ns`, or `None` while it
+/// sits within `interval_ns /` [`SOURCE_MAX_OFFSET_DIVISOR`] of it.
+pub fn source_reanchor_ns(source_ns: u64, short_ns: u64, interval_ns: u64) -> Option<i64> {
     let band = interval_ns / SOURCE_MAX_OFFSET_DIVISOR;
-    source_ns.clamp(short_ns.saturating_sub(band), short_ns.saturating_add(band))
+    (source_ns.abs_diff(short_ns) > band)
+        .then(|| (i128::from(short_ns) - i128::from(source_ns)) as i64)
 }
 
 /// The tracker + slot chooser of one capture stream, as the capture loop uses it.
@@ -873,6 +882,8 @@ pub struct CapturePhase {
     tracker: CapturePhaseTracker,
     slots: SlotHysteresis,
     crossings: u64,
+    /// The 7.11.2026 burst re-anchors of the source line onto the short fit.
+    source_reanchors: u64,
     mode: PhaseMode,
     /// The mono-to-real offset of the previous stamp-driven frame (the clock-step check).
     last_offset_ns: Option<i64>,
@@ -902,11 +913,18 @@ impl CapturePhase {
             // the slot once it spans a minute (a re-timing card's sawtooth averaged out); before
             // that, the short fit's prediction, as before.
             // E2E 42361059715: a BURST of card steps is a real phase move the 180 s line
-            // averages away, so it is clamped to the short fit +- a quarter slot.
-            Some(t) if interval_ns > 0 => self
-                .tracker
-                .source_prediction_ns()
-                .map_or(t, |s| clamp_source_to_short(s, t, interval_ns)),
+            // averages away; past a quarter slot the source line is re-anchored onto the short fit.
+            Some(t) if interval_ns > 0 => match self.tracker.source_prediction_ns() {
+                Some(s) => match source_reanchor_ns(s, t, interval_ns) {
+                    Some(delta) => {
+                        self.tracker.shift_source(delta);
+                        self.source_reanchors += 1;
+                        t
+                    }
+                    None => s,
+                },
+                None => t,
+            },
             _ => {
                 self.mode = if interval_ns == 0 {
                     PhaseMode::Off
@@ -974,6 +992,11 @@ impl CapturePhase {
     }
 
     /// Crossings the slot chooser has placed since the start (one per camera-edge crossing).
+    /// Times the source line was re-anchored onto the short fit (a burst of card steps).
+    pub fn source_reanchors(&self) -> u64 {
+        self.source_reanchors
+    }
+
     pub fn crossings(&self) -> u64 {
         self.crossings
     }

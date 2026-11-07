@@ -84,6 +84,16 @@ impl SourcePhase {
         }
     }
 
+    /// Move the whole line by `delta_ns` (every window point's time). The sums are relative to the
+    /// oldest point, which moves with the rest, so only the intercept moves: the slope (the
+    /// source's long-term rate) is kept. The 7.11.2026 burst re-anchor, see
+    /// [`super::SOURCE_MAX_OFFSET_DIVISOR`].
+    pub(super) fn shift(&mut self, delta_ns: i64) {
+        for (_, t) in self.window.iter_mut() {
+            *t = t.saturating_add_signed(delta_ns);
+        }
+    }
+
     /// Drop the oldest point (the origin, `dx = dy = 0`), then move the origin to the new oldest.
     fn pop_front(&mut self) {
         let Some((x0, t0)) = self.window.pop_front() else {
