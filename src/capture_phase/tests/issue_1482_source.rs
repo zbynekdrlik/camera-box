@@ -270,3 +270,41 @@ fn a_lone_absorbed_step_walks_the_source_onto_the_new_phase_in_one_crossing_1482
         early / 1000.0
     );
 }
+
+/// E2E 42361059715 (7.11.2026): cam2's card stepped LATER by +2..+8 ms every 1-4 s for a while
+/// (`phase_steps` 58 -> 61 in 10 s) and the 180 s source line, which averages its steps, trailed
+/// the capture by ~45 ms (`handoff_age` 63/70 ms vs `capture_age` 18 ms): frames left the box
+/// stamped two slots old, the strih FIFO at its 36 ms pin underran and dropped (a copy + a gap on
+/// the stream recording). A BURST of steps is a real phase move, not a sawtooth to average: the
+/// stamped slot must stay within a slot of the frame's own capture instant on every frame.
+#[test]
+fn a_burst_of_card_steps_never_leaves_the_stamp_a_slot_behind_the_capture_1482() {
+    let mut frames = camera(60 * 240, 0.0, 30_000.0, 4_000_000.0, 0x1482_5a06);
+    // Five +6 ms catch-ups, 3 s apart, starting 30 s after the source fit drives the stamp.
+    let first = after_switch(30);
+    for burst in 0..5 {
+        for f in frames.iter_mut().skip(first + burst * 180) {
+            f.ts += 6_000_000;
+            f.truth += 6_000_000.0;
+        }
+    }
+    let offset = (SEC_2309 * NS_PER_SECOND - MONO0) as i64;
+    let mut p = CapturePhase::new();
+    let mut worst = 0.0f64;
+    for (k, f) in frames.iter().enumerate() {
+        let slot = p.stamp_frame(f.seq, f.ts, offset, I60);
+        if k > after_switch(1) {
+            let s = slot.unwrap_or_else(|| panic!("frame {k}: stamp-driven"));
+            let mid = s as f64 + I60 as f64 / 2.0;
+            let capture = f.truth + offset as f64;
+            worst = worst.max((mid - capture).abs());
+        }
+    }
+    assert_eq!((p.phase_steps(), p.reseeds()), (5, 0));
+    assert!(
+        worst <= 0.75 * I60 as f64,
+        "the stamped slot's middle sat {:.1} ms from the capture (bound {:.1} ms)",
+        worst / 1e6,
+        0.75 * I60 as f64 / 1e6
+    );
+}
