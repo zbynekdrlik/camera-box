@@ -126,6 +126,10 @@ CLIP_TIMEOUT_S, PROBE_TIMEOUT_S, YTDLP_TIMEOUT_S, URL_TIMEOUT_S = 600, 1800, 360
 # restreamer reports the VOD done at YouTube `uploaded` (0.29.57), which can come before the
 # 1080p + audio formats are listed: the fetch retries every YTDLP_RETRY_S until YTDLP_READY_S.
 YTDLP_RETRY_S, YTDLP_READY_S = 30, 600  # inside the 2400 s tool timeout
+# issue 1482: YouTube can serve a PARTIAL archive after restreamer's `done` (E2E 42314759130: 209 s of
+# a 414 s broadcast). A fetched VOD shorter than the publish..unpublish span less this slack (the VOD
+# starts 24-42 s after the publish, one ended 8.7 s early) is fetched again until YTDLP_READY_S.
+VOD_SHORT_SLACK_S = 90.0
 
 
 def join_parts(parts):
@@ -405,7 +409,22 @@ def fmt_utc(x):
             .isoformat(timespec="milliseconds").replace("+00:00", "Z"))
 
 
-def fetch_vod(vod, out, ready_deadline_s=YTDLP_READY_S, sleep=time.sleep, clock=time.monotonic):
+def vod_min_duration(publishes, unpublishes):
+    """The shortest VOD the broadcast can leave (issue 1482), None without both ends."""
+    if not publishes or not unpublishes:
+        return None
+    return max(unpublishes) - min(publishes) - VOD_SHORT_SLACK_S
+
+
+def media_duration(path):
+    """The container's duration in seconds (ffprobe)."""
+    r = run_bounded(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                    HEIGHT_TIMEOUT_S, text=True, check=True)
+    return float(r.stdout.strip())
+
+
+def fetch_vod(vod, out, ready_deadline_s=YTDLP_READY_S, sleep=time.sleep, clock=time.monotonic,
+              min_duration_s=None):
     if os.path.isfile(vod):
         return vod
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vod):
@@ -418,6 +437,12 @@ def fetch_vod(vod, out, ready_deadline_s=YTDLP_READY_S, sleep=time.sleep, clock=
                          "bv*[height<=1080][fps<=30][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080][fps<=30]+ba/b",
                          "--merge-output-format", "mp4", "-o", path, f"https://www.youtube.com/watch?v={vod}"],
                         YTDLP_TIMEOUT_S, check=True)
+            if min_duration_s is not None:
+                dur = media_duration(path)
+                if dur < min_duration_s:
+                    os.remove(path)  # a partial archive is never judged (issue 1482)
+                    raise RuntimeError(f"the VOD is {dur:.1f} s, the broadcast leaves at least "
+                                       f"{min_duration_s:.1f} s (YouTube has not finished it)")
         except RuntimeError as e:
             if clock() + YTDLP_RETRY_S > end:
                 raise
@@ -557,11 +582,12 @@ def measure(args):
     windows_in = [parse_window(s) for s in args.windows]
     publishes = [parse_utc(p) for p in args.publish]
     recs = [parse_recording(r) for r in args.recording]
-    vod_file = fetch_vod(args.vod, args.out)
+    unpublishes = [parse_utc(u) for u in args.unpublish]
+    vod_file = fetch_vod(args.vod, args.out, min_duration_s=vod_min_duration(publishes, unpublishes))
     runs = tuple(args.runs)
     ctx = {"recs": recs, "vod_file": vod_file, "markers": fetch_markers(args.markers, args.out),
            "probe_bin": args.probe_bin, "out": args.out, "rec_audio": {}, "publishes": publishes,
-           "unpublishes": [parse_utc(u) for u in args.unpublish], "runs": runs,
+           "unpublishes": unpublishes, "runs": runs,
            "clip_markers": (fetch_markers(args.clip_markers, args.out, "clip-markers.csv")
                             if args.clip_markers else None)}
     part_rows = [cached_ticks(p, os.path.join(args.out, f"ticks-rec-{k + 1}.tsv"), args.workers, runs)

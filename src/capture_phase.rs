@@ -853,6 +853,20 @@ fn nominal_period_ns(interval_ns: u64) -> f64 {
     }
 }
 
+/// Issue 1482: the farthest the SOURCE fit's prediction may sit from the short fit's, as a
+/// fraction of the emit interval (a quarter: 4.17 ms at 60 fps). Inside it the source line
+/// averages a re-timing card's sawtooth (teeth ~2 ms); past it the card's phase really moved (a
+/// burst of catch-ups, live 7.11.2026: the 180 s line trailed the capture by ~45 ms) and the stamp
+/// follows the short fit's side of the band.
+pub const SOURCE_MAX_OFFSET_DIVISOR: u64 = 4;
+
+/// The source prediction `source_ns`, clamped to `short_ns` +- `interval_ns /`
+/// [`SOURCE_MAX_OFFSET_DIVISOR`].
+pub fn clamp_source_to_short(source_ns: u64, short_ns: u64, interval_ns: u64) -> u64 {
+    let band = interval_ns / SOURCE_MAX_OFFSET_DIVISOR;
+    source_ns.clamp(short_ns.saturating_sub(band), short_ns.saturating_add(band))
+}
+
 /// The tracker + slot chooser of one capture stream, as the capture loop uses it.
 #[derive(Debug, Clone, Default)]
 pub struct CapturePhase {
@@ -887,7 +901,12 @@ impl CapturePhase {
             // Issue 1482 step 2: while the short fit is locked, the long-horizon SOURCE fit places
             // the slot once it spans a minute (a re-timing card's sawtooth averaged out); before
             // that, the short fit's prediction, as before.
-            Some(t) if interval_ns > 0 => self.tracker.source_prediction_ns().unwrap_or(t),
+            // E2E 42361059715: a BURST of card steps is a real phase move the 180 s line
+            // averages away, so it is clamped to the short fit +- a quarter slot.
+            Some(t) if interval_ns > 0 => self
+                .tracker
+                .source_prediction_ns()
+                .map_or(t, |s| clamp_source_to_short(s, t, interval_ns)),
             _ => {
                 self.mode = if interval_ns == 0 {
                     PhaseMode::Off

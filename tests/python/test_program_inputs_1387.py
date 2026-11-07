@@ -488,6 +488,47 @@ def test_the_av_apply_on_jpeg_xs_prints_the_recommended_fact_and_holds(tmp_path)
             f"STRIH_JXS_PROGRAM_PIN_MS={want}"
 
 
+def _split(raw, pin, gain):
+    sys.path.insert(0, str(SCRIPTS))
+    import av_sync_calibrate
+    return av_sync_calibrate.split_av_correction(raw, pin, 0.0, gain,
+                                                 audio_gain=av_sync_calibrate.AUDIO_TRIM_LOOP_GAIN)
+
+
+def test_a_sub_frame_residual_on_jpeg_xs_goes_to_the_audio_trim_and_keeps_the_pin_fact_1482(tmp_path):
+    # issue 1482: the JPEG XS pin is frame-quantized (1054, 1060 and 1064 ms all hold 32 frames), so
+    # a residual under one frame can only be corrected on the mbc audio offset: the apply runs, with
+    # the fact pin exported so av_sync_calibrate.py never writes the pin.
+    r = _bash('program_inputs_av_pin_hold; printf "OFF=[%s]\\nFACT=[%s]\\nWHY=[%s]\\n" '
+              '"$AV_SYNC_APPLY_OFFSET_MS" "${AV_SYNC_PIN_FACT_MS:-}" "${AV_SYNC_HELD_REASON:-}"; '
+              'env | grep "^AV_SYNC_PIN_FACT_MS=" || true',
+              env={"E2E_PROGRAM_PATH": "jxs", "PROGRAM_INPUTS_STREAM_PIN_MS": "1064",
+                   "AV_SYNC_APPLY_OFFSET_MS": "-5.664", "AV_SYNC_COMBINED_OFFSET_MS_RAW": "-14.16",
+                   "AV_SYNC_LOOP_GAIN_VALUE": "0.4", "OUTDIR": str(tmp_path), "RUN_ID": "9",
+                   "PROGRAM_INPUTS_STREAM_BOX": "stream-snv"})
+    assert _split(-14.16, 1064, 0.4)[0] == 1064
+    assert r.returncode == 0, r.stderr
+    assert "OFF=[-5.664]" in r.stdout and "FACT=[1064]" in r.stdout and "WHY=[]" in r.stdout
+    assert "AV_SYNC_PIN_FACT_MS=1064" in r.stdout  # exported to the apply's child process
+    assert "mbc audio offset" in r.stderr
+    assert not list(tmp_path.iterdir())
+
+
+def test_a_whole_frame_residual_on_jpeg_xs_recommends_the_split_pin_fact_and_holds_1482(tmp_path):
+    r = _bash('program_inputs_av_pin_hold; printf "OFF=[%s]\\nFACT=[%s]\\n" '
+              '"$AV_SYNC_APPLY_OFFSET_MS" "${AV_SYNC_PIN_FACT_MS:-}"',
+              env={"E2E_PROGRAM_PATH": "jxs", "PROGRAM_INPUTS_STREAM_PIN_MS": "1064",
+                   "AV_SYNC_APPLY_OFFSET_MS": "-40", "AV_SYNC_COMBINED_OFFSET_MS_RAW": "-100",
+                   "AV_SYNC_LOOP_GAIN_VALUE": "0.4", "OUTDIR": str(tmp_path), "RUN_ID": "9",
+                   "PROGRAM_INPUTS_STREAM_BOX": "stream-snv"})
+    want = _split(-100.0, 1064, 0.4)[0]
+    assert want != 1064
+    assert r.returncode == 0 and "OFF=[]" in r.stdout and "FACT=[]" in r.stdout, r.stderr
+    assert f"STRIH_JXS_PROGRAM_PIN_MS={want}" in r.stderr
+    assert (tmp_path / "av-sync-jxs-pin-recommendation-9.txt").read_text().splitlines()[0] == \
+        f"STRIH_JXS_PROGRAM_PIN_MS={want}"
+
+
 def test_the_av_apply_on_ndi_or_with_no_correction_is_untouched(tmp_path):
     r = _bash('program_inputs_av_pin_hold; printf "OFF=[%s]" "$AV_SYNC_APPLY_OFFSET_MS"',
               env={"AV_SYNC_APPLY_OFFSET_MS": "20", "OUTDIR": str(tmp_path), "RUN_ID": "9"})

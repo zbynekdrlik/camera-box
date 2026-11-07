@@ -457,11 +457,26 @@ program_inputs_rendered_verify() {
 # correction. Always rc 0.
 program_inputs_av_pin_hold() {
   local off="${AV_SYNC_APPLY_OFFSET_MS:-}" pin="${PROGRAM_INPUTS_STREAM_PIN_MS:-}" rec here
+  local raw="${AV_SYNC_COMBINED_OFFSET_MS_RAW:-}" gain="${AV_SYNC_LOOP_GAIN_VALUE:-}"
   program_path_ndi && return 0
   [ -n "$off" ] || return 0
   here="$(_program_inputs_libdir)/.."
-  rec="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import av_sync_calibrate as a; print(a.required_delay_ms(int(sys.argv[2]), float(sys.argv[3])))' \
-    "$here" "$pin" "$off" 2>/dev/null || true)"
+  if [ -n "$raw" ] && [ -n "$gain" ]; then
+    # issue 1482: the pin holds whole frames, so the #1333 split decides. No whole-frame move = the
+    # sub-frame remainder goes to the mbc audio offset in the normal apply (the pin handed over as a
+    # fact, never written); a whole-frame move = the split's phase-snapped pin as the recommendation.
+    rec="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import av_sync_calibrate as a; print(a.split_av_correction(float(sys.argv[3]), int(sys.argv[2]), 0.0, float(sys.argv[4]), audio_gain=a.AUDIO_TRIM_LOOP_GAIN)[0])' \
+      "$here" "$pin" "$raw" "$gain" 2>/dev/null || true)"
+    case "$rec" in '' | *[!0123456789]*) rec="" ;; esac
+    if [ -n "$rec" ] && [ "$rec" = "$pin" ]; then
+      export AV_SYNC_PIN_FACT_MS="$pin"
+      echo "[cleanup] the JPEG XS path: the residual ${raw} ms is under one frame of the pin fact STRIH_JXS_PROGRAM_PIN_MS=${pin} -- trimmed on the mbc audio offset by the #856 apply, the pin kept (issue 1482)" >&2
+      return 0
+    fi
+  else
+    rec="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import av_sync_calibrate as a; print(a.required_delay_ms(int(sys.argv[2]), float(sys.argv[3])))' \
+      "$here" "$pin" "$off" 2>/dev/null || true)"
+  fi
   case "$rec" in '' | *[!0123456789]*) rec="" ;; esac
   AV_SYNC_HELD_REASON="the JPEG XS path: the stream pin is the box fact STRIH_JXS_PROGRAM_PIN_MS=${pin:-?} (never changed at run time); recommended STRIH_JXS_PROGRAM_PIN_MS=${rec:-<not computable>} for a measured offset ${off} ms"
   echo "[cleanup] HOLD the A/V apply: ${AV_SYNC_HELD_REASON} -- RECOMMENDATION (a fact change, merged + set up on ${PROGRAM_INPUTS_STREAM_BOX:-the stream box} while it is off air): STRIH_JXS_PROGRAM_PIN_MS=${rec:-<not computable>} (issue 1387)" >&2

@@ -715,8 +715,58 @@ def main():
     # context) keeps the legacy pin-only required_delay_ms behavior untouched.
     split_mode = loop_gain is not None and combined_offset_ms_raw is not None
 
+    # issue 1482: on the JPEG XS path the stream pin is a box FACT (STRIH_JXS_PROGRAM_PIN_MS, healed
+    # back at every OBS start), handed over by program_inputs_av_pin_hold. The pin is never written:
+    # a sub-frame remainder goes to the audio offset alone, a whole-frame move is a fact
+    # recommendation and both actuators HOLD.
+    pin_fact = _opt_float(os.environ.get("AV_SYNC_PIN_FACT_MS"))
+
     ws = _conn(args.host, args.password)
     current = read_current_latency(ws, args.source)
+
+    if pin_fact is not None:
+        if not split_mode:
+            raise SystemExit(
+                "[av-sync] AV_SYNC_PIN_FACT_MS needs the #856 split context "
+                "(--loop-gain + --combined-offset-ms) -- nothing applied"
+            )
+        if current != int(pin_fact):
+            raise SystemExit(
+                f"[av-sync] '{args.source}' runs pin {current} ms, the box fact is "
+                f"{int(pin_fact)} ms -- the pin is not the fact, nothing applied (issue 1482)"
+            )
+        current_audio = read_current_audio_offset(ws, args.audio_source)
+        new_ms, new_audio, split_diag = split_av_correction(
+            combined_offset_ms_raw, current, current_audio, loop_gain,
+            audio_gain=AUDIO_TRIM_LOOP_GAIN,
+        )
+        if new_ms != current:
+            print(
+                f"[av-sync] HOLD: the residual {combined_offset_ms_raw:.1f}ms moves the pin by "
+                f"{split_diag['frames']} frame(s): RECOMMENDATION STRIH_JXS_PROGRAM_PIN_MS={new_ms} "
+                f"(a fact change); the audio offset is left at {current_audio:.0f}ms (issue 1482)"
+            )
+            return
+        print(
+            f"[av-sync] the pin is the box fact {current}ms (kept); residual(raw)="
+            f"{combined_offset_ms_raw:.1f}ms audio_gain={AUDIO_TRIM_LOOP_GAIN:.2f} -> audio "
+            f"'{args.audio_source}' {current_audio:.0f} -> {int(round(new_audio))}ms (issue 1482)"
+        )
+        if not args.apply:
+            print("[av-sync] dry-run (pass --apply to set)")
+            return
+        applied_audio = apply_audio_offset(ws, args.audio_source, current_audio, new_audio)
+        json_path = Path(args.json_path) if args.json_path else default_last_json_path()
+        write_last_json(
+            json_path, args.source, offset, current,
+            loop_gain=loop_gain, combined_offset_ms_raw=combined_offset_ms_raw,
+            audio_offset_ms=applied_audio, audio_source=args.audio_source,
+        )
+        print(
+            f"[av-sync] APPLIED + verified: '{args.audio_source}' {AUDIO_SYNC_OFFSET_KEY}="
+            f"{applied_audio}; '{args.source}' pin {current} untouched; persisted {json_path}"
+        )
+        return
 
     current_audio = None
     new_audio = None

@@ -66,6 +66,12 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   lifeCycle `complete` + `uploaded`/`processed`/`succeeded`. The 1080p + audio check stays here:
   `fetch_vod` retries yt-dlp every `YTDLP_RETRY_S` (30 s) until `YTDLP_READY_S` (600 s, inside the
   2400 s tool timeout), then fails (UNKNOWN).
+- **`done` can still serve a PARTIAL archive (issue 1482).** E2E 42314759130 fetched 209 s of a 414 s
+  broadcast right after `done`: a truncated mp4 whose decode fell 7 frames short of its packets, so
+  the tool read UNKNOWN; the same VOD read 469.5 s, every packet decoded, ~80 min later. `fetch_vod`
+  therefore drops a file shorter than publish..unpublish minus `VOD_SHORT_SLACK_S` (90 s) and fetches
+  again inside the same 600 s bound. A "N frames decoded, the container holds M" on a VOD: compare
+  its ffprobe duration with the broadcast before blaming the decoder.
 - Quota: one session of restreamer's rolling-24 h budget (~10 sessions/day across both gates) per run.
   There is no per-SHA cache (the spec's Review Focus 4): the stage runs on every run, and a cached FAIL
   could never pass on a rerun.
