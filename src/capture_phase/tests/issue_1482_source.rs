@@ -310,3 +310,74 @@ fn a_burst_of_card_steps_never_leaves_the_stamp_a_slot_behind_the_capture_1482()
         I60 as f64 / 1e6
     );
 }
+
+/// Review of the burst clamp (7.11.2026): while the clamp bites, the stamp is the short fit +- a
+/// quarter slot and so moves with the card's teeth. On cam2's sawtooth card a burst must still
+/// move the stamp only by the burst's own slots, never back and forth with a tooth: every slot
+/// advance is 1 or 2 (a real forward move), never 0 right after a 2 (a dup after a gap) or the
+/// reverse, and the crossings stay within the burst's slot count + 1.
+#[test]
+fn a_burst_on_a_sawtooth_card_moves_the_stamp_only_by_its_own_slots_1482() {
+    let start = I60 as f64 - 1_000_000.0;
+    let mut frames = retiming_card(
+        60 * 240,
+        0.0,
+        100.0,
+        4_000_000.0,
+        start,
+        30_000.0,
+        0x1482_5a07,
+    );
+    let first = after_switch(30);
+    for burst in 0..5 {
+        for f in frames.iter_mut().skip(first + burst * 180) {
+            f.ts += 6_000_000;
+            f.source += 6_000_000.0;
+        }
+    }
+    let offset = (SEC_2309 * NS_PER_SECOND - MONO0) as i64;
+    let mut p = CapturePhase::new();
+    let mut prev: Option<u64> = None;
+    let mut last_odd: Option<(usize, u64)> = None;
+    let mut back_and_forth = Vec::new();
+    let mut worst = 0.0f64;
+    let mut crossings_at_switch = 0;
+    for (k, f) in frames.iter().enumerate() {
+        let slot = p.stamp_frame(f.seq, f.ts, offset, I60);
+        if k == after_switch(15) {
+            crossings_at_switch = p.crossings();
+        }
+        if k > after_switch(15) {
+            let s = slot.unwrap_or_else(|| panic!("frame {k}: stamp-driven"));
+            let mid = s as f64 + I60 as f64 / 2.0;
+            worst = worst.max((mid - (f.source + offset as f64)).abs());
+            if let Some(q) = prev {
+                let adv = grid_steps_between(q, s, I60);
+                if adv != 1 {
+                    if let Some((j, a)) = last_odd {
+                        if a != adv && k - j < 60 {
+                            back_and_forth.push(k);
+                        }
+                    }
+                    last_odd = Some((k, adv));
+                }
+            }
+        }
+        prev = slot;
+    }
+    let crossings = p.crossings() - crossings_at_switch;
+    eprintln!(
+        "sawtooth burst: crossings {crossings} phase_steps {} reseeds {} worst {:.1} ms",
+        p.phase_steps(),
+        p.reseeds(),
+        worst / 1e6
+    );
+    assert_eq!(p.reseeds(), 0);
+    assert!(
+        back_and_forth.is_empty(),
+        "the stamp went back and forth with a tooth at frames {back_and_forth:?}"
+    );
+    // 5 x 6 ms = 30 ms = 1.8 slots: at most 2 real moves + 1 edge settle.
+    assert!(crossings <= 3, "{crossings} crossings for a 1.8-slot burst");
+    assert!(worst <= I60 as f64, "worst {:.1} ms", worst / 1e6);
+}
