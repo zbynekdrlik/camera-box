@@ -46,6 +46,15 @@ design 6386467303 (Approach 1, three layers); finding 6386340389; validation 638
 - NVIDIA connector names = one word + a number (`DP-0`, `HDMI-1`); a sink output carries a provider
   suffix (`eDP-1-2`, `DP-1-5`) and is left out. The NVIDIA README (Display Device Names) accepts connector
   names in MetaModes; an OutputClass carries a Screen option (the package's own AllowEmpty works that way).
+- **Every xorg.conf.d `OutputClass` names its `Driver` (issue 1494, strih-snv 8.11.2026).** The class
+  first shipped with `MatchDriver "nvidia-drm"` and no `Driver` line. Xorg then adds a `(null)` entry
+  to its autoconfigured driver list (`loading driver: (null)`, `Matched (null) as autoconfigured driver
+  1`); the list stops at the first NULL, so `modesetting` never loaded, the iGPU panel sink never
+  came up and the panel was black from the first X start after the file landed (24.10 -> the 4.11
+  boot). The class now carries `Driver "nvidia"`. verify item 43's `(panel-gpu)` FAILs one X provider
+  beside a connected non-NVIDIA eDP connector (`strih_operator_igpu_panel`), so it never reads as
+  "one provider, no PRIME" again. strih-pp / stream-pp kept the old file until setup step 6 rewrites
+  it; the fix applies at their next X start.
 - Written by setup-strih step 6 (`strih_x_display_provision`, called at the end of
   `strih_drm_output_provision`, AFTER the config): write-if-changed, removed when nothing is armed, a
   loud SKIP when xrandr names no output, and NEVER an X restart -- it applies at the next X start.
