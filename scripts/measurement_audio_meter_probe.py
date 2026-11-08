@@ -178,6 +178,27 @@ def sample_channel_peaks(ws, input_name, sample_s, db_floor):
     return None if best is None else [_peak_to_db(p, db_floor) for p in best]
 
 
+def stream_active(ws, timeout_s=3.0):
+    """issue 1495: GetStreamStatus.outputActive as 1/0, or None when no answer arrived in time. Meter
+    events keep arriving on the same socket, so read until our own op-7 response."""
+    ws.send(json.dumps({"op": 6, "d": {"requestType": "GetStreamStatus", "requestId": "stream-1495"}}))
+    deadline = time.monotonic() + timeout_s
+    ws.settimeout(0.5)
+    while time.monotonic() < deadline:
+        try:
+            msg = json.loads(ws.recv())
+        except WebSocketTimeoutException:
+            continue
+        except (ValueError, OSError):
+            return None
+        d = msg.get("d", {})
+        if msg.get("op") == 7 and d.get("requestId") == "stream-1495":
+            if not d.get("requestStatus", {}).get("result"):
+                return None
+            return 1 if d.get("responseData", {}).get("outputActive") else 0
+    return None
+
+
 # issue 1439 (owner 25.10.2026: "na strih-snv obs zvuk beha iba v jednom kanaly"): the console sent the
 # strih program VBAN with its RIGHT channel empty (L -45 dBFS, R -112 dBFS) and nothing failed. A channel
 # under SILENT_DB while another is over PRESENT_DB = one silent channel.
@@ -225,6 +246,7 @@ def _main(argv):
             print(f"channel_detail={detail}")
             return 0
         peak_db, present = sample_peak(ws, ns.input, ns.sample_s, ns.db_floor)
+        active = stream_active(ws)
     finally:
         try:
             ws.close()
@@ -234,6 +256,7 @@ def _main(argv):
 
     print(f"meter_present={1 if present else 0}")
     print(f"peak_db={'' if peak_db is None else peak_db}")
+    print(f"stream_active={'' if active is None else active}")
     return 0
 
 

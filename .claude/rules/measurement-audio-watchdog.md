@@ -35,6 +35,25 @@ production-critical dev1 watchdog class (umbrella **#1308**).
   `rig-mode-state.sh` (`rig_mode_from_painter_snapshot` — the #1290 EVENT gate),
   `audio-presence-preflight.sh` (the threshold).
 
+## The production page for missing program audio (issue 1495, owner 8.11.2026)
+
+On 8.11.2026 stream-snv lost program audio for 58 min (the USB VBAN NIC vanished). This watchdog read
+`peak_db=-100.0` from 08:41, but its `measurement-audio-stream-*` keys are suppressed by the owner's
+notify policy, and in EVENT mode the TEST arm does not look at all. Owner ruling: only a
+production-stopping outage reaches his phone, through airuleset's `page:` class (one per check per
+10 min).
+- **The production arm runs in EVERY rig mode, before the EVENT gate.** The meter probe now also prints
+  `stream_active=` (`GetStreamStatus.outputActive`, our own op-7 response read past the meter events;
+  no answer = empty = not streaming). `measurement_audio_decision.py production` → `page=PAGE` iff the
+  box answered, it streams, `mbc` is in the meter and its peak is under
+  `PROGRAM_DIGITAL_SILENCE_DB` (-90 dB: the meter floor is -100, a live program never sits that low for
+  a 2 s window). Confirmed over 2 passes (state key `program`), then
+  `--dedup-key page:stream-snv-program-audio:<watchdog_notify_key bucket>` (airuleset ignores the
+  suffix after the check name and keeps its own 10-min window). Recovery = one machine-channel line.
+- Never route a diagnostic onto `page:`: it is the one class the owner always receives.
+- Tests: `tests/python/test_program_audio_page_1495.py` (the pure decision + the watchdog's EVENT arm
+  through the fetch seam and a stub `sshpass` printing a no-painter cam2 snapshot).
+
 ## Gotchas / invariants (do not regress)
 
 - **The -60 dB SILENCE bar is SINGLE-SOURCED, never retyped.** `audio_preflight_default_threshold_db`
