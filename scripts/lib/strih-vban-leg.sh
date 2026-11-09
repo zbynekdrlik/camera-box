@@ -776,12 +776,15 @@ _strih_vban_leg_leftover_grade() {
     if [ "${a%/*}" = "$addr" ] && [ "$dev" != "$ifc" ]; then found="${found}${found:+, }${addr} on ${dev}"; fi
   done <<<"$t"
   if [ "$parent" != - ]; then
-    # the retired NIC parked without an IP: no default route may leave through anything but the rig NIC
-    while read -r line; do
-      [ -n "$line" ] || continue
-      dev="${line#* dev }"; dev="${dev%% *}"
-      [ "$dev" = "$parent" ] || found="${found}${found:+, }a default route through ${dev} (${line%% proto*})"
-    done <<<"$(ip -4 route show default 2>/dev/null || true)"
+    # the retired NIC parked without an IP: no default route may leave through it (a DHCP lease after all);
+    # only that NIC is graded here, never another interface of the box (a venue WiFi is not this row's)
+    local retired
+    retired="$(_strih_vban_leg_nm_get "$STRIH_VBAN_LEG_RETIRED_PROFILE" connection.interface-name 2>/dev/null || true)"
+    if [ -n "$retired" ] && [ "$retired" != "$parent" ]; then
+      while read -r line; do
+        case "$line" in *" dev ${retired} "*) found="${found}${found:+, }a default route through the retired NIC ${retired} (${line%% proto*})" ;; esac
+      done <<<"$(ip -4 route show default 2>/dev/null || true)"
+    fi
     if ! legs="$(_strih_vban_leg_nic_legs)"; then
       found="${found}${found:+, }the profiles are unreadable (nmcli)"
     else

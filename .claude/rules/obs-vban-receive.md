@@ -671,8 +671,9 @@ USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `
   retired. On a failure path it stays until the next good run (known limit: it is live only, so a reboot in
   between leaves the old leg unfiltered; the failure message says to re-run setup before any reboot, and
   verify's leftover row FAILs that box).
-- verify's leftover row on a VLAN leg also FAILs a default route through anything but the rig NIC (a parked
-  NIC that got a DHCP lease after all).
+- verify's leftover row on a VLAN leg also FAILs a default route through the parked NIC (the interface of
+  `vban-dante70-retired`: a DHCP lease after all); another interface's default route (a venue WiFi) is never
+  this row's.
 - A VLAN created THIS run that does not read back is DELETED again (`_strih_vban_leg_rollback_new_vlan`), but
   only on a vlan leg and only while an ACTIVE NIC leg still carries the address: ONE interface on the address
   again, setup fails by name, the next run creates the VLAN anew. With no such NIC leg (the 8.11 shape: the USB

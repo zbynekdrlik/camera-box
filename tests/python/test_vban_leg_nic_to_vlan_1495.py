@@ -194,7 +194,16 @@ def test_verify_fails_a_default_route_through_the_retired_nic(tmp_path):
     s["extra_default"] = [NIC_IF]
     b.state.write_text(json.dumps(s))
     bad = [x for x in _bad(b.run("strih_vban_leg_grade")) if "leftover" in x]
-    assert any("default route through %s" % NIC_IF in x for x in bad), bad
+    assert any("default route through the retired NIC %s" % NIC_IF in x for x in bad), bad
+
+
+def test_verify_leaves_another_interfaces_default_route_to_its_own_row(tmp_path):
+    # a venue WiFi's default route is not the leg's leftover (review round 3)
+    b = _converged(tmp_path)
+    s = b.st()
+    s["extra_default"] = ["wlp0s20f3"]
+    b.state.write_text(json.dumps(s))
+    assert not [x for x in _bad(b.run("strih_vban_leg_grade")) if "leftover" in x]
 
 
 def test_a_vlan_that_does_not_come_up_keeps_the_old_leg_filtered(tmp_path):
