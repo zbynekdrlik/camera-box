@@ -1894,10 +1894,12 @@ The CI lint `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` froze dev1 twi
   ```bash
   . scripts/lib/shellcheck-pin.sh
   sc="$(shellcheck_pin_install "$HOME/.cache/shellcheck-pin")"
-  systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0 "$sc" -S warning scripts/*.sh scripts/lib/*.sh
+  systemd-run --user --scope --collect -p MemoryMax=2G -p MemorySwapMax=0 "$sc" -S warning scripts/*.sh scripts/lib/*.sh
   ```
+  `--collect` (issue 1465): without it every scope whose command exited non-zero (a lint finding,
+  a kill) stays listed as a `failed` `run-r<id>.scope` in `systemctl --user` forever; dev1 had dozens.
   A killed run (exit 137 / signal 9) means a script's closure grew past the bound. Find it per file:
-  `systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 "$sc" -x -S warning <file>`
+  `systemd-run --user --scope --collect -p MemoryMax=1500M -p MemorySwapMax=0 "$sc" -x -S warning <file>`
   under `/usr/bin/time -f %M`; the file over 1 GB needs the directive.
 - **A comment line that starts with the word `shellcheck`** (`# shellcheck 0.10.0+ knows`,
   `#   shellcheck_pin_install DIR`) is parsed as a directive and fails SC1073 (an error). Reflow the
