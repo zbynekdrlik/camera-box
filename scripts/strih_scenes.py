@@ -649,7 +649,7 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
     # issue 1412/1439: a replace keeps the input's place in EVERY scene, its sync offset and mixer state;
     # issue 1495: it never removes the old input first, and stale asides go only after it succeeded.
     st = replace_keeping_state(obs, name, want_kind, want_settings, scene, source, source_kind, state_from=ra)
-    stale = [a for a in asides if a != source]
+    stale = [a for a in asides if a not in (source, ra)]
     return st + settle_aside_inputs(obs, name, stale, finish=False) if st.startswith("replaced") else st
 
 

@@ -341,20 +341,22 @@ def _restore_filter_order(obs, name, state):
                                              "filterIndex": index}, ignore_err=True)
 
 
-def _swap_in(obs, name, aside, state, items, sleep):
+def _swap_in(obs, name, aside, state, items, sleep, also_remove=None):
     """The end of a replace, once NAME exists with a HIDDEN item per ITEMS entry (scene, the new item's id,
     the old item's index, the old item's visibility): the levels and the program filters, each new item
     at the old index, the old input removed, the items that were visible shown at once (a one-request
     gap), then monitoring + the audio monitor filters (the operator's headphones play whatever the items
-    show, so they never overlap the old input). Returns the old input's name when OBS still
-    lists it after a bounded wait (a holder keeps it), else None."""
+    show, so they never overlap the old input). ALSO_REMOVE: a second old input the STATE came from (an
+    interrupted replace's aside, review round 3), removed together with ASIDE before the show. Returns
+    the old input's name when OBS still lists it after a bounded wait (a holder keeps it), else None."""
     _restore_levels(obs, name, state)
     _restore_filters(obs, name, state, headphones=False)
     for scene, item_id, index, _enabled in items:
         if item_id is not None and isinstance(index, int):
             obs.req("SetSceneItemIndex", {"sceneName": scene, "sceneItemId": item_id, "sceneItemIndex": index},
                     ignore_err=True)
-    obs.req("RemoveInput", {"inputName": aside}, ignore_err=True)
+    for old in (aside, also_remove) if also_remove and also_remove != aside else (aside,):
+        obs.req("RemoveInput", {"inputName": old}, ignore_err=True)
     for scene, item_id, _index, enabled in items:
         if item_id is not None and enabled:
             obs.req("SetSceneItemEnabled", {"sceneName": scene, "sceneItemId": item_id,
@@ -367,7 +369,7 @@ def _swap_in(obs, name, aside, state, items, sleep):
     return aside if input_kind_listed(obs, aside) not in ("", None) else None
 
 
-def input_recreate(obs, name, kind, settings, state, fallback_scene, sleep=None, source=None):
+def input_recreate(obs, name, kind, settings, state, fallback_scene, sleep=None, source=None, also_remove=None):
     """Re-create input NAME as KIND with SETTINGS keeping STATE (input_state_read of the old input, read
     BEFORE the call), never removing the old input before the new one exists (issue 1495):
 
@@ -410,7 +412,7 @@ def input_recreate(obs, name, kind, settings, state, fallback_scene, sleep=None,
             items.append((scene, _item_id(r), index, enabled))
     elif _item_id(resp) is not None:
         obs.req("RemoveSceneItem", {"sceneName": first, "sceneItemId": _item_id(resp)}, ignore_err=True)
-    return True, (len(scenes), _swap_in(obs, name, aside, state, items, sleep))
+    return True, (len(scenes), _swap_in(obs, name, aside, state, items, sleep, also_remove=also_remove))
 
 
 def _scene_item_of(obs, scene, name):
@@ -456,9 +458,11 @@ def replace_keeping_state(obs, name, kind, settings, fallback_scene, source, sou
     """The launch seed's replace of input NAME as KIND (input_recreate from SOURCE: NAME itself, or the
     aside input of an interrupted replace, of kind SOURCE_KIND), with the state read first from
     STATE_FROM (default SOURCE: an interrupted replace's aside when NAME exists only half made, review
-    round 2). Returns the status line: `replaced (...)`, or a loud `replace FAILED (...)`."""
+    round 2; it is removed with the old input, before the show: never played beside the new one, round 3).
+    Returns the status line: `replaced (...)`, or a loud `replace FAILED (...)`."""
     state = input_state_read(obs, state_from or source)
-    ok, info = input_recreate(obs, name, kind, settings, state, fallback_scene, source=source)
+    ok, info = input_recreate(obs, name, kind, settings, state, fallback_scene, source=source,
+                              also_remove=state_from if state_from != source else None)
     was = "was %s" % (source_kind or "absent")
     if source != name:
         was = "resumed the interrupted replace of '%s', %s" % (source, was)
