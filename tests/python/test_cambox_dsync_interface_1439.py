@@ -335,6 +335,7 @@ def _dsync_box(tmp_path, nics, unit_text=OLD_UNIT, status=None):
         d.mkdir()
         if has_device:
             (d / "device").mkdir()
+            (d / "carrier").write_text("1\n" if has_device is True else "0\n")
     if unit_text is not None:
         unit_dir.joinpath("dsync.service").write_text(unit_text)
     stub = box["stub"]
