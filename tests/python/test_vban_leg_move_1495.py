@@ -341,7 +341,22 @@ def test_the_9_11_cleanup_announces_the_leg_once(tmp_path):
     r = b.run("strih_vban_leg_install && printf 'CHANGED=%s\\n' \"$STRIH_VBAN_LEG_CHANGED\"")
     assert r.returncode == 0, r.stdout + r.stderr
     assert _arp_announces(b.st()) == [["-q", "-U", "-c", "2", "-I", VLAN_IF, ADDR]]
-    assert "CHANGED=" in r.stdout and "CHANGED=\n" not in r.stdout, "a running hub restarts after it too"
+    # review round 2: the cleanup never touches the leg address or its rule, so no running Dante device stalls
+    # and the hub is NOT restarted for it
+    assert "CHANGED=\n" in r.stdout, r.stdout
+
+
+def test_the_9_11_cleanup_alone_restarts_no_hub(tmp_path):
+    b = _converged(tmp_path)
+    s = b.st()
+    s["profiles"].append({"uuid": "77777777-1111-2222-3333-444444444444", "type": "802-3-ethernet",
+                          "props": {"connection.id": RETIRED, "connection.interface-name": NIC_IF,
+                                    "ipv4.method": "disabled", "connection.autoconnect": "yes"}})
+    s = _hub(s)
+    b.state.write_text(json.dumps(s))
+    r = b.run(AFTER)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not fk.calls(b.st(), "systemctl", "try-restart", "intercom-hub")
 
 
 def test_a_mac_leg_back_on_a_retired_nic_takes_it_out_of_the_drop_in(tmp_path):
