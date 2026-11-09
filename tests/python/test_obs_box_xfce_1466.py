@@ -1,0 +1,387 @@
+"""issue 1466 -- the gradual move of the Linux OBS boxes from openbox + tint2 to XFCE.
+
+Owner ROZHODNUTE 6737530836 (9.11.2026): "schvalujem postupny prechod na xfce". Design 6737548111: the
+desktop is a box FACT (STRIH_DESKTOP = openbox | xfce), the session start is ONE script rendered from the
+openbox autostart's functions, the xfce4-panel and the keys render from the tint2 panel's launcher list and
+the openbox key commands, and verify grades the session the fact names. These tests pin the fact, the
+session start (openbox byte-identical), the xfconf merge + grade helper, the install (under the caller's
+set -euo pipefail, every path moved into the test's tmp dir) and the grade rows.
+"""
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+SCRIPTS = REPO / "scripts"
+FACTS = SCRIPTS / "lib" / "strih-box-facts.sh"
+BASELINE = SCRIPTS / "lib" / "obs-box-baseline.sh"
+PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
+XFCONF = SCRIPTS / "obs_box_xfconf.py"
+SETUP = SCRIPTS / "setup-strih.sh"
+VERIFY = SCRIPTS / "verify-strih.sh"
+ME = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+MYGROUP = subprocess.run(["id", "-gn"], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _bash(body, *args, box="stream-snv", env=None):
+    script = ('set -euo pipefail\n. "$1"\nstrih_box_load "$2"\n. "$3"\n. "$4"\nshift 4\n'
+              'fail() { echo "FAIL: $*" >&2; return 1; }\n' + body)
+    e = dict(os.environ)
+    e.update(env or {})
+    return subprocess.run(["bash", "-c", script, "h", str(FACTS), box, str(BASELINE), str(PROVISION), *args],
+                          capture_output=True, text=True, env=e, timeout=120)
+
+
+def _fact(box, key):
+    for line in (SCRIPTS / "strih-boxes" / f"{box}.env").read_text().splitlines():
+        if line.startswith(key + "="):
+            return line.split("=", 1)[1]
+    return None
+
+
+# --- the fact ---------------------------------------------------------------------------------------------
+
+def test_stream_snv_is_the_first_xfce_box_and_every_other_box_stays_openbox():
+    assert _fact("stream-snv", "STRIH_DESKTOP") == "xfce"
+    for box in ("strih-snv", "strih-pp", "stream-pp"):
+        assert _fact(box, "STRIH_DESKTOP") == "openbox", box
+
+
+def test_the_desktop_fact_is_the_last_key_and_the_accessor_reads_it():
+    r = _bash("strih_box_fact_keys | tail -n 1; strih_box_desktop; echo")
+    assert r.stdout.split() == ["STRIH_DESKTOP", "xfce"], r.stderr
+
+
+@pytest.mark.parametrize("value", ["gnome", "", "XFCE", "openbox xfce"])
+def test_the_loader_refuses_any_other_desktop(tmp_path, value):
+    boxes = tmp_path / "boxes"
+    shutil.copytree(SCRIPTS / "strih-boxes", boxes)
+    f = boxes / "stream-snv.env"
+    f.write_text(f.read_text().replace("STRIH_DESKTOP=xfce", f"STRIH_DESKTOP={value}"))
+    r = subprocess.run(["bash", "-c", '. "$1"; strih_box_load stream-snv', "h", str(FACTS)],
+                       capture_output=True, text=True, env=dict(os.environ, STRIH_BOXES_DIR=str(boxes)))
+    assert r.returncode != 0
+    if value and " " not in value:
+        assert "STRIH_DESKTOP" in r.stderr and "openbox or xfce" in r.stderr, r.stderr
+
+
+# --- the ONE session start --------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("box", ["strih-snv", "stream-snv", "stream-pp", "strih-pp"])
+def test_the_openbox_autostart_is_the_openbox_session_start_byte_for_byte(box):
+    a = _bash("strih_openbox_autostart_text", box=box)
+    b = _bash("strih_session_start_text openbox", box=box)
+    assert a.returncode == 0 and b.returncode == 0, a.stderr + b.stderr
+    assert a.stdout == b.stdout and "systemctl --user start strih-obs.service" in a.stdout
+
+
+def test_the_xfce_session_start_differs_only_by_the_tint2_line():
+    o = _bash("strih_session_start_text openbox").stdout.splitlines()
+    x = _bash("strih_session_start_text xfce").stdout.splitlines()
+    assert [ln for ln in o if ln not in x] == ["systemctl --user start obs-box-panel.service || true"]
+    assert [ln for ln in x if ln not in o] == []
+    for want in ("xset s off -dpms s noblank 2>/dev/null || true", "systemctl --user start strih-obs.service || true",
+                 "systemctl --user start restreamer.service || true"):
+        assert want in x
+
+
+def test_a_session_start_for_an_unknown_desktop_prints_nothing_and_fails():
+    r = _bash("strih_session_start_text gnome")
+    assert r.returncode != 0 and r.stdout == "" and "openbox or xfce" in r.stderr
+
+
+# --- the xfconf helper ------------------------------------------------------------------------------------
+
+def _xfconf(*args, stdin=None):
+    return subprocess.run([sys.executable, str(XFCONF), *args], input=stdin, capture_output=True, text=True)
+
+
+LIVE_XFWM4 = """<?xml version="1.1" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="activate_action" type="string" value="bring"/>
+    <property name="use_compositing" type="bool" value="true"/>
+    <property name="workspace_count" type="int" value="4"/>
+  </property>
+</channel>
+"""
+
+
+def test_merge_sets_the_declared_property_and_keeps_every_other(tmp_path):
+    f = tmp_path / "xfwm4.xml"
+    f.write_text(LIVE_XFWM4)
+    r = _xfconf("merge", "xfwm4", str(f), "-", stdin="/general/use_compositing\tbool\tfalse\n")
+    assert r.returncode == 0, r.stderr
+    assert 'name="use_compositing" type="bool" value="false"' in r.stdout
+    assert 'name="activate_action" type="string" value="bring"' in r.stdout
+    assert 'name="workspace_count" type="int" value="4"' in r.stdout
+    f.write_text(r.stdout)
+    again = _xfconf("merge", "xfwm4", str(f), "-", stdin="/general/use_compositing\tbool\tfalse\n")
+    assert again.stdout == r.stdout                    # a re-run writes the same bytes
+    assert _xfconf("check", str(f), "-", stdin="/general/use_compositing\tbool\tfalse\n").stdout.strip() == "ok"
+
+
+def test_check_names_a_wrong_value_and_a_missing_property(tmp_path):
+    f = tmp_path / "xfwm4.xml"
+    f.write_text(LIVE_XFWM4)
+    r = _xfconf("check", str(f), "-", stdin="/general/use_compositing\tbool\tfalse\n")
+    assert r.returncode == 1 and "use_compositing" in r.stdout and "true" in r.stdout
+    r = _xfconf("check", str(f), "-", stdin="/general/nope\tint\t1\n")
+    assert r.returncode == 1 and "/general/nope missing" in r.stdout
+    r = _xfconf("check", str(tmp_path / "absent.xml"), "-", stdin="/a\tint\t1\n")
+    assert r.returncode == 1 and "missing" in r.stdout
+
+
+def test_replace_drops_the_old_subtree_and_arrays_keep_their_child_properties(tmp_path):
+    f = tmp_path / "panel.xml"
+    f.write_text("""<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-panel" version="1.0">
+  <property name="panels" type="array">
+    <value type="int" value="1"/><value type="int" value="2"/>
+    <property name="panel-2" type="empty"><property name="size" type="uint" value="48"/></property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-18" type="string" value="directorymenu"/>
+  </property>
+  <property name="keep-me" type="int" value="7"/>
+</channel>
+""")
+    spec = ("/panels\treplace\n/plugins\treplace\n/panels\tarray:int\t1\n/panels/panel-1/size\tuint\t30\n"
+            "/plugins/plugin-1\tstring\tclock\n/panels/panel-1/plugin-ids\tarray:int\t1\n")
+    r = _xfconf("merge", "xfce4-panel", str(f), "-", stdin=spec)
+    assert r.returncode == 0, r.stderr
+    assert "panel-2" not in r.stdout and "directorymenu" not in r.stdout
+    assert 'name="keep-me" type="int" value="7"' in r.stdout
+    f.write_text(r.stdout)
+    assert _xfconf("check", str(f), "-", stdin=spec).stdout.strip() == "ok"
+    bad = spec.replace("plugin-ids\tarray:int\t1", "plugin-ids\tarray:int\t1,2")
+    assert _xfconf("check", str(f), "-", stdin=bad).returncode == 1
+
+
+def test_an_unreadable_file_or_another_channel_is_never_merged_over(tmp_path):
+    f = tmp_path / "x.xml"
+    f.write_text("<channel name='xfwm4'><property")
+    r = _xfconf("merge", "xfwm4", str(f), "-", stdin="/a\tint\t1\n")
+    assert r.returncode == 2 and r.stdout == ""
+    f.write_text('<channel name="xfce4-panel" version="1.0"/>')
+    r = _xfconf("merge", "xfwm4", str(f), "-", stdin="/a\tint\t1\n")
+    assert r.returncode == 2 and r.stdout == ""
+
+
+@pytest.mark.parametrize("line", ["no-tab", "/a\tweird\t1", "relative\tint\t1", "/a\tarray:nope\t1"])
+def test_a_bad_spec_line_is_refused(tmp_path, line):
+    r = _xfconf("merge", "xfwm4", str(tmp_path / "x.xml"), "-", stdin=line + "\n")
+    assert r.returncode == 2 and r.stdout == ""
+
+
+# --- the panel and the keys -------------------------------------------------------------------------------
+
+def _seams(tmp_path):
+    return {"OBS_BOX_PANEL_CHROME_BIN": str(tmp_path / "no-chrome"),
+            "OBS_BOX_PANEL_SHOT_BIN": str(tmp_path / "no-flameshot"),
+            "OBS_BOX_PANEL_RUSTDESK_BIN": str(tmp_path / "no-rustdesk"),
+            "OBS_BOX_PANEL_DISCORD_BIN": str(tmp_path / "no-discord"),
+            "OBS_BOX_PANEL_FILES_BIN": str(tmp_path / "no-pcmanfm"),
+            "OBS_BOX_PANEL_SYS_UNIT_DIR": str(tmp_path / "no-sysunits")}
+
+
+def _home_with_obs(tmp_path):
+    home = tmp_path / "home"
+    (home / ".config" / "systemd" / "user").mkdir(parents=True)
+    (home / ".config" / "systemd" / "user" / "strih-obs.service").write_text("[Service]\n")
+    return home
+
+
+def test_the_panel_carries_the_tint2_launchers_in_order_and_the_standard_plugins(tmp_path):
+    home = _home_with_obs(tmp_path)
+    r = _bash('obs_box_xfce_panel_plugins "$1"', str(home), env=_seams(tmp_path))
+    rows = [ln.split("|") for ln in r.stdout.splitlines()]
+    assert [x[1] for x in rows] == ["applicationsmenu", "launcher", "launcher", "tasklist", "separator",
+                                    "systray", "pulseaudio", "clock", "actions"], r.stdout + r.stderr
+    assert [x[2] for x in rows if x[1] == "launcher"] == ["power", "obs"]
+    assert [int(x[0]) for x in rows] == list(range(1, 10))
+
+
+def test_the_strih_role_gets_no_pulseaudio_plugin_and_no_headphone_keys(tmp_path):
+    home = _home_with_obs(tmp_path)
+    r = _bash('obs_box_xfce_panel_plugins "$1"; obs_box_xfce_keys_spec', str(home), box="strih-snv", env=_seams(tmp_path))
+    assert "pulseaudio" not in r.stdout and "XF86Audio" not in r.stdout, r.stdout
+    assert "/commands/custom/Print\tstring\t%s gui" % (tmp_path / "no-flameshot") in r.stdout
+    assert "XF86MonBrightnessUp\tstring\t/usr/local/bin/obs-box-brightness up" in r.stdout
+
+
+def test_the_stream_role_binds_the_headphone_keys_to_the_helper_and_silences_the_plugin_keys(tmp_path):
+    home = _home_with_obs(tmp_path)
+    r = _bash('obs_box_xfce_keys_spec; obs_box_xfce_panel_spec "$1"', str(home), env=_seams(tmp_path))
+    assert "XF86AudioRaiseVolume\tstring\t/usr/bin/python3 /usr/local/bin/obs-box-headphones up" in r.stdout
+    assert "enable-keyboard-shortcuts\tbool\tfalse" in r.stdout
+    assert "/panels/panel-1/plugin-ids\tarray:int\t1,2,3,4,5,6,7,8,9" in r.stdout
+
+
+def test_the_panel_keys_match_the_openbox_key_commands():
+    """The brightness keys run the same helper the openbox rc.xml binds (one source of commands)."""
+    r = _bash("obs_box_brightness_keybinds_xml; obs_box_xfce_keys_spec", box="strih-snv")
+    for cmd in ("/usr/local/bin/obs-box-brightness up", "/usr/local/bin/obs-box-brightness down"):
+        assert r.stdout.count(cmd) == 2, r.stdout
+
+
+# --- the install + the grade, end to end on a fake box ----------------------------------------------------
+
+class Box:
+    def __init__(self, tmp_path, running=()):
+        self.tmp = tmp_path
+        self.home = _home_with_obs(tmp_path)
+        self.bin = tmp_path / "bin"
+        self.bin.mkdir()
+        (tmp_path / "xsession.desktop").write_text("[Desktop Entry]\n")
+        pg = self.bin / "pgrep"
+        pg.write_text("#!/bin/sh\nfor a; do last=$a; done\ngrep -qx \"$last\" %s\n" % (tmp_path / "running"))
+        pg.chmod(0o755)
+        self.set_running(*running)
+
+    def set_running(self, *procs):
+        (self.tmp / "running").write_text("".join(p + "\n" for p in procs))
+
+    def env(self):
+        e = _seams(self.tmp)
+        e.update({"OBS_BOX_SESSION_START_BIN": str(self.tmp / "obs-box-session-start"),
+                  "OBS_BOX_XFCE_POLKIT_RULE": str(self.tmp / "50-obs-box-power.rules"),
+                  "OBS_BOX_XFCE_XSESSION": str(self.tmp / "xsession.desktop"),
+                  "OBS_BOX_XFCE_PGREP": str(self.bin / "pgrep")})
+        return e
+
+    def install(self, box="stream-snv"):
+        # chown of a file to root:root is root's: the test runs as the user, the owner is checked by text
+        return _bash('chown() { :; }\nobs_box_session_install "$1" "$2" "$3"', str(REPO), str(self.home), ME,
+                     box=box, env=self.env())
+
+    def grade(self, box="stream-snv"):
+        return _bash('obs_box_session_grade_rows "$1" "$2" "$3"', str(REPO), str(self.home), ME, box=box, env=self.env())
+
+
+def _rows(r):
+    return {ln.split("|", 1)[1].split(")", 1)[0] + ")": ln.split("|", 1)[0] for ln in r.stdout.splitlines()}
+
+
+def test_the_xfce_install_writes_every_file_and_a_rerun_writes_nothing(tmp_path):
+    box = Box(tmp_path)
+    r = box.install()
+    assert r.returncode == 0, r.stdout + r.stderr
+    start = (tmp_path / "obs-box-session-start").read_text()
+    assert start == _bash("strih_session_start_text xfce").stdout
+    assert os.access(tmp_path / "obs-box-session-start", os.X_OK)
+    adir = box.home / ".config" / "autostart"
+    assert "Exec=%s" % (tmp_path / "obs-box-session-start") in (adir / "obs-box-session.desktop").read_text()
+    for hidden in ("localsearch-3", "update-notifier", "xfce4-power-manager", "xfce4-screensaver"):
+        assert "Hidden=true" in (adir / f"{hidden}.desktop").read_text()
+    assert os.readlink(box.home / ".config/systemd/user/localsearch-3.service") == "/dev/null"
+    ch = box.home / ".config/xfce4/xfconf/xfce-perchannel-xml"
+    assert 'name="use_compositing" type="bool" value="false"' in (ch / "xfwm4.xml").read_text()
+    assert 'name="SaveOnExit" type="bool" value="false"' in (ch / "xfce4-session.xml").read_text()
+    assert "flameshot gui" in (ch / "xfce4-keyboard-shortcuts.xml").read_text()
+    assert f'subject.user == "{ME}"' in (tmp_path / "50-obs-box-power.rules").read_text()
+    again = box.install()
+    assert again.returncode == 0, again.stderr
+    # every user-owned file is unchanged; the two root:root files read as written only because this test
+    # does not run as root (their owner can never match)
+    written = [ln for ln in again.stdout.splitlines() if ln.endswith(" written")]
+    assert all("obs-box-session-start" in ln or "50-obs-box-power.rules" in ln for ln in written), again.stdout
+    assert "xfconf xfwm4:" in again.stdout and "unchanged" in again.stdout
+
+
+def test_a_running_xfconfd_keeps_its_channel_files_and_setup_warns(tmp_path):
+    box = Box(tmp_path, running=("xfconfd",))
+    r = box.install()
+    assert r.returncode == 0, r.stderr
+    assert "xfconfd runs and would overwrite it" in r.stdout
+    assert not (box.home / ".config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml").exists()
+
+
+def test_the_graded_xfce_box_passes_only_with_the_session_up_and_the_indexer_down(tmp_path):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    rows = _rows(box.grade())
+    assert rows["(session-start)"] == "OK" and rows["(xfce-session-entry)"] == "OK", rows
+    assert rows["(xfce-settings)"] == "OK" and rows["(xfce-keys)"] == "OK" and rows["(xfce-polkit)"] == "OK", rows
+    assert rows["(xfce-running)"] == "FAIL", rows          # no xfce4-session yet
+    box.set_running("xfce4-session", "localsearch-3")
+    rows = _rows(box.grade())
+    assert rows["(xfce-running)"] == "OK" and rows["(xfce-hidden)"] == "FAIL", rows
+    box.set_running("xfce4-session")
+    rows = _rows(box.grade())
+    assert rows["(xfce-hidden)"] == "OK", rows
+    assert len(box.grade().stdout.splitlines()) == 8
+
+
+def test_a_compositor_switched_back_on_fails_the_settings_row(tmp_path):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    f = box.home / ".config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
+    f.write_text(f.read_text().replace('value="false"', 'value="true"'))
+    rows = _rows(box.grade())
+    assert rows["(xfce-settings)"] == "FAIL", rows
+
+
+def test_an_openbox_box_installs_only_the_session_start_and_drops_the_xfce_pieces(tmp_path):
+    box = Box(tmp_path)
+    adir = box.home / ".config" / "autostart"
+    adir.mkdir(parents=True)
+    (adir / "obs-box-session.desktop").write_text("stale\n")
+    (tmp_path / "50-obs-box-power.rules").write_text("stale\n")
+    r = box.install(box="strih-snv")
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "obs-box-session-start").read_text() == _bash("strih_openbox_autostart_text", box="strih-snv").stdout
+    assert not (adir / "obs-box-session.desktop").exists()
+    assert not (tmp_path / "50-obs-box-power.rules").exists()
+    g = box.grade(box="strih-snv")
+    assert [ln.split("|")[0] for ln in g.stdout.splitlines()] == ["OK", "NOTE"], g.stdout
+
+
+def test_an_xfce_box_without_the_xfce_session_file_refuses(tmp_path):
+    box = Box(tmp_path)
+    (tmp_path / "xsession.desktop").unlink()
+    r = box.install()
+    assert r.returncode != 0 and "xsession.desktop missing" in r.stderr, r.stdout + r.stderr
+
+
+# --- the xfce4-panel install (setup step 16h) ---------------------------------------------------------------
+
+def test_the_panel_install_writes_each_launcher_into_its_plugin_folder_and_grades_ok(tmp_path):
+    box = Box(tmp_path)
+    r = _bash('chown() { :; }\ndpkg-query() { echo "install ok installed"; }\n'
+              'obs_box_xfce_panel_install "$1" "$2" "$3"; obs_box_xfce_check "$(obs_box_xfce_channel_path "$2" xfce4-panel)" '
+              'obs_box_xfce_panel_spec "$2"; obs_box_xfce_panel_launchers_ok "$2" && echo LAUNCHERS-OK',
+              str(REPO), str(box.home), ME, env=box.env())
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ok" in r.stdout.splitlines() and "LAUNCHERS-OK" in r.stdout, r.stdout
+    f = box.home / ".config/xfce4/panel/launcher-2/obs-box-panel-power.desktop"
+    assert "Name=Vypnúť" in f.read_text()
+
+
+# --- the wiring ---------------------------------------------------------------------------------------------
+
+def test_setup_and_verify_wire_the_session_in_one_line_each():
+    s = SETUP.read_text()
+    assert s.count('obs_box_session_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER"') == 1
+    assert 'obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth "$(strih_box_desktop)"' in s
+    assert s.find("strih_openbox_autostart_text >") < s.find("obs_box_session_install ")
+    v = VERIFY.read_text()
+    assert v.count('obs_box_session_grade_report "${HERE}/.." "$USER_HOME"') == 1
+    assert 'strih-obs.service "$(strih_box_desktop)")' in v
+
+
+def test_the_baseline_grader_reads_the_autologin_session_the_fact_names(tmp_path):
+    v = SCRIPTS / "lib" / "obs-box-baseline-verify.sh"
+    r = _bash('. "$2"; obs_box_baseline_gather_snippet strih "$1" strih-obs.service xfce > "$3"; head -4 "$3"; '
+              'obs_box_baseline_gather_snippet strih "$1" strih-obs.service gnome || echo REFUSED',
+              ME, str(v), str(tmp_path / "g"))
+    assert "SESSION=xfce" in r.stdout and "REFUSED" in r.stdout, r.stdout + r.stderr
+    assert 'grep -qxF "autologin-session=${SESSION}"' in (tmp_path / "g").read_text()
+    r = _bash('. "$2"; obs_box_baseline_gather_snippet strih "$1" strih-obs.service > "$3"; head -4 "$3"',
+              ME, str(v), str(tmp_path / "g"))
+    assert "SESSION=openbox" in r.stdout

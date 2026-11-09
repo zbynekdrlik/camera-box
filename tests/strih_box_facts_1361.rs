@@ -152,6 +152,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_JXS_CAMERA_PIN_MS",
     "STRIH_JXS_PROGRAM_PORT",
     "STRIH_JXS_PROGRAM_PIN_MS",
+    // issue 1466: the operator desktop session (openbox | xfce).
+    "STRIH_DESKTOP",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -233,6 +235,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_JXS_CAMERA_PIN_MS=36",
         "STRIH_JXS_PROGRAM_PORT=none",
         "STRIH_JXS_PROGRAM_PIN_MS=none",
+        // issue 1466: strih-snv stays on the openbox kiosk until its turn.
+        "STRIH_DESKTOP=openbox",
         "LOADED=strih-snv",
     ] {
         assert!(
