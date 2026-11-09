@@ -20,9 +20,10 @@ Usage:
     obs_box_xfconf.py merge CHANNEL FILE SPEC   -> the merged XML on stdout (FILE may be missing)
     obs_box_xfconf.py check FILE SPEC           -> rc 0 + `ok`, rc 1 + the first difference
 
-    obs_box_xfconf.py apply CHANNEL SPEC [RUNNER...] -> set SPEC through a RUNNING xfconfd with xfconf-query
-                                                (each call prefixed by RUNNER), then read every property
-                                                back: rc 0 + `ok`, rc 1 + the first failure on stderr
+    obs_box_xfconf.py apply CHANNEL SPEC        -> set SPEC through a RUNNING xfconfd with xfconf-query (run
+                                                it as the desktop user on its session bus), then read every
+                                                property back: rc 0 + `ok`, rc 1 + the first failure
+    obs_box_xfconf.py verify-live CHANNEL SPEC  -> the read-back alone (e.g. after an xfce4-panel restart)
 
 SPEC is a file, or `-` for stdin. A running xfconfd owns its channels and writes them from memory, so a
 live box is changed through it (apply), never by rewriting its files.
@@ -127,12 +128,41 @@ def merge(channel, current_text, spec):
     return '<?xml version="1.0" encoding="UTF-8"?>\n\n' + ET.tostring(root, encoding="unicode") + "\n"
 
 
+def stray_under_replace(paths, spec):
+    """The first of PATHS that sits under a `replace` path of SPEC and is none of: a declared property, an
+    ancestor of one (a container), a descendant of a declared non-replace property (an app's own detail,
+    e.g. a panel plugin's settings). None when there is none. A replaced subtree holds only what the spec
+    declares, so a property the spec dropped (a stale key binding, a removed plugin) is found here."""
+    roots = ["/" + "/".join(parts) for parts, typ, _v in spec if typ == "replace"]
+    declared = ["/" + "/".join(parts) for parts, typ, _v in spec if typ != "replace"]
+    for path in paths:
+        if not any(path.startswith(r + "/") for r in roots):
+            continue
+        if path in declared or any(d.startswith(path + "/") for d in declared):
+            continue
+        if any(path.startswith(d + "/") for d in declared):
+            continue
+        return path
+    return None
+
+
+def _file_paths(root, prefix=""):
+    for node in root.findall("property"):
+        path = prefix + "/" + node.get("name", "")
+        yield path
+        yield from _file_paths(node, path)
+
+
 def check(current_text, spec):
-    """Return None when every declared property holds, else the first difference."""
+    """Return None when every declared property holds and no replaced subtree carries anything else, else
+    the first difference."""
     try:
         root = ET.fromstring(current_text)
     except ET.ParseError as exc:
         return "not a readable xfconf file (%s)" % exc
+    stray = stray_under_replace(list(_file_paths(root)), spec)
+    if stray:
+        return "%s is not declared (a stale property under a replaced subtree)" % stray
     for parts, typ, value in spec:
         if typ == "replace":
             continue
@@ -190,31 +220,31 @@ def parse_query_value(text):
     return text.rstrip("\n")
 
 
-def apply_live(channel, spec, runner, run=None):
-    """Apply SPEC through a running xfconfd (each command prefixed by RUNNER, e.g. the sudo/env that
-    reaches the desktop user's session bus), then read every declared property back. Returns None or the
-    first failure."""
+def _run(argv):
     import subprocess
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 124, "", "timed out after 20 s (no xfconfd answer)")
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
-    def _run(argv):
-        try:
-            return subprocess.run(argv, capture_output=True, text=True, timeout=20)
-        except subprocess.TimeoutExpired:
-            return subprocess.CompletedProcess(argv, 124, "", "timed out after 20 s (no xfconfd answer)")
-        except OSError as exc:
-            return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
-    run = run or _run
-    for argv in query_args(channel, spec):
-        r = run(runner + argv)
-        # a reset of a property that does not exist yet fails harmlessly; a set must succeed
-        if r.returncode != 0 and argv[-2:] != ["-r", "-R"]:
-            return "%s failed (rc %s): %s" % (" ".join(argv), r.returncode, (r.stderr or r.stdout).strip())
+def verify_live(channel, spec, run=_run):
+    """Read every declared property back from the running xfconfd, and its property list for a stale one
+    under a replaced subtree. Returns None or the first difference."""
+    if any(typ == "replace" for _p, typ, _v in spec):
+        r = run(["xfconf-query", "-c", channel, "-l"])
+        if r.returncode != 0:
+            return "the property list read failed (rc %s): %s" % (r.returncode, (r.stderr or r.stdout).strip())
+        stray = stray_under_replace([ln.strip() for ln in r.stdout.splitlines() if ln.strip()], spec)
+        if stray:
+            return "%s is not declared (a stale property under a replaced subtree)" % stray
     for parts, typ, value in spec:
         if typ == "replace":
             continue
         path = "/" + "/".join(parts)
-        r = run(runner + ["xfconf-query", "-c", channel, "-p", path])
+        r = run(["xfconf-query", "-c", channel, "-p", path])
         if r.returncode != 0:
             return "%s: read-back failed (rc %s): %s" % (path, r.returncode, (r.stderr or r.stdout).strip())
         got = parse_query_value(r.stdout)
@@ -224,15 +254,26 @@ def apply_live(channel, spec, runner, run=None):
     return None
 
 
+def apply_live(channel, spec, run=_run):
+    """Apply SPEC through a running xfconfd (the caller runs this as the desktop user on its session bus),
+    then read every declared property back. Returns None or the first failure."""
+    for argv in query_args(channel, spec):
+        r = run(argv)
+        # a reset of a property that does not exist yet fails harmlessly; a set must succeed
+        if r.returncode != 0 and argv[-2:] != ["-r", "-R"]:
+            return "%s failed (rc %s): %s" % (" ".join(argv), r.returncode, (r.stderr or r.stdout).strip())
+    return verify_live(channel, spec, run)
+
+
 def main(argv):
-    if len(argv) >= 4 and argv[1] == "apply":
-        channel, spec_path, runner = argv[2], argv[3], argv[4:]
+    if len(argv) == 4 and argv[1] in ("apply", "verify-live"):
+        channel, spec_path = argv[2], argv[3]
         try:
             spec = parse_spec(_read(spec_path) or "")
         except (SpecError, OSError, UnicodeDecodeError) as exc:
             print("obs_box_xfconf: %s -- nothing applied" % exc, file=sys.stderr)
             return 2
-        why = apply_live(channel, spec, runner)
+        why = (apply_live if argv[1] == "apply" else verify_live)(channel, spec)
         if why:
             print("obs_box_xfconf: %s: %s" % (channel, why), file=sys.stderr)
             return 1
@@ -266,7 +307,7 @@ def main(argv):
         print("ok")
         return 0
     print(__doc__.strip().splitlines()[0], file=sys.stderr)
-    print("usage: obs_box_xfconf.py merge CHANNEL FILE SPEC | check FILE SPEC | apply CHANNEL SPEC [RUNNER...]",
+    print("usage: obs_box_xfconf.py merge CHANNEL FILE SPEC | check FILE SPEC | apply|verify-live CHANNEL SPEC",
           file=sys.stderr)
     return 2
 

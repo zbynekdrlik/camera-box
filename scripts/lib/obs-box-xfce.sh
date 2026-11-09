@@ -192,21 +192,49 @@ obs_box_xfce_xfconfd_running() { "$OBS_BOX_XFCE_PGREP" -u "${1:?user required}" 
 obs_box_xfce_user_bus_run() {
   local user="${1:?user required}" rt
   shift
-  if [ "${STRIH_SESSION_APPS_EUID:-$(id -u)}" = 0 ]; then
-    rt="/run/user/$(id -u "$user")" || return 1
-  else
-    rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-  fi
+  rt="$(_obs_box_xfce_runtime_dir "$user")" || return 1
   strih_session_apps_user_run "$user" env "DBUS_SESSION_BUS_ADDRESS=unix:path=${rt}/bus" "$@"
 }
 
+# _obs_box_xfce_runtime_dir USER -> USER's /run/user/<uid> as root; the caller's own XDG_RUNTIME_DIR otherwise.
+_obs_box_xfce_runtime_dir() {
+  if [ "${STRIH_SESSION_APPS_EUID:-$(id -u)}" = 0 ]; then
+    printf '/run/user/%s' "$(id -u "${1:?user required}")"
+  else
+    printf '%s' "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  fi
+}
+
+# obs_box_xfce_panel_restart USER HOME -> restart the running xfce4-panel on the session's X display + bus
+# (strih_kiosk_x_run: DISPLAY=:0 + the operator's Xauthority, as the user), wait up to 10 s for a NEW
+# panel process, then read the declared layout back from xfconfd: a panel that saved its old layout over
+# the new one on its way out is a failure (rc 1), never a quiet pass. A failed restart only WARNs (the
+# layout is applied; the next login draws it).
+obs_box_xfce_panel_restart() {
+  local user="${1:?user required}" home="${2:?home required}" rt old new i spec
+  rt="$(_obs_box_xfce_runtime_dir "$user")" || return 1
+  old="$("$OBS_BOX_XFCE_PGREP" -u "$user" -x xfce4-panel 2>/dev/null || true)"
+  if ! strih_kiosk_x_run "${STRIH_SESSION_APPS_EUID:-$(id -u)}" "$user" "$home" 20 \
+      env "XDG_RUNTIME_DIR=${rt}" "DBUS_SESSION_BUS_ADDRESS=unix:path=${rt}/bus" xfce4-panel --restart >/dev/null 2>&1; then
+    echo "  WARNING: issue 1466: xfce4-panel --restart failed on :0 -- the new layout shows at the next login"
+    return 0
+  fi
+  for ((i = 0; i < 20; i++)); do
+    new="$("$OBS_BOX_XFCE_PGREP" -u "$user" -x xfce4-panel 2>/dev/null || true)"
+    [ -n "$new" ] && [ "$new" != "$old" ] && break
+    sleep 0.5
+  done
+  spec="$(obs_box_xfce_panel_spec "$home")" || return 1
+  printf '%s\n' "$spec" | obs_box_xfce_user_bus_run "$user" python3 "$(_obs_box_xfce_repo)/scripts/obs_box_xfconf.py" verify-live xfce4-panel - >/dev/null \
+    || { echo "obs-box-xfce: xfce4-panel restarted but its layout is not the declared one (it saved its old layout back, above)" >&2; return 1; }
+  echo "  xfce4-panel restarted on ${user}'s session; the declared layout read back"
+}
+
 # obs_box_xfce_apply_live USER CHANNEL (stdin: the SPEC) -> set the declared properties through USER's RUNNING
-# xfconfd (xfconf-query on the user's session bus) and read each back. Sets OBS_BOX_XFCE_LIVE_APPLIED=1.
+# xfconfd (xfconf-query on the user's session bus) and read each back.
 obs_box_xfce_apply_live() {
   local user="${1:?user required}" channel="${2:?channel required}"
-  obs_box_xfce_user_bus_run "$user" python3 "$(_obs_box_xfce_repo)/scripts/obs_box_xfconf.py" apply "$channel" - >/dev/null \
-    || return 1
-  OBS_BOX_XFCE_LIVE_APPLIED=1
+  obs_box_xfce_user_bus_run "$user" python3 "$(_obs_box_xfce_repo)/scripts/obs_box_xfconf.py" apply "$channel" - >/dev/null
 }
 
 # obs_box_xfce_write_channel HOME USER CHANNEL SPEC_FN [ARGS...] -> one channel file holds the declared
@@ -218,15 +246,22 @@ obs_box_xfce_write_channel() {
   shift 3
   file="$(obs_box_xfce_channel_path "$home" "$channel")"
   strih_user_home_dir "$home" "$user" "$(dirname "$file")" || { echo "obs-box-xfce: cannot create $(dirname "$file")" >&2; return 1; }
-  if [ -f "$file" ] && obs_box_xfce_check "$file" "$@" >/dev/null; then
-    echo "  xfconf ${channel}: ${file} unchanged (every declared property holds)"
-    return 0
-  fi
   if obs_box_xfce_xfconfd_running "$user"; then
+    # the daemon's memory is the truth (it saves the file later, in its own layout)
     spec="$("$@")" || { echo "obs-box-xfce: the ${channel} properties could not be rendered" >&2; return 1; }
+    if printf '%s\n' "$spec" | obs_box_xfce_user_bus_run "$user" python3 "$(_obs_box_xfce_repo)/scripts/obs_box_xfconf.py" \
+        verify-live "$channel" - >/dev/null 2>&1; then
+      echo "  xfconf ${channel}: unchanged (every declared property holds in ${user}'s running xfconfd)"
+      return 0
+    fi
     printf '%s\n' "$spec" | obs_box_xfce_apply_live "$user" "$channel" \
       || { echo "obs-box-xfce: ${channel} could not be applied through ${user}'s running xfconfd (above)" >&2; return 1; }
+    OBS_BOX_XFCE_LIVE_APPLIED=1
     echo "  xfconf ${channel}: applied through ${user}'s running xfconfd and read back (it saves ${file} itself)"
+    return 0
+  fi
+  if [ -f "$file" ] && obs_box_xfce_check "$file" "$@" >/dev/null; then
+    echo "  xfconf ${channel}: ${file} unchanged (every declared property holds)"
     return 0
   fi
   # the helper prints exactly one trailing newline; the stdin write below puts it back
@@ -296,14 +331,10 @@ obs_box_xfce_panel_install() {
   done < <(obs_box_xfce_panel_plugins "$home")
   OBS_BOX_XFCE_LIVE_APPLIED=0
   obs_box_xfce_write_channel "$home" "$user" xfce4-panel obs_box_xfce_panel_spec "$home" || return 1
-  # a layout changed under a running panel: restart it once on the user's bus, so a half-applied layout
-  # (the replace runs first) never stays on screen; a failure only WARNs (the next login draws it)
+  # a layout changed under a running panel: restart it once, so a half-applied layout (the replace runs
+  # first) never stays on screen
   if [ "$OBS_BOX_XFCE_LIVE_APPLIED" = 1 ] && "$OBS_BOX_XFCE_PGREP" -u "$user" -x xfce4-panel >/dev/null 2>&1; then
-    if obs_box_xfce_user_bus_run "$user" xfce4-panel --restart >/dev/null 2>&1; then
-      echo "  xfce4-panel restarted on ${user}'s session (the new layout)"
-    else
-      echo "  WARNING: issue 1466: xfce4-panel --restart failed -- the new layout shows at the next login"
-    fi
+    obs_box_xfce_panel_restart "$user" "$home" || return 1
   fi
 }
 

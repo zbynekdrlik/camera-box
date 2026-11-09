@@ -44,17 +44,28 @@ class Daemon:
                         PATH="%s:%s" % (self.query.parent, os.environ["PATH"]))
         if root != "/":
             self.env["LD_LIBRARY_PATH"] = str(Path(root) / LIBDIR)
-        out = subprocess.run(["dbus-daemon", "--session", "--fork", "--print-address=1", "--print-pid=1",
-                              "--address=unix:path=%s" % (tmp / "bus")],
-                             capture_output=True, text=True, timeout=20, check=True).stdout.split()
+        # a private bus that can start NO service: never the system's own xfconfd (installed on CI), which
+        # would save into the runner's real ~/.config and take the bus name from the test's daemon
+        conf = tmp / "bus.conf"
+        conf.write_text(BUS_CONF % (tmp / "bus"))
+        out = subprocess.run(["dbus-daemon", "--config-file=%s" % conf, "--fork", "--print-address=1",
+                              "--print-pid=1"], env=self.env, capture_output=True, text=True, timeout=20,
+                             check=True).stdout.split()
         self.bus_pid = int(out[1])
         self.env["DBUS_SESSION_BUS_ADDRESS"] = out[0]
         self.xfconfd = subprocess.Popen([str(daemon)], env=self.env, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL)
-        for _ in range(50):
-            if subprocess.run([str(self.query), "-l"], env=self.env, capture_output=True).returncode == 0:
+        for _ in range(100):
+            r = subprocess.run(["dbus-send", "--bus=%s" % out[0], "--print-reply", "--dest=org.freedesktop.DBus",
+                                "/org/freedesktop/DBus", "org.freedesktop.DBus.NameHasOwner", "string:org.xfce.Xfconf"],
+                               env=self.env, capture_output=True, text=True, timeout=10)
+            if "boolean true" in r.stdout:
                 break
+            assert self.xfconfd.poll() is None, "the test's xfconfd exited (rc %s)" % self.xfconfd.returncode
             time.sleep(0.1)
+        else:
+            self.close()
+            raise AssertionError("the test's xfconfd never owned org.xfce.Xfconf on the private bus within 10 s")
 
     def q(self, *args):
         return subprocess.run([str(self.query), *args], env=self.env, capture_output=True, text=True, timeout=20)
@@ -74,6 +85,19 @@ class Daemon:
             self.xfconfd.wait()
         os.kill(self.bus_pid, signal.SIGTERM)
 
+
+BUS_CONF = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:path=%s</listen>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+"""
 
 KEYS = ("/commands/custom\treplace\n/commands/custom/override\tbool\ttrue\n"
         "/commands/custom/<Alt>Print\tstring\t/usr/bin/flameshot gui\n/commands/custom/Print\tstring\t/usr/bin/flameshot gui\n")
@@ -98,6 +122,16 @@ def test_the_live_apply_against_the_real_xfconfd(tmp_path):
             assert r.returncode == 0 and r.stdout.strip() == "ok", (channel, r.stdout, r.stderr)
         again = d.apply("xfce4-panel", PANEL)                     # idempotent
         assert again.returncode == 0, again.stderr
+        for channel, spec in (("xfce4-keyboard-shortcuts", KEYS), ("xfce4-panel", PANEL), ("xfwm4", XFWM)):
+            v = subprocess.run([sys.executable, str(XFCONF), "verify-live", channel, "-"], input=spec, env=d.env,
+                               capture_output=True, text=True, timeout=120)
+            assert v.returncode == 0, (channel, v.stderr)
+        # a property the spec does not declare, under a replaced subtree, is a difference (the -l list)
+        d.q("-c", "xfce4-keyboard-shortcuts", "-p", "/commands/custom/<Super>r", "-n", "-t", "string", "-s", "x")
+        v = subprocess.run([sys.executable, str(XFCONF), "verify-live", "xfce4-keyboard-shortcuts", "-"], input=KEYS,
+                           env=d.env, capture_output=True, text=True, timeout=120)
+        assert v.returncode == 1 and "<Super>r is not declared" in v.stderr, v.stderr
+        assert d.apply("xfce4-keyboard-shortcuts", KEYS).returncode == 0
         assert d.q("-c", "xfce4-keyboard-shortcuts", "-p", "/commands/custom/<Super>e").returncode != 0
         assert d.q("-c", "xfce4-panel", "-p", "/plugins/plugin-18").returncode != 0
         assert d.q("-c", "xfwm4", "-p", "/general/use_compositing").stdout.strip() == "false"

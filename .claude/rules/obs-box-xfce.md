@@ -112,7 +112,20 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
   xfconf 4.18 (noble; the boxes run 4.20): `-n -t T -s V` overwrites an existing value, `-n -a -t T -s V
   ...` sets an array (one element too), the array read-back is the `Value is an array with N items:`
   header + a blank line + one value per line, `-r -R` removes a subtree, a missing property reads rc 1.
-- After a live panel apply, `xfce4-panel --restart` runs once on the user's bus (a WARN on failure).
+- **Under a live xfconfd the daemon's memory is the truth:** `verify-live` (the read-back + the
+  `xfconf-query -l` list) decides "unchanged" before anything is set; the saved file lags.
+- **A `replace` subtree holds only what the spec declares:** `stray_under_replace` (both `check` on a
+  file and `verify-live` on the daemon) fails a property under a replaced path that is not declared, not
+  an ancestor of one and not inside a declared property (a panel plugin's own settings stay allowed), so
+  a key binding or plugin the spec dropped is found and the next run re-applies.
+- **After a live panel apply** `obs_box_xfce_panel_restart` runs `xfce4-panel --restart` ON THE DISPLAY
+  (`strih_kiosk_x_run`: `DISPLAY=:0` + the operator's Xauthority, as the user, plus the bus env), waits
+  up to 10 s for a NEW panel process, then `verify-live` reads the layout back: a panel that saved its
+  old layout over the new one on its way out FAILS the step. A failed restart itself only WARNs.
+- **The real-daemon test's bus can start no service** (a `--config-file` with no servicedirs, the test's
+  env): on CI the installed xfconf ships a D-Bus service file, and an autostarted system xfconfd would
+  save into the runner's real `~/.config`. It waits for `NameHasOwner org.xfce.Xfconf` (dbus-send) and
+  fails loudly after 10 s.
 
 ## UNVERIFIED until slice 2 on stream-snv (supervisor)
 
@@ -125,7 +138,8 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
 - that the pulseaudio plugin with keyboard shortcuts off leaves the XF86Audio keys to the shortcut;
 - the live apply: `xfconf-query` as the user through `sudo -u` on `/run/user/<uid>/bus` reaches the
   running xfconfd (run a setup-strih re-run once INSIDE the XFCE session and read
-  `applied through ... read back`), and xfce4-panel picks a changed layout up live.
+  `applied through ... read back`), and `xfce4-panel --restart` on :0 brings the new layout up
+  without saving the old one back (`the declared layout read back`).
 
 ## Slice 2 runbook (stream-snv, supervisor)
 

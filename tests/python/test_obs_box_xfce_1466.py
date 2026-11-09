@@ -255,10 +255,28 @@ if mode == "-x":
     if len(pat) > 15:
         sys.stderr.write("pgrep: pattern that searches for process name longer than 15 characters will result in zero matches\n")
         sys.exit(1)
-    hit = any(ln.split()[0].rsplit("/", 1)[-1][:15] == pat for ln in procs)
+    hits = [ln for ln in procs if ln.split()[0].rsplit("/", 1)[-1][:15] == pat]
 else:
-    hit = any(re.search(pat, ln) for ln in procs)
-sys.exit(0 if hit else 1)
+    hits = [ln for ln in procs if re.search(pat, ln)]
+for ln in hits:
+    print(ln)          # stands in for the pid: a restarted process prints another line
+sys.exit(0 if hits else 1)
+"""
+
+FAKE_PANEL = r"""#!%(py)s
+# xfce4-panel --restart: logs its display + bus; the new panel replaces the old one in RUNNING; with
+# REVERT present it first saves an OLD layout back into the JSON xfconfd (what a panel that never
+# took the new layout would do on its way out).
+import json, os, sys
+with open(%(plog)r, "a") as f:
+    f.write("%%s %%s %%s\n" %% (os.environ.get("DISPLAY", "-"), os.environ.get("DBUS_SESSION_BUS_ADDRESS", "-"), " ".join(sys.argv[1:])))
+if os.path.exists(%(revert)r):
+    st = json.load(open(%(state)r))
+    st["xfce4-panel"]["/panels/panel-1/plugin-ids"] = ["1"]
+    json.dump(st, open(%(state)r, "w"))
+lines = [("xfce4-panel --restarted" if ln.split()[0] == "xfce4-panel" else ln)
+         for ln in open(%(running)r).read().splitlines()]
+open(%(running)r, "w").write("".join(ln + "\n" for ln in lines))
 """
 
 FAKE_XFCONF_QUERY = r"""#!%(py)s
@@ -272,8 +290,12 @@ with open(log_f, "a") as f:
 if os.path.exists(%(broken)r):
     sys.stderr.write("broken bus\n"); sys.exit(1)
 ch = args[args.index("-c") + 1]
-p = args[args.index("-p") + 1]
 props = st.setdefault(ch, {})
+if "-l" in args:
+    for k in sorted(props):
+        print(k)
+    sys.exit(0)
+p = args[args.index("-p") + 1]
 vals = [args[i + 1] for i, a in enumerate(args) if a == "-s"]
 if "-r" in args:
     gone = [k for k in props if k == p or k.startswith(p + "/")]
@@ -304,11 +326,12 @@ class Box:
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         (tmp_path / "xsession.desktop").write_text("[Desktop Entry]\n")
-        for name, text in (("pgrep", FAKE_PGREP), ("xfconf-query", FAKE_XFCONF_QUERY)):
+        for name, text in (("pgrep", FAKE_PGREP), ("xfconf-query", FAKE_XFCONF_QUERY), ("xfce4-panel", FAKE_PANEL)):
             f = self.bin / name
             f.write_text(text % {"py": sys.executable, "running": str(tmp_path / "running"),
                                  "state": str(tmp_path / "xfconfd.json"), "log": str(tmp_path / "xfconf-query.log"),
-                                 "broken": str(tmp_path / "bus-broken")})
+                                 "broken": str(tmp_path / "bus-broken"), "plog": str(tmp_path / "panel.log"),
+                                 "revert": str(tmp_path / "revert")})
             f.chmod(0o755)
         self.set_running(*running)
 
@@ -417,19 +440,28 @@ def test_a_failed_live_apply_fails_setup_by_name(tmp_path):
     assert "could not be applied through" in r.stderr and "broken bus" in r.stderr, r.stderr
 
 
-def test_a_file_that_already_holds_every_property_is_left_alone_even_under_xfconfd(tmp_path):
+def test_a_file_that_already_holds_every_property_is_left_alone(tmp_path):
     box = Box(tmp_path)
     assert box.install().returncode == 0
     f = box.home / ".config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
     # xfconfd's own layout: no space before />, version 1.1, extra properties -- the same declared values
     f.write_text(LIVE_XFWM4.replace('"use_compositing" type="bool" value="true"', '"use_compositing" type="bool" value="false"'))
     before = f.read_text()
-    box.set_running("xfconfd")
     r = box.install()
     assert r.returncode == 0, r.stderr
     assert "xfconf xfwm4: %s unchanged" % f in r.stdout
     assert f.read_text() == before
-    assert "-c xfwm4" not in ((tmp_path / "xfconf-query.log").read_text() if (tmp_path / "xfconf-query.log").exists() else "")
+
+
+def test_a_live_xfconfd_that_already_holds_the_properties_gets_no_write(tmp_path):
+    box = Box(tmp_path, running=("xfconfd",))
+    assert box.install().returncode == 0                       # the first run applies them live
+    (tmp_path / "xfconf-query.log").unlink()
+    r = box.install()
+    assert r.returncode == 0, r.stderr
+    assert "xfconf xfwm4: unchanged (every declared property holds in" in r.stdout, r.stdout
+    log = (tmp_path / "xfconf-query.log").read_text().splitlines()
+    assert log and not [ln for ln in log if " -s " in ln or " -r " in ln], log   # reads only
 
 
 def test_the_graded_xfce_box_passes_only_with_the_session_up_and_the_indexer_down(tmp_path):
@@ -491,6 +523,31 @@ def test_the_panel_install_writes_each_launcher_into_its_plugin_folder_and_grade
     assert "ok" in r.stdout.splitlines() and "LAUNCHERS-OK" in r.stdout, r.stdout
     f = box.home / ".config/xfce4/panel/launcher-2/obs-box-panel-power.desktop"
     assert "Name=Vypnúť" in f.read_text()
+
+
+def _panel_install(box):
+    return _bash('chown() { :; }\ndpkg-query() { echo "install ok installed"; }\nobs_box_xfce_panel_install "$1" "$2" "$3"',
+                 str(REPO), str(box.home), ME, env=box.env())
+
+
+def test_a_live_panel_layout_change_restarts_the_panel_on_the_display_and_reads_the_layout_back(tmp_path):
+    box = Box(tmp_path, running=("xfconfd", "xfce4-panel"))
+    r = _panel_install(box)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "the declared layout read back" in r.stdout, r.stdout
+    plog = (tmp_path / "panel.log").read_text().split()
+    assert plog[0] == ":0" and plog[1] == "unix:path=%s/bus" % (tmp_path / "run") and plog[2] == "--restart"
+    # nothing changed on a re-run: no apply, no restart
+    (tmp_path / "panel.log").unlink()
+    again = _panel_install(box)
+    assert again.returncode == 0 and not (tmp_path / "panel.log").exists(), again.stdout
+
+
+def test_a_panel_that_saves_its_old_layout_back_fails_the_step(tmp_path):
+    box = Box(tmp_path, running=("xfconfd", "xfce4-panel"))
+    (tmp_path / "revert").write_text("")
+    r = _panel_install(box)
+    assert r.returncode != 0 and "saved its old layout back" in r.stderr, r.stdout + r.stderr
 
 
 # the verify item-44 rows of an xfce box: the shared-row helpers (discord / kbd / files / power, each with
