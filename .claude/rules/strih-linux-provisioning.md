@@ -85,6 +85,10 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
     fixture that shrinks `STRIH_CAMERAS` (the 1361 `strih-zz` box and `seed_manifest_follows_the_camera_and_cg_facts`)
     must shrink the dependent fact too, or the load refuses before the assertion. Grep the test tree for
     the other fact's literal (`STRIH_CAMERAS=2 3 5`) and read each replacement.
+- **`STRIH_DESKTOP` (issue 1466)** = `openbox` | `xfce`, the last key: the operator session
+  (`.claude/rules/obs-box-xfce.md`). stream-snv is the first `xfce` box. It is not in the 1361 golden
+  (the openbox autostart is `strih_session_start_text openbox`, unchanged), so moving a box is the fact
+  line + setup-strih + a reboot, with no golden regeneration.
 - **Changing strih-snv's `STRIH_CAMERAS` is a fact change with four test consumers** (issue 1413):
   regenerate the 1361 golden from the new facts (`render.sh`), and update the default-box tests that
   read the live list -- `tests/strih_provision_pure_functions.rs` (`strih_lx_ndi_inputs` count, the

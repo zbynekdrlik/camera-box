@@ -82,7 +82,8 @@ strih_box_fact_keys() {
     STRIH_BKSHADING_RELAYS \
     STRIH_AUDIO_BUFFERING_MS \
     STRIH_JXS_CAMERAS STRIH_JXS_CAMERA_PIN_MS \
-    STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS
+    STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS \
+    STRIH_DESKTOP
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -476,6 +477,12 @@ strih_box_validate() {
   fi
   strih_box_jxs_facts_ok "${f[STRIH_ROLE]}" "${f[STRIH_CAMERAS]}" "${f[STRIH_JXS_CAMERAS]}" "${f[STRIH_JXS_CAMERA_PIN_MS]}" \
     "${f[STRIH_JXS_PROGRAM_PORT]}" "${f[STRIH_JXS_PROGRAM_PIN_MS]}" "strih-box ${name}: " || bad=1
+  # issue 1466 (ROZHODNUTE 6737530836, the gradual move to XFCE): the operator desktop session the box
+  # boots into -- openbox (the kiosk + tint2) or xfce (xfwm4 + xfce4-panel); moving a box = this line.
+  case "${f[STRIH_DESKTOP]}" in
+    openbox|xfce) ;;
+    *) echo "strih-box ${name}: STRIH_DESKTOP '${f[STRIH_DESKTOP]}' must be openbox or xfce (the operator session, issue 1466)" >&2; bad=1 ;;
+  esac
   [ "$bad" = 0 ]
 }
 
@@ -750,6 +757,10 @@ strih_lx_cg_sender() {
 
 # strih_box_role -> the box's role (fact STRIH_ROLE: strih | stream, issue 1412).
 strih_box_role() { strih_box_fact STRIH_ROLE; }
+
+# strih_box_desktop -> the operator desktop session (fact STRIH_DESKTOP: openbox | xfce, issue 1466); the
+# lightdm session name is the same word (/usr/share/xsessions/<it>.desktop).
+strih_box_desktop() { strih_box_fact STRIH_DESKTOP; }
 
 # strih_lx_dante_gm -> the PTP grandmaster host the box's dantesync config allows (fact STRIH_DANTE_GM;
 # RIG_GRANDMASTER_IP overrides it for one run, the same override every rig grandmaster read honours).

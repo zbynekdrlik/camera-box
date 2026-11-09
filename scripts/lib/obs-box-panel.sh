@@ -47,6 +47,8 @@ OBS_BOX_PANEL_PACKAGE=tint2
 OBS_BOX_PANEL_UNIT=obs-box-panel.service
 OBS_BOX_PANEL_BIN=/usr/bin/tint2
 OBS_BOX_PANEL_WM_CLASS=tint2.Tint2
+# issue 1466: the panel window of an xfce box (STRIH_DESKTOP=xfce, scripts/lib/obs-box-xfce.sh)
+OBS_BOX_XFCE_PANEL_WM_CLASS=xfce4-panel.Xfce4-panel
 OBS_BOX_PANEL_ROWS=10
 # issue 1441 (owner 18.10.2026: "da sa v liste prepinat??"): the keyboard layout item. tint2 runs the
 # helper as an executor (`watch` prints US / SK on every change, a left click runs `next`); it reads and
@@ -446,19 +448,23 @@ obs_box_panel_shot_install() {
 }
 
 # obs_box_panel_shot_row USER_HOME -> the (panel-shot) row (issue 1481). Read-only; always rc 0.
+# issue 1466: a second argument `skip-keys` (an xfce box) grades the package + ini only: the Print keys there
+# are xfce4-keyboard-shortcuts, graded by item 48's (xfce-keys) row.
 obs_box_panel_shot_row() {
-  local home="$1" ini rc why=""
+  local home="$1" keys_mode="${2:-}" ini rc why=""
   ini="${home}/.config/flameshot/flameshot.ini"
   rc="${home}/.config/openbox/rc.xml"
   if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_SHOT_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
     why="${OBS_BOX_PANEL_SHOT_PACKAGE} not installed"
   elif [ ! -f "$ini" ] || [ "$(obs_box_panel_shot_ini_merge "$home" < "$ini")" != "$(cat "$ini")" ]; then
     why="${ini} missing or not saving to ~/${OBS_BOX_PANEL_SHOT_DIR}"
-  elif [ ! -f "$rc" ] || [ "$(obs_box_panel_shot_rc < "$rc" 2>/dev/null)" != "$(cat "$rc")" ]; then
+  elif [ "$keys_mode" != skip-keys ] && { [ ! -f "$rc" ] || [ "$(obs_box_panel_shot_rc < "$rc" 2>/dev/null)" != "$(cat "$rc")" ]; }; then
     why="${rc} does not bind Print + Alt+Print to flameshot gui"
   fi
   if [ -n "$why" ]; then
     printf 'FAIL|(panel-shot) %s -- re-run setup-strih.sh step 16h (issue 1481)\n' "$why"
+  elif [ "$keys_mode" = skip-keys ]; then
+    printf 'OK|(panel-shot) flameshot installed, saves to ~/%s (the Print keys: (xfce-keys))\n' "$OBS_BOX_PANEL_SHOT_DIR"
   else
     printf 'OK|(panel-shot) flameshot installed, saves to ~/%s, Print + Alt+Print bound\n' "$OBS_BOX_PANEL_SHOT_DIR"
   fi
@@ -536,6 +542,16 @@ obs_box_panel_install() {
   [ "$w" = written ] && changed=1
   strih_session_apps_user_systemctl "$user" daemon-reload \
     || { echo "obs-box-panel: systemctl --user daemon-reload failed" >&2; return 1; }
+  # issue 1466: an xfce box runs xfce4-panel with the same launchers; tint2's files stay (moving back to
+  # openbox is one fact line), its unit is disabled and never started.
+  if [ "$(strih_box_desktop)" = xfce ]; then
+    # --now: a box moved live from openbox stops its tint2 at once (the conversion reboots anyway)
+    strih_session_apps_user_systemctl "$user" disable --now "$OBS_BOX_PANEL_UNIT" \
+      || { echo "obs-box-panel: systemctl --user disable --now ${OBS_BOX_PANEL_UNIT} failed" >&2; return 1; }
+    echo "  ${OBS_BOX_PANEL_UNIT} disabled + stopped (STRIH_DESKTOP=xfce: xfce4-panel carries the launchers)"
+    obs_box_xfce_panel_install "$repo" "$home" "$user" || { echo "obs-box-panel: the xfce4-panel could not be provisioned (above)" >&2; return 1; }
+    return 0
+  fi
   strih_session_apps_user_systemctl "$user" enable "$OBS_BOX_PANEL_UNIT" \
     || { echo "obs-box-panel: systemctl --user enable ${OBS_BOX_PANEL_UNIT} failed" >&2; return 1; }
   if [ "$changed" = 1 ]; then
@@ -551,6 +567,11 @@ obs_box_panel_install() {
 obs_box_panel_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
   local cfg unit pid exe en act wins guard cause
+  # issue 1466: an xfce box grades xfce4-panel in the package / config / unit / window rows, the rest as is
+  if [ "$(strih_box_desktop 2>/dev/null || true)" = xfce ]; then
+    _obs_box_panel_xfce_rows "$repo" "$home" "$user"
+    return 0
+  fi
   if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_PACKAGE" 2>/dev/null || true)" = "install ok installed" ]; then
     printf 'OK|(panel-pkg) %s installed\n' "$OBS_BOX_PANEL_PACKAGE"
   else
@@ -562,18 +583,7 @@ obs_box_panel_grade_rows() {
   else
     printf 'FAIL|(panel-config) %s %s -- re-run setup-strih.sh step 16h\n' "$cfg" "$([ -f "$cfg" ] && echo 'differs from the declared config' || echo missing)"
   fi
-  local id name ex icon dst badl="" nl=0
-  while IFS='|' read -r id name ex icon; do
-    [ -n "$id" ] || continue
-    nl=$((nl + 1))
-    dst="$(obs_box_panel_desktop_path "$home" "$id")"
-    [ -f "$dst" ] && [ "$(cat "$dst")" = "$(obs_box_panel_desktop_text "$name" "$ex" "$icon")" ] || badl="${badl:+$badl, }${dst}"
-  done < <(obs_box_panel_launchers "$home")
-  if [ -n "$badl" ]; then
-    printf 'FAIL|(panel-launchers) missing or not the declared launcher: %s -- re-run setup-strih.sh step 16h\n' "$badl"
-  else
-    printf 'OK|(panel-launchers) %s launcher(s), each the declared .desktop file\n' "$nl"
-  fi
+  _obs_box_panel_launchers_row "$home"
   unit="${home}/.config/systemd/user/${OBS_BOX_PANEL_UNIT}"
   en="$(strih_session_apps_user_systemctl "$user" is-enabled "$OBS_BOX_PANEL_UNIT" 2>/dev/null || true)"
   act="$(strih_session_apps_user_systemctl "$user" is-active "$OBS_BOX_PANEL_UNIT" 2>/dev/null || true)"
@@ -613,6 +623,65 @@ obs_box_panel_grade_rows() {
     printf 'FAIL|(panel-window) no %s window on :0 -- the panel is not shown\n' "$OBS_BOX_PANEL_WM_CLASS"
   fi
   return 0
+}
+
+# _obs_box_panel_launchers_row USER_HOME -> the (panel-launchers) row: every declared launcher .desktop file.
+_obs_box_panel_launchers_row() {
+  local home="$1" id name ex icon dst badl="" nl=0
+  while IFS='|' read -r id name ex icon; do
+    [ -n "$id" ] || continue
+    nl=$((nl + 1))
+    dst="$(obs_box_panel_desktop_path "$home" "$id")"
+    [ -f "$dst" ] && [ "$(cat "$dst")" = "$(obs_box_panel_desktop_text "$name" "$ex" "$icon")" ] || badl="${badl:+$badl, }${dst}"
+  done < <(obs_box_panel_launchers "$home")
+  if [ -n "$badl" ]; then
+    printf 'FAIL|(panel-launchers) missing or not the declared launcher: %s -- re-run setup-strih.sh step 16h\n' "$badl"
+  else
+    printf 'OK|(panel-launchers) %s launcher(s), each the declared .desktop file\n' "$nl"
+  fi
+}
+
+# _obs_box_panel_xfce_rows REPO USER_HOME DESKTOP_USER -> issue 1466: the OBS_BOX_PANEL_ROWS rows of an xfce
+# box. xfce4-panel replaces tint2 in (panel-pkg), (panel-config) (the declared panel properties + each
+# launcher plugin's file, scripts/lib/obs-box-xfce.sh), (panel-unit) (tint2's unit not enabled, an
+# xfce4-panel running for the user) and (panel-window); the other rows are the openbox box's.
+_obs_box_panel_xfce_rows() {
+  local repo="$1" home="$2" user="$3" why bad en wins
+  if [ "$(dpkg-query -W -f='${Status}' xfce4-panel 2>/dev/null || true)" = "install ok installed" ]; then
+    printf 'OK|(panel-pkg) xfce4-panel installed (STRIH_DESKTOP=xfce)\n'
+  else
+    printf 'FAIL|(panel-pkg) xfce4-panel not installed -- re-run setup-strih.sh step 11 (issue 1466)\n'
+  fi
+  why="$(obs_box_xfce_grade_channel "$home" "$user" xfce4-panel obs_box_xfce_panel_spec "$home")" || true
+  if [ "$why" != ok ]; then
+    printf 'FAIL|(panel-config) %s -- re-run setup-strih.sh step 16h, it applies through a running xfconfd (issue 1466)\n' "${why:-no answer}"
+  elif ! bad="$(obs_box_xfce_panel_launchers_ok "$home")"; then
+    printf 'FAIL|(panel-config) %s missing or not the declared launcher -- re-run setup-strih.sh step 16h\n' "$bad"
+  else
+    printf 'OK|(panel-config) the xfce4-panel layout + every launcher plugin file are the declared ones\n'
+  fi
+  _obs_box_panel_launchers_row "$home"
+  en="$(strih_session_apps_user_systemctl "$user" is-enabled "$OBS_BOX_PANEL_UNIT" 2>/dev/null || true)"
+  if [ "$en" = enabled ]; then
+    printf 'FAIL|(panel-unit) %s enabled on an xfce box (tint2 would draw a second panel) -- re-run setup-strih.sh step 16h\n' "$OBS_BOX_PANEL_UNIT"
+  elif ! "${OBS_BOX_XFCE_PGREP:-pgrep}" -u "$user" -x xfce4-panel >/dev/null 2>&1; then
+    printf 'FAIL|(panel-unit) no xfce4-panel runs for %s -- the XFCE session is not up\n' "$user"
+  else
+    printf 'OK|(panel-unit) xfce4-panel runs for %s, %s not enabled\n' "$user" "$OBS_BOX_PANEL_UNIT"
+  fi
+  obs_box_panel_discord_row
+  obs_box_panel_kbd_row "$repo" "$home" "$user"
+  obs_box_panel_files_row "$repo" "$home"
+  obs_box_panel_power_row "$repo" "$user"
+  obs_box_panel_shot_row "$home" skip-keys
+  wins="$(strih_session_apps_wmctrl "$user" "$home")"
+  if [ -z "$wins" ]; then
+    printf 'NOTE|(panel-window) not graded: wmctrl on :0 answered nothing (X down or no client list)\n'
+  elif awk -v c="$OBS_BOX_XFCE_PANEL_WM_CLASS" '$3 == c {f = 1} END {exit !f}' <<<"$wins"; then
+    printf 'OK|(panel-window) the xfce4-panel window is on :0\n'
+  else
+    printf 'FAIL|(panel-window) no %s window on :0 -- the panel is not shown\n' "$OBS_BOX_XFCE_PANEL_WM_CLASS"
+  fi
 }
 
 # obs_box_panel_files_row REPO USER_HOME -> the (panel-files) row (issue 1458): pcmanfm installed, the

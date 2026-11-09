@@ -355,6 +355,14 @@ jobs:
           sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
 
+      # xfconf: the issue-1466 live xfconf apply is measured against the REAL xfconfd on a private
+      # session bus (tests/python/test_obs_box_xfconf_real_daemon_1466.py), never only a fake.
+      - name: Install xfconf
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xfconf dbus
+          xfconf-query --version | head -1
+
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party
         # pytest plugins). These tests pin the obs_phase2 self-verify guard that

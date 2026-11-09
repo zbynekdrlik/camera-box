@@ -53,6 +53,11 @@ if ! declare -F obs_box_panel_install >/dev/null; then
   # shellcheck source=scripts/lib/obs-box-panel.sh
   . "$(dirname "${BASH_SOURCE[0]}")/obs-box-panel.sh"
 fi
+# issue 1466: the ONE operator session start + the XFCE session (setup-strih steps 15 + 16h, verify item 48).
+if ! declare -F obs_box_session_install >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-xfce.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-xfce.sh"
+fi
 # issue 1399: the box's own HTTPS front end (setup-strih step 16i, verify-strih item 45).
 if ! declare -F strih_https_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-https.sh
@@ -2113,8 +2118,19 @@ strih_lx_reboot_pending() {
 # alone would never fire -- imag's step-16 pattern) + the issue-1399 session apps, Companion Satellite
 # (companion-satellite.service) and its watch among them. RustDesk needs no line: its system
 # rustdesk.service serves the Xorg session itself. Needs obs-box-baseline.sh sourced.
-strih_openbox_autostart_text() {
-  local box
+# issue 1466: it IS the openbox form of the ONE session start, strih_session_start_text openbox.
+strih_openbox_autostart_text() { strih_session_start_text openbox; }
+
+# strih_session_start_text DESKTOP -> the ONE operator session start (issue 1466, the gradual move to
+# XFCE): setup-strih step 15 installs it as /usr/local/bin/obs-box-session-start (rendered for the box's
+# STRIH_DESKTOP) and writes its openbox form as ~/.config/openbox/autostart on every box (the shared
+# baseline `autostart` row grades that file, and a box moved back to openbox needs nothing else). An XFCE
+# session runs the script through the XDG entry ~/.config/autostart/obs-box-session.desktop. The only
+# per-desktop line: the tint2 panel starts under openbox only (XFCE brings xfce4-panel). DESKTOP is
+# openbox | xfce, anything else rc 1 with no output.
+strih_session_start_text() {
+  local desktop="${1-}" box
+  case "$desktop" in openbox|xfce) ;; *) echo "strih_session_start_text: DESKTOP must be openbox or xfce" >&2; return 1 ;; esac
   box="$(strih_lx_hostname)" || return 1
   printf '#!/bin/bash\n# %s OBS kiosk boot -- WRITTEN BY setup-strih.sh (issue 1357, the shared OBS-box baseline). Do not hand-edit.\n' "$box"
   cat <<'AUTOSTART_EOF'
@@ -2147,7 +2163,7 @@ AUTOSTART_EOF
     'systemctl --user start strih-bundle-state-server.service || true'
   strih_session_apps_autostart_lines
   # issue 1420: the kiosk panel (tint2), on every box the 16h-panel gate admits.
-  ! obs_box_step_applies 16h-panel >/dev/null || printf '%s\n' "systemctl --user start ${OBS_BOX_PANEL_UNIT} || true"
+  [ "$desktop" != openbox ] || ! obs_box_step_applies 16h-panel >/dev/null || printf '%s\n' "systemctl --user start ${OBS_BOX_PANEL_UNIT} || true"
   # issue 1412 (restreamer agreement 11.10.2026): the stream box runs the restreamer headless as the
   # --user unit its .deb ships; the kiosk has no tray and no XDG autostart, so start it here.
   if [ "$(strih_box_role)" = stream ]; then

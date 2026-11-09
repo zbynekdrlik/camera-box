@@ -848,7 +848,7 @@ else note "(program-audio) not graded: ${WHY}"; fi
 if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.." "${STRIH_LX_USER:-newlevel}" || bad "(tally) the grader did not print all of its rows"
 else note "(tally) not graded: ${WHY}"; fi
 # 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 14 rows) + 44) issue 1420 kiosk panel (scripts/lib/obs-box-panel.sh).
-strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"
+strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"; obs_box_session_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(session) the grader did not print all of its rows"   # 48) issue 1466 the session start + the XFCE session (scripts/lib/obs-box-xfce.sh)
 # 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh: nginx + each name's cert + the upstreams + renewal) + issue 1453 tunnel + TURN (strih-interkom-public.sh).
 if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; strih_interkom_public_grade_report || bad "(https-public) the grader did not print both rows"; else note "(https) not graded: ${WHY}"; fi
 if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_grade_report || bad "(log-sink) the grader did not print all of its rows"; else note "(log-sink) not graded: ${WHY}"; fi   # 46) issue 1394 cambox log sink (scripts/lib/strih-cambox-log-sink.sh: files, units, listeners)
@@ -976,7 +976,7 @@ fi
 #     GNOME purged, the openbox autostart contract, the power envelope, the touchpad InputClass. One
 #     PASS/FAIL line per item; a box missing ANY item FAILS (it supersedes the old never-sleep,
 #     governor and crash-popup items).
-BASELINE_FACTS="$(bash -c "$(obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service)" 2>/dev/null || true)"
+BASELINE_FACTS="$(bash -c "$(obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service "$(strih_box_desktop)")" 2>/dev/null || true)"
 while IFS='|' read -r _bl_item _bl_state _bl_detail; do
   [ -n "$_bl_item" ] || continue
   if [ "$_bl_state" = OK ]; then
