@@ -157,7 +157,8 @@ obs_box_panel_launchers() {
 # app.slice/run-r<id>.scope beside the panel; `--collect` drops a scope whose app exited non-zero instead
 # of leaving it `failed`; no `--unit`, since a fixed name would refuse a second launch while the first
 # runs, so the description names it. systemd-run reaches the manager over its private socket, the
-# context the (panel-power) read already uses. xfce4-panel renders the same list (issue 1466).
+# context the (panel-power) read already uses. xfce4-panel renders the same list (issue 1466). The launch
+# therefore needs the user's systemd manager (always there under tint2's unit and the XFCE session).
 OBS_BOX_PANEL_SCOPE_PREFIX="/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-"
 
 # obs_box_panel_scoped_exec ID CMD -> CMD started in its own transient scope named after the launcher id.
@@ -676,7 +677,8 @@ _obs_box_panel_launchers_row() {
     [ -f "$dst" ] && ! obs_box_panel_exec_scoped "$fex" && unscoped="${unscoped:+$unscoped, }${dst}"
   done < <(obs_box_panel_launchers "$home")
   if [ -n "$unscoped" ]; then
-    printf "FAIL|(panel-launchers) starts its app inside the panel's own unit (a panel restart kills it): %s -- re-run setup-strih.sh step 16h (issue 1465)\n" "$unscoped"
+    printf "FAIL|(panel-launchers) starts its app inside the panel's own unit (a panel restart kills it): %s%s -- re-run setup-strih.sh step 16h (issue 1465)\n" \
+      "$unscoped" "${badl:+; missing or not the declared launcher: ${badl}}"
   elif [ -n "$badl" ]; then
     printf 'FAIL|(panel-launchers) missing or not the declared launcher: %s -- re-run setup-strih.sh step 16h\n' "$badl"
   else

@@ -132,6 +132,8 @@ def test_a_launcher_that_starts_its_app_inside_the_panel_unit_fails_by_name(tmp_
     row = _launcher_row(home, env)
     assert row.startswith("FAIL|(panel-launchers)"), row
     assert "inside the panel's own unit" in row and "obs-box-panel-rustdesk.desktop" in row, row
+    # one verify run names every fault: the same file also differs from the declared text
+    assert "; missing or not the declared launcher: " in row, row
 
 
 def test_the_xfce_launcher_files_carry_the_scope_too(tmp_path):
@@ -185,6 +187,12 @@ def _read(path):
         return ""
 
 
+def _alive(pid):
+    """A live process, never a killed one still waiting to be reaped (state Z)."""
+    stat = _read(Path("/proc", pid, "stat"))
+    return bool(stat) and stat.rsplit(")", 1)[-1].split()[0] != "Z"
+
+
 def test_a_panel_restart_leaves_an_app_started_from_a_launcher_running(tmp_path):
     """The REAL user manager: a stand-in panel unit runs the rendered launcher Exec the way tint2 does
     (/bin/sh -c), the unit restarts, the app lives on in its own scope. CI starts the runner's user
@@ -214,10 +222,10 @@ def test_a_panel_restart_leaves_an_app_started_from_a_launcher_running(tmp_path)
             _systemctl("show", "-p", "MainPID", "--value", unit + ".service").stdout.strip()))
         assert after, "the stand-in panel never came back after the restart"
         time.sleep(0.5)
-        assert Path("/proc", pid).exists(), "the panel restart killed the app it started"
+        assert _alive(pid), "the panel restart killed the app it started"
         _systemctl("stop", unit + ".service")
         time.sleep(0.5)
-        assert Path("/proc", pid).exists(), "stopping the panel killed the app it started"
+        assert _alive(pid), "stopping the panel killed the app it started"
     finally:
         _systemctl("stop", unit + ".service", check=False)
         for p in {pid, _read(pidf)} - {None, ""}:
