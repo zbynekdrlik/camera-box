@@ -189,11 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn gates_overall_pass_is_report_only_from_day_one_930() {
+    fn gates_overall_pass_is_live_once_the_paired_evidence_is_recorded_1032() {
+        // Born report-only in issue 930; LIVE since issue 1032 recorded the 7.11 -> 8.11 pair
+        // (comment 6753309112). A silent revert to report-only must fail here.
         assert!(
-            !gates_overall_pass(),
-            "issue 930: this gate term is born report-only — restore-gated on real paired-run \
-             evidence, never flip silently"
+            gates_overall_pass(),
+            "issue 1032: the fold is live — the 7.11 -> 8.11 paired evidence is recorded"
         );
     }
 
@@ -286,12 +287,14 @@ mod tests {
     }
 
     #[test]
-    fn recorded_clean_paired_runs_is_zero_no_evidence_yet_1032() {
+    fn recorded_clean_paired_runs_meets_the_bar_on_the_8_11_pair_1032() {
+        // 27 measurable SyncNet clips of the 8.11 production vs E2E 42395687259's A/V (-1.1 ms):
+        // 27 Agree, 0 Disagree (issue 1032 comment 6753309112).
         assert_eq!(
-            RECORDED_CLEAN_PAIRED_RUNS, 0,
-            "issue 1032 DATA-FIRST: no paired-run evidence exists yet — supervisor bumps this as \
-             it records a live campaign, never on a guess"
+            RECORDED_CLEAN_PAIRED_RUNS, REQUIRED_CLEAN_PAIRED_RUNS,
+            "issue 1032: the recorded evidence meets the bar, recorded on the ticket"
         );
+        assert!(fold_is_earned(RECORDED_CLEAN_PAIRED_RUNS));
     }
 
     #[test]
@@ -308,9 +311,14 @@ mod tests {
     }
 
     #[test]
-    fn gates_overall_pass_still_report_only_today_derived_from_count_1032() {
-        // derived: RECORDED (0) < REQUIRED (5) -> false, so the fold is not live yet.
-        assert!(!gates_overall_pass());
+    fn gates_overall_pass_live_derived_from_count_1032() {
+        // derived: RECORDED (5) >= REQUIRED (5) -> true, and a Disagree now folds to a failure.
+        assert_eq!(gates_overall_pass(), fold_is_earned(RECORDED_CLEAN_PAIRED_RUNS));
+        assert!(gates_overall_pass());
+        assert!(folds_to_failure(
+            LipsyncCrossCheckVerdict::Disagree,
+            RECORDED_CLEAN_PAIRED_RUNS
+        ));
     }
 
     #[test]

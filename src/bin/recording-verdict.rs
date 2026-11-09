@@ -18140,9 +18140,13 @@ mod tests {
             camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Agree
         );
         assert!(
-            !camera_box::lipsync_cross_check::gates_overall_pass(),
-            "930: report-only from day one"
+            camera_box::lipsync_cross_check::gates_overall_pass(),
+            "issue 1032: the fold is live since the 7.11 -> 8.11 paired evidence"
         );
+        assert!(!camera_box::lipsync_cross_check::folds_to_failure(
+            cc.verdict,
+            camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS
+        ));
     }
 
     #[test]
@@ -18154,5 +18158,10 @@ mod tests {
             cc.verdict,
             camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Disagree
         );
+        // issue 1032: the fold is live, so this Disagree makes the --av-sync run exit non-zero.
+        assert!(camera_box::lipsync_cross_check::folds_to_failure(
+            cc.verdict,
+            camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS
+        ));
     }
 }
