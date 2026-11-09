@@ -883,7 +883,8 @@ def _source_box():
 def _non_roster_box():
     # any resolvable cambox that is neither the source box nor cam2
     src = _source_box()
-    for cam in ("cam3", "cam4", "cam5", "cam6", "cam7", "cam1"):
+    # issue 1452: boxes on the fleet-default pin first (cam3/cam5 take the REST pin, _good_block reads the default)
+    for cam in ("cam4", "cam6", "cam7", "cam1", "cam3", "cam5"):
         if cam not in (src, "cam2"):
             return cam
     raise AssertionError("no non-roster cambox")

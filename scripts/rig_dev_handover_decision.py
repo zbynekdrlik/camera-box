@@ -598,7 +598,7 @@ ITEMS = [
          forgot_token_msgs={
              "SHADING-DEAD": "bkshading relay je zapnutý ale spadol na niektorom camboxe (SHADING-DEAD) — "
                              "reštartuj / preprovizuj relay (issue 1309)",
-             "RELAY-STALE": "shading relay na niektorom camboxe má inú verziu ako scripts/shading-release.pin "
+             "RELAY-STALE": "shading relay na niektorom camboxe má inú verziu ako jeho pin (scripts/shading-release-boxes.txt) "
                             "(RELAY-STALE) — nasaď celú flotilu jedným príkazom scripts/deploy-fleet.sh, "
                             "ten upgraduje aj relay (issue 1452)",
              "RELAY-MISSING": "shading relay je na niektorom camboxe nainštalovaný bez binárky "

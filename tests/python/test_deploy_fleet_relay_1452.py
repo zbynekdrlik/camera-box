@@ -357,7 +357,9 @@ def test_the_handover_probe_reads_state_and_versions_in_one_ssh_call_and_passes_
     s = HANDOVER.read_text()
     body = s[s.index("probe_shading() {"):s.index("\n}\n", s.index("probe_shading() {"))]
     assert body.count("sshpass -p") == 1, "one connect per box: a down box costs one ConnectTimeout"
-    assert "origin/main:scripts/shading-release.pin" in body and '"$main")' in body, body
+    # issue 1452: per box, against this tree's pin AND origin/main's (the lib reads the merged map + pin)
+    assert 'shading_pin_version_for_box_at_ref "$HERE/.." origin/main "$label"' in body, body
+    assert 'shading_pin_version_for_box "$HERE/.." "$label"' in body and '"$main")' in body, body
 
 
 # ---- issue 1487: the relay is the pinned shading release ------------------------------------------ #

@@ -362,7 +362,10 @@ deploy_frame_probe_to_painter() {
 # there); a box whose own camera-box close left the root unverified gets no relay deploy (nothing more
 # is written to a writable root). Every path adds one VERSION_ROWS row.
 relay_step() {  # $1=cam $2=ip
-  local cam="$1" ip="$2" out rc=0 cbv rlv
+  local cam="$1" ip="$2" out rc=0 cbv rlv RELAY_VER RELAY_BIN
+  # issue 1452: this box's own pin (scripts/shading-release-boxes.txt), fetched before any box was touched.
+  RELAY_VER="${RELAY_VER_OF_BOX[$cam]:-}"
+  RELAY_BIN="${RELAY_BIN_OF_BOX[$cam]:-}"
   out="$(ssh_box "$ip" "$(bkshading_relay_versions_cmd)" 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     err "[$cam] could not read the camera-box + relay versions (ssh rc $rc)"
@@ -397,9 +400,9 @@ relay_step() {  # $1=cam $2=ip
     # (the issue-1450 resource `<venue>-cams`): an SNV holder never blocks a PP relay.
     STRIH_HOST="$(obs_fleet_host "strih-$VENUE")" STREAM_HOST="$(obs_fleet_host "stream-$VENUE")" \
       BKSHADING_DEPLOY_LEASE_RESOURCE="$VENUE-cams" SSH_PASS="$SSH_PASS" \
-      "$HERE/bkshading-deploy-relay.sh" --host "$ip" --binary "$RELAY_BIN" || rc=$?
+      "$HERE/bkshading-deploy-relay.sh" --host "$ip" --box "$cam" --binary "$RELAY_BIN" || rc=$?
   else
-    SSH_PASS="$SSH_PASS" "$HERE/bkshading-deploy-relay.sh" --host "$ip" --binary "$RELAY_BIN" || rc=$?
+    SSH_PASS="$SSH_PASS" "$HERE/bkshading-deploy-relay.sh" --host "$ip" --box "$cam" --binary "$RELAY_BIN" || rc=$?
   fi
   case "$rc" in
     0) : ;;
@@ -422,7 +425,7 @@ relay_phase() {
   local entry
   [ "${#REACHED[@]}" -gt 0 ] || return 0
   echo "================================================================"
-  echo ">> bkshading relay (issue 1452): $([ "$NO_RELAY" = 1 ] && echo 'versions only (--no-relay)' || echo "${RELAY_VER:-no relay binary given}")"
+  echo ">> bkshading relay (issue 1452): $([ "$NO_RELAY" = 1 ] && echo 'versions only (--no-relay)' || echo "${RELAY_PINS_SUMMARY:-no relay binary given}")"
   echo "================================================================"
   for entry in "${REACHED[@]}"; do
     relay_step "${entry%%|*}" "${entry#*|}"
@@ -532,11 +535,25 @@ BINARY_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
 # --- issue 1487: the bkshading relay of the pinned shading release ------------------------
 # Fetched and proved before any box is touched: no verified relay = nothing deployed (--no-relay
 # deploys camera-box alone). Its version is the pin's, unrelated to camera-box's.
-RELAY_VER=""
+# issue 1452: the pin is chosen PER BOX (scripts/shading-release-boxes.txt: the REST relay only where the
+# camera serves REST). Every pin the set needs is fetched + proved here, once per pin.
+declare -A RELAY_VER_OF_BOX=() RELAY_BIN_OF_BOX=() _RELAY_BIN_OF_PIN=() _RELAY_VER_OF_PIN=()
+RELAY_PINS_SUMMARY=""
 if [ "$NO_RELAY" = 0 ]; then
-  RELAY_BIN="$(shading_release_relay "$HERE/.." amd64)" \
-    || { err "no verified relay of the pinned shading release (above) -- nothing deployed (pass --no-relay to deploy camera-box alone)"; exit 1; }
-  RELAY_VER="$(shading_pin_version "$HERE/..")"
+  for _rcam in $SET; do
+    _rpin="$(shading_pin_file_for_box "$HERE/.." "$_rcam")" \
+      || { err "[$_rcam] no valid shading pin (above) -- nothing deployed"; exit 1; }
+    if [ -z "${_RELAY_BIN_OF_PIN[$_rpin]:-}" ]; then
+      RELAY_BIN="$(SHADING_RELEASE_PIN_FILE="$_rpin" shading_release_relay "$HERE/.." amd64)" \
+        || { err "no verified relay of the pinned shading release ${_rpin##*/} (above) -- nothing deployed (pass --no-relay to deploy camera-box alone)"; exit 1; }
+      RELAY_VER="$(SHADING_RELEASE_PIN_FILE="$_rpin" shading_pin_version "$HERE/..")"
+      _RELAY_BIN_OF_PIN[$_rpin]="$RELAY_BIN"
+      _RELAY_VER_OF_PIN[$_rpin]="$RELAY_VER"
+    fi
+    RELAY_BIN_OF_BOX[$_rcam]="${_RELAY_BIN_OF_PIN[$_rpin]}"
+    RELAY_VER_OF_BOX[$_rcam]="${_RELAY_VER_OF_PIN[$_rpin]}"
+    RELAY_PINS_SUMMARY="${RELAY_PINS_SUMMARY:+$RELAY_PINS_SUMMARY, }$_rcam=${_RELAY_VER_OF_PIN[$_rpin]}"
+  done
 fi
 log "Deploying camera-box $NEW_VER to: $SET"
 echo ""

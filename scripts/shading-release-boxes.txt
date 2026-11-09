@@ -1,0 +1,10 @@
+# issue 1452 (shading#6, owner 9.11.2026): the bkshading relay pin PER BOX. `<box> <pin file in scripts/>`.
+# A box not listed takes scripts/shading-release.pin (the fleet default, the gphoto2 relay v0.1.x).
+# scripts/shading-release-rest.pin (the REST relay v0.2.x, NO gphoto2 fallback) goes ONLY on a box whose
+# camera serves the Blackmagic REST API over its USB-C link: Pocket 6K fw >= 8.6 / Pocket 4K fw >= 9.8 AND
+# Blackmagic Camera Setup -> Network access -> "Web media manager" ON. Otherwise REST answers 404 and that
+# camera's shading reads offline. The box is the relay host's own name (hostname, lower case, no domain):
+# a cambox camN, a handheld SBC by its hostname. Add a box here only after its camera answers
+# `GET /control/api/v1/lens/iris` on the link (.claude/rules/shading-pinned-release.md).
+cam3 shading-release-rest.pin
+cam5 shading-release-rest.pin
