@@ -273,6 +273,7 @@ class Box:
         (d / "address").write_text(mac + "\n")
         (d / "carrier").write_text("1\n")
         (d / "carrier_changes").write_text("4\n")
+        (d / "flags").write_text("0x1003\n")  # issue 1495: the link admin UP (IFF_UP)
         if physical:
             dev = self.tmp / "devices" / name
             (dev / "driver").parent.mkdir(parents=True, exist_ok=True)

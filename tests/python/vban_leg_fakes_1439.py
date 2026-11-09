@@ -52,6 +52,11 @@ def prof(ref):
     return None
 def out(t):
     sys.stdout.write(t)
+def link(d, up):
+    # issue 1495: NetworkManager brings a device's link UP when it activates a profile on it
+    f = os.path.join(s.get("sysfs", ""), "class", "net", d, "flags")
+    if s.get("sysfs") and os.path.isdir(os.path.dirname(f)):
+        open(f, "w").write("0x1003\n" if up else "0x1002\n")
 def addrs_of(pr, d):
     if pr.get("ipv4.method") == "auto": return [s["dhcp"].get(d, "").split("/")[0]]
     if pr.get("ipv4.method") == "manual": return [v.split("/")[0] for v in pr.get("ipv4.addresses", "").split(",") if v]
@@ -94,6 +99,7 @@ if cmd == ["connection", "modify"]:
     can = s["carrier"].get(x["props"].get("vlan.parent", d), True)
     if x["props"].get("connection.autoconnect") == "yes" and x["uuid"] not in s["active"].values() and d and can:
         s["active"][d] = x["uuid"]; s["applied"][d] = dict(x["props"]); s["log"].append(["nm-autoconnect", d])
+        link(d, True)
 elif cmd == ["connection", "add"]:
     kv = a[2:]; new = {"uuid": str(_uuid.uuid4()), "type": "802-3-ethernet", "props": {
         "ipv4.method": "auto", "connection.autoconnect": "yes", "ipv6.method": "auto"}}
@@ -127,6 +133,8 @@ elif cmd == ["device", "reapply"]:
     s["applied"][d] = dict(new)
 elif cmd == ["connection", "up"]:
     x = prof(a[2]); d = a[a.index("ifname") + 1] if "ifname" in a else x["props"]["connection.interface-name"]
+    if d in s.get("unmanaged", {}):
+        sys.stderr.write("Error: Connection activation failed: device is strictly unmanaged\n"); save(); sys.exit(4)
     if not s["carrier"].get(d, True):
         sys.stderr.write("Error: Connection activation failed: No suitable device found (no carrier)\n")
         save(); sys.exit(4)
@@ -144,10 +152,27 @@ elif cmd == ["connection", "up"]:
     for dd in [dd for dd, u in s["active"].items() if u == x["uuid"]]:
         del s["active"][dd]
     s["active"][d] = x["uuid"]; s["applied"][d] = dict(x["props"])
+    link(d, True)
 elif cmd == ["connection", "down"]:
     x = prof(a[2])
     for d in [d for d, u in s["active"].items() if u == x["uuid"]]:
         del s["active"][d]; s["applied"].pop(d, None)
+elif cmd == ["device", "disconnect"]:
+    # issue 1495: deactivates the device (its address goes) and blocks autoconnect on it
+    d = a[2]
+    if d not in s["active"]:
+        sys.stderr.write("Error: Device '%s' (%s) disconnecting failed: This device is not active\n" % (d, d))
+        save(); sys.exit(10)
+    del s["active"][d]; s["applied"].pop(d, None); s.setdefault("blocked", {})[d] = True
+elif cmd == ["device", "set"]:
+    d = a[2]
+    if a[3:5] == ["managed", "no"]:
+        s.setdefault("unmanaged", {})[d] = True
+        s["active"].pop(d, None); s["applied"].pop(d, None)
+    else:
+        save(); sys.exit(2)
+elif cmd == ["general", "reload"]:
+    pass
 else:
     save(); sys.exit(2)
 save()
@@ -165,6 +190,12 @@ def addrs(d):
         return [x.strip() for x in pr.get("ipv4.addresses", "").split(",") if x.strip()]
     return []
 out = sys.stdout.write
+if a[:3] == ["link", "set", "dev"] and a[4:] in (["up"], ["down"]):
+    f = os.path.join(s["sysfs"], "class", "net", a[3], "flags")
+    if not os.path.isdir(os.path.dirname(f)):
+        sys.stderr.write('Cannot find device "%s"\n' % a[3]); sys.exit(1)
+    open(f, "w").write("0x1003\n" if a[4] == "up" else "0x1002\n")
+    sys.exit(0)
 if a == ["-o", "-4", "addr", "show"]:
     for d in s["applied"]:
         for x in addrs(d):
@@ -284,6 +315,12 @@ elif verb in ("restart", "start"):
     if s.get("unit_runs_nft"):
         f = s["unit_runs_nft"]
         s["nft_loaded_file"] = open(f).read(); s["nft_render"] = nft_render(s["nft_loaded_file"])
+elif verb == "try-restart":
+    if not u["active"]:
+        save(); sys.exit(0)
+    s.setdefault("restarted", []).append(args[1])
+elif verb == "show":
+    sys.stdout.write(s.get("show", {}).get(args[-1], ""))
 elif verb == "daemon-reload": pass
 save()
 '''
@@ -303,6 +340,23 @@ if "-p" in a:
         open(f, "w").write(v + "\n")
     sys.exit(0)
 sys.exit(2)
+'''
+
+
+ARPING = r'''
+import json, os, sys
+p = os.environ["FAKE_STATE"]; s = json.load(open(p)); a = sys.argv[1:]
+s["log"].append(["arping"] + a); json.dump(s, open(p, "w"))
+if a == ["-V"]:
+    print(s.get("arping_version", "arping from iputils 20240117")); sys.exit(0)
+sys.exit(s.get("arping_rc", 0))
+'''
+
+PGREP = r'''
+import json, os, sys
+p = os.environ["FAKE_STATE"]; s = json.load(open(p)); a = sys.argv[1:]
+s["log"].append(["pgrep"] + a); json.dump(s, open(p, "w"))
+sys.exit(0 if a[-1] in s.get("procs", []) else 1)
 '''
 
 
@@ -350,7 +404,8 @@ def install(bin_dir, state_path, proc_sys):
     bin_dir = Path(bin_dir)
     bin_dir.mkdir(parents=True, exist_ok=True)
     for name, body in (("nmcli", NMCLI), ("ip", IP), ("nft", NFT.replace("%(render)s", RENDER_SRC)),
-                       ("systemctl", SYSTEMCTL.replace("%(render)s", RENDER_SRC)), ("sysctl", SYSCTL)):
+                       ("systemctl", SYSTEMCTL.replace("%(render)s", RENDER_SRC)), ("sysctl", SYSCTL),
+                       ("arping", ARPING), ("pgrep", PGREP)):
         f = bin_dir / name
         f.write_text("#!%s\n%s" % (sys.executable, body))
         f.chmod(0o755)
