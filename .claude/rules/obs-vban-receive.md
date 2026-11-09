@@ -723,6 +723,16 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   watchdog pages a foreign one). Who may bind 319: `.claude/rules/strih-dante-input.md`.
 - **`rp_filter=2` on the leg:** an inbound multicast's reverse lookup has no `from` match and resolves
   through the rig NIC.
+- **Address conflict detection is off on the leg (`ipv4.dad-timeout 0`, issue 1495, live 9.11.2026):** the
+  NIC-to-VLAN handover brings the VLAN up while the old NIC leg still holds the SAME address on the same
+  L2, and NetworkManager's ACD refused it ("IP address 10.77.7.204 cannot be configured because it is
+  already in use in the network by host 00:E0:4C:68:01:85"). The fake nmcli models that refusal.
+- **A leg profile change is a `device reapply`, and a RUNNING dstack device does not survive it**
+  (strih-snv, 9.11.2026 19:04): the reapply briefly takes the address away, the hub's `strih-snv-intercom`
+  then logged `info packet could not be sent: No such device (os error 19)` every 0.25 s and its
+  subscriptions stayed `pending` until `systemctl restart intercom-hub` (OBS's `strih-obs` was restarted
+  by the deploy anyway). So a setup run that changes the leg profile on a box with a live hub needs a hub
+  restart after it (open item on issue 1495); until then restart it by hand and re-read `foh_dante`.
 - **Unproven until the first live run:** `man nm-settings-nmcli` says `ipv4.route-table` affects device-routes
   too, but the fake NetworkManager assumes it, so the
   first reapply on strih-snv is the proof: `ip route show table 70` carries the /24, main does not, and the
