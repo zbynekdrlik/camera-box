@@ -487,8 +487,12 @@ production.
 - **Camboxes** (issue 1439 part 2): `scripts/lib/cambox-dsync-unit.sh` holds the unit
   (`cambox_dsync_unit_text [NIC]`, byte-identical to the old STEP 17 heredoc without a NIC,
   ` --interface <NIC>` after `--ntp-server strih.lan` with one) and the NIC rule `cambox_lan_nic
-  SYSROOT` = the ONE `enp*` with a `device` link (the netplan #1155 name rule: the bkshading USB link is
-  `enx*`, a VLAN has no device link; none or two = rc 1 by name, never a guess).
+  SYSROOT` = the ONE `enp*` with a `device` link AND `carrier` 1 (the netplan #1155 name rule: the
+  bkshading USB link is `enx*`, a VLAN has no device link). Every live cambox has TWO onboard r8169
+  ports and the cable sits in either (read 9.11.2026: cam2 enp3s0, cam3 enp1s0, cam5 enp2s0), so the
+  cabled port decides; none or two cabled = rc 1 by name, never a guess. A cable moved to the other
+  port later leaves dsync waiting on the old one (it never falls back): `(ba)` FAILs and the apply
+  re-binds it.
   - setup-device STEP 17 writes through both (enable-only, fails by name on an unresolved NIC).
   - verify-device `(ba)` grades `/status` + the unit's ExecStart over the SAME verdict.
   - A live box gets it from `scripts/cambox-ro-units-apply.sh`: the unit written in the verified rw

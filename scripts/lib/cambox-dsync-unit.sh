@@ -13,10 +13,12 @@
 # `ptp_interface` on /status.
 #
 # Helpers:
-#   cambox_lan_nic SYSROOT               the ONE `enp*` under SYSROOT/class/net with a `device` link (the
-#                                        netplan LAN rule, `match: name: "enp*"`: a PCI NIC is enp*, the
-#                                        USB camera link enx*, a VLAN has no device link); none or two or
-#                                        more = rc 1 + a named stderr line, never a guess
+#   cambox_lan_nic SYSROOT               the ONE `enp*` under SYSROOT/class/net with a `device` link AND
+#                                        carrier 1 (the netplan LAN rule, `match: name: "enp*"`: a PCI NIC
+#                                        is enp*, the USB camera link enx*, a VLAN has no device link; every
+#                                        live cambox has TWO onboard ports and the cable sits in either, so
+#                                        the cabled one decides); none or two or more = rc 1 + a named
+#                                        stderr line, never a guess
 #   cambox_dsync_unit_text [NIC]         the STEP 17 unit; without a NIC byte-identical to the pre-1439
 #                                        heredoc, with one ` --interface <NIC>` after `--ntp-server
 #                                        strih.lan`. A NIC that is not 1-15 of [A-Za-z0-9._-] or starts
@@ -44,6 +46,8 @@ cambox_lan_nic() {
     n="${d##*/}"
     case "$n" in enp*) ;; *) continue ;; esac
     [ -e "$d/device" ] || [ -L "$d/device" ] || continue
+    # the cabled port: a cambox has two onboard ports and the cable sits in either (issue 1439)
+    [ "$(cat "$d/carrier" 2>/dev/null || true)" = 1 ] || continue
     found="${found:+$found }$n"
     count=$((count + 1))
   done
@@ -52,9 +56,9 @@ cambox_lan_nic() {
     return 0
   fi
   if [ "$count" -eq 0 ]; then
-    echo "cambox_lan_nic: no enp* interface with a device under ${sys}/class/net -- the LAN NIC is unknown, dsync is not bound to a guess" >&2
+    echo "cambox_lan_nic: no enp* interface with a device and carrier 1 (a cable) under ${sys}/class/net -- the LAN NIC is unknown, dsync is not bound to a guess" >&2
   else
-    echo "cambox_lan_nic: ${count} enp* interfaces with a device under ${sys}/class/net (${found}) -- the LAN NIC is ambiguous, dsync is not bound to a guess" >&2
+    echo "cambox_lan_nic: ${count} cabled enp* interfaces (carrier 1) under ${sys}/class/net (${found}) -- the LAN NIC is ambiguous, dsync is not bound to a guess" >&2
   fi
   return 1
 }
