@@ -415,11 +415,13 @@ struct Args {
     /// the PAIRED lipsync-test-mode recording of the SAME rig state, from `scripts/av_sync_measure.py`
     /// and `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when
     /// given together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
-    /// comparing it against this recording's own QR/QPSK offset (`camera_box::lipsync_cross_check`).
-    /// Report-only TODAY (issue 1032: `gates_overall_pass` is derived-`false` while
-    /// `RECORDED_CLEAN_PAIRED_RUNS` < `REQUIRED_CLEAN_PAIRED_RUNS`, so it does not affect this CLI's
-    /// exit code); once the supervisor records N>=5 clean paired runs, a Disagree verdict makes
-    /// `--av-sync` exit non-zero (the JSON is still printed first).
+    /// comparing it against this recording's own QR/QPSK offset minus `--av-expected-ms` (the
+    /// test feed's measured leg, issue 1032) (`camera_box::lipsync_cross_check`). On the direct
+    /// test feed pass `--av-expected-ms` from `rig_test_feed_av_expected_ms` (-46): this flag's
+    /// default 0 compares the raw offset, 46 ms off. `scripts/lipsync-cross-check.sh` does it.
+    /// LIVE since issue 1032 recorded the 7.11 -> 8.11 paired evidence (`RECORDED_CLEAN_PAIRED_RUNS`
+    /// reached `REQUIRED_CLEAN_PAIRED_RUNS`): a Disagree verdict makes `--av-sync` exit non-zero
+    /// (the JSON is still printed first).
     /// `allow_negative_numbers`: video-earlier-than-audio is half the real outcome space and must
     /// parse as a bare `-N` value (clap 4 otherwise reads a leading `-` as a new flag).
     #[arg(long, allow_negative_numbers = true)]
@@ -2979,14 +2981,23 @@ fn decode_for_grouped(
 /// caller never supplied `--syncnet-offset-ms` (the pre-930 behavior: no `lipsync_cross_check`
 /// key at all), `Some` otherwise — `camera_box::lipsync_cross_check::evaluate` itself decides
 /// Agree/Disagree/Unknown.
+///
+/// issue 1032: SyncNet is compared against the QR/QPSK RESIDUAL, `raw − av_expected_ms`
+/// (`av_window::residual_offset_ms`, the A/V gate's own function): the raw offset carries the
+/// test feed's measured leg (the direct feed reads −46 ms when production A/V is 0), SyncNet on
+/// real faces does not. With `--av-expected-ms 0` (the optical feed) the two are the same.
 fn lipsync_cross_check_for(
-    qr_qpsk_offset_ms: f64,
+    qr_qpsk_raw_offset_ms: f64,
+    av_expected_ms: f64,
     syncnet_offset_ms: Option<f64>,
 ) -> Option<camera_box::lipsync_cross_check::LipsyncCrossCheck> {
     let syncnet_offset_ms = syncnet_offset_ms?;
     Some(camera_box::lipsync_cross_check::evaluate(
         Some(syncnet_offset_ms),
-        Some(qr_qpsk_offset_ms),
+        Some(camera_box::av_window::residual_offset_ms(
+            qr_qpsk_raw_offset_ms,
+            av_expected_ms,
+        )),
         camera_box::lipsync_cross_check::LIPSYNC_CROSS_CHECK_TOLERANCE_MS,
     ))
 }
@@ -3036,15 +3047,16 @@ fn run_av_sync(args: &Args) -> Result<()> {
     // lipsync-test-mode run's SyncNet offset (never printed on a plain --av-sync call, so every
     // pre-930 invocation's JSON shape is byte-for-byte unchanged).
     let mut lipsync_folds_to_failure = false;
-    if let Some(cross_check) =
-        lipsync_cross_check_for(report.offset.offset_ms, args.syncnet_offset_ms)
-    {
+    if let Some(cross_check) = lipsync_cross_check_for(
+        report.offset.offset_ms,
+        args.av_expected_ms,
+        args.syncnet_offset_ms,
+    ) {
         let gate_pass =
             camera_box::lipsync_cross_check::lipsync_cross_check_gate_pass(cross_check.verdict);
-        // issue 1032: fold-earned check against the recorded evidence count. DORMANT today —
-        // RECORDED_CLEAN_PAIRED_RUNS (0) < REQUIRED_CLEAN_PAIRED_RUNS (5), so this is always
-        // `false` and the run still exits 0; it goes live the instant the supervisor bumps the
-        // recorded count to 5 (one-constant flip in src/lipsync_cross_check.rs).
+        // issue 1032: fold-earned check against the recorded evidence count. LIVE —
+        // RECORDED_CLEAN_PAIRED_RUNS reached REQUIRED_CLEAN_PAIRED_RUNS on the 7.11 -> 8.11 pair,
+        // so a Disagree sets this and the run exits non-zero below.
         lipsync_folds_to_failure = camera_box::lipsync_cross_check::folds_to_failure(
             cross_check.verdict,
             camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
@@ -3052,6 +3064,8 @@ fn run_av_sync(args: &Args) -> Result<()> {
         json["lipsync_cross_check"] = serde_json::json!({
             "syncnet_offset_ms": cross_check.syncnet_offset_ms,
             "qr_qpsk_offset_ms": cross_check.qr_qpsk_offset_ms,
+            "qr_qpsk_raw_offset_ms": report.offset.offset_ms,
+            "av_expected_ms": args.av_expected_ms,
             "delta_ms": cross_check.delta_ms,
             "tolerance_ms": cross_check.tolerance_ms,
             "verdict": format!("{:?}", cross_check.verdict),
@@ -3063,7 +3077,9 @@ fn run_av_sync(args: &Args) -> Result<()> {
         });
         tracing::info!(
             syncnet_offset_ms = ?cross_check.syncnet_offset_ms,
-            qr_qpsk_offset_ms = report.offset.offset_ms,
+            qr_qpsk_offset_ms = ?cross_check.qr_qpsk_offset_ms,
+            qr_qpsk_raw_offset_ms = report.offset.offset_ms,
+            av_expected_ms = args.av_expected_ms,
             delta_ms = ?cross_check.delta_ms,
             verdict = ?cross_check.verdict,
             gate_pass,
@@ -3088,9 +3104,8 @@ fn run_av_sync(args: &Args) -> Result<()> {
     );
     // issue 1032 — fold the lipsync cross-check into this --av-sync run's exit code. The JSON above
     // is ALWAYS printed first (the operator sees both offsets + the delta) before the run fails.
-    // DORMANT today: `folds_to_failure` is always `false` while RECORDED_CLEAN_PAIRED_RUNS (0) <
-    // REQUIRED_CLEAN_PAIRED_RUNS (5), so exit behavior is byte-identical to before; it goes LIVE
-    // the moment the supervisor records N>=5 clean paired runs by bumping that one constant.
+    // LIVE since issue 1032: the recorded evidence count meets the bar, so only a Disagree fails;
+    // an Agree or an Unknown (one side unmeasured) exits 0 as before.
     if lipsync_folds_to_failure {
         anyhow::bail!(
             "lipsync cross-check DISAGREE: SyncNet vs QR/QPSK differ beyond the {}ms tolerance \
@@ -18125,13 +18140,14 @@ mod tests {
 
     #[test]
     fn lipsync_cross_check_for_is_none_without_syncnet_offset_930() {
-        assert_eq!(super::lipsync_cross_check_for(12.0, None), None);
+        assert_eq!(super::lipsync_cross_check_for(12.0, 0.0, None), None);
     }
 
     #[test]
     fn lipsync_cross_check_for_agrees_within_tolerance_930() {
         // 12.0 (QR/QPSK) vs 40.0 (SyncNet) -> delta 28.0, within the 50ms tolerance.
-        let cc = super::lipsync_cross_check_for(12.0, Some(40.0)).expect("Some when syncnet given");
+        let cc =
+            super::lipsync_cross_check_for(12.0, 0.0, Some(40.0)).expect("Some when syncnet given");
         assert_eq!(cc.qr_qpsk_offset_ms, Some(12.0));
         assert_eq!(cc.syncnet_offset_ms, Some(40.0));
         assert_eq!(cc.delta_ms, Some(28.0));
@@ -18140,16 +18156,55 @@ mod tests {
             camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Agree
         );
         assert!(
-            !camera_box::lipsync_cross_check::gates_overall_pass(),
-            "930: report-only from day one"
+            camera_box::lipsync_cross_check::gates_overall_pass(),
+            "issue 1032: the fold is live since the 7.11 -> 8.11 paired evidence"
         );
+        assert!(!camera_box::lipsync_cross_check::folds_to_failure(
+            cc.verdict,
+            camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS
+        ));
     }
 
     #[test]
     fn lipsync_cross_check_for_disagrees_beyond_tolerance_930() {
         // 0.0 (QR/QPSK) vs 500.0 (SyncNet) -> delta 500.0, far beyond the 50ms tolerance.
-        let cc = super::lipsync_cross_check_for(0.0, Some(500.0)).expect("Some when syncnet given");
+        let cc =
+            super::lipsync_cross_check_for(0.0, 0.0, Some(500.0)).expect("Some when syncnet given");
         assert_eq!(cc.delta_ms, Some(500.0));
+        assert_eq!(
+            cc.verdict,
+            camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Disagree
+        );
+        // issue 1032: the fold is live, so this Disagree makes the --av-sync run exit non-zero.
+        assert!(camera_box::lipsync_cross_check::folds_to_failure(
+            cc.verdict,
+            camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS
+        ));
+    }
+
+    #[test]
+    fn lipsync_cross_check_compares_the_residual_on_the_direct_feed_1032() {
+        // The direct test feed reads -46 ms when production A/V is 0 (rig-test-feed.sh). A synced
+        // rig: raw -46, expected -46, SyncNet 0 -> the residual 0 agrees with SyncNet.
+        let cc = super::lipsync_cross_check_for(-46.0, -46.0, Some(0.0))
+            .expect("Some when syncnet given");
+        assert_eq!(cc.qr_qpsk_offset_ms, Some(0.0));
+        assert_eq!(cc.delta_ms, Some(0.0));
+        assert_eq!(
+            cc.verdict,
+            camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Agree
+        );
+        // The same reading against the wrong (zero) expected leg sits 46 ms off.
+        let raw = super::lipsync_cross_check_for(-46.0, 0.0, Some(0.0)).expect("Some");
+        assert_eq!(raw.delta_ms, Some(46.0));
+    }
+
+    #[test]
+    fn lipsync_cross_check_disagrees_when_the_residual_is_beyond_tolerance_1032() {
+        // raw -46 on the direct feed is production 0; SyncNet -80 is then 80 ms off -> Disagree,
+        // although the raw difference (34 ms) would have read Agree.
+        let cc = super::lipsync_cross_check_for(-46.0, -46.0, Some(-80.0)).expect("Some");
+        assert_eq!(cc.delta_ms, Some(80.0));
         assert_eq!(
             cc.verdict,
             camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Disagree
