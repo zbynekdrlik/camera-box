@@ -366,6 +366,17 @@ jobs:
           xfconf-query --version > /tmp/xfconf-version.txt
           head -1 /tmp/xfconf-version.txt
 
+      # issue 1465 item 7: tests/python/test_obs_box_panel_scope_1465.py restarts a stand-in panel unit on
+      # the REAL systemd --user manager and checks the app a launcher started lives on in its own scope.
+      # A hosted runner has no user manager until linger starts user@<uid>; wait for its private socket.
+      - name: Start the runner's systemd user manager
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sock="/run/user/$(id -u)/systemd/private"
+          for _ in $(seq 1 60); do [ -S "$sock" ] && break; sleep 1; done
+          [ -S "$sock" ] || { echo "no systemd --user manager: $sock missing after 60 s" >&2; exit 1; }
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party
         # pytest plugins). These tests pin the obs_phase2 self-verify guard that

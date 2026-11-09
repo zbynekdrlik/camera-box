@@ -26,7 +26,9 @@
 #   * obs_box_panel_grade_report  -- verify-strih item 44, through the caller's ok / bad / note:
 #       (panel-pkg)    tint2 installed;
 #       (panel-config) the config equals the declared text;
-#       (panel-launchers) every declared launcher .desktop file exists with the declared text;
+#       (panel-launchers) every declared launcher .desktop file exists with the declared text, and
+#                      each one starts its app through its own unit or in its own transient scope
+#                      (issue 1465 item 7: never inside the panel unit, which a restart would kill);
 #       (panel-unit)   the unit file equals the checkout, enabled, active, its main process /usr/bin/tint2;
 #       (panel-discord) issue 1448: Discord installed on the stream role (setup installs the pinned
 #                      .deb); NOTE on the strih role (production-only);
@@ -112,15 +114,18 @@ OBS_BOX_PANEL_DISCORD_SHA256="${OBS_BOX_PANEL_DISCORD_SHA256:-e7f346569784ef47ea
 #   rustdesk   the RustDesk binary
 #   discord    the Discord binary (issue 1448)
 # A supervised app starts through its unit, never its binary: the unit runs the box's own wrapper
-# (strih-obs-start.sh) and `start` on a running unit does nothing.
+# (strih-obs-start.sh) and `start` on a running unit does nothing. Every other launcher starts its app
+# in its own transient scope (obs_box_panel_scoped_exec, issue 1465 item 7).
 obs_box_panel_launchers() {
   local home="${1:?user home required}" ud
   ud="${home}/.config/systemd/user"
-  printf 'power|Vypnúť|/usr/bin/python3 %s|%s\n' "$OBS_BOX_PANEL_POWER_HELPER" "$(obs_box_panel_power_icon_path "$home")"
+  printf 'power|Vypnúť|%s|%s\n' "$(obs_box_panel_scoped_exec power "/usr/bin/python3 ${OBS_BOX_PANEL_POWER_HELPER}")" \
+    "$(obs_box_panel_power_icon_path "$home")"
   [ -f "${ud}/strih-obs.service" ] \
     && printf 'obs|OBS Studio|systemctl --user start strih-obs.service|%s\n' "$(obs_box_panel_obs_icon_path "$home")"
   [ -x "$OBS_BOX_PANEL_FILES_BIN" ] \
-    && printf 'files|Nahrávky|/usr/bin/python3 %s open|system-file-manager\n' "$OBS_BOX_PANEL_FILES_HELPER"
+    && printf 'files|Nahrávky|%s|system-file-manager\n' \
+      "$(obs_box_panel_scoped_exec files "/usr/bin/python3 ${OBS_BOX_PANEL_FILES_HELPER} open")"
   [ -f "${ud}/bkshading-panel-app.service" ] \
     && printf 'shading|Shading|systemctl --user start bkshading-panel-app.service|video-display\n'
   if [ -f "${ud}/restreamer.service" ] || [ -f "${OBS_BOX_PANEL_SYS_UNIT_DIR}/restreamer.service" ]; then
@@ -129,15 +134,48 @@ obs_box_panel_launchers() {
   if [ -x "$OBS_BOX_PANEL_CHROME_BIN" ] && [ "$(strih_box_role)" = stream ]; then
     # issue 1469: the kiosk autologin never unlocks the GNOME login keyring, so Chrome keeps its own
     # basic password store and never pops "Unlock Login Keyring".
-    printf 'chrome|Chrome|%s --password-store=basic|google-chrome\n' "$OBS_BOX_PANEL_CHROME_BIN"
+    printf 'chrome|Chrome|%s|google-chrome\n' \
+      "$(obs_box_panel_scoped_exec chrome "${OBS_BOX_PANEL_CHROME_BIN} --password-store=basic")"
   fi
   [ -x "$OBS_BOX_PANEL_SHOT_BIN" ] \
-    && printf 'screenshot|Snímka obrazovky|%s gui|org.flameshot.Flameshot\n' "$OBS_BOX_PANEL_SHOT_BIN"
-  [ -x "$OBS_BOX_PANEL_RUSTDESK_BIN" ] && printf 'rustdesk|RustDesk|%s|rustdesk\n' "$OBS_BOX_PANEL_RUSTDESK_BIN"
+    && printf 'screenshot|Snímka obrazovky|%s|org.flameshot.Flameshot\n' \
+      "$(obs_box_panel_scoped_exec screenshot "${OBS_BOX_PANEL_SHOT_BIN} gui")"
+  [ -x "$OBS_BOX_PANEL_RUSTDESK_BIN" ] \
+    && printf 'rustdesk|RustDesk|%s|rustdesk\n' "$(obs_box_panel_scoped_exec rustdesk "$OBS_BOX_PANEL_RUSTDESK_BIN")"
   # issue 1448 (owner 16.10.2026, "ma byt na lavo discord v liste"): Discord where it is installed. It
   # is single-instance, so a click on a running one focuses its window, never a second copy.
-  [ -x "$OBS_BOX_PANEL_DISCORD_BIN" ] && printf 'discord|Discord|%s|discord\n' "$OBS_BOX_PANEL_DISCORD_BIN"
+  [ -x "$OBS_BOX_PANEL_DISCORD_BIN" ] \
+    && printf 'discord|Discord|%s|discord\n' "$(obs_box_panel_scoped_exec discord "$OBS_BOX_PANEL_DISCORD_BIN")"
   return 0
+}
+
+# issue 1465 item 7 (finding 6363702188, design 6753269997): tint2 runs as the --user unit
+# obs-box-panel.service, so an app a launcher forked lived in the PANEL's cgroup and a panel restart (step
+# 16h's try-restart, a tint2 crash under Restart=always) killed Chrome / RustDesk / Discord / pcmanfm. Each
+# binary launcher now asks the user manager for its own transient scope: `--scope` keeps the app a direct
+# child (the panel's DISPLAY + environment, the launch returns when the app exits) and puts it in
+# app.slice/run-r<id>.scope beside the panel; `--collect` drops a scope whose app exited non-zero instead
+# of leaving it `failed`; no `--unit`, since a fixed name would refuse a second launch while the first
+# runs, so the description names it. systemd-run reaches the manager over its private socket, the
+# context the (panel-power) read already uses. xfce4-panel renders the same list (issue 1466).
+OBS_BOX_PANEL_SCOPE_PREFIX="/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-"
+
+# obs_box_panel_scoped_exec ID CMD -> CMD started in its own transient scope named after the launcher id.
+obs_box_panel_scoped_exec() {
+  printf '%s%s -- %s' "$OBS_BOX_PANEL_SCOPE_PREFIX" "${1:?launcher id required}" "${2:?command required}"
+}
+
+# obs_box_panel_exec_scoped EXEC -> rc 0 when a launcher Exec line starts its app outside the panel
+# unit: a start of its own unit, or the scope form above (an id, then `-- ` and a command).
+obs_box_panel_exec_scoped() {
+  local ex="${1-}" rest
+  case "$ex" in
+    "systemctl --user start "?*) return 0 ;;
+    "$OBS_BOX_PANEL_SCOPE_PREFIX"*)
+      rest="${ex#"$OBS_BOX_PANEL_SCOPE_PREFIX"}"
+      case "$rest" in *" -- "?*) [[ "${rest%% -- *}" =~ ^[abcdefghijklmnopqrstuvwxyz]+$ ]] ;; *) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
 }
 
 # obs_box_panel_obs_icon_path USER_HOME -> where step 16h puts the OBS logo (the vendored OBS tree's
@@ -627,17 +665,22 @@ obs_box_panel_grade_rows() {
 
 # _obs_box_panel_launchers_row USER_HOME -> the (panel-launchers) row: every declared launcher .desktop file.
 _obs_box_panel_launchers_row() {
-  local home="$1" id name ex icon dst badl="" nl=0
+  local home="$1" id name ex icon dst badl="" unscoped="" nl=0 fex
   while IFS='|' read -r id name ex icon; do
     [ -n "$id" ] || continue
     nl=$((nl + 1))
     dst="$(obs_box_panel_desktop_path "$home" "$id")"
     [ -f "$dst" ] && [ "$(cat "$dst")" = "$(obs_box_panel_desktop_text "$name" "$ex" "$icon")" ] || badl="${badl:+$badl, }${dst}"
+    # issue 1465 item 7: the file's OWN Exec line, so a declaration that lost the scope fails here too
+    fex="$(sed -n 's/^Exec=//p' "$dst" 2>/dev/null | head -n 1 || true)"
+    [ -f "$dst" ] && ! obs_box_panel_exec_scoped "$fex" && unscoped="${unscoped:+$unscoped, }${dst}"
   done < <(obs_box_panel_launchers "$home")
-  if [ -n "$badl" ]; then
+  if [ -n "$unscoped" ]; then
+    printf "FAIL|(panel-launchers) starts its app inside the panel's own unit (a panel restart kills it): %s -- re-run setup-strih.sh step 16h (issue 1465)\n" "$unscoped"
+  elif [ -n "$badl" ]; then
     printf 'FAIL|(panel-launchers) missing or not the declared launcher: %s -- re-run setup-strih.sh step 16h\n' "$badl"
   else
-    printf 'OK|(panel-launchers) %s launcher(s), each the declared .desktop file\n' "$nl"
+    printf 'OK|(panel-launchers) %s launcher(s), each the declared .desktop file, each app in its own unit or own scope\n' "$nl"
   fi
 }
 
