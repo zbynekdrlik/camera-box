@@ -309,3 +309,55 @@ def test_setup_strih_restarts_after_the_leg_and_before_the_dante_toml():
     m = s.index('strih_vban_leg_after_change "$DESKTOP_USER" ||')
     d = s.index('strih_dante_input_install "$DESKTOP_USER" "$USER_HOME"')
     assert a < m < d
+
+
+# --- review round 1 ---------------------------------------------------------------------------------------
+
+def test_a_failed_link_down_still_restores_the_leg_before_it_fails(tmp_path):
+    """The old profile is already gone when the link-down fails: the shared rule it took must come back and the
+    retiring filter go before setup fails, never a leg without its policy rule."""
+    b = _box(tmp_path, delete_drops_shared_rules=True, link_set_fails=True)
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode != 0 and NIC_IF in r.stderr and "link" in r.stderr, r.stdout + r.stderr
+    s = b.st()
+    assert fk.calls(s, "nmcli", "device", "reapply", VLAN_IF), "the rule came back"
+    assert s["applied"][VLAN_IF]["ipv4.routing-rules"] == "priority 100 from %s table 70" % ADDR
+    assert s.get("nft_other", {}) == {}, "the retiring filter went"
+    assert _arp_announces(s), "the leg still announced"
+
+
+def test_the_9_11_cleanup_announces_the_leg_once(tmp_path):
+    b = _converged(tmp_path)
+    s = b.st()
+    s["profiles"].append({"uuid": "77777777-1111-2222-3333-444444444444", "type": "802-3-ethernet",
+                          "props": {"connection.id": RETIRED, "connection.interface-name": NIC_IF,
+                                    "ipv4.method": "disabled", "ipv6.method": "disabled",
+                                    "connection.autoconnect": "yes"}})
+    s["active"][NIC_IF] = "77777777-1111-2222-3333-444444444444"
+    s["applied"][NIC_IF] = dict(s["profiles"][-1]["props"])
+    s.pop("unmanaged", None)
+    b.state.write_text(json.dumps(s))
+    b.nm_conf.unlink()
+    r = b.run("strih_vban_leg_install && printf 'CHANGED=%s\\n' \"$STRIH_VBAN_LEG_CHANGED\"")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _arp_announces(b.st()) == [["-q", "-U", "-c", "2", "-I", VLAN_IF, ADDR]]
+    assert "CHANGED=" in r.stdout and "CHANGED=\n" not in r.stdout, "a running hub restarts after it too"
+
+
+def test_a_mac_leg_back_on_a_retired_nic_takes_it_out_of_the_drop_in(tmp_path):
+    """The rollback to the USB NIC (the fact file's `mac:` shape): a NIC the drop-in unmanages would refuse
+    every activation ("strictly unmanaged"), so the leg takes it back first."""
+    b = t39.Box(tmp_path, profiles=[t39._rig_profile()], active={RIG_IF: t39.RIG_UUID},
+                applied={RIG_IF: t39._rig_profile()["props"]}, unmanaged={NIC_IF: True})
+    b.nic(NIC_IF, NIC_MAC)
+    conf = Path(b.env["STRIH_VBAN_LEG_NM_CONF_FILE"])
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text("[device-vban-dante70-retired]\nmatch-device=interface-name:%s;mac:%s;interface-name:enx0001\n"
+                    "managed=0\n" % (NIC_IF, NIC_MAC))
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode == 0, r.stdout + r.stderr
+    s = b.st()
+    assert NIC_IF not in s.get("unmanaged", {}) and s["active"].get(NIC_IF), "the leg is up on it again"
+    c = conf.read_text()
+    assert NIC_IF not in c and NIC_MAC not in c and "interface-name:enx0001" in c, "only its own entries go"
+    assert fk.calls(s, "nmcli", "device", "set", NIC_IF, "managed", "yes")

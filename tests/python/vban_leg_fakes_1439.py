@@ -172,6 +172,8 @@ elif cmd == ["device", "set"]:
     if a[3:5] == ["managed", "no"]:
         s.setdefault("unmanaged", {})[d] = True
         s["active"].pop(d, None); s["applied"].pop(d, None)
+    elif a[3:5] == ["managed", "yes"]:
+        s.setdefault("unmanaged", {}).pop(d, None)
     else:
         save(); sys.exit(2)
 elif cmd == ["general", "reload"]:
@@ -194,6 +196,8 @@ def addrs(d):
     return []
 out = sys.stdout.write
 if a[:3] == ["link", "set", "dev"] and a[4:] in (["up"], ["down"]):
+    if s.get("link_set_fails"):
+        sys.stderr.write("RTNETLINK answers: Operation not permitted\n"); sys.exit(2)
     f = os.path.join(s["sysfs"], "class", "net", a[3], "flags")
     if not os.path.isdir(os.path.dirname(f)):
         sys.stderr.write('Cannot find device "%s"\n' % a[3]); sys.exit(1)
