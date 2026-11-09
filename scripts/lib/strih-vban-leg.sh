@@ -274,6 +274,7 @@ strih_vban_leg_nm_props() {
     ipv4.dns "" \
     ipv4.routes "$routes" \
     ipv4.routing-rules "priority ${STRIH_VBAN_LEG_RULE_PRIORITY} from ${addr} table ${STRIH_VBAN_LEG_ROUTE_TABLE}" \
+    ipv4.dad-timeout 0 \
     ipv6.method disabled
 }
 
