@@ -124,7 +124,8 @@ strih-snv since 24.10.2026). lv1 sends two streams: `strih-obs` to OBS on 6981, 
 
 | Path | Source clock -> crossings -> listener | Fixed latency (computed) |
 |---|---|---|
-| Program into the stream OBS (stream-snv) | mbc.lan VBAN `stream` (24-bit, 239-frame packets, USB-C NIC on VLAN 70) -> obs-vban receive timeline -> OBS mix (FLEET) -> YouTube + the recording | R = **80 ms** (`STRIH_PROGRAM_VBAN_RESERVE_MS`). No hub (setup-strih step 13 moves a stream-role hub aside). |
+| Program into the stream OBS (stream-snv, issue 1495, ONE NIC) | mbc-snv Dante TX (dstack 0.6.55, the stream mix, channels `STREAM master L 01` / `R 02`; names in the untracked site file) at 96 kHz on DANTE -> dlink RX device `stream-obs` on VLAN 70 TAGGED on the rig NIC (`enp56s0.70`) on DANTE MEDIA = FLEET (in-process PTP follower, the dsync service's clock as fallback) -> dlink `Rated` 96 -> 48 kHz -> the `dante_input` source `mbc` -> OBS mix (FLEET) -> YouTube + the recording. No ASRC crossing (one grandmaster both ends, computed as on strih-snv below) | dlink's DEFAULT device latency (no `latency_ms` written: **15 ms**, P = 13.042 ms RX-only 96/48) + the source's timeline (stated by the obs project). Computed, not measured. No hub. |
+| Program into the stream OBS (stream-snv, before issue 1495, rollback) | mbc.lan VBAN `stream` (24-bit, 239-frame packets, USB-C NIC on VLAN 70 until 9.11.2026) -> obs-vban receive timeline -> OBS mix (FLEET) | R = **80 ms** (`STRIH_PROGRAM_VBAN_RESERVE_MS`). |
 | Program into the stream OBS (stream-pp) | lv1 VBAN `stream` -> obs-vban -> OBS -> YouTube + the recording | R = **40 ms** |
 | Headphone monitor (stream role) | the restreamer's RTMP -> ffmpeg -> relay -> PipeWire `stream-operator-headphones` | not a fixed path (monitoring only; `.claude/rules/stream-headphone-monitor.md`) |
 
@@ -171,6 +172,23 @@ the obs release v0.2.0 deploy + the site file on strih-snv (issue 1487); live on
 - **Budget:** against the strih program's R = 30 ms (VBAN today) the 15 ms device latency is the smaller
   term, but neither total is known until the two projects state their source timelines. No double-sound
   row is added until the paths exist.
+
+## Dante on stream-snv (issue 1495, owner 9.11.2026: "prechod stream na dlink v obs" + "jeden ethernet")
+
+The same design as strih-snv (the program device is `<STRIH_ROLE>-obs`: `stream-obs`), no hub on the box.
+
+- **Clocks:** mbc-snv TX (DANTE, the audio grandmaster mbc follows) and the `stream-obs` RX (DANTE MEDIA =
+  FLEET by dstack's code) on one grandmaster: no clock domain crossed, only the exact 2:1 96 -> 48 kHz.
+  Computed from the strih-snv analysis above, not measured on this box.
+- **Latency change:** obs-vban R = 80 ms -> dlink's default 15 ms: the program audio reaches the stream mix
+  ~65 ms EARLIER than with VBAN (computed). The stream picture is unchanged, so the stream A/V offset moves
+  by about that: the E2E A/V gate re-measures it after the switch, and the compensation is part of the
+  change (owner 31.10.2026: an approved latency change includes its A/V alignment).
+- **Leg:** VLAN 70 tagged on the onboard r8169 rig NIC (`enp56s0.70`), 10.77.7.204/24 with
+  `ipv4.route-table 70` (the Dante variant of `obs-vban-receive.md`); the USB-C NIC leg is retired by setup.
+- **Graded:** verify-strih item 9 `(program-dante)` (the device `stream-obs`), rig-mode TEST #901 item 2 (the
+  `mbc` input is the `dante_input` kind, unmuted), and the E2E program-audio continuity gate folds the
+  device's counters from the STREAM OBS log (`stream_dante`, `stream Dante:` reasons).
 
 ## Where two paths meet one listener (the double-sound budget)
 

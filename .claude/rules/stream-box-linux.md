@@ -33,6 +33,8 @@ step that sent PowerShell to it through `win_ssh_run` failed there (rig-mode TES
 | `stream_box_obs_restart_hint USER HOST WIN_HINT` | the operator's OBS restart line (issue 1474): Linux `ssh USER@HOST 'systemctl --user restart strih-obs.service'`, else WIN_HINT verbatim; no trailing newline, rc 0. |
 | `stream_mbc_vban_expect HOST` | Linux: `<stream> <port> <input>` from the box facts (`STRIH_PROGRAM_VBAN_STREAMS` / `_PORT` / `STRIH_PROGRAM_AUDIO_INPUT`, loaded in a SUBSHELL, so the caller never gets a loaded box); the input name may hold spaces (stream-pp `Zvuk z mixu`), so it comes last: `read -r stream port input`. Windows: nothing, rc 0. A Linux box refuses (rc 1) with one of two named messages: no fleet row / the facts did not load (the loader's own line says why), or the facts declare `none`. |
 
+| `stream_program_dante_input HOST` | issue 1495: Linux box whose facts take the program from its Dante device -> `<device> <input>` (`stream-obs mbc` on stream-snv), rc 0; any other box rc 1, nothing printed. rig-mode item 2 and the continuity gate ask it BEFORE `stream_mbc_vban_expect`. |
+
 Argument order follows the wrapped function: exec / download take win_ssh_run's (USER PW HOST ...), the
 visibility gate strih_linux_visibility_check's (HOST USER PW TIMEOUT HERE). Reordering the gate would
 also put `"$STREAM_USER" "$STREAM_PW" "$STREAM"` into the `[0/8]` Linux branch ahead of the Windows
