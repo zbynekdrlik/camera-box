@@ -596,7 +596,7 @@ obs_box_lowlatency_kernel "$STRIH_KERNEL_SERIES"
 obs_box_cpu_affinity strih        # -> /etc/strih-isolated-cpus.conf, strih-obs-start.sh's taskset pin
 obs_box_nvidia_prime strih        # nvidia-driver-595-open + PRIME nvidia-PRIMARY (the RTX 5050)
 obs_box_dejitter "$DESKTOP_USER" strih "$OBS_CFG"
-obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth
+obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth "$(strih_box_desktop)"   # issue 1466: the lightdm session = STRIH_DESKTOP
 obs_box_power_envelope "$STRIH_PL1_W" strih_fetch_repo_file "$STRIH_PL1_STEPDOWN_W"
 obs_box_touchpad strih
 obs_box_maxperf_persistence strih
@@ -798,6 +798,8 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/menu.xml"
 rm -f "${USER_HOME}/.config/autostart/companion-satellite.desktop" "${USER_HOME}/.config/autostart/obs.desktop"
 rmdir "${USER_HOME}/.config/autostart" 2>/dev/null || true
 echo "  ~/.config/openbox/autostart (display layout + kiosk preamble + strih-obs/bundle-state/session-app starts, Companion Satellite included) + menu.xml written for ${DESKTOP_USER}; GNOME-era XDG autostarts removed"
+# issue 1466: the ONE session start /usr/local/bin/obs-box-session-start on every box; an xfce box (STRIH_DESKTOP) runs it from XDG autostart.
+obs_box_session_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1466: the operator session could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop build, run by companion-satellite.service"

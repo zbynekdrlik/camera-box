@@ -22,6 +22,11 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
   never a start);
 - `obs_box_panel_grade_rows` is verify-strih item 44 (`OBS_BOX_PANEL_ROWS` rows, the count is pinned).
 
+**An xfce box (issue 1466, `STRIH_DESKTOP=xfce`) runs xfce4-panel instead:** step 16h keeps tint2's
+files, DISABLES its unit and renders the xfce4-panel from the SAME launcher list
+(`obs_box_xfce_panel_install`); item 44 grades `(panel-pkg)` / `(panel-config)` / `(panel-unit)` /
+`(panel-window)` against xfce4-panel there, the row count stays 10. `.claude/rules/obs-box-xfce.md`.
+
 ## Launchers (`obs_box_panel_launchers`, one `id|Name|Exec|Icon` per app the box has)
 
 - OBS, Shading, Restreamer start through their units, never a second copy; RustDesk, Discord where the

@@ -388,6 +388,11 @@ obs_box_kiosk() {
     # Optional box fact: `keep-bluetooth` leaves bluetooth enabled (strih-snv is operated with a Bluetooth
     # mouse); every other box gets the plain disable list below.
     local KEEP_BT="${3:-}"
+    # issue 1466 (the gradual move to XFCE): the lightdm autologin SESSION, openbox (imag, and every strih
+    # box until its fact STRIH_DESKTOP moves it) or xfce. openbox stays installed either way (moving back
+    # is one fact line); xfce also installs the xfce4 desktop without its recommends.
+    local SESSION="${4:-openbox}"
+    case "$SESSION" in openbox|xfce) ;; *) fail "issue 1466: kiosk session '${SESSION}' must be openbox or xfce" ;; esac
 # imag-nb is a single-purpose OBS cutting appliance — it must boot straight into a bare,
 # non-compositing openbox kiosk (fullscreen OBS projectors on the full panel+HDMI), NOT the full
 # GNOME user desktop (owner directive #504, 2026-07-04): GNOME's dock/top-bar steal OBS's screen,
@@ -419,6 +424,14 @@ obs_box_kiosk() {
 obs_box_apt_update
 DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop xserver-xorg x11-xserver-utils python3-websocket xinput \
     || fail "#504: openbox+lightdm install failed — cannot convert the box to the kiosk WM"
+# issue 1466: an xfce box gets the xfce4 desktop (no recommends: the measured power manager, screensaver and
+# indexer stay out) and its lightdm session file must exist before (b) points the autologin at it.
+if [ "$SESSION" = xfce ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xfce4 \
+        || fail "issue 1466: xfce4 install failed -- the box would autologin into a missing session"
+    [ -f /usr/share/xsessions/xfce.desktop ] \
+        || fail "issue 1466: /usr/share/xsessions/xfce.desktop missing after the xfce4 install -- refusing to point lightdm at it"
+fi
 # issue 1418: on a fresh box that install brings xserver-xorg, whose `xserver-xorg-video-all |
 # xorg-driver-video` dependency pulls the amdgpu DDX back in AFTER the NVIDIA step removed it. Remove it
 # again here, on a discrete-NVIDIA box only (see obs_box_amdgpu_ddx_remove; a no-op when absent).
@@ -434,8 +447,8 @@ cat > "/etc/lightdm/lightdm.conf.d/50-${BOX}-autologin.conf" <<EOF
 [Seat:*]
 autologin-user=${DESKTOP_USER}
 autologin-user-timeout=0
-autologin-session=openbox
-user-session=openbox
+autologin-session=${SESSION}
+user-session=${SESSION}
 EOF
 # issue 1454: lightdm starts X only once every display GPU is registered with udev (a GPU X adds later
 # as a hotplugged screen aborted Xorg and lightdm fell back to the login screen on strih-snv 21.10.2026).
