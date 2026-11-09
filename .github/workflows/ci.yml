@@ -360,8 +360,11 @@ jobs:
       - name: Install xfconf
         run: |
           sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xfconf dbus
-          xfconf-query --version | head -1
+          # Ubuntu's xfconf package only RECOMMENDS its own library, so libxfconf-0-3 is named explicitly
+          # (without it xfconf-query exits 127 and the real-daemon test fails by name, run 42615136396).
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xfconf libxfconf-0-3 dbus
+          xfconf-query --version > /tmp/xfconf-version.txt
+          head -1 /tmp/xfconf-version.txt
 
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party
