@@ -187,20 +187,26 @@ _obs_box_xfce_repo() { (cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd); }
 # obs_box_xfce_xfconfd_running USER -> rc 0 while the user's xfconfd runs (its channels are then its own).
 obs_box_xfce_xfconfd_running() { "$OBS_BOX_XFCE_PGREP" -u "${1:?user required}" -x xfconfd >/dev/null 2>&1; }
 
-# obs_box_xfce_apply_live USER CHANNEL (stdin: the SPEC) -> set the declared properties through USER's RUNNING
-# xfconfd (xfconf-query on the user's session bus, as the user when run as root) and read each back.
-obs_box_xfce_apply_live() {
-  local user="${1:?user required}" channel="${2:?channel required}" uid rt
-  local -a runner
-  uid="$(id -u "$user")" || return 1
-  rt="/run/user/${uid}"
+# obs_box_xfce_user_bus_run USER CMD... -> CMD as USER (strih_session_apps_user_run: sudo -u + XDG_RUNTIME_DIR as
+# root, inline otherwise) on USER's session bus, where the running xfconfd and xfce4-panel listen.
+obs_box_xfce_user_bus_run() {
+  local user="${1:?user required}" rt
+  shift
   if [ "${STRIH_SESSION_APPS_EUID:-$(id -u)}" = 0 ]; then
-    runner=(sudo -u "$user" env "XDG_RUNTIME_DIR=${rt}" "DBUS_SESSION_BUS_ADDRESS=unix:path=${rt}/bus")
+    rt="/run/user/$(id -u "$user")" || return 1
   else
-    rt="${XDG_RUNTIME_DIR:-$rt}"
-    runner=(env "DBUS_SESSION_BUS_ADDRESS=unix:path=${rt}/bus")
+    rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   fi
-  python3 "$(_obs_box_xfce_repo)/scripts/obs_box_xfconf.py" apply "$channel" - "${runner[@]}" >/dev/null
+  strih_session_apps_user_run "$user" env "DBUS_SESSION_BUS_ADDRESS=unix:path=${rt}/bus" "$@"
+}
+
+# obs_box_xfce_apply_live USER CHANNEL (stdin: the SPEC) -> set the declared properties through USER's RUNNING
+# xfconfd (xfconf-query on the user's session bus) and read each back. Sets OBS_BOX_XFCE_LIVE_APPLIED=1.
+obs_box_xfce_apply_live() {
+  local user="${1:?user required}" channel="${2:?channel required}"
+  obs_box_xfce_user_bus_run "$user" python3 "$(_obs_box_xfce_repo)/scripts/obs_box_xfconf.py" apply "$channel" - >/dev/null \
+    || return 1
+  OBS_BOX_XFCE_LIVE_APPLIED=1
 }
 
 # obs_box_xfce_write_channel HOME USER CHANNEL SPEC_FN [ARGS...] -> one channel file holds the declared
@@ -288,7 +294,17 @@ obs_box_xfce_panel_install() {
     obs_box_write_if_changed_rendered "$f" 0644 "${user}:${grp}" "xfce4-panel launcher ${name}" \
       obs_box_panel_desktop_text "$name" "$ex" "$icon" || return 1
   done < <(obs_box_xfce_panel_plugins "$home")
-  obs_box_xfce_write_channel "$home" "$user" xfce4-panel obs_box_xfce_panel_spec "$home"
+  OBS_BOX_XFCE_LIVE_APPLIED=0
+  obs_box_xfce_write_channel "$home" "$user" xfce4-panel obs_box_xfce_panel_spec "$home" || return 1
+  # a layout changed under a running panel: restart it once on the user's bus, so a half-applied layout
+  # (the replace runs first) never stays on screen; a failure only WARNs (the next login draws it)
+  if [ "$OBS_BOX_XFCE_LIVE_APPLIED" = 1 ] && "$OBS_BOX_XFCE_PGREP" -u "$user" -x xfce4-panel >/dev/null 2>&1; then
+    if obs_box_xfce_user_bus_run "$user" xfce4-panel --restart >/dev/null 2>&1; then
+      echo "  xfce4-panel restarted on ${user}'s session (the new layout)"
+    else
+      echo "  WARNING: issue 1466: xfce4-panel --restart failed -- the new layout shows at the next login"
+    fi
+  fi
 }
 
 # obs_box_xfce_panel_launchers_ok HOME -> rc 0 when every launcher plugin's .desktop file holds the

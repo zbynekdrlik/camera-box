@@ -195,7 +195,16 @@ def apply_live(channel, spec, runner, run=None):
     reaches the desktop user's session bus), then read every declared property back. Returns None or the
     first failure."""
     import subprocess
-    run = run or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=20))
+
+    def _run(argv):
+        try:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(argv, 124, "", "timed out after 20 s (no xfconfd answer)")
+        except OSError as exc:
+            return subprocess.CompletedProcess(argv, 127, "", str(exc))
+
+    run = run or _run
     for argv in query_args(channel, spec):
         r = run(runner + argv)
         # a reset of a property that does not exist yet fails harmlessly; a set must succeed

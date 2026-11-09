@@ -6,6 +6,7 @@ paths:
   - "scripts/lib/obs-box-kiosk.sh"
   - "scripts/strih-boxes/*.env"
   - "tests/python/test_obs_box_xfce_1466.py"
+  - "tests/python/test_obs_box_xfconf_real_daemon_1466.py"
 ---
 
 # The operator desktop is a box fact: openbox or XFCE (issue 1466)
@@ -103,6 +104,15 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
   `OBS_BOX_XFCE_PGREP`. Tests: `tests/python/test_obs_box_xfce_1466.py` (stub `chown`; a root:root file
   always re-reads as written as non-root; a fake `pgrep` with the 15-character rule and a fake
   `xfconf-query` over a JSON "xfconfd" that logs the bus address).
+- **The real daemon:** `tests/python/test_obs_box_xfconf_real_daemon_1466.py` runs `apply` against the
+  REAL xfconfd on a private `dbus-daemon` (CI's python job apt-installs `xfconf dbus`), then grades the
+  file the daemon saves with `check`; a host without xfconf FAILS it by name. dev1 has no xfconf: run it
+  with `OBS_BOX_TEST_XFCONF_ROOT=<dir>` after `apt-get download xfconf libxfconf-0-3 libxfce4util7` +
+  `dpkg-deb -x` of each into `<dir>` (from a script file in a worktree lane). Measured 9.11.2026 on
+  xfconf 4.18 (noble; the boxes run 4.20): `-n -t T -s V` overwrites an existing value, `-n -a -t T -s V
+  ...` sets an array (one element too), the array read-back is the `Value is an array with N items:`
+  header + a blank line + one value per line, `-r -R` removes a subtree, a missing property reads rc 1.
+- After a live panel apply, `xfce4-panel --restart` runs once on the user's bus (a WARN on failure).
 
 ## UNVERIFIED until slice 2 on stream-snv (supervisor)
 

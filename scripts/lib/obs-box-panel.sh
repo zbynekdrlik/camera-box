@@ -448,19 +448,23 @@ obs_box_panel_shot_install() {
 }
 
 # obs_box_panel_shot_row USER_HOME -> the (panel-shot) row (issue 1481). Read-only; always rc 0.
+# issue 1466: a second argument `skip-keys` (an xfce box) grades the package + ini only: the Print keys there
+# are xfce4-keyboard-shortcuts, graded by item 48's (xfce-keys) row.
 obs_box_panel_shot_row() {
-  local home="$1" ini rc why=""
+  local home="$1" keys_mode="${2:-}" ini rc why=""
   ini="${home}/.config/flameshot/flameshot.ini"
   rc="${home}/.config/openbox/rc.xml"
   if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_SHOT_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
     why="${OBS_BOX_PANEL_SHOT_PACKAGE} not installed"
   elif [ ! -f "$ini" ] || [ "$(obs_box_panel_shot_ini_merge "$home" < "$ini")" != "$(cat "$ini")" ]; then
     why="${ini} missing or not saving to ~/${OBS_BOX_PANEL_SHOT_DIR}"
-  elif [ ! -f "$rc" ] || [ "$(obs_box_panel_shot_rc < "$rc" 2>/dev/null)" != "$(cat "$rc")" ]; then
+  elif [ "$keys_mode" != skip-keys ] && { [ ! -f "$rc" ] || [ "$(obs_box_panel_shot_rc < "$rc" 2>/dev/null)" != "$(cat "$rc")" ]; }; then
     why="${rc} does not bind Print + Alt+Print to flameshot gui"
   fi
   if [ -n "$why" ]; then
     printf 'FAIL|(panel-shot) %s -- re-run setup-strih.sh step 16h (issue 1481)\n' "$why"
+  elif [ "$keys_mode" = skip-keys ]; then
+    printf 'OK|(panel-shot) flameshot installed, saves to ~/%s (the Print keys: (xfce-keys))\n' "$OBS_BOX_PANEL_SHOT_DIR"
   else
     printf 'OK|(panel-shot) flameshot installed, saves to ~/%s, Print + Alt+Print bound\n' "$OBS_BOX_PANEL_SHOT_DIR"
   fi
@@ -669,15 +673,7 @@ _obs_box_panel_xfce_rows() {
   obs_box_panel_kbd_row "$repo" "$home" "$user"
   obs_box_panel_files_row "$repo" "$home"
   obs_box_panel_power_row "$repo" "$user"
-  # the Print keys of an xfce box are xfce4-keyboard-shortcuts, graded by item 48's (xfce-keys) row
-  local ini="${home}/.config/flameshot/flameshot.ini"
-  if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_SHOT_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
-    printf 'FAIL|(panel-shot) %s not installed -- re-run setup-strih.sh step 16h (issue 1481)\n' "$OBS_BOX_PANEL_SHOT_PACKAGE"
-  elif [ ! -f "$ini" ] || [ "$(obs_box_panel_shot_ini_merge "$home" < "$ini")" != "$(cat "$ini")" ]; then
-    printf 'FAIL|(panel-shot) %s missing or not saving to ~/%s -- re-run setup-strih.sh step 16h\n' "$ini" "$OBS_BOX_PANEL_SHOT_DIR"
-  else
-    printf 'OK|(panel-shot) flameshot installed, saves to ~/%s (the Print keys: (xfce-keys))\n' "$OBS_BOX_PANEL_SHOT_DIR"
-  fi
+  obs_box_panel_shot_row "$home" skip-keys
   wins="$(strih_session_apps_wmctrl "$user" "$home")"
   if [ -z "$wins" ]; then
     printf 'NOTE|(panel-window) not graded: wmctrl on :0 answered nothing (X down or no client list)\n'
