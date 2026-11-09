@@ -2,6 +2,8 @@
 paths:
   - "scripts/lib/strih-dante-leg.sh"
   - "tests/python/test_vban_leg_nic_to_vlan_1495.py"
+  - "tests/python/test_vban_leg_move_1495.py"
+  - "scripts/lib/strih-vban-leg-move.sh"
   - "vendor/obs-vban/src/vban-source.c"
   - "vendor/obs-vban/src/vban-receive-timeline.h"
   - "src/vban_receive_timeline.rs"
@@ -695,22 +697,58 @@ USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `
   retired. On a failure path it stays until the next good run (known limit: it is live only, so a reboot in
   between leaves the old leg unfiltered; the failure message says to re-run setup before any reboot, and
   verify's leftover row FAILs that box).
-- verify's leftover row on a VLAN leg also FAILs a default route through the parked NIC (the interface of
-  `vban-dante70-retired`: a DHCP lease after all); another interface's default route (a venue WiFi) is never
-  this row's.
+- verify's leftover row on a VLAN leg also FAILs a default route through a retired NIC (the drop-in's NIC
+  below); another interface's default route (a venue WiFi) is never this row's.
 - A VLAN created THIS run that does not read back is DELETED again (`_strih_vban_leg_rollback_new_vlan`), but
   only on a vlan leg and only while an ACTIVE NIC leg still carries the address: ONE interface on the address
   again, setup fails by name, the next run creates the VLAN anew. With no such NIC leg (the 8.11 shape: the USB
   NIC gone, its profile inactive) the VLAN stays, it is the only leg. A `mac:` leg is never rolled back.
-- The retired NIC is parked under `vban-dante70-retired` (`ipv4.method disabled`, IPv6 off, autoconnect), so
-  NetworkManager's automatic DHCP profile never takes the audio-VLAN port with a second default route.
+- **The retired NIC is LINK-DOWN and unmanaged, never parked under a profile** (`scripts/lib/strih-vban-leg-move.sh`,
+  live 9.11.2026 19:00Z: the first cut parked it under `vban-dante70-retired` with no address, an ACTIVE profile kept
+  the link admin UP on the switch (VLAN 70 untagged), mbc kept its ARP entry for .204 = the old MAC and sent the
+  Dante stream there for ~65 min of silent program; fixed by hand with `nmcli device disconnect` + `ip link set down`).
+  Retirement now: `nmcli device disconnect <nic>` (blocks its autoconnect) BEFORE the profile delete, then
+  `_strih_vban_leg_retire_down`: a NetworkManager drop-in `/etc/NetworkManager/conf.d/90-vban-dante70-retired.conf`
+  (`[device-vban-dante70-retired]`, `match-device=interface-name:<nic>;mac:<mac>`, `managed=0`; entries are added,
+  never dropped), `nmcli general reload conf` + `nmcli device set <nic> managed no`, `ip link set dev <nic> down`.
+  - Why durable: NetworkManager.conf(5) `managed` in a `[device-*]` section (on 1.46+, above udev rules): an
+    unmanaged device is never activated, not at an NM restart, not at boot, where the kernel creates every
+    interface DOWN; with no NM device there is no automatic DHCP profile either, so no parking profile is needed.
+    Known limit: anything outside NetworkManager that ups it (a hand `ip link set up`, a networkd config) does;
+    verify catches it. NOT read on a box yet (the manpage only): after the first setup run on stream-snv, restart
+    NetworkManager and then reboot, and read `nmcli -g GENERAL.STATE device show <nic>` = `unmanaged` and IFF_UP
+    clear in `/sys/class/net/<nic>/flags` after each (or verify item 9's leftover row).
+  - A `mac:` leg back on a retired NIC (the rollback to the USB NIC) takes its entries out of the drop-in first
+    (`_strih_vban_leg_unretire`: rewrite or remove, `general reload conf`, `device set <nic> managed yes`); else
+    NetworkManager refuses its activation as strictly unmanaged. Handed back, NetworkManager may bring its
+    automatic DHCP profile up on the port for a moment; the `mac:` apply then adopts that profile as the leg's
+    (the mac kind's adopt rule), so it converges in the same run.
+  - A failed link-down fails the step only after the leg is restored (the retiring filter deleted, the shared
+    rule reapplied, the announce sent): the old profile is already gone at that point.
+  - Never the rig NIC: refused by name AND by MAC (a VLAN shares its parent's MAC).
+  - Every run (`_strih_vban_leg_retired_upkeep`, a vlan leg): a 9.11 `vban-dante70-retired` profile is deleted
+    (device disconnected first) and its NIC retired down; a retired NIC whose link is up again is taken down.
+  - verify `(vban-leg) leftover` FAILs a retired NIC (the drop-in's, or a parking profile's) whose link is admin UP
+    (sysfs `flags` IFF_UP; `up` / `unreadable` FAIL), a parking profile left, and a default route through it; the
+    OK row names `the retired NIC <nic> unmanaged + link down`. An unplugged retired NIC is not graded.
+- **The leg address is announced after a change** (`_strih_vban_leg_announce`): iputils
+  `arping -q -U -c 2 -I <leg> <addr>` (unsolicited ARP requests, source = target = the leg address, bounded by
+  `timeout 10`) once the changed leg READ BACK (created, brought up or reapplied this run), and once after a
+  retirement (also after the per-run cleanup of a 9.11 parking profile / a retired NIC that came up again; that
+  cleanup is NOT a leg change: it never touches the leg address, so it restarts no hub). Why: the leg runs `ipv4.dad-timeout 0`, so NetworkManager announces nothing, and the kernel's
+  `arp_notify` fires at NETDEV_UP, before NM adds the address. Never on the rig NIC or STRIH_IP. No arping =
+  `iputils-arping` installed (not on stream-snv on 9.11.2026); a non-iputils arping (Habets', other flags) or a
+  failed send = a WARN (a neighbour then waits for its ARP entry to expire). An unchanged leg announces nothing.
+  `arping -U` exits 0 after sending, 2 on a down interface (checked in a netns on dev1).
 - A profile whose name nmcli cannot read fails the scan (rc 1), never "not ours".
 - A `vban-dante70` ethernet profile bound to the rig NIC is never touched (a WARN; verify FAILs it).
 - verify item 9 `(vban-leg) leftover`: the leg address on any other interface, and on a vlan leg any
   ethernet `vban-dante70` profile left, FAIL.
 - The first-VLAN warning names the atlantic reset as one driver's behaviour; r8169 showed none (the wait
   ends with the "no reset on this NIC" NOTE after `STRIH_VBAN_LEG_RESET_SEEN_S`).
-- Tests: `tests/python/test_vban_leg_nic_to_vlan_1495.py`. The `mac:` tests of `test_vban_leg_1439.py` run on
+- Tests: `tests/python/test_vban_leg_nic_to_vlan_1495.py` + `test_vban_leg_move_1495.py` (the retired NIC's link,
+  the announce, the hub restart; the fakes model the sysfs link flags, NM's activation bringing a link up,
+  `device disconnect` / `device set managed`, an iputils `arping`, `pgrep`). The `mac:` tests of `test_vban_leg_1439.py` run on
   a copy of the facts with stream-snv in its pre-1495 shape (`vban_leg_fakes_1439.pre_1495_boxes`).
 
 ## The Dante variant of the leg (issue 1485, strih-snv; stream-snv since issue 1495)
@@ -755,8 +793,15 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   (strih-snv, 9.11.2026 19:04): the reapply briefly takes the address away, the hub's `strih-snv-intercom`
   then logged `info packet could not be sent: No such device (os error 19)` every 0.25 s and its
   subscriptions stayed `pending` until `systemctl restart intercom-hub` (OBS's `strih-obs` was restarted
-  by the deploy anyway). So a setup run that changes the leg profile on a box with a live hub needs a hub
-  restart after it (open item on issue 1495); until then restart it by hand and re-read `foh_dante`.
+  by the deploy anyway). So the leg lib records every change it makes (create, up, reapply, the transition's
+  retirement) in `STRIH_VBAN_LEG_CHANGED`, and setup step 13 runs `strih_vban_leg_after_change` right after
+  `strih_vban_leg_install` (also when the install failed after touching the leg): a RUNNING `intercom-hub` is
+  `systemctl try-restart`ed (never a start), the crash-loop probe runs (a loop fails setup by name), the running
+  install is recorded (`strih_intercom_hub_record_loaded`, so the post-16i restart fires again only for a later
+  hub file change), one line names the reason. Here, not after 16i: a later step that fails would leave the hub
+  stalled. A running OBS on a Dante-program box gets one WARNING naming its device and
+  `systemctl --user restart strih-obs.service` (never restarted by setup; the genlock deploy stops OBS before
+  setup, so a deploy never prints it). An unchanged leg restarts nothing.
 - **Unproven until the first live run:** `man nm-settings-nmcli` says `ipv4.route-table` affects device-routes
   too, but the fake NetworkManager assumes it, so the
   first reapply on strih-snv is the proof: `ip route show table 70` carries the /24, main does not, and the

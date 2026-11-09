@@ -700,7 +700,8 @@ else
   echo "  SKIP: ${WHY}"
   strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"
 fi
-strih_vban_leg_install || fail "issue 1439: the VBAN-only leg (a second NIC or a VLAN on the rig NIC, ROZHODNUTE 6360417876) failed (above)"
+strih_vban_leg_install || { strih_vban_leg_after_change "$DESKTOP_USER" || true; fail "issue 1439: the VBAN-only leg (a second NIC or a VLAN on the rig NIC, ROZHODNUTE 6360417876) failed (above)"; }
+strih_vban_leg_after_change "$DESKTOP_USER" || fail "issue 1495: the running intercom hub did not come back from its restart after the leg changed (above) -- journalctl -u intercom-hub"
 strih_dante_input_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1485: the program Dante device's ~/.camera-box/dante-input.toml (above; the site file $(strih_dante_input_site_file) must exist)"
 
 # ---------------------------------------------------------------------------------------------

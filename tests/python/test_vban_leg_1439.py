@@ -57,7 +57,7 @@ STRIH_SENDER = "10.77.7.30:6980,6981"  # Ableton-FOH: the hub's fohabl-strih + t
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
          "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "NDI_DISCOVERY_SENDER_HOSTS",
          "STRIH_VBAN_LEG_SYSFS", "STRIH_VBAN_LEG_PROC_SYS", "STRIH_VBAN_LEG_NFT_FILE", "STRIH_VBAN_LEG_UNIT_FILE",
-         "STRIH_VBAN_LEG_SYSCTL_FILE", "STRIH_VBAN_LEG_WAIT_S")
+         "STRIH_VBAN_LEG_SYSCTL_FILE", "STRIH_VBAN_LEG_WAIT_S", "STRIH_VBAN_LEG_NM_CONF_FILE")
 GRADE_FNS = 'ok() { printf "OK|%s\\n" "$*"; }\nbad() { printf "BAD|%s\\n" "$*"; }\nnote() { printf "NOTE|%s\\n" "$*"; }\n'
 
 
@@ -264,6 +264,8 @@ class Box:
                          "STRIH_VBAN_LEG_NFT_FILE": str(self.nft_file),
                          "STRIH_VBAN_LEG_UNIT_FILE": str(self.unit_file),
                          "STRIH_VBAN_LEG_SYSCTL_FILE": str(self.sysctl_file), "STRIH_VBAN_LEG_WAIT_S": "0",
+                         "STRIH_VBAN_LEG_NM_CONF_FILE": str(self.etc / "NetworkManager" / "conf.d"
+                                                            / "90-vban-dante70-retired.conf"),
                          "STRIH_VBAN_LEG_RESET_SEEN_S": "2", "STRIH_DANTE_AVAHI_UID": "111"})
         self.nic(RIG_IF, "a8:a1:59:00:00:01")
 
@@ -273,6 +275,7 @@ class Box:
         (d / "address").write_text(mac + "\n")
         (d / "carrier").write_text("1\n")
         (d / "carrier_changes").write_text("4\n")
+        (d / "flags").write_text("0x1003\n")  # issue 1495: the link admin UP (IFF_UP)
         if physical:
             dev = self.tmp / "devices" / name
             (dev / "driver").parent.mkdir(parents=True, exist_ok=True)
@@ -919,7 +922,10 @@ def test_setup_step_13_installs_the_leg_on_every_role():
     s = SETUP.read_text()
     i = s.index("strih_intercom_hub_remove ||")
     j = s.index("step 14 ")
-    assert "\nfi\nstrih_vban_leg_install || fail" in s[i:j], "after the role branch: both roles"
+    # issue 1495: a failed install still runs the after-change restart before it fails (a leg it touched stalls
+    # a running hub), so the line is `|| { ...; fail ...; }`; it still sits right after the role branch
+    assert "\nfi\nstrih_vban_leg_install || " in s[i:j], "after the role branch: both roles"
+    assert 'fail "issue 1439: the VBAN-only leg' in s[i:j]
     assert s.count("strih_vban_leg_install") == 1
 
 

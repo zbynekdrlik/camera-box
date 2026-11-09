@@ -213,16 +213,17 @@ def test_a_vlan_that_does_not_come_up_keeps_the_old_leg_filtered(tmp_path):
     assert NIC_IF in other.get("vban_dante70_retiring", ""), other
 
 
-def test_the_retired_nic_is_parked_without_an_ip(tmp_path):
+def test_the_retired_nic_is_never_parked_under_a_profile(tmp_path):
+    # the 9.11.2026 parking profile kept the link UP (an active profile = admin up), and mbc's stale ARP entry
+    # sent the Dante stream to it for ~65 min: the NIC is unmanaged + link-down instead
+    # (test_vban_leg_move_1495.py), so NetworkManager has no device there to put an automatic DHCP profile on
     b = _box(tmp_path)
     assert b.run("strih_vban_leg_install").returncode == 0
-    parked = [p for p in b.st()["profiles"] if p["props"].get("connection.id") == "vban-dante70-retired"]
-    assert len(parked) == 1, "NetworkManager's automatic DHCP profile never takes the audio-VLAN port"
-    p = parked[0]["props"]
-    assert p["connection.interface-name"] == NIC_IF and p["ipv4.method"] == "disabled" and p["ipv6.method"] == "disabled"
-    # a rerun parks nothing twice
+    s = b.st()
+    assert not [p for p in s["profiles"] if p["props"].get("connection.id") == "vban-dante70-retired"]
+    assert NIC_IF in s.get("unmanaged", {})
     assert b.run("strih_vban_leg_install").returncode == 0
-    assert len([p for p in b.st()["profiles"] if p["props"].get("connection.id") == "vban-dante70-retired"]) == 1
+    assert not [p for p in b.st()["profiles"] if p["props"].get("connection.interface-name") == NIC_IF]
 
 
 def test_a_rule_the_old_leg_took_with_it_comes_back_by_one_reapply(tmp_path):
