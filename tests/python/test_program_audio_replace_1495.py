@@ -65,7 +65,7 @@ class LingeringObs:
 
     def __init__(self, old_kind=VBAN_KIND, dock_pin=True, dock_every=3, rename_ok=True, refuse_create=0,
                  old_name=NAME, extra=()):
-        self.calls, self.events = [], []
+        self.calls, self.events, self.heard = [], [], []
         self.rename_ok, self.refuse_create = rename_ok, refuse_create
         self.dock_pin, self.dock_every, self.dock_held = dock_pin, dock_every, None
         gain = {"filterName": "Sluchadla operatora", "filterKind": "monitor_filter", "filterIndex": 0,
@@ -118,7 +118,15 @@ class LingeringObs:
         r = self._answer(t, d or {})
         self.gc()
         self.events.append({sc: [s.uid for s in self.audible(sc)] for sc in self.scenes})
+        self.heard.append(self.headphones())
         return r
+
+    def headphones(self):
+        """The live sources the operator hears on the stream headphones: monitoring and an enabled
+        monitor filter output whatever the scene items show (a removed source is taken as silent)."""
+        return [s.uid for s in self.sources if not s.removed and not s.destroyed
+                and (s.monitor != "OBS_MONITORING_TYPE_NONE"
+                     or any(f["filterKind"] == "monitor_filter" and f["filterEnabled"] for f in s.filters))]
 
     def _answer(self, t, d):
         if t == "GetInputList":
@@ -308,8 +316,52 @@ def test_a_leftover_beside_a_matching_input_is_removed_and_named():
     assert obs.by_name(NAME + " (seed replace 1)") is None and obs.by_name(NAME).kind == DANTE_KIND
 
 
-def test_the_aside_name_never_takes_an_existing_input():
-    obs = LingeringObs(extra=((NAME + " (seed replace 1)", "ndi_source"),))
+def test_the_aside_name_never_takes_an_existing_input_and_a_stale_aside_is_dropped_after_the_replace():
+    obs = LingeringObs(dock_pin=False, extra=((NAME + " (seed replace 1)", VBAN_KIND),))
     st = _seed(obs)
     assert st.startswith("replaced (was"), st
-    assert obs.by_name(NAME + " (seed replace 1)").kind == "ndi_source", "another input is never touched"
+    renames = [d for t, d in obs.calls if t == "SetInputName"]
+    assert renames[0]["newInputName"] == NAME + " (seed replace 2)", "a free aside name, never a taken one"
+    assert "removed the leftover '%s (seed replace 1)'" % NAME in st, st
+    assert obs.by_name(NAME + " (seed replace 1)") is None, "stale asides never accumulate"
+    assert obs.by_name(NAME).kind == DANTE_KIND
+
+
+def test_the_operator_headphones_never_hear_the_old_and_the_new_input_together():
+    # monitoring and the operator's monitor filter play whatever the scene items show
+    obs = LingeringObs()
+    _seed(obs)
+    assert all(len(h) <= 1 for h in obs.heard), "the new input's headphone output starts after the old one left"
+    new = obs.by_name(NAME)
+    assert obs.heard[-1] == [new.uid]
+
+
+def test_a_replace_interrupted_after_its_create_is_finished_never_left_hidden():
+    # OBS died after the new input was created (hidden, in PRO only, no state) and before the old one
+    # went: the next seed sees `mbc` of the wanted kind beside the aside input that still carries the
+    # visible items and the operator state
+    obs = LingeringObs(old_name=NAME + " (seed replace 1)", dock_pin=False)
+    new = Src(NAME, DANTE_KIND)
+    obs.sources.append(new)
+    obs._add_item("PRO", new, False)
+    st = _seed(obs)
+    assert st.startswith("matched (finished the interrupted replace of '%s (seed replace 1)'" % NAME), st
+    assert obs.items_of(new) == {"PRO": [(1, True)], "Development": [], "Zaloha": [(0, False)]}
+    assert obs.audible("PRO") == [new], "the program audio is back on PRO"
+    assert new.sync == 58 and [f["filterName"] for f in new.filters] == ["Sluchadla operatora", "Limiter"]
+    assert obs.by_name(NAME + " (seed replace 1)") is None
+
+
+def test_a_lingering_removed_aside_is_never_a_resume_source():
+    # a removed aside a holder still keeps is listed but in no scene: `mbc` absent then is a plain create,
+    # never a resume that would leave the new input in no scene at all
+    obs = LingeringObs(dock_pin=False)
+    old = obs.by_name(NAME)
+    obs.dock_refresh = lambda: None
+    obs.dock_held = old   # the holder keeps its reference to the old source throughout
+    obs.req("SetInputName", {"inputName": NAME, "newInputName": NAME + " (seed replace 1)"})
+    obs.req("RemoveInput", {"inputName": NAME + " (seed replace 1)"})
+    assert obs.listed()[NAME + " (seed replace 1)"] == VBAN_KIND and NAME not in obs.listed()
+    st = _seed(obs)
+    assert st == "created", st
+    assert obs.by_name(NAME).kind == DANTE_KIND
