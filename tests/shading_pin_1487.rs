@@ -216,6 +216,6 @@ fn the_relay_version_is_graded_against_the_pin_never_camera_box() {
     assert!(h.contains("bkshading_relay_version_verdict \"$pin\" \"$rlv\" \"$main\""));
     // issue 1452: each box's relay version is the version of ITS pin (scripts/shading-release-boxes.txt)
     assert!(read("scripts/deploy-fleet.sh")
-        .contains("RELAY_VER=\"$(SHADING_RELEASE_PIN_FILE=\"$_rpin\" shading_pin_version"));
+        .contains("_rver=\"$(SHADING_RELEASE_PIN_FILE=\"$_rpin\" shading_pin_version"));
     assert!(!read("scripts/deploy-fleet.sh").contains("not from the same build"));
 }

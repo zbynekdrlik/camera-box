@@ -145,7 +145,7 @@ def test_deploy_fleet_brings_a_mapped_box_onto_its_own_pin(tmp_path):
     assert "cam2=9.9.8-rest" in out and "cam2 camera-box=9.9.9-test relay=9.9.8-rest" in fleet._summary(proc)
 
 
-def _deploy_relay(tmp_path, name, args, env_extra=None):
+def _deploy_relay(tmp_path, name, args, env_extra=None, rest_bytes_pinned=False):
     """bkshading-deploy-relay.sh against the 808 fake ssh, whose box names itself `name`."""
     import test_bkshading_deploy_relay_808 as dr
     binary = tmp_path / "relay"
@@ -153,12 +153,15 @@ def _deploy_relay(tmp_path, name, args, env_extra=None):
     sha = subprocess.run(["sha256sum", str(binary)], capture_output=True, text=True, check=True).stdout.split()[0]
     env, logf = dr._fake_deploy_env(str(tmp_path), sha)
     ssh = tmp_path / "fake-ssh"
-    body = ssh.read_text().replace('case "$cmd" in\n', 'case "$cmd" in\n  *"uname -n"*) printf "%s\\n" ;;\n' % name)
+    body = ssh.read_text()
+    body = body.replace('  *"uname -n"*) printf "cam9\\n" ;;\n', "")
+    body = body.replace('case "$cmd" in\n', 'case "$cmd" in\n  *"uname -n"*) printf "%s\\n" ;;\n' % name)
     ssh.write_text(body)
     pin = tmp_path / "default.pin"
     pin.write_text("SHADING_RELEASE_TAG=v0.1.2\nSHADING_RELAY_LINUX_AMD64_SHA256=%s\n" % sha)
     rest = tmp_path / "rest.pin"
-    rest.write_text("SHADING_RELEASE_TAG=v0.2.2\nSHADING_RELAY_LINUX_AMD64_SHA256=%s\n" % ("b" * 64))
+    rest.write_text("SHADING_RELEASE_TAG=v0.2.2\nSHADING_RELAY_LINUX_AMD64_SHA256=%s\nSHADING_RELAY_TRANSPORT=rest\n"
+                    % (sha if rest_bytes_pinned else "b" * 64))
     (tmp_path / "boxes.txt").write_text("cam3 rest.pin\n")
     env.update({"SHADING_RELEASE_PIN_FILE": str(pin), "SHADING_RELEASE_BOXES_FILE": str(tmp_path / "boxes.txt")})
     env.update(env_extra or {})
@@ -191,6 +194,31 @@ def test_deploy_relay_on_a_default_box_names_its_pin_and_deploys(tmp_path):
     assert "SCP" in calls
     # the name is read BEFORE anything changes on the box
     assert calls.index("uname -n") < calls.index("remount,rw")
+
+
+def test_deploy_relay_on_a_rest_pin_puts_the_camera_link_in_place_after_the_swap(tmp_path):
+    rest = tmp_path / "rest.pin"
+    r, calls = _deploy_relay(tmp_path, "cam3", ["--box", "cam3"],
+                             env_extra={"SHADING_RELEASE_BOXES_FILE": str(tmp_path / "boxes.txt")},
+                             rest_bytes_pinned=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "the camera link file is in place on 10.0.0.9" in r.stdout
+    link_at = calls.index("05-bkshading-camera.network")
+    assert calls.index("SCP") < link_at, "the link program runs after the relay swap"
+    assert "networkctl reload" in calls[link_at:]
+    assert rest.exists()
+
+
+def test_deploy_relay_on_the_default_pin_never_writes_the_link(tmp_path):
+    r, calls = _deploy_relay(tmp_path, "cam7", ["--box", "cam7"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "05-bkshading-camera.network" not in calls
+
+
+def test_deploy_relay_refuses_an_unnamed_box_without_box(tmp_path):
+    r, calls = _deploy_relay(tmp_path, "", [])
+    assert r.returncode == 1 and "no --box was given" in r.stderr, r.stdout + r.stderr
+    assert "remount" not in calls and "SCP" not in calls
 
 
 def test_deploy_relay_dry_run_names_the_pin(tmp_path):

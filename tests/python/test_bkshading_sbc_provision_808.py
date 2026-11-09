@@ -678,6 +678,7 @@ def _fake_deploy_env(tmp, remote_sha, root_opts=RW_OPTS):
         "case \"$cmd\" in\n"
         # issue 808: the deploy reads the relay state first and refuses on an unreadable read, so
         # the fake SBC answers it like a real one whose relay is stopped.
+        '  *"uname -n"*) printf "handheld-9\\n" ;;\n'  # issue 1452: the board names itself
         '  *"is-active"*) printf "inactive\\n" ;;\n'
         # issue 808 slice B: the deploy reads the target's root mode; an empty answer refuses.
         '  *"findmnt"*) printf "__ROOT__\\n" ;;\n'

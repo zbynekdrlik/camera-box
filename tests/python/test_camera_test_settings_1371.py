@@ -404,7 +404,7 @@ busy = os.environ.get("FAKE_BUSY") == "1"
 print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": busy, "recording": False}]}))
 '''
 
-BOX_TOOLS = ("readlink", "cat", "sed", "head", "cut", "tr", "rm", "awk")
+BOX_TOOLS = ("readlink", "cat", "sed", "head", "cut", "tr", "rm", "awk", "mktemp")
 
 
 def _make_net(root, link=True, lease=True):
@@ -677,15 +677,31 @@ def test_a_camera_on_usb_without_a_network_link_aborts_naming_the_link_and_web_m
     assert not any(c.startswith(("GET", "SET")) for c in r.calls), r.calls
 
 
-def test_the_camera_address_falls_back_to_the_other_host_of_the_links_30():
-    # no lease file: `ip -4 -o addr show dev <link>` (a stub) gives the box .162/30, so the camera is .161
+def _no_lease_rig(box_addr):
+    """No lease file: `ip -4 -o addr show dev <link>` (a stub) gives the box BOX_ADDR."""
     rig = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned())
     os.unlink(os.path.join(rig.leases, "7"))
     Rig._exe(os.path.join(rig.root, "stubs", "ip"),
-             "#!/bin/sh\necho '7: enx02743ba02a02    inet 172.25.77.162/30 brd 172.25.77.163 scope global'\n")
-    r = rig.run()
+             "#!/bin/sh\necho '7: enx02743ba02a02    inet %s brd 172.25.77.163 scope global'\n" % box_addr)
+    return rig.run()
+
+
+def test_the_camera_address_falls_back_to_the_other_host_of_the_links_30():
+    r = _no_lease_rig("172.25.77.162/30")
     assert r.rc == 0, r.out
     assert "CTS_CAMERA enx02743ba02a02 172.25.77.161" in r.out
+
+
+def test_the_30_fallback_also_works_when_the_box_holds_the_first_host():
+    # box .161 -> camera .162; the fake curl only answers .161, so the abort names the address it used
+    r = _no_lease_rig("172.25.77.161/30")
+    assert "CTS_CAMERA enx02743ba02a02 172.25.77.162" in r.out, r.out
+
+
+def test_a_link_without_a_lease_and_without_a_30_address_has_no_camera():
+    r = _no_lease_rig("172.25.77.162/24")
+    assert r.rc == 1, r.out
+    assert "has no network link" in r.out
 
 
 def test_a_relay_still_active_on_the_camera_box_aborts_by_name():
@@ -749,6 +765,9 @@ def test_a_put_body_is_refused_before_it_reaches_the_box_unless_it_is_one_numeri
                 'video/iso|{"iso":8000,"x":1}'):
         r = run(bad)
         assert r.returncode == 1 and "refused PUT" in r.stderr, (bad, r.stdout)
+    get = subprocess.run(["bash", "-c", '. "$1"; camera_test_settings_rest_cmd get video/iso "$2"', "t", LIB,
+                          'x"; reboot; "'], capture_output=True, text=True)
+    assert get.returncode == 1 and "refused GET" in get.stderr, get.stdout
 
 
 # ---------------------------------------------------------------------------------------------

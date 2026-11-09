@@ -106,6 +106,11 @@ printf 'LINK_ENX_DNS=%s\n' "\$(for _l in /sys/class/net/enx*; do [ -e "\$_l" ] |
 SNIP
 }
 
+# The tools that put the file on a box, named in every FAIL line.
+bkshading_camera_link_fix_hint() {
+  printf '%s\n' "a live cambox: bash scripts/lib/bkshading-camera-link.sh --apply-program | ssh root@<box> bash -s (a REST-pin relay deploy runs it too); else setup-device.sh / bkshading-provision-sbc.sh --install"
+}
+
 _bkcl_field() { printf '%s\n' "${1:-}" | sed -n "s/^$2=//p" | tail -n 1; }
 
 # bkshading_camera_link_verdict BLOCK -> `ok` | one `FAIL: <reason>` per line. Pure.
@@ -117,9 +122,9 @@ bkshading_camera_link_verdict() {
   fi
   v="$(_bkcl_field "$block" LINK_NET_SHA)"
   if [ -z "$v" ]; then
-    out="${out}FAIL: $(bkshading_camera_link_network_path) missing -- the relay cannot find the camera (re-run setup-device.sh or bkshading-deploy-relay.sh)"$'\n'
+    out="${out}FAIL: $(bkshading_camera_link_network_path) missing -- the relay cannot find the camera ($(bkshading_camera_link_fix_hint))"$'\n'
   elif [ "$v" != "$(bkshading_camera_link_sha)" ]; then
-    out="${out}FAIL: $(bkshading_camera_link_network_path) differs from the shading contract's file -- re-run bkshading-deploy-relay.sh"$'\n'
+    out="${out}FAIL: $(bkshading_camera_link_network_path) differs from the shading contract's file ($(bkshading_camera_link_fix_hint))"$'\n'
   fi
   v="$(_bkcl_field "$block" LINK_NETWORKD)"
   [ "$v" = enabled ] || out="${out}FAIL: systemd-networkd is-enabled='${v:-<none>}' -- the camera link file has no daemon to apply it"$'\n'
@@ -218,3 +223,12 @@ return "$_bkcl_rc"
 _bkcl_main </dev/null
 PROG
 }
+
+# CLI: `bash scripts/lib/bkshading-camera-link.sh --apply-program` prints the live-box program (pipe it into
+# `ssh root@<box> bash -s` while no E2E holds the rig lease). Sourcing defines the functions only.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  case "${1:-}" in
+    --apply-program) bkshading_camera_link_apply_program ;;
+    *) echo "usage: $0 --apply-program" >&2; exit 2 ;;
+  esac
+fi

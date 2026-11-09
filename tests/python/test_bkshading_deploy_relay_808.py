@@ -172,6 +172,7 @@ def _fake_deploy_env(tmp, remote_sha, root_opts="ro,relatime"):
         "case \"$cmd\" in\n"
         # issue 808: the deploy reads the relay state first and refuses on an unreadable read, so
         # the fake box answers it like a real one whose relay is stopped.
+        '  *"uname -n"*) printf "cam9\\n" ;;\n'  # issue 1452: the box names itself (a default-pin box)
         '  *"is-active"*) printf "inactive\\n" ;;\n'
         '  *"findmnt"*) printf "__ROOT__\\n" ;;\n'
         '  *sha256sum*) printf "__SHA__\\n" ;;\n'

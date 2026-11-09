@@ -544,11 +544,11 @@ if [ "$NO_RELAY" = 0 ]; then
     _rpin="$(shading_pin_file_for_box "$HERE/.." "$_rcam")" \
       || { err "[$_rcam] no valid shading pin (above) -- nothing deployed"; exit 1; }
     if [ -z "${_RELAY_BIN_OF_PIN[$_rpin]:-}" ]; then
-      RELAY_BIN="$(SHADING_RELEASE_PIN_FILE="$_rpin" shading_release_relay "$HERE/.." amd64)" \
+      _rbin="$(SHADING_RELEASE_PIN_FILE="$_rpin" shading_release_relay "$HERE/.." amd64)" \
         || { err "no verified relay of the pinned shading release ${_rpin##*/} (above) -- nothing deployed (pass --no-relay to deploy camera-box alone)"; exit 1; }
-      RELAY_VER="$(SHADING_RELEASE_PIN_FILE="$_rpin" shading_pin_version "$HERE/..")"
-      _RELAY_BIN_OF_PIN[$_rpin]="$RELAY_BIN"
-      _RELAY_VER_OF_PIN[$_rpin]="$RELAY_VER"
+      _rver="$(SHADING_RELEASE_PIN_FILE="$_rpin" shading_pin_version "$HERE/..")"
+      _RELAY_BIN_OF_PIN[$_rpin]="$_rbin"
+      _RELAY_VER_OF_PIN[$_rpin]="$_rver"
     fi
     RELAY_BIN_OF_BOX[$_rcam]="${_RELAY_BIN_OF_PIN[$_rpin]}"
     RELAY_VER_OF_BOX[$_rcam]="${_RELAY_VER_OF_PIN[$_rpin]}"

@@ -131,6 +131,13 @@ shading_pin_version_of_text() {
   return 0
 }
 
+# shading_pin_transport ROOT -> `rest` when the pin declares SHADING_RELAY_TRANSPORT=rest (issue 1452: the
+# v0.2.x relay drives the camera over its USB-C link, which needs the camera link file), else `gphoto2`.
+shading_pin_transport() {
+  [ "$(_shading_pin_field "${1:?tree required}" SHADING_RELAY_TRANSPORT)" = rest ] && { printf '%s\n' rest; return 0; }
+  printf '%s\n' gphoto2
+}
+
 # _shading_asset_key ASSET -> the pin file key of ASSET; nothing + rc 1 for an unknown asset.
 _shading_asset_key() {
   case "${1:-}" in

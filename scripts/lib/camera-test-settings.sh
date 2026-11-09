@@ -107,6 +107,14 @@ camera_test_settings_rc_no_link() { printf '%s\n' 95; }
 camera_test_settings_rc_no_curl() { printf '%s\n' 96; }
 camera_test_settings_rc_relay_active() { printf '%s\n' 97; }
 
+# The endpoints a GET may name (camera_test_settings.py READ_ENDPOINTS), checked before the text is built.
+camera_test_settings_get_ok() {
+  case "${1:-}" in
+    video/iso | video/shutter | video/whiteBalance | video/whiteBalanceTint | lens/iris | system/format) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The endpoints a PUT may name (the enforceable ones), and the shape of its JSON body: ONE numeric
 # field. Both are checked here before the text is built, so a body can never carry shell syntax.
 camera_test_settings_put_ok() {
@@ -147,10 +155,11 @@ camera_test_settings_rest_cmd() {
   printf '%s' 'if [ $((_cts_l - _cts_b)) = 1 ]; then _cts_p=$((_cts_b + 2)); else _cts_p=$((_cts_b + 1)); fi; _cts_cam="${_cts_ip%.*}.$_cts_p";; esac; fi; '
   printf '%s' 'break; done; '
   printf '[ -n "$_cts_cam" ] || { echo "CTS_NO_LINK ${_cts_if:-none}"; exit %s; }; ' "$(camera_test_settings_rc_no_link)"
-  printf '%s' 'echo "CTS_CAMERA $_cts_if $_cts_cam"; _cts_t="/tmp/cts-body.$$"; '
+  printf '%s' 'echo "CTS_CAMERA $_cts_if $_cts_cam"; _cts_t="$(mktemp)"; '
   for spec in "$@"; do
     if [ "$mode" = get ]; then
-      printf '_cts_c="$(curl -s -m 5 -o "$_cts_t" -w "%%{http_code}" "http://$_cts_cam/control/api/v1/%s")"; echo "CTS_GET %s ${_cts_c:-000} $(tr -d "\\n\\r" <"$_cts_t" 2>/dev/null)"; rm -f "$_cts_t"; ' "$spec" "$spec"
+      camera_test_settings_get_ok "$spec" || { echo "camera_test_settings_rest_cmd: refused GET '$spec'" >&2; return 1; }
+      printf '_cts_c="$(curl -s -m 5 -o "$_cts_t" -w "%%{http_code}" "http://$_cts_cam/control/api/v1/%s")"; echo "CTS_GET %s ${_cts_c:-000} $(tr -d "\\n\\r" <"$_cts_t" 2>/dev/null)"; : >"$_cts_t"; ' "$spec" "$spec"
     else
       ep="${spec%%|*}"
       body="${spec#*|}"
@@ -158,7 +167,7 @@ camera_test_settings_rest_cmd() {
       printf '_cts_c="$(curl -s -m 5 -o /dev/null -w "%%{http_code}" -X PUT -H "Content-Type: application/json" -d '"'"'%s'"'"' "http://$_cts_cam/control/api/v1/%s")"; echo "CTS_PUT %s ${_cts_c:-000}"; ' "$body" "$ep" "$ep"
     fi
   done
-  printf '\n'
+  printf '%s\n' 'rm -f "$_cts_t"'
 }
 
 # camera_test_settings_transport_abort RC LABEL IP WHAT [CONSEQUENCE] -> exits 1 with a message naming
@@ -305,7 +314,7 @@ camera_test_settings_enforce() {
     exit 1
   fi
   read_rc=0
-  # shellcheck disable=SC2086  # read_eps is a space-separated list of fixed endpoint names
+  # shellcheck disable=SC2086  # read_eps = the words of camera_test_settings.py READ_ENDPOINTS, each checked by camera_test_settings_get_ok
   raw="$(camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_rest_cmd get $read_eps)")" || read_rc=$?
   if [ "$action" = abort-unpinned ]; then
     local suggestion
@@ -416,7 +425,7 @@ _cts_set_and_readback() {
     esac
   done
   rc=0
-  # shellcheck disable=SC2086  # read_eps is a space-separated list of fixed endpoint names
+  # shellcheck disable=SC2086  # read_eps = the words of camera_test_settings.py READ_ENDPOINTS, each checked by camera_test_settings_get_ok
   readback="$(camera_test_settings_ssh "$ip" "$pw" "$(camera_test_settings_rest_cmd get $read_eps)")" || rc=$?
   [ "$rc" -eq 0 ] || camera_test_settings_transport_abort "$rc" "$label" "$ip" read-back "$consequence"
   printf '%s\n' "$readback"
@@ -484,7 +493,7 @@ _cts_restore_apply() {
     exit 1
   fi
   read_rc=0
-  # shellcheck disable=SC2086  # read_eps is a space-separated list of fixed endpoint names
+  # shellcheck disable=SC2086  # read_eps = the words of camera_test_settings.py READ_ENDPOINTS, each checked by camera_test_settings_get_ok
   raw="$(camera_test_settings_ssh "$CTS_FOUND_IP" "$pw" "$(camera_test_settings_rest_cmd get $read_eps)")" || read_rc=$?
   [ "$read_rc" -eq 0 ] || camera_test_settings_transport_abort "$read_rc" "$CTS_FOUND_LABEL" "$CTS_FOUND_IP" read "$consequence"
 

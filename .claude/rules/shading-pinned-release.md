@@ -64,8 +64,8 @@ Blackmagic Camera Setup -> Network access -> "Web media manager" ON (else 404 = 
   `SHADING_RELEASE_BOXES_FILE` = another map (its pin files relative to the map's dir).
 - **Consumers:** deploy-fleet fetches every pin its set needs before any box and passes `--box camN`;
   `bkshading-deploy-relay.sh --box <name>` takes that box's pin and, before anything changes, reads
-  the box's own `uname -n`: a name whose pin differs is REFUSED ("pass --box cam3"), an unreadable name
-  keeps the chosen pin with a NOTE; setup-device takes `$DEVICE_NAME`'s pin; verify-device (ao) and
+  the box's own `uname -n`: a name whose pin differs is REFUSED ("pass --box cam3"); an unreadable name
+  is REFUSED without `--box` and keeps the given `--box` pin with a NOTE; setup-device takes `$DEVICE_NAME`'s pin; verify-device (ao) and
   rig-dev-handover item 15 grade each box against its own pin (the handover also against origin/main's
   map + pin, `shading_pin_version_for_box_at_ref`).
 - **The service stays on the default pin.** A v0.2.x panel sends `apertureStep` for +/-, which a
@@ -73,9 +73,12 @@ Blackmagic Camera Setup -> Network access -> "Web media manager" ON (else 404 = 
 - **The camera link file** every relay box carries: `scripts/lib/bkshading-camera-link.sh`
   (`05-bkshading-camera.network`, the contract's text byte for byte, pinned against
   `tests/fixtures/shading_pinned_rest/CONTRACT.md`): setup-device `[bkshading-relay]`, the SBC
-  `--install` + `--check` row (2c), verify-device (bb). A live cambox gets it from
-  `bkshading_camera_link_apply_program` piped into `ssh root@<box> bash -s` (one verified ro window,
-  `networkctl reload` only after the close). systemd-networkd is the cambox netplan renderer, so the
+  `--install` + `--check` row (2c), verify-device (bb). A pin declaring `SHADING_RELAY_TRANSPORT=rest`
+  (`shading_pin_transport`) makes `bkshading-deploy-relay.sh` run the live-box program after the swap
+  on a cambox (amd64), so every REST relay deploy carries its link file. Any other live cambox:
+  `bash scripts/lib/bkshading-camera-link.sh --apply-program | ssh root@<box> bash -s` (one verified ro
+  window, `networkctl reload` only after the close; never on an SBC, whose root may be rw by design).
+  setup-device's write is enable-only: the link comes up at the next boot or with that program. systemd-networkd is the cambox netplan renderer, so the
   file takes effect; its match (`Driver=cdc_ncm` + `ID_VENDOR_ID=1edb`) never claims the `enp*` LAN.
 
 ## Bumping the pin

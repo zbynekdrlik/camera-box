@@ -241,6 +241,7 @@ def _deploy_env(tmp, remote_sha, was_active="active", ro_fails=False):
         'case "$cmd" in\n'
         # issue 1407: the ro close is the shared emitter's text -- run it on the fake box.
         '  *"remount,ro"*) PATH="__BOX__:$PATH" bash -c "$cmd"; exit $? ;;\n'
+        '  *"uname -n"*) printf "cam9\\n" ;;\n'  # issue 1452: the box names itself (a default-pin box)
         '  *"is-active"*) printf "__WAS__\\n" ;;\n'
         # issue 808 slice B: a cambox root is read-only, so the deploy runs its remount cycle.
         '  *"findmnt"*) printf "ro,relatime\\n" ;;\n'

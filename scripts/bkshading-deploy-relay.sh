@@ -84,6 +84,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/rig-lease.sh"  # issue 1371: the rig lease an E2E holds while it owns the camboxes
 # shellcheck source=scripts/lib/ro-window.sh
 . "$HERE/lib/ro-window.sh" # ro_window_close_cmds / ro_window_holders — the ONE verified ro close (issue 1407)
+# shellcheck source=scripts/lib/bkshading-camera-link.sh
+. "$HERE/lib/bkshading-camera-link.sh" # issue 1452: the camera link file a REST-pin relay needs
 
 RELAY_DEST="$(bkshading_relay_bin_path)"     # /usr/local/bin/bkshading-relay (one source of truth)
 RELAY_UNIT="$(bkshading_relay_unit_name)"    # bkshading-relay.service (one source of truth)
@@ -383,8 +385,11 @@ if [ -n "$BOX_SELF" ]; then
     exit 1
   fi
   echo "box $HOST names itself '$BOX_SELF': pin ${PIN_FILE##*/} (issue 1452)"
+elif [ -z "$BOX" ]; then
+  echo "ERROR: could not read the box's own name on $HOST and no --box was given -- its relay pin cannot be chosen; pass --box <name>; nothing changed on the box (issue 1452)" >&2
+  exit 1
 else
-  echo "NOTE: could not read the box's own name on $HOST -- deploying the pin of --box '${BOX:-<none: the fleet default>}' (${PIN_FILE##*/}) unchecked (issue 1452)"
+  echo "NOTE: could not read the box's own name on $HOST -- deploying the pin of --box '$BOX' (${PIN_FILE##*/}) as given (issue 1452)"
 fi
 
 # issue 808, slice B: the remount cycle follows the TARGET's own root mode -- read it like the relay
@@ -467,6 +472,20 @@ if [ "$FINISH_RC" -ne 0 ]; then
   exit 1
 fi
 echo "OK: relay deployed + byte-verified (executable) on $HOST ($RELAY_DEST, sha256 $LOCAL_SHA)$([ "$RO_ROOT" = 1 ] && echo ', root back to read-only')"
+
+# issue 1452: a REST-pin relay finds the camera through the camera link file; on a cambox it is put in
+# place by its own verified ro window (networkd reloaded after the close). The SBC gets it from
+# bkshading-provision-sbc.sh --install (its root may still be read-write by design).
+if [ "$ARCH" = amd64 ] && [ "$(shading_pin_transport "$HERE/..")" = rest ]; then
+  if LINK_OUT="$(ssh_box "$HOST" "$(bkshading_camera_link_apply_program)" 2>&1)"; then
+    printf '%s\n' "$LINK_OUT" | sed 's/^/       /'
+    echo "OK: the camera link file is in place on $HOST (issue 1452)"
+  else
+    printf '%s\n' "$LINK_OUT" | sed 's/^/       /' >&2
+    echo "ERROR: the relay is deployed, but the camera link file did not land on $HOST (above) -- the REST relay cannot find the camera until it does (issue 1452)" >&2
+    exit 1
+  fi
+fi
 
 # The deploy never STARTS a relay that was not running: the predicate is the single source of truth
 # (always `no`); if a future change flips it, that is a RED test, not a silent live start. An active
