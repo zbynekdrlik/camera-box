@@ -365,8 +365,12 @@ def _swap_in(obs, name, aside, state, items, sleep, also_remove=None):
         obs.req("SetInputAudioMonitorType", {"inputName": name, "monitorType": state["monitor"]}, ignore_err=True)
     _restore_filters(obs, name, state, headphones=True)
     _restore_filter_order(obs, name, state)
-    _await_free(obs, aside, sleep)
-    return aside if input_kind_listed(obs, aside) not in ("", None) else None
+    left = []
+    for old in (aside, also_remove) if also_remove and also_remove != aside else (aside,):
+        _await_free(obs, old, sleep)
+        if input_kind_listed(obs, old) not in ("", None):
+            left.append(old)
+    return "', '".join(left) or None
 
 
 def input_recreate(obs, name, kind, settings, state, fallback_scene, sleep=None, source=None, also_remove=None):
