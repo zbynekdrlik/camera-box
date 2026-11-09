@@ -103,7 +103,7 @@ from program_audio_vban import (  # noqa: E402,F401
     AUDIO_MONITOR_FILTER_KIND, AUDIO_MONITOR_FILTER_NAME, audio_monitor_filter_settings,   # issue 1436
     parse_program_audio_monitor_filter, seed_audio_monitor_filter,
     VBAN_SOURCE_KIND, DANTE_SOURCE_KIND, program_audio_want, kind_missing_text,   # issue 1485
-    aside_inputs, drop_aside_inputs, replace_keeping_state,   # issue 1495
+    aside_inputs, replace_keeping_state, resumable_aside, settle_aside_inputs,   # issue 1495
     browser_audio_report,
     drop_pulse_capture_inputs,
     input_create_verified,
@@ -629,10 +629,11 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
                                          or {}).get("inputSettings"), want_settings)
         status = "matched (the operator's settings differ from the box facts: %s)" % "; ".join(diff) if diff \
             else "matched"
-        return status + drop_aside_inputs(obs, asides)
+        return status + settle_aside_inputs(obs, name, asides)
     source, source_kind = name, kind
-    if action == "create" and asides:   # resume: the old input, its scenes and state are under the aside name
-        source, source_kind = asides[0], program_audio_input_kind_from_inputs(inputs, asides[0])
+    if action == "create" and resumable_aside(obs, asides):   # its old input's scenes and state
+        source = resumable_aside(obs, asides)
+        source_kind = program_audio_input_kind_from_inputs(inputs, source)
     if vban and not kind_available(obs, want_kind):
         return kind_missing_text(source_kind, want_kind)
     scene = _current_scene_name(obs)
@@ -646,10 +647,11 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
             return "create FAILED: %s after two CreateInput -- restart OBS (the launch seed runs again)" % (
                 listed_text(name, listed))
         return "created"
-    # issue 1412: a replace keeps the input's place in EVERY scene and its sync offset (a ported
-    # collection carries it in scenes the seed plan does not name); issue 1439: and its mixer state;
-    # issue 1495: and never removes the old input before the new one exists.
-    return replace_keeping_state(obs, name, want_kind, want_settings, scene, source, source_kind)
+    # issue 1412/1439: a replace keeps the input's place in EVERY scene, its sync offset and mixer state;
+    # issue 1495: it never removes the old input first, and stale asides go only after it succeeded.
+    st = replace_keeping_state(obs, name, want_kind, want_settings, scene, source, source_kind)
+    stale = [a for a in asides if a != source]
+    return st + settle_aside_inputs(obs, name, stale, finish=False) if st.startswith("replaced") else st
 
 
 def audio_monitor_type_of(obs, name=AUDIO_INPUT_NAME):
