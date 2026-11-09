@@ -127,10 +127,12 @@ _strih_vban_leg_retire_down() {
 
 # _strih_vban_leg_retired_upkeep PARENT IF ADDR -> every 9.11 parking profile `vban-dante70-retired` deleted (its
 # device disconnected first) and its NIC retired down, and every retired NIC whose link is up again taken down;
-# when anything was retired, the change is marked and the leg IF's ADDR announced once (a neighbour may still
-# hold the old MAC). rc 1 + a named line on an nmcli or link failure.
+# when anything was retired, the leg IF's ADDR is announced once (a neighbour may still hold the old MAC). NOT
+# marked as a leg change: neither action touches the leg address or its rule, so no running Dante device stalls
+# and the hub is not restarted (review round 2). rc 1 + a named line on an nmcli or link failure, after the
+# announce for what was already retired.
 _strih_vban_leg_retired_upkeep() {
-  local parent="$1" ifc="${2-}" addr="${3-}" rows u dev id ifn r did=""
+  local parent="$1" ifc="${2-}" addr="${3-}" rows u dev id ifn r did="" rd=0
   rows="$(nmcli -g UUID,TYPE,DEVICE connection show </dev/null 2>/dev/null)" \
     || { echo "strih-vban-leg: nmcli cannot list the NetworkManager connections (the retired NIC)" >&2; return 1; }
   while IFS=: read -r u _ dev; do
@@ -145,20 +147,18 @@ _strih_vban_leg_retired_upkeep() {
     nmcli connection delete "$u" </dev/null >/dev/null \
       || { echo "strih-vban-leg: nmcli could not delete the parking profile ${u} on ${ifn:-?}" >&2; return 1; }
     echo "  the parking profile ${STRIH_VBAN_LEG_RETIRED_PROFILE} (${u}) on ${ifn:-?} deleted: an active profile kept its link UP"
-    _strih_vban_leg_retire_down "${ifn:--}" "$parent" || return 1
     did="${did}${did:+, }${ifn:-?}"
+    _strih_vban_leg_retire_down "${ifn:--}" "$parent" || rd=1
   done <<<"$rows"
   while read -r r; do
     [ -n "$r" ] || continue
     if [ "$(_strih_vban_leg_link_state "$r")" != down ]; then
-      _strih_vban_leg_retire_down "$r" "$parent" || return 1
+      _strih_vban_leg_retire_down "$r" "$parent" || rd=1
       did="${did}${did:+, }${r}"
     fi
   done <<<"$(_strih_vban_leg_retired_ifaces "$parent")"
-  if [ -n "$did" ]; then
-    _strih_vban_leg_mark "the retired NIC ${did} taken down"
-    _strih_vban_leg_announce "$ifc" "$addr" "$parent"
-  fi
+  if [ -n "$did" ]; then _strih_vban_leg_announce "$ifc" "$addr" "$parent"; fi
+  return "$rd"
 }
 
 # _strih_vban_leg_unretire NIC -> a `mac:` leg back on a NIC an earlier VLAN move retired (the rollback): its
