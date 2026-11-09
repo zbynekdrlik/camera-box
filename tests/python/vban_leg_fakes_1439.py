@@ -52,6 +52,10 @@ def prof(ref):
     return None
 def out(t):
     sys.stdout.write(t)
+def addrs_of(pr, d):
+    if pr.get("ipv4.method") == "auto": return [s["dhcp"].get(d, "").split("/")[0]]
+    if pr.get("ipv4.method") == "manual": return [v.split("/")[0] for v in pr.get("ipv4.addresses", "").split(",") if v]
+    return []
 if a[:1] == ["--wait"]:
     a = a[2:]
 if a[:1] == ["-g"]:
@@ -125,6 +129,17 @@ elif cmd == ["connection", "up"]:
     x = prof(a[2]); d = a[a.index("ifname") + 1] if "ifname" in a else x["props"]["connection.interface-name"]
     if not s["carrier"].get(d, True):
         sys.stderr.write("Error: Connection activation failed: No suitable device found (no carrier)\n")
+        save(); sys.exit(4)
+    # issue 1495 (live, stream-snv 9.11.2026): NetworkManager's address conflict detection refuses an
+    # address another live interface already holds ("IP address 10.77.7.204 cannot be configured because
+    # it is already in use in the network by host 00:E0:4C:68:01:85"), unless the profile turns it off
+    # with ipv4.dad-timeout 0.
+    want = x["props"].get("ipv4.addresses", "").split("/")[0]
+    held = [dd for dd, pr in s["applied"].items() if dd != d and want and want in addrs_of(pr, dd)]
+    if held and x["props"].get("ipv4.dad-timeout") != "0":
+        sys.stderr.write("Error: Connection activation failed: IP configuration could not be reserved "
+                         "(no available address, timeout, etc.)\n")
+        s["log"].append(["nm-acd-refused", d, want, held[0]])
         save(); sys.exit(4)
     for dd in [dd for dd, u in s["active"].items() if u == x["uuid"]]:
         del s["active"][dd]

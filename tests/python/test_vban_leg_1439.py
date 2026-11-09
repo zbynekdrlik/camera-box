@@ -308,7 +308,8 @@ LIVE_PROPS = {"connection.id": "vban-dante70", "connection.interface-name": LEG_
               "ipv4.method": "manual", "ipv4.addresses": "10.77.7.204/32", "ipv4.gateway": "",
               "ipv4.never-default": "yes", "ipv4.ignore-auto-routes": "yes", "ipv4.ignore-auto-dns": "yes",
               "ipv4.dns": "", "ipv4.routes": "10.77.7.0/24 table=70",
-              "ipv4.routing-rules": "priority 100 from 10.77.7.204 table 70", "ipv6.method": "disabled",
+              "ipv4.routing-rules": "priority 100 from 10.77.7.204 table 70", "ipv4.dad-timeout": "0",
+              "ipv6.method": "disabled",
               "802-3-ethernet.mac-address": ""}
 
 
@@ -472,7 +473,8 @@ VLAN_PROPS_1439 = {"connection.id": "vban-dante70", "connection.interface-name":
                    "ipv4.method": "manual", "ipv4.addresses": "10.77.7.202/32", "ipv4.gateway": "",
                    "ipv4.never-default": "yes", "ipv4.ignore-auto-routes": "yes", "ipv4.ignore-auto-dns": "yes",
                    "ipv4.dns": "", "ipv4.routes": "10.77.7.0/24 table=70",
-                   "ipv4.routing-rules": "priority 100 from 10.77.7.202 table 70", "ipv6.method": "disabled"}
+                   "ipv4.routing-rules": "priority 100 from 10.77.7.202 table 70", "ipv4.dad-timeout": "0",
+                   "ipv6.method": "disabled"}
 VLAN_PROPS = dict(VLAN_PROPS_1439, **{"ipv4.addresses": "10.77.7.202/24", "ipv4.routes": "",
                                       "ipv4.route-table": "70"})
 
