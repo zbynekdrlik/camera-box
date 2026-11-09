@@ -549,13 +549,13 @@ _strih_vban_leg_retiring_filter() {
 }
 
 # _strih_vban_leg_retire_nic_legs IF ADDR PARENT -> issue 1495: after the VLAN leg IF came up and read back,
-# delete every NIC leg left behind (`connection delete` takes it down first), never one bound to the rig NIC
-# PARENT (a WARN, verify FAILs it), and park the NIC under a `vban-dante70-retired` profile with no IP (so
-# NetworkManager's automatic DHCP profile never takes the audio-VLAN port, a second default route). Then the
+# delete every NIC leg left behind (its device disconnected first), never one bound to the rig NIC PARENT (a
+# WARN, verify FAILs it), and retire the NIC unmanaged + link-down (strih-vban-leg-move.sh: an active parking
+# profile kept the link UP and the switch delivered to the old MAC, 9.11.2026). Then the
 # retiring filter goes and the VLAN is read back again: the old profile's deactivation may take a routing rule
 # both profiles carried with it, so one `device reapply` of IF restores it; still wrong = rc 1.
 _strih_vban_leg_retire_nic_legs() {
-  local ifc="$1" addr="$2" parent="$3" legs u b act n=0 p
+  local ifc="$1" addr="$2" parent="$3" legs u b act n=0 p rd=0
   legs="$(_strih_vban_leg_nic_legs)" || { echo "strih-vban-leg: nmcli cannot list or read the NetworkManager connections (the retired NIC leg)" >&2; return 1; }
   while read -r u b act; do
     [ -n "$u" ] || continue
@@ -572,7 +572,8 @@ _strih_vban_leg_retire_nic_legs() {
       || { echo "strih-vban-leg: nmcli could not delete the retired NIC leg ${u} on ${b} -- ${ifc} and ${b} may both carry ${addr}" >&2; return 1; }
     echo "  the NIC leg ${STRIH_VBAN_LEG_PROFILE} (${u}) on ${b} retired: ${ifc} carries ${addr} (issue 1495)"
     _strih_vban_leg_mark "the NIC leg on ${b} retired"
-    _strih_vban_leg_retire_down "$b" "$parent" || return 1
+    # a failed link-down fails the step only after the leg is restored below (the old profile is already gone)
+    _strih_vban_leg_retire_down "$b" "$parent" || rd=1
     n=$((n + 1))
   done <<<"$legs"
   [ "$n" -gt 0 ] || return 0
@@ -586,6 +587,10 @@ _strih_vban_leg_retire_nic_legs() {
     echo "  ${ifc}: reapplied once after the NIC leg went (its rule / route came back)"
   fi
   _strih_vban_leg_announce "$ifc" "$addr" "$parent"
+  if [ "$rd" = 1 ]; then
+    echo "strih-vban-leg: a retired NIC could not be unmanaged / its link taken down (above) -- the switch keeps delivering to its old MAC" >&2
+    return 1
+  fi
 }
 
 # _strih_vban_leg_nm_apply IF ADDR MAC PARENT VLAN_ID -> the profile adopted / created, the extra ones
@@ -706,7 +711,7 @@ _strih_vban_leg_nm_apply() {
   if [ "$touched" = 1 ]; then _strih_vban_leg_announce "$ifc" "$addr" "$parent"; fi
   if [ "$parent" != - ]; then
     _strih_vban_leg_retire_nic_legs "$ifc" "$addr" "$parent" || return 1
-    _strih_vban_leg_retired_upkeep "$parent" || return 1
+    _strih_vban_leg_retired_upkeep "$parent" "$ifc" "$addr" || return 1
   fi
 }
 
@@ -769,6 +774,8 @@ strih_vban_leg_install() {
   fi
   _strih_vban_leg_filter_apply "$ifc" "$sender" "$port" "$addr" || return 1
   _strih_vban_leg_sysctl_apply "$ifc" || return 1
+  # issue 1495: a `mac:` leg on a NIC a VLAN move retired (the rollback) takes it out of the unmanaged drop-in
+  if [ "$parent" = - ]; then _strih_vban_leg_unretire "$ifc" || return 1; fi
   _strih_vban_leg_nm_apply "$ifc" "$addr" "$mac" "$parent" "$id" || return 1
   # a VLAN created just now did not exist at the sysctl step above (udev applies the drop-in too)
   [ ! -e "$(_strih_vban_leg_sysfs)/class/net/${ifc}" ] || _strih_vban_leg_sysctl_apply "$ifc" >/dev/null || return 1

@@ -715,7 +715,14 @@ USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `
     unmanaged device is never activated, not at an NM restart, not at boot, where the kernel creates every
     interface DOWN; with no NM device there is no automatic DHCP profile either, so no parking profile is needed.
     Known limit: anything outside NetworkManager that ups it (a hand `ip link set up`, a networkd config) does;
-    verify catches it.
+    verify catches it. NOT read on a box yet (the manpage only): after the first setup run on stream-snv, restart
+    NetworkManager and then reboot, and read `nmcli -g GENERAL.STATE device show <nic>` = `unmanaged` and IFF_UP
+    clear in `/sys/class/net/<nic>/flags` after each (or verify item 9's leftover row).
+  - A `mac:` leg back on a retired NIC (the rollback to the USB NIC) takes its entries out of the drop-in first
+    (`_strih_vban_leg_unretire`: rewrite or remove, `general reload conf`, `device set <nic> managed yes`); else
+    NetworkManager refuses its activation as strictly unmanaged.
+  - A failed link-down fails the step only after the leg is restored (the retiring filter deleted, the shared
+    rule reapplied, the announce sent): the old profile is already gone at that point.
   - Never the rig NIC: refused by name AND by MAC (a VLAN shares its parent's MAC).
   - Every run (`_strih_vban_leg_retired_upkeep`, a vlan leg): a 9.11 `vban-dante70-retired` profile is deleted
     (device disconnected first) and its NIC retired down; a retired NIC whose link is up again is taken down.
@@ -725,7 +732,8 @@ USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `
 - **The leg address is announced after a change** (`_strih_vban_leg_announce`): iputils
   `arping -q -U -c 2 -I <leg> <addr>` (unsolicited ARP requests, source = target = the leg address, bounded by
   `timeout 10`) once the changed leg READ BACK (created, brought up or reapplied this run), and once after a
-  retirement. Why: the leg runs `ipv4.dad-timeout 0`, so NetworkManager announces nothing, and the kernel's
+  retirement (also the per-run cleanup of a 9.11 parking profile / a retired NIC that came up again, which is
+  marked as a leg change too). Why: the leg runs `ipv4.dad-timeout 0`, so NetworkManager announces nothing, and the kernel's
   `arp_notify` fires at NETDEV_UP, before NM adds the address. Never on the rig NIC or STRIH_IP. No arping =
   `iputils-arping` installed (not on stream-snv on 9.11.2026); a non-iputils arping (Habets', other flags) or a
   failed send = a WARN (a neighbour then waits for its ARP entry to expire). An unchanged leg announces nothing.

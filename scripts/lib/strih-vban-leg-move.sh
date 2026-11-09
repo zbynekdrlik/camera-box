@@ -13,7 +13,8 @@
 #      interface up DOWN), `nmcli general reload conf` + `nmcli device set <nic> managed no` for the running
 #      daemon, then `ip link set dev <nic> down`. With no NM device there is no automatic DHCP profile either.
 #      Never the rig NIC (by name and by MAC). verify's `(vban-leg) leftover` FAILs a retired NIC whose link is
-#      admin UP (sysfs flags, IFF_UP) and a 9.11 parking profile left.
+#      admin UP (sysfs flags, IFF_UP) and a 9.11 parking profile left. A `mac:` leg back on such a NIC (the
+#      rollback) takes it out of the drop-in first.
 #   2. The leg address is announced after a change: iputils `arping -q -U -c 2 -I <leg> <addr>` (unsolicited
 #      ARP requests, source = target = the leg address), after the changed leg read back and once after a
 #      retirement. The leg runs ipv4.dad-timeout 0 (the handover), so NetworkManager announces nothing, and the
@@ -124,11 +125,12 @@ _strih_vban_leg_retire_down() {
   echo "  the retired NIC ${nic}: unmanaged (${f}: ${w}), link down -- the switch drops its old MAC (issue 1495)"
 }
 
-# _strih_vban_leg_retired_upkeep PARENT -> every 9.11 parking profile `vban-dante70-retired` deleted (its device
-# disconnected first) and its NIC retired down, and every retired NIC whose link is up again taken down. rc 1 +
-# a named line on an nmcli or link failure.
+# _strih_vban_leg_retired_upkeep PARENT IF ADDR -> every 9.11 parking profile `vban-dante70-retired` deleted (its
+# device disconnected first) and its NIC retired down, and every retired NIC whose link is up again taken down;
+# when anything was retired, the change is marked and the leg IF's ADDR announced once (a neighbour may still
+# hold the old MAC). rc 1 + a named line on an nmcli or link failure.
 _strih_vban_leg_retired_upkeep() {
-  local parent="$1" rows u dev id ifn r
+  local parent="$1" ifc="${2-}" addr="${3-}" rows u dev id ifn r did=""
   rows="$(nmcli -g UUID,TYPE,DEVICE connection show </dev/null 2>/dev/null)" \
     || { echo "strih-vban-leg: nmcli cannot list the NetworkManager connections (the retired NIC)" >&2; return 1; }
   while IFS=: read -r u _ dev; do
@@ -142,13 +144,52 @@ _strih_vban_leg_retired_upkeep() {
     if [ -n "$dev" ]; then nmcli device disconnect "$dev" </dev/null >/dev/null 2>&1 || true; fi
     nmcli connection delete "$u" </dev/null >/dev/null \
       || { echo "strih-vban-leg: nmcli could not delete the parking profile ${u} on ${ifn:-?}" >&2; return 1; }
-    echo "  the parking profile ${STRIH_VBAN_LEG_PROFILE}-retired (${u}) on ${ifn:-?} deleted: an active profile kept its link UP"
+    echo "  the parking profile ${STRIH_VBAN_LEG_RETIRED_PROFILE} (${u}) on ${ifn:-?} deleted: an active profile kept its link UP"
     _strih_vban_leg_retire_down "${ifn:--}" "$parent" || return 1
+    did="${did}${did:+, }${ifn:-?}"
   done <<<"$rows"
   while read -r r; do
     [ -n "$r" ] || continue
-    if [ "$(_strih_vban_leg_link_state "$r")" != down ]; then _strih_vban_leg_retire_down "$r" "$parent" || return 1; fi
+    if [ "$(_strih_vban_leg_link_state "$r")" != down ]; then
+      _strih_vban_leg_retire_down "$r" "$parent" || return 1
+      did="${did}${did:+, }${r}"
+    fi
   done <<<"$(_strih_vban_leg_retired_ifaces "$parent")"
+  if [ -n "$did" ]; then
+    _strih_vban_leg_mark "the retired NIC ${did} taken down"
+    _strih_vban_leg_announce "$ifc" "$addr" "$parent"
+  fi
+}
+
+# _strih_vban_leg_unretire NIC -> a `mac:` leg back on a NIC an earlier VLAN move retired (the rollback): its
+# entries (interface name, MAC) leave the drop-in (the file goes when none is left), NetworkManager is told
+# (`general reload conf`, `device set NIC managed yes`), so the leg's activation is not refused as strictly
+# unmanaged. Nothing to do = no output. rc 1 + a named line on a write failure.
+_strih_vban_leg_unretire() {
+  local nic="${1-}" mac f m lm keep="" hit=""
+  f="$(_strih_vban_leg_nm_conf_file)"
+  [ -n "$nic" ] && [ -f "$f" ] || return 0
+  mac="$(_strih_vban_leg_mac_of "$nic")"
+  while read -r m; do
+    [ -n "$m" ] || continue
+    lm="$(tr '[:upper:]' '[:lower:]' <<<"$m")"
+    if [ "$m" = "interface-name:${nic}" ] || { [ -n "$mac" ] && [ "$lm" = "mac:${mac}" ]; }; then
+      hit=1
+    else
+      keep="${keep}${keep:+;}${m}"
+    fi
+  done <<<"$(_strih_vban_leg_retired_matches)"
+  [ -n "$hit" ] || return 0
+  if [ -n "$keep" ]; then
+    _strih_vban_leg_put "$f" 0644 "$(strih_vban_leg_retired_conf_text "$keep")" >/dev/null \
+      || { echo "strih-vban-leg: could not rewrite ${f} without ${nic} (the leg NIC stays unmanaged)" >&2; return 1; }
+  else
+    rm -f -- "$f" || { echo "strih-vban-leg: could not remove ${f} (the leg NIC ${nic} stays unmanaged)" >&2; return 1; }
+  fi
+  nmcli general reload conf </dev/null >/dev/null 2>&1 || true
+  nmcli device set "$nic" managed yes </dev/null >/dev/null 2>&1 \
+    || echo "  WARN: nmcli device set ${nic} managed yes failed -- NetworkManager takes it back at its next start"
+  echo "  ${nic}: taken out of ${f} (a VLAN move had retired it; the leg is a mac: leg on it again, issue 1495)"
 }
 
 # _strih_vban_leg_mark REASON -> records a change of the leg address on its interface this run (appended to
@@ -167,6 +208,10 @@ _strih_vban_leg_announce() {
   fi
   if ! command -v arping >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iputils-arping >/dev/null 2>&1 || true
+    if ! command -v arping >/dev/null 2>&1; then
+      echo "  WARN: no gratuitous ARP for ${addr} on ${ifc}: iputils-arping could not be installed -- a neighbour keeps its old ARP entry until it expires"
+      return 0
+    fi
   fi
   v="$(arping -V 2>&1 || true)"
   case "$v" in
