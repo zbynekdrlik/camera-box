@@ -371,10 +371,12 @@ def test_a_pulse_input_becomes_the_vban_source_keeping_the_operator_state():
     assert w[2] == ("CreateSceneItem", {"sceneName": "PRO", "sourceName": "Zvuk z mixu", "sceneItemEnabled": False})
     # the old input goes only after the new one carries the state; then PRO's item is shown, POST's
     # (hidden before) stays hidden
-    assert w[-2] == ("RemoveInput", {"inputName": "Zvuk z mixu (seed replace 1)"})
+    removed = w.index(("RemoveInput", {"inputName": "Zvuk z mixu (seed replace 1)"}))
     assert w[-1] == ("SetSceneItemEnabled", {"sceneName": "PRO", "sceneItemId": 9, "sceneItemEnabled": True})
+    assert [t for t, _ in w[removed + 1:-1]] == ["SetInputAudioMonitorType"], \
+        "only the headphone outputs (monitoring, audio monitor filters) wait for the old input to go"
     assert not any(t == "SetSceneItemEnabled" and d["sceneName"] == "POST" for t, d in w)
-    rest = w[3:-2]
+    rest = w[3:removed] + w[removed + 1:-1]
     assert ("SetInputVolume", {"inputName": "Zvuk z mixu", "inputVolumeMul": 0.5}) in rest
     assert ("SetInputMute", {"inputName": "Zvuk z mixu", "inputMuted": True}) in rest
     assert ("SetInputAudioMonitorType", {"inputName": "Zvuk z mixu", "monitorType": "OBS_MONITORING_TYPE_NONE"}) in rest

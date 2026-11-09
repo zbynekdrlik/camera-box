@@ -68,7 +68,7 @@ class LingeringObs:
         self.calls, self.events, self.heard = [], [], []
         self.rename_ok, self.refuse_create = rename_ok, refuse_create
         self.dock_pin, self.dock_every, self.dock_held = dock_pin, dock_every, None
-        gain = {"filterName": "Sluchadla operatora", "filterKind": "monitor_filter", "filterIndex": 0,
+        gain = {"filterName": "Sluchadla operatora", "filterKind": PAV.AUDIO_MONITOR_FILTER_KIND, "filterIndex": 0,
                 "filterEnabled": True, "filterSettings": {"device": "x"}}
         lim = {"filterName": "Limiter", "filterKind": "limiter_filter", "filterIndex": 1,
                "filterEnabled": False, "filterSettings": {"threshold": -6.0}}
@@ -126,7 +126,8 @@ class LingeringObs:
         monitor filter output whatever the scene items show (a removed source is taken as silent)."""
         return [s.uid for s in self.sources if not s.removed and not s.destroyed
                 and (s.monitor != "OBS_MONITORING_TYPE_NONE"
-                     or any(f["filterKind"] == "monitor_filter" and f["filterEnabled"] for f in s.filters))]
+                     or any(f["filterKind"] == PAV.AUDIO_MONITOR_FILTER_KIND and f["filterEnabled"]
+                            for f in s.filters))]
 
     def _answer(self, t, d):
         if t == "GetInputList":
@@ -196,6 +197,13 @@ class LingeringObs:
             src.filters.append({"filterName": d["filterName"], "filterKind": d["filterKind"],
                                 "filterIndex": len(src.filters), "filterEnabled": True,
                                 "filterSettings": d["filterSettings"]})
+        elif t == "SetSourceFilterIndex":
+            f = next((f for f in src.filters if f["filterName"] == d["filterName"]), None)
+            if f is not None:
+                src.filters.remove(f)
+                src.filters.insert(d["filterIndex"], f)
+                for i, g in enumerate(src.filters):
+                    g["filterIndex"] = i
         elif t == "SetSourceFilterEnabled":
             for f in src.filters:
                 if f["filterName"] == d["filterName"]:
