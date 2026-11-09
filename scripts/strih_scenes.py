@@ -630,10 +630,9 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
         status = "matched (the operator's settings differ from the box facts: %s)" % "; ".join(diff) if diff \
             else "matched"
         return status + settle_aside_inputs(obs, name, asides)
-    source, source_kind = name, kind
-    if action == "create" and resumable_aside(obs, asides):   # its old input's scenes and state
-        source = resumable_aside(obs, asides)
-        source_kind = program_audio_input_kind_from_inputs(inputs, source)
+    source, source_kind, ra = name, kind, resumable_aside(obs, asides)   # ra: the old input's scenes + state
+    if action == "create" and ra:
+        source, source_kind = ra, program_audio_input_kind_from_inputs(inputs, ra)
     if vban and not kind_available(obs, want_kind):
         return kind_missing_text(source_kind, want_kind)
     scene = _current_scene_name(obs)
@@ -649,7 +648,7 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
         return "created"
     # issue 1412/1439: a replace keeps the input's place in EVERY scene, its sync offset and mixer state;
     # issue 1495: it never removes the old input first, and stale asides go only after it succeeded.
-    st = replace_keeping_state(obs, name, want_kind, want_settings, scene, source, source_kind)
+    st = replace_keeping_state(obs, name, want_kind, want_settings, scene, source, source_kind, state_from=ra)
     stale = [a for a in asides if a != source]
     return st + settle_aside_inputs(obs, name, stale, finish=False) if st.startswith("replaced") else st
 

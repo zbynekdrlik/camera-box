@@ -344,8 +344,9 @@ def _restore_filter_order(obs, name, state):
 def _swap_in(obs, name, aside, state, items, sleep):
     """The end of a replace, once NAME exists with a HIDDEN item per ITEMS entry (scene, the new item's id,
     the old item's index, the old item's visibility): the levels and the program filters, each new item
-    at the old index, the old input removed, then monitoring + the audio monitor filters (the operator's
-    headphones), then the items that were visible shown. Returns the old input's name when OBS still
+    at the old index, the old input removed, the items that were visible shown at once (a one-request
+    gap), then monitoring + the audio monitor filters (the operator's headphones play whatever the items
+    show, so they never overlap the old input). Returns the old input's name when OBS still
     lists it after a bounded wait (a holder keeps it), else None."""
     _restore_levels(obs, name, state)
     _restore_filters(obs, name, state, headphones=False)
@@ -354,13 +355,13 @@ def _swap_in(obs, name, aside, state, items, sleep):
             obs.req("SetSceneItemIndex", {"sceneName": scene, "sceneItemId": item_id, "sceneItemIndex": index},
                     ignore_err=True)
     obs.req("RemoveInput", {"inputName": aside}, ignore_err=True)
-    if isinstance(state.get("monitor"), str) and state["monitor"]:
-        obs.req("SetInputAudioMonitorType", {"inputName": name, "monitorType": state["monitor"]}, ignore_err=True)
-    _restore_filters(obs, name, state, headphones=True)
     for scene, item_id, _index, enabled in items:
         if item_id is not None and enabled:
             obs.req("SetSceneItemEnabled", {"sceneName": scene, "sceneItemId": item_id,
                                             "sceneItemEnabled": True}, ignore_err=True)
+    if isinstance(state.get("monitor"), str) and state["monitor"]:
+        obs.req("SetInputAudioMonitorType", {"inputName": name, "monitorType": state["monitor"]}, ignore_err=True)
+    _restore_filters(obs, name, state, headphones=True)
     _restore_filter_order(obs, name, state)
     _await_free(obs, aside, sleep)
     return aside if input_kind_listed(obs, aside) not in ("", None) else None
@@ -451,11 +452,12 @@ def finish_interrupted_replace(obs, name, aside, sleep=None):
     return len(items), _swap_in(obs, name, aside, state, items, sleep or time.sleep)
 
 
-def replace_keeping_state(obs, name, kind, settings, fallback_scene, source, source_kind):
+def replace_keeping_state(obs, name, kind, settings, fallback_scene, source, source_kind, state_from=None):
     """The launch seed's replace of input NAME as KIND (input_recreate from SOURCE: NAME itself, or the
-    aside input of an interrupted replace, of kind SOURCE_KIND), with the state read from SOURCE first.
-    Returns the status line: `replaced (...)`, or a loud `replace FAILED (...)` naming what OBS did."""
-    state = input_state_read(obs, source)
+    aside input of an interrupted replace, of kind SOURCE_KIND), with the state read first from
+    STATE_FROM (default SOURCE: an interrupted replace's aside when NAME exists only half made, review
+    round 2). Returns the status line: `replaced (...)`, or a loud `replace FAILED (...)`."""
+    state = input_state_read(obs, state_from or source)
     ok, info = input_recreate(obs, name, kind, settings, state, fallback_scene, source=source)
     was = "was %s" % (source_kind or "absent")
     if source != name:
