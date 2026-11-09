@@ -90,7 +90,7 @@ if a[:1] == ["-g"]:
         x = prof(rest[2])
         if x is None:
             sys.stderr.write("Error: no such connection profile\n"); save(); sys.exit(10)
-        v = x["props"].get(fields, "")
+        v = x["uuid"] if fields == "connection.uuid" else x["props"].get(fields, "")
         if fields == "802-3-ethernet.mac-address":
             v = v.upper().replace(":", "\\:")
         out(v + "\n")

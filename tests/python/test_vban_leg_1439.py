@@ -922,7 +922,10 @@ def test_setup_step_13_installs_the_leg_on_every_role():
     s = SETUP.read_text()
     i = s.index("strih_intercom_hub_remove ||")
     j = s.index("step 14 ")
-    assert "\nfi\nstrih_vban_leg_install || fail" in s[i:j], "after the role branch: both roles"
+    # issue 1495: a failed install still runs the after-change restart before it fails (a leg it touched stalls
+    # a running hub), so the line is `|| { ...; fail ...; }`; it still sits right after the role branch
+    assert "\nfi\nstrih_vban_leg_install || " in s[i:j], "after the role branch: both roles"
+    assert 'fail "issue 1439: the VBAN-only leg' in s[i:j]
     assert s.count("strih_vban_leg_install") == 1
 
 
