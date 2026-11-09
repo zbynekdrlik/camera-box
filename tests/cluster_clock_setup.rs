@@ -46,10 +46,18 @@ fn setup_scripts_point_dantesync_at_the_cluster_master() {
     // The venue strih's DNS name: strih-snv in SNV, strih-pp in Poprad.
     const MASTER: &str = "strih.lan";
     let script = "scripts/setup-device.sh";
-    let body = read(script);
+    // Issue 1439 part 2: STEP 17 renders the unit through scripts/lib/cambox-dsync-unit.sh
+    // (`cambox_dsync_unit_text`, which appends `--interface <LAN NIC>`), so the ExecStart line lives in
+    // the lib; the script must still call it.
+    let lib = "scripts/lib/cambox-dsync-unit.sh";
+    assert!(
+        read(script).contains("cambox_dsync_unit_text \"$_DSYNC_NIC\""),
+        "{script} must write the dantesync unit through {lib}"
+    );
+    let body = format!("{}\n{}", read(script), read(lib));
     assert!(
         body.contains(&format!(
-            "ExecStart=/usr/local/bin/dsync --ntp-server {MASTER}\n"
+            "ExecStart=/usr/local/bin/dsync --ntp-server {MASTER}${{iface}}\n"
         )),
         "{script} must launch dantesync against the venue strih by name \
          (--ntp-server {MASTER}) so a camera in ANY venue disciplines to that venue's strih"

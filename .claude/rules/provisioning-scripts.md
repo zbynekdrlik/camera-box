@@ -201,7 +201,11 @@ link target, `scripts/lib/cambox-jxs-target.sh`) sits after `(ak)`, before `(ax)
 (`tests/python/test_cambox_jxs_target_1387.py` executes `(ay)` up to the next `\n# (` marker). `(az)`
 (issue 1387, the cameraman preview capped at 1080p: `video=1920x1080@60` on the running cmdline, fb0 at
 most 1920x1080) sits after `(ak)`, before `(ay)` (`tests/python/test_cambox_preview_cap_1387.py`
-executes `(az)` up to the next marker); the next free letter is `(ba)`.
+executes `(az)` up to the next marker). `(ba)` (issue 1439, dsync's PTP NIC: `/status` configured AND
+joined == the LAN NIC, the unit's ExecStart carrying `--interface <NIC>`, `scripts/lib/cambox-dsync-unit.sh`)
+sits after `(ak)`, before `(az)` (`tests/python/test_cambox_dsync_interface_1439.py` executes `(ba)` up to
+the next marker, so its comment lines never START with `# (`: a parenthesised aside cut the first
+draft's slice); the next free letter is `(bb)`.
 
 ## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
 

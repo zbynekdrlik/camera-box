@@ -615,6 +615,11 @@ if host == "root@" + os.environ.get("FAKE_RUNTIME_FAIL_HOST", ""):  # files land
     print("OK: the unit files are written and the root of cam1 reads read-only again (ro,relatime)")
     sys.stderr.write("FAIL: [issue 1394] cambox-netconsole.service did not arm on cam1 (Result=exit-code); it retries now\n")
     sys.exit(1)
+if host == "root@" + os.environ.get("FAKE_DSYNC_NIC_HOST", ""):  # issue 1439: the NIC does not resolve
+    print("PLAN (cam1): dsync PTP NIC <unresolved>; unit not written (issue 1439)")
+    print("OK: the unit files are written and the root of cam1 reads read-only again (ro,relatime)")
+    sys.stderr.write("FAIL: [issue 1394] the LAN NIC of cam1 does not resolve (the line above) -- dsync.service is not written, dsync is never bound to a guess (issue 1439)\n")
+    sys.exit(1)
 if host == "root@" + os.environ.get("FAKE_NO_NC_HOST", ""):
     print("NOTE: no /etc/systemd/system/cambox-netconsole.service on cam3 -- issue 1311 netconsole is not provisioned here; re-run setup-device.sh for it (this program writes no new unit)")
 if host == "root@" + fail:

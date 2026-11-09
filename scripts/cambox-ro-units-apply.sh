@@ -16,7 +16,10 @@ set -euo pipefail
 #   - the box's off-box log sink (issue 1394, owner 9.10.2026: its OWN venue strih, never dev1):
 #     remote_log_sink_ip resolves it per box from the venue fact files BEFORE the first box is
 #     touched, and the same window rewrites the netconsole script, journal-upload.conf and the upload
-#     drop-in where issue 1311 put them; systemd-journal-upload restarts after the close.
+#     drop-in where issue 1311 put them; systemd-journal-upload restarts after the close;
+#   - dsync bound to the box's LAN NIC (issue 1439): dsync.service rewritten in the same window when it
+#     lacks `--interface <NIC>` (the NIC resolved ON the box), dsync restarted after the close only
+#     then, and /status read back (locked, configured == joined == the NIC, up to 150 s).
 #
 # It is a root write on a cambox, so --apply TAKES the rig lease (scripts/lib/rig-lease.sh, repo
 # camera-box-ro-units-apply) for its whole run and releases it on every exit: a live foreign holder
@@ -330,6 +333,8 @@ for _i in "${!NAMES[@]}"; do
     FAILED+=("$_name (root-rw: $(ro_window_holders "$_out"); nothing was started)")
   else
     case "$_out" in
+      *"dsync.service is not written, dsync is never bound to a guess"*)
+        FAILED+=("$_name (dsync not bound: the LAN NIC does not resolve, see its PLAN line; the rest of the unit set ran, issue 1439)") ;;
       *"OK: the unit files are written"* | *"OK: nothing to write on"*)
         FAILED+=("$_name (the unit files are in place; a step outside the rw window failed: $(first_fail_line "$_out"))") ;;
       *) FAILED+=("$_name (rc=$_rc; the unit set did not land: $(first_fail_line "$_out"))") ;;

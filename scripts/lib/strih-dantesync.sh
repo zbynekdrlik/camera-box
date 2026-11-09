@@ -114,39 +114,16 @@ strih_dantesync_rig_nic() {
 # OWN /status names the NIC it was told (ptp_interface_configured) and the one it joined (ptp_interface).
 #   unreadable (READ != 1) | norig (no rig NIC) | not-configured (no --interface) |
 #   configured-elsewhere:<c>:<rig> | joined-elsewhere:<j|->:<rig> | ok:<rig>. Pure, always rc 0.
-strih_dantesync_iface_verdict() {
-  local read="${1-}" conf="${2-}" joined="${3-}" rig="${4-}"
-  if [ "$read" != 1 ]; then echo unreadable
-  elif [ -z "$rig" ]; then echo norig
-  elif [ -z "$conf" ]; then echo not-configured
-  elif [ "$conf" != "$rig" ]; then echo "configured-elsewhere:${conf}:${rig}"
-  elif [ "$joined" != "$rig" ]; then echo "joined-elsewhere:${joined:--}:${rig}"
-  else echo "ok:${rig}"
-  fi
-}
-
 # strih_dantesync_iface_grade RIG -> reads 127.0.0.1:8898/status ONCE (bounded) and prints the verdict
 # above. A dead endpoint, an empty or non-JSON answer is `unreadable`, never a pass. Always rc 0.
-strih_dantesync_iface_grade() {
-  local rig="${1-}" body pair="" read=0 conf="" joined=""
-  body="$(curl -s -m 3 http://127.0.0.1:8898/status 2>/dev/null || true)"
-  if [ -n "$body" ]; then
-    pair="$(printf '%s' "$body" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-if not isinstance(d, dict):
-    sys.exit(1)
-v = [d.get("ptp_interface_configured"), d.get("ptp_interface")]
-print("\t".join(x if isinstance(x, str) else "" for x in v))
-' 2>/dev/null)" && read=1
-  fi
-  conf="${pair%%$'\t'*}"
-  joined="${pair#*$'\t'}"
-  strih_dantesync_iface_verdict "$read" "$conf" "$joined" "$rig"
-}
+# Both are the shared dsync_iface_* grade (scripts/lib/dsync-iface.sh): issue 1439 part 2 grades the
+# camboxes with the same one. The strih_* names stay for verify-strih item 6d and its tests.
+if ! command -v dsync_iface_verdict >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/dsync-iface.sh
+  . "${BASH_SOURCE[0]%/*}/dsync-iface.sh"
+fi
+strih_dantesync_iface_verdict() { dsync_iface_verdict "$@"; }
+strih_dantesync_iface_grade() { dsync_iface_grade "$@"; }
 
 # strih_dantesync_unit_masked PATH -> 0 iff PATH is an operator mask: a symlink to /dev/null
 # (`systemctl mask`). Step 2 never replaces, enables or starts a masked unit.

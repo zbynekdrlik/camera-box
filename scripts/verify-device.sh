@@ -177,6 +177,10 @@
 #       missing/wrong facet. journal-upload's ACTIVE state is not gated (it depends on the venue strih sink,
 #       provisioned by setup-strih step 16k); enabled + correct config is the cambox-side bar. A `failed`
 #       netconsole is named with its systemd Result (issue 1394).
+#   (ba) dsync PTP NIC (issue 1439) -- HARD FAIL: dsync's own /status names the box's LAN NIC (the ONE
+#       enp* with a device link) as both ptp_interface_configured and ptp_interface, and the installed
+#       dsync.service ExecStart carries --interface <that NIC> (scripts/lib/cambox-dsync-unit.sh over
+#       the shared scripts/lib/dsync-iface.sh verdict); a live box is fixed by cambox-ro-units-apply.sh.
 #   (ar) the read-only-root unit set (issue 1394) -- HARD FAIL: the logrotate drop-in (state in /run,
 #        the ro-root canon) byte-for-byte AND loaded, logrotate.service's last Result success, the
 #        four apt timers/services masked + inactive, and the cambox-netconsole unit byte-identical to
@@ -357,6 +361,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cambox-zram.sh
 . "$HERE/lib/cambox-zram.sh"  # cambox_zram_gather_remote_snippet / cambox_zram_verdict -- the (at) zram
                               # swap check (issue 1428; SAME lib setup-device.sh / create-usb-linux.sh write with)
+# shellcheck source=scripts/lib/cambox-dsync-unit.sh
+. "$HERE/lib/cambox-dsync-unit.sh"  # cambox_dsync_gather_remote_snippet / cambox_dsync_verify_verdict --
+                                    # the (ba) dsync PTP NIC check (issue 1439; SAME lib setup-device STEP 17 writes with)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -995,6 +1002,8 @@ Checks:
   (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
       target to the box's venue strih :514, AND systemd-journal-upload enabled with URL -> that sink + a /run cursor
       (a failed netconsole is named with its Result, issue 1394)
+  (ba) dsync PTP NIC (issue 1439): /status configured AND joined == the LAN NIC, and the unit's
+      ExecStart carries --interface <LAN NIC>; fix a live box with scripts/cambox-ro-units-apply.sh
   (ar) read-only-root unit set (issue 1394): the logrotate drop-in (state in /run) byte-for-byte and
       loaded, logrotate's last Result success, the four apt timers/services masked + inactive, and the
       netconsole unit byte-identical with Restart=on-failure loaded -- fix a live box with
@@ -1924,6 +1933,24 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> ${REMOTELOG_SINK}:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> $(remote_log_journal_url "$REMOTELOG_SINK") (this box's venue strih; the next #1309 stick death ships its kernel+journal off-box, #1311, issue 1394)"
+fi
+
+# (ba) dsync PTP NIC (issue 1439) -- HARD FAIL ----------------------------------------------------------
+# ROZHODNUTE 1.11.2026: dsync binds PTP to the box's LAN NIC, never to the first IPv4 interface it
+# lists: the bkshading USB camera link took the join on cam1, 20.8.2026. One read-only ssh gather: the LAN
+# NIC resolved on the box, the unit's ExecStart and dsync's own /status, graded by the lib (the shared
+# dsync_iface_verdict). Inserted after the (ak) check and before the (az) one, outside the slices other
+# tests EXECUTE. No comment line here may start with a check marker (the slice tests cut at one).
+barc=0
+BA_BLOCK="$(ssh_box "$(cambox_dsync_gather_remote_snippet)")" || barc=$?
+BA_V="$(cambox_dsync_verify_verdict "$BA_BLOCK")"
+if [ "$barc" -ne 0 ]; then
+  fail "could not read the dsync PTP NIC (ssh rc=$barc, issue 1439)"
+else
+  case "$BA_V" in
+    ok:*) ok "dsync PTP bound to + joined on the LAN NIC ${BA_V#ok:} (--interface, issue 1439)" ;;
+    *) fail "dsync PTP NIC: ${BA_V} -- ok = --interface <LAN NIC> in dsync.service and joined there; fix a live box with scripts/cambox-ro-units-apply.sh --apply --box <name> (it restarts dsync once), or re-run setup-device.sh (issue 1439)" ;;
+  esac
 fi
 
 # (az) cameraman preview capped at 1080p (issue 1387) -- HARD FAIL ---------------------------------

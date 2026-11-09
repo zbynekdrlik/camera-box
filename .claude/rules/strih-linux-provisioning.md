@@ -484,8 +484,24 @@ production.
   1.15).
 - **The 1361 golden** renders the unit with `enp7s0` (render.sh `${STRIH_NIC_IFACE:-enp7s0}`), the
   strih-snv rig NIC.
-- **Camboxes** (setup-device's `--ntp-server strih.lan` unit) are the next item on issue 1439.
-- Tests: `tests/python/test_strih_dantesync_interface_1439.py`.
+- **Camboxes** (issue 1439 part 2): `scripts/lib/cambox-dsync-unit.sh` holds the unit
+  (`cambox_dsync_unit_text [NIC]`, byte-identical to the old STEP 17 heredoc without a NIC,
+  ` --interface <NIC>` after `--ntp-server strih.lan` with one) and the NIC rule `cambox_lan_nic
+  SYSROOT` = the ONE `enp*` with a `device` link (the netplan #1155 name rule: the bkshading USB link is
+  `enx*`, a VLAN has no device link; none or two = rc 1 by name, never a guess).
+  - setup-device STEP 17 writes through both (enable-only, fails by name on an unresolved NIC).
+  - verify-device `(ba)` grades `/status` + the unit's ExecStart over the SAME verdict.
+  - A live box gets it from `scripts/cambox-ro-units-apply.sh`: the unit written in the verified rw
+    window when it differs, `systemctl restart dsync` only after the close and only when written, then
+    a bounded `/status` read-back (locked + configured == joined == the NIC,
+    `CAMBOX_RO_UNITS_DSYNC_WAIT_S` default 150 s, the cold lock ~95 s). One dsync restart per cambox,
+    off-production. Its FAIL lines keep the `FAIL: [issue 1394]` prefix the CLI's RESULT reads.
+- **One verdict for every node class:** `dsync_iface_verdict` / `dsync_iface_grade` live in
+  `scripts/lib/dsync-iface.sh` (with the `is_locked` + NIC field reader the apply embeds via
+  `declare -f`); `strih_dantesync_iface_*` are thin wrappers kept for verify-strih item 6d.
+- Tests: `tests/python/test_strih_dantesync_interface_1439.py` (the OBS boxes),
+  `tests/python/test_cambox_dsync_interface_1439.py` (the camboxes: the resolver over a fake sysfs, the
+  unit, STEP 17's real lines, `(ba)` run as its slice, the apply on the issue-1407 fake box).
 
 ## Ubuntu 26.04 (owner ROZHODNUTÉ 18.9.2026)
 
