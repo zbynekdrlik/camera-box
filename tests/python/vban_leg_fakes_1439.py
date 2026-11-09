@@ -57,6 +57,15 @@ def link(d, up):
     f = os.path.join(s.get("sysfs", ""), "class", "net", d, "flags")
     if s.get("sysfs") and os.path.isdir(os.path.dirname(f)):
         open(f, "w").write("0x1003\n" if up else "0x1002\n")
+def deactivate(d):
+    gone = s["applied"].pop(d, None) or {}
+    s["active"].pop(d, None)
+    # issue 1495: model a rule two active profiles share being removed with the one that goes (any deactivation:
+    # a delete or a `device disconnect`)
+    if s.get("delete_drops_shared_rules") and gone.get("ipv4.routing-rules"):
+        for dd, pr in s["applied"].items():
+            if pr.get("ipv4.routing-rules") == gone["ipv4.routing-rules"]:
+                pr["ipv4.routing-rules"] = ""
 def addrs_of(pr, d):
     if pr.get("ipv4.method") == "auto": return [s["dhcp"].get(d, "").split("/")[0]]
     if pr.get("ipv4.method") == "manual": return [v.split("/")[0] for v in pr.get("ipv4.addresses", "").split(",") if v]
@@ -115,13 +124,7 @@ elif cmd == ["connection", "add"]:
 elif cmd == ["connection", "delete"]:
     x = prof(a[2]); s["profiles"].remove(x)
     for d in [d for d, u in s["active"].items() if u == x["uuid"]]:
-        gone = s["applied"].pop(d, None) or {}
-        del s["active"][d]
-        # issue 1495: model a rule two active profiles share being removed with the one that goes
-        if s.get("delete_drops_shared_rules") and gone.get("ipv4.routing-rules"):
-            for dd, pr in s["applied"].items():
-                if pr.get("ipv4.routing-rules") == gone["ipv4.routing-rules"]:
-                    pr["ipv4.routing-rules"] = ""
+        deactivate(d)
 elif cmd == ["device", "reapply"]:
     d = a[2]
     if d not in s["active"] or s.get("reapply_fails"):
@@ -163,7 +166,7 @@ elif cmd == ["device", "disconnect"]:
     if d not in s["active"]:
         sys.stderr.write("Error: Device '%s' (%s) disconnecting failed: This device is not active\n" % (d, d))
         save(); sys.exit(10)
-    del s["active"][d]; s["applied"].pop(d, None); s.setdefault("blocked", {})[d] = True
+    deactivate(d); s.setdefault("blocked", {})[d] = True
 elif cmd == ["device", "set"]:
     d = a[2]
     if a[3:5] == ["managed", "no"]:
