@@ -16,7 +16,10 @@ set -euo pipefail
 #   - the box's off-box log sink (issue 1394, owner 9.10.2026: its OWN venue strih, never dev1):
 #     remote_log_sink_ip resolves it per box from the venue fact files BEFORE the first box is
 #     touched, and the same window rewrites the netconsole script, journal-upload.conf and the upload
-#     drop-in where issue 1311 put them; systemd-journal-upload restarts after the close.
+#     drop-in where issue 1311 put them; systemd-journal-upload restarts after the close;
+#   - dsync bound to the box's LAN NIC (issue 1439): dsync.service rewritten in the same window when it
+#     lacks `--interface <NIC>` (the NIC resolved ON the box), dsync restarted after the close only
+#     then, and /status read back (locked, configured == joined == the NIC, up to 150 s).
 #
 # It is a root write on a cambox, so --apply TAKES the rig lease (scripts/lib/rig-lease.sh, repo
 # camera-box-ro-units-apply) for its whole run and releases it on every exit: a live foreign holder

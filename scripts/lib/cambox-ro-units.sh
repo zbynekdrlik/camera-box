@@ -42,6 +42,10 @@ if ! command -v ro_window_close_cmds >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/ro-window.sh
   . "${BASH_SOURCE[0]%/*}/ro-window.sh"
 fi
+if ! command -v cambox_dsync_unit_text >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/cambox-dsync-unit.sh
+  . "${BASH_SOURCE[0]%/*}/cambox-dsync-unit.sh"
+fi
 
 # The systemd unit dir on the box. Overridable so a test can point the gather and the program at a
 # temp tree; production never sets it.
@@ -198,6 +202,12 @@ cambox_ro_units_verdict() {
 # only when it differs; step 3 restarts systemd-journal-upload when one of them was written (the
 # netconsole restart picks up its script anyway). A non-IPv4 SINK_IP prints nothing and returns 1.
 # Without SINK_IP the program is the issue-1394 unit set alone.
+# Issue 1439 (ROZHODNUTE 1.11.2026, dsync binds PTP to the LAN NIC): on a box that carries dsync.service,
+# step 1 resolves the LAN NIC ON the box (cambox_lan_nic over its /sys) and compares the unit with
+# cambox_dsync_unit_text <NIC>; step 2 writes it inside the same window when it differs (temp + rename);
+# step 3 restarts dsync ONLY when the unit was written, then reads /status back (bounded by
+# CAMBOX_RO_UNITS_DSYNC_WAIT_S, default 150 s: the cold lock takes ~95 s) until it is locked with
+# configured == joined == the NIC. A NIC that does not resolve is a named FAIL and nothing is written.
 # Exit 0 only when every step held. Without a sink the text is the same for every cambox (the box
 # names itself); with one it is per box.
 cambox_ro_units_apply_program() {
@@ -233,6 +243,15 @@ PROG
   printf '_rou_rl_drop_body=%q\n' "$rl_drop"
   printf '_rou_ju_unit=%q\n' "${REMOTE_LOG_JU_SERVICE_NAME}.service"
   printf '%s\n' "$(declare -f ro_root_mount_mode)"
+  # issue 1439: the dsync unit, its NIC rule and the /status read-back (bounded; a bad override = default)
+  local ds_wait="${CAMBOX_RO_UNITS_DSYNC_WAIT_S:-150}" ds_poll="${CAMBOX_RO_UNITS_DSYNC_POLL_S:-5}"
+  [[ "$ds_wait" =~ ^[0123456789]{1,4}$ ]] || ds_wait=150
+  [[ "$ds_poll" =~ ^[123456789][0123456789]{0,2}$ ]] || ds_poll=5
+  printf '_rou_ds_unit=%q\n' "$CAMBOX_RO_UNITS_UNIT_DIR/dsync.service"
+  printf '_rou_ds_sys=%q\n' "${CAMBOX_RO_UNITS_FS_ROOT}/sys"
+  printf '_rou_ds_wait=%s\n' "$((10#$ds_wait))"
+  printf '_rou_ds_poll=%s\n' "$((10#$ds_poll))"
+  printf '%s\n' "$(declare -f cambox_lan_nic cambox_dsync_unit_text dsync_iface_verdict dsync_iface_status_fields dsync_iface_read_status)"
   cat <<'PROG'
 _rou_box="$(hostname 2>/dev/null || echo this cambox)"
 _rou_sha() { if [ -e "$1" ]; then _rou_s="$(sha256sum <"$1")"; echo "${_rou_s%% *}"; else echo __ABSENT__; fi; }
@@ -272,6 +291,21 @@ if [ -n "$_rou_rl_sink" ] && [ "$_rou_nc_present" = 1 ]; then
   if _rou_rl_need "$_rou_rl_conf" "$_rou_rl_conf_body"; then _rou_rl_todo="$_rou_rl_todo conf"; fi
   if _rou_rl_need "$_rou_rl_drop" "$_rou_rl_drop_body"; then _rou_rl_todo="$_rou_rl_todo dropin"; fi
 fi
+# issue 1439: dsync's unit, bound to the LAN NIC resolved on THIS box; only where dsync.service exists
+# (a box without it needs setup-device, like the netconsole unit).
+_rou_ds_present=0
+[ ! -e "$_rou_ds_unit" ] || _rou_ds_present=1
+_rou_ds_nic=""
+_rou_ds_body=""
+_rou_do_ds=0
+_rou_ds_bad=0
+if [ "$_rou_ds_present" = 1 ]; then
+  if _rou_ds_nic="$(cambox_lan_nic "$_rou_ds_sys")" && _rou_ds_body="$(cambox_dsync_unit_text "$_rou_ds_nic")"; then
+    if _rou_rl_need "$_rou_ds_unit" "$_rou_ds_body"; then _rou_do_ds=1; fi
+  else
+    _rou_ds_bad=1
+  fi
+fi
 _rou_mask=""
 for _rou_u in $_rou_apt; do
   [ "$(systemctl is-enabled "$_rou_u" 2>/dev/null || true)" = masked ] || _rou_mask="$_rou_mask $_rou_u"
@@ -283,10 +317,21 @@ fi
 if [ "$_rou_nc_present" = 0 ]; then
   echo "NOTE: no $_rou_nc on $_rou_box -- issue 1311 netconsole is not provisioned here; re-run setup-device.sh for it (this program writes no new unit)"
 fi
+if [ "$_rou_ds_present" = 0 ]; then
+  echo "NOTE: no $_rou_ds_unit on $_rou_box -- dsync is not provisioned here; re-run setup-device.sh for it (issue 1439)"
+elif [ "$_rou_ds_bad" = 1 ]; then
+  echo "PLAN ($_rou_box): dsync PTP NIC <unresolved>; unit not written (issue 1439)"
+else
+  echo "PLAN ($_rou_box): dsync PTP NIC $_rou_ds_nic; unit $([ "$_rou_do_ds" = 1 ] && echo write || echo in-place) (issue 1439)"
+fi
 if [ "$_rou_mode" != ro ]; then
   echo "NOTE: the root of $_rou_box reads '$_rou_mode' before this program -- a cambox runs read-only; the verified close puts it back before anything is run"
 fi
 _rou_rc=0
+if [ "$_rou_ds_bad" = 1 ]; then
+  echo "FAIL: [issue 1394] the LAN NIC of $_rou_box does not resolve (the line above) -- dsync.service is not written, dsync is never bound to a guess (issue 1439)" >&2
+  _rou_rc=1
+fi
 # The apt timers/services stop BEFORE the window: they are masked inside it, and a masked timer that
 # kept running would elapse into its masked service and fail; stopped first, none can fire while the
 # root is writable either. A stop on a stopped unit is a no-op. Accepted residual (review round 3):
@@ -312,7 +357,8 @@ PROG
 trap '_rou_close' EXIT
 _rou_wrote=0
 _rou_opened=0
-if [ "$_rou_do_lr" = 1 ] || [ "$_rou_do_nc" = 1 ] || [ -n "$_rou_mask" ] || [ -n "$_rou_rl_todo" ] || [ "$_rou_mode" != ro ]; then
+_rou_ds_written=0
+if [ "$_rou_do_lr" = 1 ] || [ "$_rou_do_nc" = 1 ] || [ -n "$_rou_mask" ] || [ -n "$_rou_rl_todo" ] || [ "$_rou_do_ds" = 1 ] || [ "$_rou_mode" != ro ]; then
 if ! mount -o remount,rw /; then
   echo "FAIL: [issue 1394] could not remount / read-write on $_rou_box -- nothing was written" >&2
   exit 1
@@ -324,6 +370,7 @@ if [ "$_rou_do_nc" = 1 ]; then _rou_write "$_rou_nc" "$_rou_nc_body"; _rou_wrote
 case " $_rou_rl_todo " in *" script "*) _rou_write "$_rou_rl_script" "$_rou_rl_script_body" 0755; _rou_wrote=1 ;; esac
 case " $_rou_rl_todo " in *" conf "*) _rou_write "$_rou_rl_conf" "$_rou_rl_conf_body"; _rou_wrote=1 ;; esac
 case " $_rou_rl_todo " in *" dropin "*) _rou_write "$_rou_rl_drop" "$_rou_rl_drop_body"; _rou_wrote=1 ;; esac
+if [ "$_rou_do_ds" = 1 ]; then _rou_write "$_rou_ds_unit" "$_rou_ds_body"; _rou_wrote=1; _rou_ds_written=1; fi
 # The masks are links on the root; --no-reload: the daemon-reload runs after the close.
 if [ -n "$_rou_mask" ]; then
   if ! systemctl mask --no-reload $_rou_mask; then
@@ -343,9 +390,11 @@ else
   echo "OK: nothing to write on $_rou_box -- the root was not touched"
 fi
 # --- 3. after the verified close: load, clear, run, read back (each failure named, the rest run) ---
+_rou_reloaded=1
 if ! systemctl daemon-reload; then
   echo "FAIL: [issue 1394] systemctl daemon-reload failed on $_rou_box -- the new files may not be loaded" >&2
   _rou_rc=1
+  _rou_reloaded=0
 fi
 for _rou_u in logrotate.service $_rou_apt $_rou_nc_unit; do
   if systemctl is-failed --quiet "$_rou_u" 2>/dev/null; then
@@ -381,6 +430,38 @@ case " $_rou_rl_todo " in
     fi
     ;;
 esac
+if [ "$_rou_ds_written" = 1 ]; then
+  if [ "$_rou_reloaded" != 1 ]; then
+    echo "FAIL: [issue 1394] dsync not restarted on $_rou_box: the reload failed, so the new unit is not loaded (issue 1439)" >&2
+    _rou_rc=1
+  elif ! systemctl restart dsync; then
+    echo "FAIL: [issue 1394] dsync did not restart on $_rou_box -- read: journalctl -u dsync -n 20 (issue 1439)" >&2
+    _rou_rc=1
+  else
+    _rou_ds_v=""
+    _rou_ds_lk=""
+    _rou_ds_n=$((_rou_ds_wait / _rou_ds_poll))
+    for ((_rou_i = 0; _rou_i <= _rou_ds_n; _rou_i++)); do
+      [ "$_rou_i" = 0 ] || sleep "$_rou_ds_poll"
+      _rou_ds_read=0
+      _rou_ds_f=""
+      if _rou_ds_f="$(dsync_iface_read_status)"; then _rou_ds_read=1; fi
+      _rou_ds_lk="${_rou_ds_f%%$'\t'*}"
+      _rou_ds_rest="${_rou_ds_f#*$'\t'}"
+      _rou_ds_v="$(dsync_iface_verdict "$_rou_ds_read" "${_rou_ds_rest%%$'\t'*}" "${_rou_ds_rest#*$'\t'}" "$_rou_ds_nic")"
+      if [ "$_rou_ds_v" = "ok:$_rou_ds_nic" ] && [ "$_rou_ds_lk" = true ]; then break; fi
+    done
+    if [ "$_rou_ds_v" != "ok:$_rou_ds_nic" ]; then
+      echo "FAIL: [issue 1394] dsync on $_rou_box is not bound to $_rou_ds_nic after ${_rou_ds_wait} s: $_rou_ds_v (issue 1439)" >&2
+      _rou_rc=1
+    elif [ "$_rou_ds_lk" != true ]; then
+      echo "FAIL: [issue 1394] dsync on $_rou_box is bound to $_rou_ds_nic but not locked after ${_rou_ds_wait} s -- re-read /status, the cold lock takes ~95 s (issue 1439)" >&2
+      _rou_rc=1
+    else
+      echo "OK: dsync locked on $_rou_ds_nic (--interface, configured and joined; issue 1439)"
+    fi
+  fi
+fi
 _rou_state="$(systemctl is-system-running 2>/dev/null || true)"
 if [ "$_rou_state" = running ]; then
   echo "OK: is-system-running = running on $_rou_box"

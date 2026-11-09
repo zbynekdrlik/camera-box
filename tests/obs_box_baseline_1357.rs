@@ -1629,6 +1629,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/obs-downstream-keyer.sh",
         // issue 1372: the dantesync step-2 action (setup-strih.sh + verify-strih.sh)
         "scripts/lib/strih-dantesync.sh",
+        // issue 1439: the shared dsync PTP-NIC grade (sourced by strih-dantesync.sh)
+        "scripts/lib/dsync-iface.sh",
         // issue 1391: the rig NIC driver via DKMS (setup-strih step 1b + verify-strih item 36)
         "scripts/lib/strih-nic-driver.sh",
         // issue 1418: the operator surface (setup-strih step 16g + verify-strih item 43)

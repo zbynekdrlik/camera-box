@@ -139,6 +139,9 @@ fail() {
                                # time zone STEP 1 writes; shared with create-usb-linux.sh, the OBS-box
                                # baseline and verify-device.sh (as)
 
+# shellcheck source=scripts/lib/cambox-dsync-unit.sh
+. "$HERE/lib/cambox-dsync-unit.sh"  # cambox_lan_nic / cambox_dsync_unit_text -- STEP 17's dsync unit,
+                                    # bound to the LAN NIC (issue 1439)
 # shellcheck source=scripts/lib/dantesync-install.sh
 . "$HERE/lib/dantesync-install.sh"  # issue 1487: dantesync_install_retire_legacy + the pinned shas
 # shellcheck source=scripts/dantesync-version-gate.sh
@@ -1660,29 +1663,14 @@ DANTECFGEOF
 chmod 644 /etc/dsync/config.json
 echo "  #1307/#1066: /etc/dsync/config.json installed (gm_allowlist=[\"${_RG_GM_HOST}\"], resolves to ${_RG_GM_IP}, clock_discipline=ptp_phase_lock)"
 
-cat > /etc/systemd/system/dsync.service << 'DANTEEOF'
-[Unit]
-Description=dsync (PTP/NTP Synchronization)
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-# Sync to the venue's strih by NAME (strih.lan: strih-snv in SNV, strih-pp in Poprad), NOT the
-# dantesync binary's default public NTP pool -- every node must discipline its clock to the SAME
-# reference or the wall-clock genlock in src/ndi.rs silently diverges across cameras (#8). Issue 1412:
-# the old literal SNV IP left every Poprad cambox with no NTP at all (cam7 ~150 s off strih-pp). The
-# CLI value is resolved on every query, so an unresolvable name is a counted NTP failure, never a
-# public-pool fallback, and it recovers once DNS answers.
-ExecStart=/usr/local/bin/dsync --ntp-server strih.lan
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-DANTEEOF
+# issue 1439 (ROZHODNUTE 1.11.2026): dsync binds PTP to this box's LAN NIC, never to the first IPv4
+# interface it lists (the bkshading USB camera link, enx*, took the join on cam1 on 20.8.2026). The unit
+# text and the NIC rule (the ONE enp* with a device link) live in scripts/lib/cambox-dsync-unit.sh, which
+# verify-device (ba) and the live apply (scripts/cambox-ro-units-apply.sh) read too.
+_DSYNC_NIC="$(cambox_lan_nic /sys)" || fail "cannot resolve this cambox's LAN NIC (the line above) -- dsync is never bound to a guessed NIC (issue 1439)"
+_DSYNC_UNIT="$(cambox_dsync_unit_text "$_DSYNC_NIC")" || fail "LAN NIC name '${_DSYNC_NIC}' is not a usable interface name (issue 1439)"
+printf '%s\n' "$_DSYNC_UNIT" > /etc/systemd/system/dsync.service
+echo "  dsync.service: PTP bound to the LAN NIC ${_DSYNC_NIC} (--interface, issue 1439)"
 
 systemctl daemon-reload
 systemctl enable dsync 2>/dev/null || true
