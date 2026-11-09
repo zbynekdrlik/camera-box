@@ -1383,6 +1383,10 @@ was written for it:
 - **`{ echo msg >&2; } 2>/dev/null` sends the message itself to /dev/null.** The group's fd 2 is
   redirected first, so the inner `>&2` follows it. The guarded form is `echo msg >&2 2>/dev/null`.
   Redirections apply left to right, so fd 1 takes the real stderr before fd 2 is dropped.
+- **The same dead terminal hits a NEW stderr line on the normal path** (issue 1452). The HUP test
+  runs `bkshading-deploy-relay.sh` with stderr = `/dev/full`; a plain `echo "WARNING ..." >&2` added
+  before the swap failed under `set -e` and ended the deploy before the scp the test waits for. Print
+  an informational NOTE to stdout, keep `>&2` for lines that end the run anyway.
 - **Clear the "box is dirty" flag only after the restore returned.** Otherwise a signal inside the
   restore leaves the trap nothing to do. Keep a separate "restore in progress" flag, and re-run the
   restore from the trap when it was interrupted. This is safe because it is idempotent: `remount,ro`
