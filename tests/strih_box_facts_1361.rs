@@ -960,7 +960,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "STRIH-ZZ (Grading)",
         "{\"sender\": \"STRIH-ZZ (2ME PVW)\", \"input\": \"NDI 2ME PVW\", \"scene\": \"2ME PVW\"}",
         "{\"sender\": \"CAM3 (usb)\", \"input\": \"NDI cam3\", \"scene\": \"Cam 3\"}",
-        "ExecStart=/usr/local/bin/dsync --ntp-server venue-ntp.lan\n",
+        "ExecStart=/usr/local/bin/dsync --ntp-server venue-ntp.lan --interface enp7s0\n",
         "local_ip = \"10.0.0.5\"",
         "ws_ip = \"127.0.0.1\"",
         "# strih-zz OBS kiosk boot",
