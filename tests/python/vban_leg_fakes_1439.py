@@ -57,6 +57,8 @@ if a[:1] == ["--wait"]:
 if a[:1] == ["-g"]:
     fields = a[1]; rest = a[2:]
     if rest[:2] == ["connection", "show"] and len(rest) == 2:
+        if s.get("list_fails"):
+            sys.stderr.write("Error: Could not create NMClient object\n"); save(); sys.exit(8)
         for x in s["profiles"]:
             dev = next((d for d, u in s["active"].items() if u == x["uuid"]), "")
             vals = {"UUID": x["uuid"], "TYPE": x["type"], "DEVICE": dev, "NAME": x["props"].get("connection.id", "")}

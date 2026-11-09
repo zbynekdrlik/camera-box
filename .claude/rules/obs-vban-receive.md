@@ -664,12 +664,15 @@ USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `
   deactivation took with it; still wrong = rc 1). The seconds between the read-back and the delete are the
   only time two interfaces carry the address.
 - A VLAN that does not come up leaves the old leg untouched (program audio keeps flowing).
-- The old leg stays FILTERED while the main table already names the VLAN: before NetworkManager is touched,
-  `_strih_vban_leg_retiring_filter` loads the same ruleset rendered for the old NIC as its own live table
-  `inet vban_dante70_retiring` (only while an ACTIVE NIC leg carries the address,
-  `_strih_vban_leg_carrying_nic_leg`); it is deleted once the old leg is retired. On a failure path it stays
-  until the next good run (known limit: it is not persistent, so a reboot in between leaves the old leg
-  unfiltered; verify's leftover row FAILs that box anyway).
+- The old leg is never unfiltered: BEFORE the main table moves to the VLAN, `_strih_vban_leg_retiring_filter`
+  loads the same ruleset rendered for the old NIC as its own live table `inet vban_dante70_retiring` (only
+  while an ACTIVE NIC leg carries the address, `_strih_vban_leg_carrying_nic_leg`: 0 found / 1 none / 2
+  unreadable, and unreadable refuses the step with nothing changed); it is deleted once the old leg is
+  retired. On a failure path it stays until the next good run (known limit: it is live only, so a reboot in
+  between leaves the old leg unfiltered; the failure message says to re-run setup before any reboot, and
+  verify's leftover row FAILs that box).
+- verify's leftover row on a VLAN leg also FAILs a default route through anything but the rig NIC (a parked
+  NIC that got a DHCP lease after all).
 - A VLAN created THIS run that does not read back is DELETED again (`_strih_vban_leg_rollback_new_vlan`), but
   only on a vlan leg and only while an ACTIVE NIC leg still carries the address: ONE interface on the address
   again, setup fails by name, the next run creates the VLAN anew. With no such NIC leg (the 8.11 shape: the USB

@@ -33,7 +33,9 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   - the site file names the stream mix's transmitter and channels (never in the repo); verify item 9 and
     the TOML follow the device name. Tests: `tests/python/test_stream_snv_dante_1495.py`.
   - verify item 9's per-channel meter row (`strih_program_vban_channels_row`, OBS's own meter of the
-    input) runs in the Dante grade too, tagged `(program-dante)` (strih-snv gets it as well).
+    input) runs in the Dante grade too, tagged `(program-dante)` (strih-snv gets it as well). Its verdict
+    assumes a stereo input: both site files subscribe 2 channels today; a site file with more RX channels
+    needs the row re-checked on the box first (an unused subscription would read as an empty channel).
   - The per-point E2E report names the source `dante_input (stream-obs)` when the block carries
     `stream_dante` (`e2e_report_youtube.py`).
   - Before the first deploy, read `ss -lntup` on stream-snv: the box-wide `ip_unprivileged_port_start =

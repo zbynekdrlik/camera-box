@@ -173,9 +173,28 @@ def test_the_old_leg_stays_filtered_until_it_is_retired(tmp_path):
     assert len(loads) >= 1 and any(c[1:] == ["delete", "table", "inet", "vban_dante70_retiring"] for c in nft), nft
     assert s.get("nft_other", {}) == {}, "removed once the old leg is gone"
     first_up = next(i for i, c in enumerate(s["log"]) if c[0] == "nmcli" and "connection" in c and "up" in c)
-    retiring = [i for i in loads if i < first_up]
-    assert retiring, "loaded before the VLAN comes up"
+    main_load = next(i for i, c in enumerate(s["log"]) if c[:3] == ["systemctl", "restart", "vban-dante70-filter.service"])
+    retiring = [i for i in loads if i < first_up and i < main_load]
+    assert retiring, "loaded before the main table moves to the VLAN and before the VLAN comes up"
     assert "keeps the old NIC leg %s filtered" % NIC_IF in r.stdout
+
+
+def test_unreadable_profiles_refuse_the_step_with_nothing_changed(tmp_path):
+    b = _box(tmp_path, list_fails=True)
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode != 0 and "nothing changed" in r.stderr, r.stderr
+    s = b.st()
+    assert not [c for c in fk.calls(s, "nmcli") if c[:1] != ["-g"]], "no NetworkManager change"
+    assert not [c for c in s["log"] if c[:2] == ["systemctl", "restart"]], "the main table is not moved"
+
+
+def test_verify_fails_a_default_route_through_the_retired_nic(tmp_path):
+    b = _converged(tmp_path)
+    s = b.st()
+    s["extra_default"] = [NIC_IF]
+    b.state.write_text(json.dumps(s))
+    bad = [x for x in _bad(b.run("strih_vban_leg_grade")) if "leftover" in x]
+    assert any("default route through %s" % NIC_IF in x for x in bad), bad
 
 
 def test_a_vlan_that_does_not_come_up_keeps_the_old_leg_filtered(tmp_path):
