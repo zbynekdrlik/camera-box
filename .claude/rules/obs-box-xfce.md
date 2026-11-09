@@ -137,26 +137,30 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
   save into the runner's real `~/.config`. It waits for `NameHasOwner org.xfce.Xfconf` (dbus-send) and
   fails loudly after 10 s.
 
-## UNVERIFIED until slice 2 on stream-snv (supervisor)
+## Verified live on stream-snv (slice 2, 9.11.2026, xfce4 4.20)
 
-- that xfce4-panel 4.20 shows a launcher whose `.desktop` carries `NoDisplay=true` (shared with tint2's
-  text) and does not copy/rename our launcher file;
-- that `p=8` puts the panel at the bottom over the full width;
-- the `xfce4-panel.Xfce4-panel` WM_CLASS in `wmctrl -lx`;
-- that xfsettingsd does not fight the session start's xrandr layout or the display watch (no
-  displays.xml profile is written);
-- that the pulseaudio plugin with keyboard shortcuts off leaves the XF86Audio keys to the shortcut;
-- the live apply: `xfconf-query` as the user through `sudo -u` on `/run/user/<uid>/bus` reaches the
-  running xfconfd (run a setup-strih re-run once INSIDE the XFCE session and read
-  `applied through ... read back`), and `xfce4-panel --restart` on :0 brings the new layout up
-  without saving the old one back (`the declared layout read back`).
+- xfce4-panel shows every `NoDisplay=true` launcher (8 of 8), at the bottom over the full width
+  (`p=8`: 1920x31 at 0,1049); `wmctrl -lx` names it `xfce4-panel.Xfce4-panel`.
+- xfsettingsd writes only `displays.xml` with `ActiveProfile=Default` (no output profile), so it does
+  not fight the session start's xrandr or the display watch.
+- The XF86Audio keys drive `obs-box-headphones` (45 -> 50 -> 45 %), Print starts `flameshot gui`.
+- The live apply: after a deliberate drift (compositing on, panel size 44) setup-strih printed
+  `applied through newlevel's running xfconfd and read back` for xfwm4 + xfce4-panel and
+  `xfce4-panel restarted ...; the declared layout read back`; the next run read `unchanged` everywhere
+  and did not restart the panel.
+- The session switch needs no host reboot: `systemctl restart lightdm` autologins into xfce in ~5 s,
+  strih-obs.service brings OBS back. CPU and program `lagged` match openbox (95.0 vs 94.7 % idle,
+  lagged 0 in both).
+- **Not provable remotely:** Alt+Shift (`grp:alt_shift_toggle`, set in X): xdotool's keys go through
+  the virtual XTEST keyboard and never switch the group, so the layout switch, touchpad tap/scroll and
+  the wheel in the Restreamer windows are the operator's check on the real devices.
 
 ## Slice 2 runbook (stream-snv, supervisor)
 
 1. With the box still in openbox: `sudo ./scripts/setup-strih.sh --box stream-snv` (installs xfce4,
    points lightdm at xfce, writes the files while no xfconfd runs). Stop OBS first only if step 4 swaps
    the bundle (the genlock deploy does that itself).
-2. Reboot. Confirm `pgrep -u newlevel -x xfce4-session`, OBS + restreamer + the session apps up,
+2. `sudo systemctl restart lightdm` (or a reboot). Confirm `pgrep -u newlevel -x xfce4-session`, OBS + restreamer + the session apps up,
    `pgrep -u newlevel -f localsearch-3` empty. Then run setup-strih TWICE inside the XFCE session: the
    second run must print `xfconf xfce4-panel: unchanged ...` for every channel and must NOT restart the
    panel (a running panel that writes something under a declared container must never make it re-apply).
