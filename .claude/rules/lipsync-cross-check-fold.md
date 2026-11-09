@@ -53,7 +53,17 @@ clips (25 x 0 ms, 2 x +40 ms) against the E2E's production-equivalent A/V -1.1 m
   the raw `av_offset_ms` carries the feed's own measured leg (`RIG_DIRECT_AV_EXPECTED_MS`, -46 ms
   when production A/V is 0), so the production-equivalent number is the gate's
   `residual_offset_ms`. Comparing the raw -46 against production faces is wrong by the whole leg.
-  On the optical feed (expected 0) the two are the same.
+  On the optical feed (expected 0) the two are the same. The CODE compares the same thing: the
+  fresh-context review caught that the first flip still compared SyncNet with the RAW offset, so
+  `lipsync_cross_check_for` evaluates `av_window::residual_offset_ms(raw, --av-expected-ms)` and
+  `scripts/lipsync-cross-check.sh` passes `--av-expected-ms=` (default `rig_test_feed_av_expected_ms`,
+  the E2E gate's own source). Any new consumer of the cross-check must pass the feed's leg too.
+- **The counter means "clips of ONE validated E2E -> production pair"**, not 5 independent paired
+  runs (the 25.9 procedure's definition). All 27 clips share one E2E value, and at SyncNet's 40 ms
+  steps only a 2-frame error could have failed it: the next production pair is the real re-check.
+- **Record the state on the ticket with the pair:** the 7.11 E2E ran the JPEG XS program path,
+  stream pin `JXS PGM src` 1064 ms, `mbc` inputAudioSyncOffset 56 ms after its #856 apply
+  (`[av-sync] APPLIED + verified` in the job log).
 - **A pair is evidence only when nothing changed on the rig between the E2E and the production.**
   Check `gh run list` for later E2E runs (they deploy and align) and `git log origin/dev` for
   pin/latency commits in between. 30.10 E2E vs 1.11 is NOT a pair: the stream program pin moved one

@@ -71,9 +71,11 @@ pub const REQUIRED_CLEAN_PAIRED_RUNS: u32 = 5;
 /// 2 × +40 ms, all 27 within [`LIPSYNC_CROSS_CHECK_TOLERANCE_MS`], none outside. Per the closing
 /// procedure (issue 1032 comment 5830076613) one production's ≥ 5 clips against its own green
 /// E2E are the N clean paired runs, so the counter sits at [`REQUIRED_CLEAN_PAIRED_RUNS`] and
-/// [`gates_overall_pass`] is `true` with NO consumer edit. Pairs across a rig change are not
-/// evidence (1.11 against the 30.10 E2E: the stream pin moved one frame in between). Lower it
-/// only with a ticket citing live evidence that the two methods no longer agree.
+/// [`gates_overall_pass`] is `true`. The count is the clips of ONE validated E2E -> production
+/// pair, not five independent paired runs; the consumer compares SyncNet with the QR/QPSK RESIDUAL
+/// (raw minus `--av-expected-ms`), the same number that pair checked. Pairs across a rig change
+/// are not evidence (1.11 against the 30.10 E2E: the stream pin moved one frame in between).
+/// Lower it only with a ticket citing live evidence that the two methods no longer agree.
 pub const RECORDED_CLEAN_PAIRED_RUNS: u32 = 5;
 
 /// Pure: is the fold EARNED at `recorded_clean_paired_runs` clean paired runs? `recorded >=
