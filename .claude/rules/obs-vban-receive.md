@@ -474,7 +474,8 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   gap, never a double sound). Monitoring and the `audio_monitor` filters (the operator's headphones:
   they play whatever the items show) are put back only AFTER the old input is gone, the program filters
   before (review rounds 1-2). A replace whose wanted kind changed after an interrupted one takes the
-  state from the aside that still holds scene items, not from the half-made `<name>`. A refused create renames the old input back (`kept the old input`); a refused
+  state from the aside that still holds scene items, not from the half-made `<name>`, and removes that
+  aside together with the renamed half before the show (never played beside the new input, round 3). A refused create renames the old input back (`kept the old input`); a refused
   rename removes nothing. The next launch seed RESUMES from an aside input that still holds scene items
   when `<name>` is absent (OBS died mid-replace: the state comes from it, never a fresh create in the
   program scene); a removed aside a holder keeps (listed, in no scene) is never a resume source. Next
