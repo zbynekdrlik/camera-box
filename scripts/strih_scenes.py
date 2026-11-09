@@ -103,6 +103,7 @@ from program_audio_vban import (  # noqa: E402,F401
     AUDIO_MONITOR_FILTER_KIND, AUDIO_MONITOR_FILTER_NAME, audio_monitor_filter_settings,   # issue 1436
     parse_program_audio_monitor_filter, seed_audio_monitor_filter,
     VBAN_SOURCE_KIND, DANTE_SOURCE_KIND, program_audio_want, kind_missing_text,   # issue 1485
+    aside_inputs, replace_keeping_state, resumable_aside, settle_aside_inputs,   # issue 1495
     browser_audio_report,
     drop_pulse_capture_inputs,
     input_create_verified,
@@ -611,45 +612,45 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
     """The ONE allowed create/replace (issue 1344): ensure the program-audio input NAME exists as
     pulse_input_capture on strih-program-source (the OBS program capture), or, given VBAN (the obs-vban
     source settings of the stream role's manifest, issue 1439), as the obs-vban receive source. A missing
-    input is CREATED; the un-creatable Windows asio_input_capture (or any other kind) is REMOVED +
-    recreated keeping the operator's state (every scene and the item's visibility, volume, mute,
-    monitoring, tracks, balance, sync offset, filters); an input of the right kind is left alone (its
-    settings are the operator's; a difference from the box facts is named in the status). An obs-vban
-    kind OBS has not loaded (a bundle without the plugin) never removes anything. issue 1485: the DANTE_SEED
-    marker makes it the obs release's dante_input (no settings). Returns a short status for the log."""
+    input is CREATED; any other kind is re-created keeping the operator's state (input_recreate: renamed
+    aside, never removed before the new one exists, issue 1495); an input of the right kind is left alone
+    (a difference from the box facts is named). An obs-vban kind OBS has not loaded never removes
+    anything. issue 1485: the DANTE_SEED marker = the obs release's dante_input (no settings). An aside
+    input (`<name> (seed replace N)`, a replace OBS died in) is resumed when NAME is absent, else removed."""
     want_kind, want_settings = program_audio_want(vban, AUDIO_INPUT_KIND, program_audio_input_settings())
     inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
-    exists = any(i.get("inputName") == name for i in inputs)
     kind = program_audio_input_kind_from_inputs(inputs, name)
-    action = audio_input_action(exists, kind, want_kind)
+    action = audio_input_action(any(i.get("inputName") == name for i in inputs), kind, want_kind)
+    asides = aside_inputs(inputs, name)
     if action == "ok":
-        if not vban or want_kind == DANTE_SOURCE_KIND:
-            return "matched"
-        current = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True) or {}).get("inputSettings")
-        diff = settings_differences(current, want_settings)
-        return "matched" if not diff else "matched (the operator's settings differ from the box facts: %s)" % (
-            "; ".join(diff))
+        diff = None
+        if vban and want_kind != DANTE_SOURCE_KIND:
+            diff = settings_differences((obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
+                                         or {}).get("inputSettings"), want_settings)
+        status = "matched (the operator's settings differ from the box facts: %s)" % "; ".join(diff) if diff \
+            else "matched"
+        return status + settle_aside_inputs(obs, name, asides)
+    source, source_kind, ra = name, kind, resumable_aside(obs, asides)   # ra: the old input's scenes + state
+    if action == "create" and ra:
+        source, source_kind = ra, program_audio_input_kind_from_inputs(inputs, ra)
     if vban and not kind_available(obs, want_kind):
-        return kind_missing_text(kind, want_kind)
+        return kind_missing_text(source_kind, want_kind)
     scene = _current_scene_name(obs)
     if scene is None:
         return "no-scene (deferred)"
     # issue 1439 review: every create is read back from GetInputList (one retry); a create or re-create
     # OBS never lists as the wanted kind is a loud FAILED, never "created" / "replaced".
-    if action == "create":
+    if source == name and action == "create":
         _resp, listed = input_create_verified(obs, scene, name, want_kind, want_settings)
         if listed != want_kind:
             return "create FAILED: %s after two CreateInput -- restart OBS (the launch seed runs again)" % (
                 listed_text(name, listed))
         return "created"
-    # issue 1412: a replace keeps the input's place in EVERY scene and its sync offset (a ported
-    # collection carries it in scenes the seed plan does not name); issue 1439: and its mixer state.
-    state = input_state_read(obs, name)
-    ok, info = input_recreate(obs, name, want_kind, want_settings, state, scene)
-    if not ok:
-        return ("replace FAILED (was %s): %s after RemoveInput + two CreateInput -- restart OBS (the launch "
-                "seed runs again)" % (kind or "absent", listed_text(name, info)))
-    return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", info)
+    # issue 1412/1439: a replace keeps the input's place in EVERY scene, its sync offset and mixer state;
+    # issue 1495: it never removes the old input first, and stale asides go only after it succeeded.
+    st = replace_keeping_state(obs, name, want_kind, want_settings, scene, source, source_kind, state_from=ra)
+    stale = [a for a in asides if a not in (source, ra)]
+    return st + settle_aside_inputs(obs, name, stale, finish=False) if st.startswith("replaced") else st
 
 
 def audio_monitor_type_of(obs, name=AUDIO_INPUT_NAME):

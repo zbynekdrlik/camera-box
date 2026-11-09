@@ -377,13 +377,20 @@ def test_setup_strih_writes_the_toml_after_the_leg():
 class FakeObs:
     def __init__(self, kind, kinds=("dante_input",)):
         self.kind, self.kinds, self.calls, self.present = kind, list(kinds), [], True
+        self.aside = None   # issue 1495: the replace renames the old input aside, removes it last
 
     def req(self, t, d=None, ignore_err=False):
         self.calls.append((t, d))
         if t == "GetInputList":
-            return {"inputs": [{"inputName": "ASIO zvuk", "inputKind": self.kind}] if self.present else []}
+            inputs = [{"inputName": "ASIO zvuk", "inputKind": self.kind}] if self.present else []
+            return {"inputs": inputs + ([{"inputName": self.aside, "inputKind": "?"}] if self.aside else [])}
+        if t == "SetInputName":
+            if d["inputName"] == "ASIO zvuk" and self.present:
+                self.aside, self.present = d["newInputName"], False
+            return {}
         if t == "RemoveInput":
-            self.present = False
+            if d["inputName"] == self.aside:
+                self.aside = None
             return {}
         if t == "CreateInput":
             self.present, self.kind = True, d["inputKind"]
