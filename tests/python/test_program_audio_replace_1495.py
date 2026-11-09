@@ -392,6 +392,9 @@ def test_a_kind_change_after_an_interrupted_replace_takes_the_state_from_the_asi
     assert obs.items_of(new) == {"PRO": [(1, True)], "Development": [], "Zaloha": [(0, False)]}
     assert new.sync == 58 and obs.audible("PRO") == [new]
     assert {n for n in obs.listed() if n.startswith(NAME)} == {NAME}, "both old inputs are gone"
+    pro = [e["PRO"] for e in obs.events]
+    assert all(len(a) <= 1 for a in pro), "the aside's visible item never plays beside the new one"
+    assert len([a for a in pro if not a]) <= 1, "a one-request gap"
 
 
 def test_a_lingering_removed_aside_is_never_a_resume_source():
