@@ -115,6 +115,11 @@ lipsync_verdict_cmd() {
     "$(printf '%q' "$bin")" "$recording" "$marker_log" "$syncnet_offset_ms"
 }
 
+# lipsync_default_av_expected_ms -- the expected QR/QPSK A/V offset of the rig's test feed.
+lipsync_default_av_expected_ms() {
+  printf '0'
+}
+
 # lipsync_mean_offset_from_report_json <report_json_text> -- pull `mean_offset_ms` out of
 # av_sync_calibrate.py --calibrate's --report-json output (a tiny JSON object: {n, n_total,
 # mean_offset_ms, stdev_ms, ci95_ms}). Uses python3 (already a hard dependency of this whole

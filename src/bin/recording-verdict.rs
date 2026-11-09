@@ -2979,13 +2979,15 @@ fn decode_for_grouped(
 /// key at all), `Some` otherwise — `camera_box::lipsync_cross_check::evaluate` itself decides
 /// Agree/Disagree/Unknown.
 fn lipsync_cross_check_for(
-    qr_qpsk_offset_ms: f64,
+    qr_qpsk_raw_offset_ms: f64,
+    av_expected_ms: f64,
     syncnet_offset_ms: Option<f64>,
 ) -> Option<camera_box::lipsync_cross_check::LipsyncCrossCheck> {
     let syncnet_offset_ms = syncnet_offset_ms?;
+    let _ = av_expected_ms;
     Some(camera_box::lipsync_cross_check::evaluate(
         Some(syncnet_offset_ms),
-        Some(qr_qpsk_offset_ms),
+        Some(qr_qpsk_raw_offset_ms),
         camera_box::lipsync_cross_check::LIPSYNC_CROSS_CHECK_TOLERANCE_MS,
     ))
 }
@@ -3035,9 +3037,11 @@ fn run_av_sync(args: &Args) -> Result<()> {
     // lipsync-test-mode run's SyncNet offset (never printed on a plain --av-sync call, so every
     // pre-930 invocation's JSON shape is byte-for-byte unchanged).
     let mut lipsync_folds_to_failure = false;
-    if let Some(cross_check) =
-        lipsync_cross_check_for(report.offset.offset_ms, args.syncnet_offset_ms)
-    {
+    if let Some(cross_check) = lipsync_cross_check_for(
+        report.offset.offset_ms,
+        args.av_expected_ms,
+        args.syncnet_offset_ms,
+    ) {
         let gate_pass =
             camera_box::lipsync_cross_check::lipsync_cross_check_gate_pass(cross_check.verdict);
         // issue 1032: fold-earned check against the recorded evidence count. LIVE —
@@ -18122,13 +18126,14 @@ mod tests {
 
     #[test]
     fn lipsync_cross_check_for_is_none_without_syncnet_offset_930() {
-        assert_eq!(super::lipsync_cross_check_for(12.0, None), None);
+        assert_eq!(super::lipsync_cross_check_for(12.0, 0.0, None), None);
     }
 
     #[test]
     fn lipsync_cross_check_for_agrees_within_tolerance_930() {
         // 12.0 (QR/QPSK) vs 40.0 (SyncNet) -> delta 28.0, within the 50ms tolerance.
-        let cc = super::lipsync_cross_check_for(12.0, Some(40.0)).expect("Some when syncnet given");
+        let cc =
+            super::lipsync_cross_check_for(12.0, 0.0, Some(40.0)).expect("Some when syncnet given");
         assert_eq!(cc.qr_qpsk_offset_ms, Some(12.0));
         assert_eq!(cc.syncnet_offset_ms, Some(40.0));
         assert_eq!(cc.delta_ms, Some(28.0));
@@ -18149,7 +18154,8 @@ mod tests {
     #[test]
     fn lipsync_cross_check_for_disagrees_beyond_tolerance_930() {
         // 0.0 (QR/QPSK) vs 500.0 (SyncNet) -> delta 500.0, far beyond the 50ms tolerance.
-        let cc = super::lipsync_cross_check_for(0.0, Some(500.0)).expect("Some when syncnet given");
+        let cc =
+            super::lipsync_cross_check_for(0.0, 0.0, Some(500.0)).expect("Some when syncnet given");
         assert_eq!(cc.delta_ms, Some(500.0));
         assert_eq!(
             cc.verdict,
@@ -18160,5 +18166,34 @@ mod tests {
             cc.verdict,
             camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS
         ));
+    }
+
+    #[test]
+    fn lipsync_cross_check_compares_the_residual_on_the_direct_feed_1032() {
+        // The direct test feed reads -46 ms when production A/V is 0 (rig-test-feed.sh). A synced
+        // rig: raw -46, expected -46, SyncNet 0 -> the residual 0 agrees with SyncNet.
+        let cc = super::lipsync_cross_check_for(-46.0, -46.0, Some(0.0))
+            .expect("Some when syncnet given");
+        assert_eq!(cc.qr_qpsk_offset_ms, Some(0.0));
+        assert_eq!(cc.delta_ms, Some(0.0));
+        assert_eq!(
+            cc.verdict,
+            camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Agree
+        );
+        // The same reading against the wrong (zero) expected leg sits 46 ms off.
+        let raw = super::lipsync_cross_check_for(-46.0, 0.0, Some(0.0)).expect("Some");
+        assert_eq!(raw.delta_ms, Some(46.0));
+    }
+
+    #[test]
+    fn lipsync_cross_check_disagrees_when_the_residual_is_beyond_tolerance_1032() {
+        // raw -46 on the direct feed is production 0; SyncNet -80 is then 80 ms off -> Disagree,
+        // although the raw difference (34 ms) would have read Agree.
+        let cc = super::lipsync_cross_check_for(-46.0, -46.0, Some(-80.0)).expect("Some");
+        assert_eq!(cc.delta_ms, Some(80.0));
+        assert_eq!(
+            cc.verdict,
+            camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Disagree
+        );
     }
 }
