@@ -79,11 +79,14 @@ SITE = "# test site file (fake names)\nRX1=Program L|foh-tx|MASTER-L\nRX2=Progra
 
 # --- facts --------------------------------------------------------------------------------------------
 
-def test_only_strih_snv_takes_the_program_from_dante():
+def test_only_the_snv_boxes_take_the_program_from_dante():
+    # issue 1495: stream-snv too, through its own device stream-obs (`<STRIH_ROLE>-obs`)
     r = _bash('for b in strih-snv strih-pp stream-snv stream-pp; do (strih_box_load "$b" >/dev/null; '
-              'if strih_program_dante_declared; then echo "$b yes"; else echo "$b no"; fi); done')
+              'if strih_program_dante_declared; then echo "$b yes $(strih_dante_input_device)"; '
+              'else echo "$b no"; fi); done')
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split("\n")[:4] == ["strih-snv yes", "strih-pp no", "stream-snv no", "stream-pp no"]
+    assert r.stdout.split("\n")[:4] == ["strih-snv yes strih-obs", "strih-pp no", "stream-snv yes stream-obs",
+                                        "stream-pp no"]
 
 
 def test_strih_snv_has_no_vban_program_and_keeps_its_input_name():
@@ -251,8 +254,11 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     (root / "etc" / "sysctl.d" / "60-strih-dante-ptp-port.conf").write_text(PTP_PORT_DROPIN)
     (root / "proc" / "sys" / "net" / "ipv4").mkdir(parents=True, exist_ok=True)
     (root / "proc" / "sys" / "net" / "ipv4" / "ip_unprivileged_port_start").write_text("319\n")
+    ch = tmp_path / "channels"   # issue 1495: the per-channel meter row's seam (a healthy stereo program)
+    ch.write_text("channel_verdict=ok\nchannel_detail=ch1 -40.0 dB ch2 -41.0 dB\n")
     return _bash(body, "scn", "127.0.0.1", "unused", log,
                  env=dict({"STRIH_DANTE_INPUT_KIND_FILE": str(kf), "STRIH_DANTE_INPUT_TOML": str(dest),
+                           "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(ch),
                            "STRIH_DANTE_INPUT_WAIT_S": "0", "STRIH_DANTE_RX_PIN_ROOT": str(root),
                            "STRIH_DANTE_PTP_OBS_PIN": str(pin), "STRIH_DANTE_PTP_INTERCOM_PIN": str(ic_pin)},
                           **({"STRIH_LX_USER": user} if user else {})))

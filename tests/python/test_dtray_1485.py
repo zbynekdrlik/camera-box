@@ -283,7 +283,10 @@ def test_the_markers_follow_the_strih_snv_fact_file():
                sources=(F.SCRIPTS / "lib" / "strih-box-facts.sh", DTRAY_LIB))
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == ["strih-snv-intercom", "strih-obs"]
-    for box in ("stream-snv", "strih-pp", "stream-pp"):
+    r = F.bash('unset DTRAY_DANTE_DEVICES; strih_box_load stream-snv >/dev/null || exit 9; dtray_expected_devices',
+               sources=(F.SCRIPTS / "lib" / "strih-box-facts.sh", DTRAY_LIB))
+    assert r.returncode == 0 and r.stdout.split() == ["stream-obs"], r.stderr   # issue 1495
+    for box in ("strih-pp", "stream-pp"):
         r = F.bash('unset DTRAY_DANTE_DEVICES; strih_box_load %s >/dev/null || exit 9; dtray_expected_devices' % box,
                    sources=(F.SCRIPTS / "lib" / "strih-box-facts.sh", DTRAY_LIB))
         assert r.returncode == 0 and r.stdout == "", (box, r.stderr)

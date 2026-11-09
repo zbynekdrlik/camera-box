@@ -73,7 +73,7 @@ strih_program_vban_field() {
 # --per-channel; STRIH_PROGRAM_VBAN_CHANNELS_FILE = its output, the test seam). One channel under -90 dBFS while
 # another is over -60 = FAIL naming it; nothing over -60 = NOTE (nothing playing now); no meter = NOTE.
 strih_program_vban_channels_row() {
-  local ws="${1-}" name="${2-}" out verdict detail
+  local ws="${1-}" name="${2-}" tag="${3:-(program-vban)}" why="${4:-the sender sends that channel empty (the VBAN patch of the console); the receiver plays what arrives (issue 1439)}" out verdict detail
   if [ -n "${STRIH_PROGRAM_VBAN_CHANNELS_FILE:-}" ]; then
     out="$(cat -- "$STRIH_PROGRAM_VBAN_CHANNELS_FILE" 2>/dev/null || true)"
   else
@@ -83,10 +83,10 @@ strih_program_vban_channels_row() {
   verdict="$(sed -n 's/^channel_verdict=//p' <<<"$out" | head -n 1)"
   detail="$(sed -n 's/^channel_detail=//p' <<<"$out" | head -n 1)"
   case "$verdict" in
-    ok) ok "(program-vban) both channels carry the program: ${detail}" ;;
-    silent-channel) bad "(program-vban) OBS '${name}': ${detail} -- the sender sends that channel empty (the console's VBAN patch); the receiver plays what arrives (issue 1439)" ;;
-    quiet) note "(program-vban) OBS '${name}' is quiet now (${detail}) -- the per-channel check runs while the program plays" ;;
-    *) note "(program-vban) OBS '${name}': no per-channel meter read over obs-websocket ${ws}:4455${detail:+ (${detail})} -- channels not graded" ;;
+    ok) ok "${tag} both channels carry the program: ${detail}" ;;
+    silent-channel) bad "${tag} OBS '${name}': ${detail} -- ${why}" ;;
+    quiet) note "${tag} OBS '${name}' is quiet now (${detail}) -- the per-channel check runs while the program plays" ;;
+    *) note "${tag} OBS '${name}': no per-channel meter read over obs-websocket ${ws}:4455${detail:+ (${detail})} -- channels not graded" ;;
   esac
   return 0
 }

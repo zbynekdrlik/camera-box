@@ -57,6 +57,8 @@ if a[:1] == ["--wait"]:
 if a[:1] == ["-g"]:
     fields = a[1]; rest = a[2:]
     if rest[:2] == ["connection", "show"] and len(rest) == 2:
+        if s.get("list_fails"):
+            sys.stderr.write("Error: Could not create NMClient object\n"); save(); sys.exit(8)
         for x in s["profiles"]:
             dev = next((d for d, u in s["active"].items() if u == x["uuid"]), "")
             vals = {"UUID": x["uuid"], "TYPE": x["type"], "DEVICE": dev, "NAME": x["props"].get("connection.id", "")}
@@ -103,7 +105,13 @@ elif cmd == ["connection", "add"]:
 elif cmd == ["connection", "delete"]:
     x = prof(a[2]); s["profiles"].remove(x)
     for d in [d for d, u in s["active"].items() if u == x["uuid"]]:
-        del s["active"][d]; s["applied"].pop(d, None)
+        gone = s["applied"].pop(d, None) or {}
+        del s["active"][d]
+        # issue 1495: model a rule two active profiles share being removed with the one that goes
+        if s.get("delete_drops_shared_rules") and gone.get("ipv4.routing-rules"):
+            for dd, pr in s["applied"].items():
+                if pr.get("ipv4.routing-rules") == gone["ipv4.routing-rules"]:
+                    pr["ipv4.routing-rules"] = ""
 elif cmd == ["device", "reapply"]:
     d = a[2]
     if d not in s["active"] or s.get("reapply_fails"):
@@ -210,7 +218,17 @@ import json, os, re, sys
 s["log"].append(["nft"] + a)
 def save(): json.dump(s, open(p, "w"))
 if a[:1] == ["-f"]:
-    s["nft_loaded_file"] = open(a[1]).read(); s["nft_render"] = nft_render(s["nft_loaded_file"])
+    text = open(a[1]).read()
+    m = re.search(r"(?m)^table inet (\S+)$", text)
+    if m and m.group(1) != "vban_dante70":   # issue 1495: another table (the retiring filter) is kept apart
+        s.setdefault("nft_other", {})[m.group(1)] = nft_render(text)
+        save(); sys.exit(0)
+    s["nft_loaded_file"] = text; s["nft_render"] = nft_render(s["nft_loaded_file"])
+    save(); sys.exit(0)
+if a[:3] == ["delete", "table", "inet"]:
+    if a[3] not in s.get("nft_other", {}):
+        sys.stderr.write("Error: No such file or directory\n"); save(); sys.exit(1)
+    del s["nft_other"][a[3]]
     save(); sys.exit(0)
 if a == ["list", "table", "inet", "vban_dante70"]:
     if s.get("nft_unreadable"):
@@ -271,6 +289,45 @@ if "-p" in a:
     sys.exit(0)
 sys.exit(2)
 '''
+
+
+# issue 1495: stream-snv's facts before it moved to ONE NIC + Dante (9.11.2026): the USB-C NIC leg and
+# mbc.lan's VBAN `stream`. The tests that pin the `mac:` leg / the stream role's obs-vban source run on a
+# copy of the box facts with these lines (the rollback shape the fact file names).
+STREAM_SNV_PRE_1495 = {
+    "STRIH_PROGRAM_VBAN_STREAMS": "stream", "STRIH_PROGRAM_VBAN_PORT": "6980", "STRIH_PROGRAM_VBAN_RESERVE_MS": "80",
+    "STRIH_PROGRAM_VBAN_LEG": "mac:00:e0:4c:68:01:85", "STRIH_PROGRAM_VBAN_SENDER": "10.77.7.232",
+    "STRIH_DANTE_DEVICES": "none",
+}
+BOXES = Path(__file__).resolve().parent.parent.parent / "scripts" / "strih-boxes"
+
+
+def pre_1495_boxes(dest):
+    """Copy the box facts to DEST (a new dir) with stream-snv in its pre-issue-1495 shape; return DEST."""
+    import re
+    import shutil
+    dest = Path(dest)
+    shutil.copytree(BOXES, dest)
+    f = dest / "stream-snv.env"
+    t = f.read_text()
+    for k, v in STREAM_SNV_PRE_1495.items():
+        t, n = re.subn(r"(?m)^%s=.*$" % k, "%s=%s" % (k, v), t)
+        assert n == 1, k
+    f.write_text(t)
+    return dest
+
+
+_PRE_1495_DIR = None
+
+
+def pre_1495_boxes_dir():
+    """One shared pre-issue-1495 copy per test process (removed at exit)."""
+    global _PRE_1495_DIR
+    if _PRE_1495_DIR is None:
+        import tempfile
+        _PRE_1495_DIR = tempfile.TemporaryDirectory(prefix="boxes-pre-1495-")
+        pre_1495_boxes(Path(_PRE_1495_DIR.name) / "boxes")
+    return str(Path(_PRE_1495_DIR.name) / "boxes")
 
 
 def install(bin_dir, state_path, proc_sys):

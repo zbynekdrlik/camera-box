@@ -1,6 +1,7 @@
 ---
 paths:
   - "scripts/lib/strih-dante-leg.sh"
+  - "tests/python/test_vban_leg_nic_to_vlan_1495.py"
   - "vendor/obs-vban/src/vban-source.c"
   - "vendor/obs-vban/src/vban-receive-timeline.h"
   - "src/vban_receive_timeline.rs"
@@ -651,7 +652,44 @@ VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, ne
   lacks the off-leg counter, so verify FAILs `(vban-leg) filter` there until then. On stream-snv the
   run touches no NM state; on strih-snv neither (the VLAN exists): no link reset on either.
 
-## The Dante variant of the leg (issue 1485, strih-snv only)
+## A leg moves from a second NIC to a VLAN: the kind transition (issue 1495, stream-snv 9.11.2026)
+
+Owner 9.11.2026: "stream nb sa ma prerobit na jeden ethernet" (after the USB-C NIC dropped off the bus on
+8.11, ~58 min without program audio). stream-snv's leg became `vlan:70` on the onboard r8169 rig NIC
+(`enp56s0.70`), the switch port (foh2_video ether4) carrying VLAN 89 untagged + 70 tagged, admit-all (set by
+the supervisor). The scan of a vlan leg lists only `vlan` profiles, so the old ETHERNET `vban-dante70` on the
+USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `_retire_nic_legs`):
+- ONLY after the VLAN came up and read back (`_strih_vban_leg_live_problems` clean) is the old profile
+  deleted, then the VLAN is read back again (one `device reapply` restores a routing rule the old profile's
+  deactivation took with it; still wrong = rc 1). The seconds between the read-back and the delete are the
+  only time two interfaces carry the address.
+- A VLAN that does not come up leaves the old leg untouched (program audio keeps flowing).
+- The old leg is never unfiltered: BEFORE the main table moves to the VLAN, `_strih_vban_leg_retiring_filter`
+  loads the same ruleset rendered for the old NIC as its own live table `inet vban_dante70_retiring` (only
+  while an ACTIVE NIC leg carries the address, `_strih_vban_leg_carrying_nic_leg`: 0 found / 1 none / 2
+  unreadable, and unreadable refuses the step with nothing changed); it is deleted once the old leg is
+  retired. On a failure path it stays until the next good run (known limit: it is live only, so a reboot in
+  between leaves the old leg unfiltered; the failure message says to re-run setup before any reboot, and
+  verify's leftover row FAILs that box).
+- verify's leftover row on a VLAN leg also FAILs a default route through the parked NIC (the interface of
+  `vban-dante70-retired`: a DHCP lease after all); another interface's default route (a venue WiFi) is never
+  this row's.
+- A VLAN created THIS run that does not read back is DELETED again (`_strih_vban_leg_rollback_new_vlan`), but
+  only on a vlan leg and only while an ACTIVE NIC leg still carries the address: ONE interface on the address
+  again, setup fails by name, the next run creates the VLAN anew. With no such NIC leg (the 8.11 shape: the USB
+  NIC gone, its profile inactive) the VLAN stays, it is the only leg. A `mac:` leg is never rolled back.
+- The retired NIC is parked under `vban-dante70-retired` (`ipv4.method disabled`, IPv6 off, autoconnect), so
+  NetworkManager's automatic DHCP profile never takes the audio-VLAN port with a second default route.
+- A profile whose name nmcli cannot read fails the scan (rc 1), never "not ours".
+- A `vban-dante70` ethernet profile bound to the rig NIC is never touched (a WARN; verify FAILs it).
+- verify item 9 `(vban-leg) leftover`: the leg address on any other interface, and on a vlan leg any
+  ethernet `vban-dante70` profile left, FAIL.
+- The first-VLAN warning names the atlantic reset as one driver's behaviour; r8169 showed none (the wait
+  ends with the "no reset on this NIC" NOTE after `STRIH_VBAN_LEG_RESET_SEEN_S`).
+- Tests: `tests/python/test_vban_leg_nic_to_vlan_1495.py`. The `mac:` tests of `test_vban_leg_1439.py` run on
+  a copy of the facts with stream-snv in its pre-1495 shape (`vban_leg_fakes_1439.pre_1495_boxes`).
+
+## The Dante variant of the leg (issue 1485, strih-snv; stream-snv since issue 1495)
 
 Owner 2.11.2026: each application is its own Dante device; PP gets no Dante; VBAN stays. Fact
 `STRIH_DANTE_DEVICES` = `none` everywhere but strih-snv (`name=arc:cmc:flows:rxfirst-rxlast`, space-joined;

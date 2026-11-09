@@ -27,6 +27,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vban_leg_fakes_1439 as fk  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from strih_pp_hub_fed_1439 import hub_fed_boxes  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -120,7 +123,7 @@ def test_every_box_fact_file_loads(box):
     assert r.returncode == 0, r.stderr
 
 
-@pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "stream|6980|80"),
+@pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "none|none|none"),   # stream-snv: Dante, issue 1495
                                       ("strih-snv", "none|none|none"), ("strih-pp", "strih-obs|6981|40")])   # strih-snv: Dante, issue 1485
 def test_each_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s" "$(strih_lx_program_vban_streams)" '
@@ -135,7 +138,9 @@ def test_each_box_declares_its_program_vban(box, want):
 # production load, lv1 (stream-pp, 256-frame packets) 26-29 ms.
 @pytest.mark.parametrize("box,frames,worst_gap_ms", [("stream-snv", 239, 52), ("stream-pp", 256, 29)])
 def test_each_stream_box_r_sits_above_its_senders_worst_gap(box, frames, worst_gap_ms):
-    r = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_vban_reserve_ms)"', box)
+    # stream-snv: its VBAN rollback shape (issue 1495 moved the program to Dante, the R stays the rollback's)
+    r = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_vban_reserve_ms)"', box,
+              env={"STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()})
     assert r.returncode == 0, r.stderr
     reserve_ms = int(r.stdout)
     budget_ms = reserve_ms - frames * 1000.0 / 48_000 - _header_define("VBAN_RECV_DEADLINE_MARGIN_MS")
@@ -235,8 +240,21 @@ def test_the_stream_manifest_carries_the_vban_source_settings():
     assert PAV.parse_program_audio_vban(text) == PAV.vban_source_settings(6980, "stream", 40)
 
 
-def test_the_stream_snv_manifest_names_mbc_on_the_same_vban_source():
-    d = json.loads(_manifest("stream-snv"))
+def test_the_stream_snv_manifest_switches_mbc_to_its_dante_device():
+    # issue 1495: the program over Dante (the device stream-obs), the input keeps its name `mbc`
+    text = _manifest("stream-snv")
+    d = json.loads(text)
+    assert d["program_audio_input"] == "mbc"
+    assert d["program_audio_dante"] == {"device": "stream-obs"} and "program_audio_vban" not in d
+    assert PAV.parse_program_audio_vban(text) == PAV.DANTE_SEED
+    assert PAV.program_audio_want(PAV.parse_program_audio_vban(text), "x", {})[0] == PAV.DANTE_SOURCE_KIND
+
+
+def test_the_stream_snv_vban_rollback_manifest_names_mbc_on_the_vban_source():
+    r = _bash('strih_box_load "$1"\nobs_box_seed_manifest_json', "stream-snv",
+              env={"STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()})
+    assert r.returncode == 0, r.stderr
+    d = json.loads(r.stdout)
     assert d["program_audio_input"] == "mbc"
     # R 80 ms: mbc's gaps reached 52 ms under production load (issue 1439 finding 6348583939)
     assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 80}
@@ -705,6 +723,7 @@ def _line(received, port=6980, stream="stream", r=40, lost=0, re_anchors=0, sour
 
 
 def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None, box="stream-pp"):
+    # stream-snv: its VBAN rollback shape (issue 1495)
     log = tmp_path / "obs.txt"
     log.write_text(log_text)
     kf = tmp_path / "kind"
@@ -716,7 +735,8 @@ def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None, box="stream-pp"):
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
             'strih_box_load "$3"\n' + later + 'strih_program_vban_grade /nonexistent 127.0.0.1 "$1"\nwait')
     r = _bash(body, log, tmp_path / "later.txt", box,
-              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "1" if append else "0"})
+              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "1" if append else "0",
+                   "STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()})
     assert r.returncode == 0, r.stderr
     return r.stdout.splitlines()
 
