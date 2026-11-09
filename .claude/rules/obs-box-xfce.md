@@ -122,6 +122,10 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
   `/panels/dark-mode` (4.18+) is declared (`true`, dark like tint2).
 - **Verify grades what setup trusts:** `obs_box_xfce_grade_channel` grades the daemon (`verify-live`)
   while the user's xfconfd runs, the file otherwise ((xfce-settings), (xfce-keys), (panel-config)).
+- **A flag set by a function on the RIGHT of a pipe is lost** (bash runs the last pipeline member in a
+  subshell): `printf ... | obs_box_xfce_apply_live` could never tell the panel install that it applied
+  live, so the restart never ran (review round 3). `OBS_BOX_XFCE_LIVE_APPLIED` is set by the caller after
+  the pipeline returned 0.
 - **After a live panel apply** `obs_box_xfce_panel_restart` runs `xfce4-panel --restart` ON THE DISPLAY
   (`strih_kiosk_x_run`: `DISPLAY=:0` + the operator's Xauthority, as the user, plus the bus env), waits
   up to 10 s for a NEW panel process, then `verify-live` reads the layout back: a panel that saved its
