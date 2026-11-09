@@ -46,7 +46,8 @@ def test_a_box_with_discord_gets_a_discord_launcher_that_starts_the_binary(tmp_p
     assert [x[0] for x in rows] == ["power", "obs", "discord"], r.stdout + r.stderr   # issue 1464: power first
     discord = rows[2]
     assert discord[1] == "Discord"
-    assert discord[2] == str(tmp_path / "discord")   # single-instance: a click focuses a running one
+    # single-instance: a click focuses a running one; issue 1465 item 7: in its own scope
+    assert discord[2] == "/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-%s -- " % "discord" + str(tmp_path / "discord")
     assert discord[3] == "discord"                   # the icon the Discord .deb installs
 
 

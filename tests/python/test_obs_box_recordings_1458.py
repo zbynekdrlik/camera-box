@@ -159,7 +159,9 @@ def test_the_recordings_launcher_is_listed_where_pcmanfm_exists(box):
     assert [x[0] for x in rows][:3] == ["power", "obs", "files"], r.stdout + r.stderr   # issue 1464: power first
     files = dict((x[0], x) for x in rows)["files"]
     assert files[1] == "Nahrávky"
-    assert files[2] == "/usr/bin/python3 %s open" % (box.tmp / "lib" / "camera-box" / "obs_box_recordings.py")
+    # issue 1465 item 7: the helper (which resolves the folder at click time) runs in its own scope
+    assert files[2] == ("/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-%s -- " % "files"
+                        + "/usr/bin/python3 %s open" % (box.tmp / "lib" / "camera-box" / "obs_box_recordings.py"))
     r = _bash('obs_box_panel_launchers "$1"', str(box.home), env=_files_env(box, present=False))
     assert "files|" not in r.stdout
 
