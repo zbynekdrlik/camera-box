@@ -109,6 +109,8 @@ REPO="$(cd "$HERE/.." && pwd)"
 . "$HERE/lib/ro-root.sh" # the ONE read-only-root canon, shared with setup-device.sh STEP 18 (issue 808)
 # shellcheck source=scripts/lib/bkshading-sbc-wifi-probe.sh
 . "$HERE/lib/bkshading-sbc-wifi-probe.sh" # the WiFi link reads, shared with the heal (issue 808)
+# shellcheck source=scripts/lib/bkshading-camera-link.sh
+. "$HERE/lib/bkshading-camera-link.sh" # issue 1452: the camera's USB-C link file, shared with the camboxes
 
 UNIT_NAME="$(bkshading_relay_unit_name)"
 UNIT_SRC="$REPO/systemd/$UNIT_NAME"
@@ -129,6 +131,8 @@ UNIT_DIR="$(dirname "$UNIT_DEST")"
 NETPLAN_DIR="${BKSHADING_SBC_NETPLAN_DIR:-/etc/netplan}"
 WPA_CONF_DIR="${BKSHADING_SBC_WPA_CONF_DIR:-/etc/wpa_supplicant}"
 NETWORKD_DIR="${BKSHADING_SBC_NETWORKD_DIR:-/etc/systemd/network}"
+# issue 1452: the camera link file lands in the same networkd dir as the WiFi file.
+BKSHADING_CAMERA_LINK_PATH="$NETWORKD_DIR/05-bkshading-camera.network"
 HEAL_DIR="${BKSHADING_SBC_HEAL_DIR:-$(bkshading_sbc_wifi_heal_install_dir)}"
 PYTHON="${BKSHADING_SBC_PYTHON:-python3}"
 WPA_PASSPHRASE="${BKSHADING_SBC_WPA_PASSPHRASE:-wpa_passphrase}"
@@ -519,6 +523,12 @@ do_install() {
   mv -f "$RELAY_ENV.new" "$RELAY_ENV"
   echo "  wrote $RELAY_ENV (the relay registers with $(bkshading_sbc_register_url))"
 
+  # issue 1452 (shading#6): the camera's USB-C network link (the REST relay finds the camera through its
+  # DHCP lease). Written only when it differs; systemd-networkd enabled, nothing started.
+  BKSHADING_CAMERA_LINK_SYSTEMCTL="$SYSTEMCTL" bkshading_camera_link_install >/dev/null \
+    || { echo "ERROR: the camera link file could not be written (above)" >&2; exit 1; }
+  echo "  camera link file $(bkshading_camera_link_network_path) in place (issue 1452)"
+
   apply_wifi
 
   # ENABLE-ONLY: never start/restart the relay here (provisioning-scripts.md) — reboot / the
@@ -703,6 +713,14 @@ do_check() {
     echo "OK: $RELAY_ENV registers the relay with $(bkshading_sbc_register_url)"
   else
     echo "FAIL: $RELAY_ENV missing or differs (the relay would not announce itself to the shading service) -- re-run --install" >&2
+    rc=1
+  fi
+  # (2c) issue 1452: the camera's USB-C link file is the shading contract's (the REST relay finds the
+  #      camera through its DHCP lease on that link).
+  if [ "$(sha256sum "$(bkshading_camera_link_network_path)" 2>/dev/null | cut -d' ' -f1)" = "$(bkshading_camera_link_sha)" ]; then
+    echo "OK: camera link file $(bkshading_camera_link_network_path)"
+  else
+    echo "FAIL: camera link file $(bkshading_camera_link_network_path) missing or differs from the shading contract (issue 1452) -- re-run --install" >&2
     rc=1
   fi
   # (3) gphoto2 runtime present.

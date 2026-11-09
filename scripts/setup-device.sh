@@ -1887,7 +1887,8 @@ fi
 RELAY_PLAN="$(bkshading_relay_provision_binary_plan "$RELAY_BINARY_ARG")"
 RELAY_DL_DIR="$(mktemp -d)"
 RELAY_BIN_SRC=""
-if RELAY_FETCH_OUT="$(bkshading_relay_provision_fetch_binary "$RELAY_PLAN" "$RELAY_DL_DIR")"; then
+# issue 1452: this box's own pin (scripts/shading-release-boxes.txt), never the fleet default blindly.
+if RELAY_FETCH_OUT="$(bkshading_relay_provision_fetch_binary "$RELAY_PLAN" "$RELAY_DL_DIR" "$DEVICE_NAME")"; then
     RELAY_BIN_SRC="$RELAY_FETCH_OUT"
 else
     RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }$RELAY_FETCH_OUT"
@@ -1901,6 +1902,12 @@ else
     RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }the relay install (gphoto2/unit/env/enable-state) failed -- see the lines above"
 fi
 rm -rf "$RELAY_DL_DIR"
+# issue 1452 (shading#6): the camera's USB-C network link file (DHCP from the camera, no route, no DNS),
+# the one the REST relay finds the camera through. Enable-only: it takes effect at the next boot; verify-
+# device.sh (bb) grades it.
+if ! bkshading_camera_link_install; then
+    RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }the camera link file (issue 1452) could not be written -- see the line above"
+fi
 if [ -n "$RELAY_PROBLEM" ]; then
     echo -e "${RED}  !!! bkshading relay NOT fully provisioned: ${RELAY_PROBLEM}. Continuing to STEP 18 (the read-only fstab), then STEP 19 refuses Setup Complete (issue 808).${NC}"
 fi
