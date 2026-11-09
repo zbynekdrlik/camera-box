@@ -397,6 +397,18 @@ def test_a_kind_change_after_an_interrupted_replace_takes_the_state_from_the_asi
     assert len([a for a in pro if not a]) <= 1, "a one-request gap"
 
 
+def test_a_kind_change_names_the_state_aside_when_a_holder_keeps_it():
+    obs = LingeringObs(old_name=NAME + " (seed replace 1)", dock_pin=False)
+    obs.dock_refresh = lambda: None
+    obs.dock_held = obs.by_name(NAME + " (seed replace 1)")   # a holder keeps the aside the state came from
+    half = Src(NAME, "pulse_input_capture")
+    obs.sources.append(half)
+    obs._add_item("PRO", half, False)
+    st = _seed(obs)
+    assert st.startswith("replaced (was pulse_input_capture"), st
+    assert "still lingers as '%s (seed replace 1)'" % NAME in st, st
+
+
 def test_a_lingering_removed_aside_is_never_a_resume_source():
     # a removed aside a holder still keeps is listed but in no scene: `mbc` absent then is a plain create,
     # never a resume that would leave the new input in no scene at all
