@@ -32,12 +32,35 @@ evidence source is the manual paired-run campaign, which is SUPERVISOR/rig-ops s
 
 Unlike the plain-bool seams, `gates_overall_pass()` here is derived:
 `fold_is_earned(RECORDED_CLEAN_PAIRED_RUNS)` = `RECORDED_CLEAN_PAIRED_RUNS >= REQUIRED_CLEAN_PAIRED_RUNS`
-(REQUIRED = 5, the ticket's "N (>=5)"). Report-only today because `RECORDED_CLEAN_PAIRED_RUNS = 0`
-(no evidence). To make the fold LIVE: bump `RECORDED_CLEAN_PAIRED_RUNS` to 5 (the ONE constant) as
-you record the real N-run evidence set, linking each clean paired-run verdict on issue 1032 — NEVER
-on a guess (`verdict-gate-seam-calibration.md` gates-green-first). No consumer edit is needed: the
-consumer (`run_av_sync`) already calls `folds_to_failure(verdict, RECORDED_CLEAN_PAIRED_RUNS)` and
-bails on a Disagree once earned.
+(REQUIRED = 5, the ticket's "N (>=5)"). It was report-only while `RECORDED_CLEAN_PAIRED_RUNS = 0`;
+since 9.11.2026 it is 5 (the evidence below), so the consumer (`run_av_sync`, which calls
+`folds_to_failure(verdict, RECORDED_CLEAN_PAIRED_RUNS)`) bails on a Disagree. Going back to
+report-only = lowering that one constant with a ticket citing live evidence, never silently.
+
+## LIVE since 9.11.2026 — the evidence that flipped it, and how to read a pair (issue 1032)
+
+The paired-run campaign on the rig never produced a clean pair (moiré, speech arrival). What did:
+the dev2 SyncNet measurer's clips of a LIVE production (real faces on the delivered stream
+program, `~/avsync/measurements-snv-<day>.tsv`, keep `conf >= 4.0`) against the green Full-path
+E2E run right before it (comment 5830076613). 7.11 E2E 42395687259 vs the 8.11 production: 27
+clips (25 x 0 ms, 2 x +40 ms) against the E2E's production-equivalent A/V -1.1 ms, all Agree.
+`RECORDED_CLEAN_PAIRED_RUNS = 5`; a Disagree now fails `recording-verdict --av-sync
+--syncnet-offset-ms` (and so `scripts/lipsync-cross-check.sh`). The E2E verdict is unaffected.
+
+- **Sign: same on both sides, no conversion.** SyncNet `+N fr` = audio leads video = video late
+  (`av_sync_measure.py` header); the QPSK offset is `video_ts - audio_ts` (>0 = video late).
+- **Which E2E number.** On the DIRECT test feed (issue 1482: cam2 HDMI + the marker from the jack)
+  the raw `av_offset_ms` carries the feed's own measured leg (`RIG_DIRECT_AV_EXPECTED_MS`, -46 ms
+  when production A/V is 0), so the production-equivalent number is the gate's
+  `residual_offset_ms`. Comparing the raw -46 against production faces is wrong by the whole leg.
+  On the optical feed (expected 0) the two are the same.
+- **A pair is evidence only when nothing changed on the rig between the E2E and the production.**
+  Check `gh run list` for later E2E runs (they deploy and align) and `git log origin/dev` for
+  pin/latency commits in between. 30.10 E2E vs 1.11 is NOT a pair: the stream program pin moved one
+  frame (1087 -> 1054 ms) and the JPEG XS inputs were provisioned on 31.10 (its 18 clips read
+  -40 then -80 ms, a one-frame step mid-service at 11:38, unexplained).
+- **SyncNet reads in 40 ms steps** (one frame at 25 fps), so a true -1 ms reads 0 and an occasional
+  +/-40 ms clip is quantization, inside the 50 ms tolerance.
 
 ## Pass semantics (the fold's decision)
 

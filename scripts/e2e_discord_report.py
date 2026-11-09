@@ -950,8 +950,8 @@ def _blocking_failures(verdict):
     'Blocking' == folds into recording-verdict.rs's `all_pass` and is LIVE today. A LIVE-toggleable
     seam is honored via its own `gates_overall_pass` field (so if a seam is ever flipped to
     report-only, this report auto-follows). The report-only seams (imag leg PER-FRAME CONTENT,
-    cold_cut, lipsync — dup_cadence LIVE since issue 1166; frozen_leg/self_heal LIVE since issue
-    905 item 2; the optical undecodable floor LIVE since issue 905 item 3) are NEVER returned here
+    cold_cut, lipsync (live only as the --av-sync exit code, issue 1032) — dup_cadence LIVE
+    since issue 1166; frozen_leg/self_heal LIVE since issue 905 item 2; the optical undecodable floor LIVE since issue 905 item 3) are NEVER returned here
     — see `_report_only_tripped`. Ownership follows the #1117
     convention: agent-recoverable ->
     "Rieši Claude."; a genuine physical fault (capture card, silent mbc chain) -> a "Treba fyzicky
@@ -1280,8 +1280,10 @@ def _report_only_tripped(verdict):
             and _g(verdict, "all_cambox_continuity",
                    "undecodable_floor_gates_overall_pass") is not True):
         names.append("optická čitateľnosť (floor)")
-    # lipsync cross-check (issue 1032) — report-only; JSON node lives under all_cambox_av_sync or
-    # top-level depending on run shape (absent on ~all runs today). Guarded so absent -> no-op.
+    # lipsync cross-check (issue 1032) — LIVE since 9.11.2026, but only as the exit code of a
+    # manual `recording-verdict --av-sync --syncnet-offset-ms` run; it never folds into an E2E
+    # verdict's overall_pass, so here it stays an ℹ️ line. The node lives under all_cambox_av_sync
+    # or top-level depending on run shape (absent on the E2E runs). Guarded so absent -> no-op.
     lip = (_g(verdict, "all_cambox_av_sync", "lipsync_cross_check", default=None)
            or _g(verdict, "lipsync_cross_check", default=None))
     if isinstance(lip, dict) and lip.get("gate_pass") is False:
