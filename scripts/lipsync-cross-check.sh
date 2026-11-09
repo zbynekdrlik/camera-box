@@ -238,6 +238,12 @@ main() {
   [ -n "$qrqpsk_recording" ] || { echo "FAIL: --qrqpsk-recording is required" >&2; exit 2; }
   [ -n "$qrqpsk_marker_log" ] || { echo "FAIL: --qrqpsk-marker-log is required" >&2; exit 2; }
   [ -n "$verdict_bin" ] || { echo "FAIL: --verdict-bin is required -- download the CI probe-tools-linux-amd64 artifact's recording-verdict binary (Tier 0: never build --features probe locally)" >&2; exit 2; }
+  # issue 1032: resolve the expected A/V leg up front, so an invalid RIG_TEST_FEED fails before
+  # the long SyncNet pass and before any workdir exists.
+  if [ -z "$av_expected_ms" ]; then
+    av_expected_ms="$(lipsync_default_av_expected_ms)" \
+      || { echo "FAIL: cannot resolve the rig test feed's expected A/V leg (RIG_TEST_FEED='${RIG_TEST_FEED:-}') -- pass --av-expected-ms" >&2; exit 2; }
+  fi
   [ -n "$asset_baseline_ms" ] || { echo "FAIL: --asset-baseline-ms is required -- the pinned lipsync asset has an intrinsic A/V offset (see assets/lipsync/PROVENANCE.md's Baseline section) that must be subtracted before the verdict (930, issuecomment-5153948268)" >&2; exit 2; }
 
   # issue 1174: emit-cadence attribution (independent of the SyncNet pipeline). Placed AFTER the
@@ -315,7 +321,6 @@ main() {
   echo "[lipsync-cross-check] SyncNet aggregated offset (raw, includes asset baseline): ${syncnet_offset_ms}ms" >&2
   echo "[lipsync-cross-check] asset baseline: ${asset_baseline_ms}ms -> rig-added offset (baseline-corrected): ${rig_added_ms}ms" >&2
 
-  [ -n "$av_expected_ms" ] || av_expected_ms="$(lipsync_default_av_expected_ms)"
   echo "[lipsync-cross-check] cross-checking against the paired QR/QPSK recording (expected A/V leg ${av_expected_ms}ms)" >&2
   # issue 1032: the fold is live, so a Disagree exits non-zero; remove our own workdir first.
   local rc=0

@@ -416,7 +416,9 @@ struct Args {
     /// and `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when
     /// given together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
     /// comparing it against this recording's own QR/QPSK offset minus `--av-expected-ms` (the
-    /// test feed's measured leg, issue 1032) (`camera_box::lipsync_cross_check`).
+    /// test feed's measured leg, issue 1032) (`camera_box::lipsync_cross_check`). On the direct
+    /// test feed pass `--av-expected-ms` from `rig_test_feed_av_expected_ms` (-46): this flag's
+    /// default 0 compares the raw offset, 46 ms off. `scripts/lipsync-cross-check.sh` does it.
     /// LIVE since issue 1032 recorded the 7.11 -> 8.11 paired evidence (`RECORDED_CLEAN_PAIRED_RUNS`
     /// reached `REQUIRED_CLEAN_PAIRED_RUNS`): a Disagree verdict makes `--av-sync` exit non-zero
     /// (the JSON is still printed first).
