@@ -652,7 +652,7 @@ _obs_box_panel_xfce_rows() {
   else
     printf 'FAIL|(panel-pkg) xfce4-panel not installed -- re-run setup-strih.sh step 11 (issue 1466)\n'
   fi
-  why="$(obs_box_xfce_check "$(obs_box_xfce_channel_path "$home" xfce4-panel)" obs_box_xfce_panel_spec "$home")" || true
+  why="$(obs_box_xfce_grade_channel "$home" "$user" xfce4-panel obs_box_xfce_panel_spec "$home")" || true
   if [ "$why" != ok ]; then
     printf 'FAIL|(panel-config) %s -- re-run setup-strih.sh step 16h with the session logged out (issue 1466)\n' "${why:-no answer}"
   elif ! bad="$(obs_box_xfce_panel_launchers_ok "$home")"; then

@@ -129,20 +129,19 @@ def merge(channel, current_text, spec):
 
 
 def stray_under_replace(paths, spec):
-    """The first of PATHS that sits under a `replace` path of SPEC and is none of: a declared property, an
-    ancestor of one (a container), a descendant of a declared non-replace property (an app's own detail,
-    e.g. a panel plugin's settings). None when there is none. A replaced subtree holds only what the spec
-    declares, so a property the spec dropped (a stale key binding, a removed plugin) is found here."""
+    """The first of PATHS that is a DIRECT child of a `replace` path of SPEC and is neither declared nor an
+    ancestor of a declared property: a key binding, a panel or a plugin the spec dropped. None when there
+    is none. Anything deeper (a running panel's own mode / opacity / plugin settings under a declared
+    panel-1 or plugin-N) is the app's own detail and never stray, so a live panel can settle."""
     roots = ["/" + "/".join(parts) for parts, typ, _v in spec if typ == "replace"]
     declared = ["/" + "/".join(parts) for parts, typ, _v in spec if typ != "replace"]
     for path in paths:
-        if not any(path.startswith(r + "/") for r in roots):
-            continue
-        if path in declared or any(d.startswith(path + "/") for d in declared):
-            continue
-        if any(path.startswith(d + "/") for d in declared):
-            continue
-        return path
+        for r in roots:
+            if not path.startswith(r + "/") or "/" in path[len(r) + 1:]:
+                continue
+            if path in declared or any(d.startswith(path + "/") for d in declared):
+                continue
+            return path
     return None
 
 

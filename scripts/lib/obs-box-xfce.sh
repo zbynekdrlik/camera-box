@@ -148,6 +148,9 @@ obs_box_xfce_launcher_file() {
 obs_box_xfce_panel_spec() {
   local home="${1:?home required}" pid kind lid ids=""
   printf '/panels\treplace\n/plugins\treplace\n/configver\tint\t2\n/panels\tarray:int\t1\n'
+  # the panel-global key xfce4-panel 4.18+ keeps under /panels (the shipped default.xml sets it): the dark
+  # theme, like the tint2 panel
+  printf '/panels/dark-mode\tbool\ttrue\n'
   printf '/panels/panel-1/position\tstring\tp=8;x=0;y=0\n/panels/panel-1/length\tuint\t100\n'
   printf '/panels/panel-1/position-locked\tbool\ttrue\n/panels/panel-1/size\tuint\t30\n/panels/panel-1/icon-size\tuint\t22\n'
   while IFS='|' read -r pid kind lid; do
@@ -183,6 +186,22 @@ obs_box_xfce_check() {
 }
 
 _obs_box_xfce_repo() { (cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd); }
+
+# obs_box_xfce_grade_channel HOME USER CHANNEL SPEC_FN [ARGS...] -> prints `ok` or the first difference; rc 0
+# only on ok. While the user's xfconfd runs its MEMORY is graded (verify-live: it saves the file when it
+# decides to, so the file can lag a live apply), else the file -- the same decision setup takes.
+obs_box_xfce_grade_channel() {
+  local home="$1" user="$2" channel="$3" spec out
+  shift 3
+  if obs_box_xfce_xfconfd_running "$user"; then
+    spec="$("$@")" || { echo "the declared properties could not be rendered"; return 1; }
+    out="$(printf '%s\n' "$spec" | obs_box_xfce_user_bus_run "$user" python3 "$(_obs_box_xfce_repo)/scripts/obs_box_xfconf.py" \
+      verify-live "$channel" - 2>&1)" && { echo ok; return 0; }
+    printf '%s (the running xfconfd)\n' "${out:-no answer}"
+    return 1
+  fi
+  obs_box_xfce_check "$(obs_box_xfce_channel_path "$home" "$channel")" "$@"
+}
 
 # obs_box_xfce_xfconfd_running USER -> rc 0 while the user's xfconfd runs (its channels are then its own).
 obs_box_xfce_xfconfd_running() { "$OBS_BOX_XFCE_PGREP" -u "${1:?user required}" -x xfconfd >/dev/null 2>&1; }
@@ -398,14 +417,14 @@ obs_box_session_grade_rows() {
     printf 'OK|(xfce-hidden) the indexer, update notifier, power manager and screensaver are hidden and not running\n'
   fi
   why=""
-  why="$(obs_box_xfce_check "$(obs_box_xfce_channel_path "$home" xfwm4)" obs_box_xfce_xfwm4_spec)" || true
-  if [ "$why" = ok ]; then why="$(obs_box_xfce_check "$(obs_box_xfce_channel_path "$home" xfce4-session)" obs_box_xfce_session_spec)" || true; fi
+  why="$(obs_box_xfce_grade_channel "$home" "$user" xfwm4 obs_box_xfce_xfwm4_spec)" || true
+  if [ "$why" = ok ]; then why="$(obs_box_xfce_grade_channel "$home" "$user" xfce4-session obs_box_xfce_session_spec)" || true; fi
   if [ "$why" = ok ]; then
     printf 'OK|(xfce-settings) xfwm4 compositing off, the session never saved on logout\n'
   else
     printf 'FAIL|(xfce-settings) %s -- re-run setup-strih.sh step 15 with the session logged out\n' "${why:-no answer}"
   fi
-  why="$(obs_box_xfce_check "$(obs_box_xfce_channel_path "$home" xfce4-keyboard-shortcuts)" obs_box_xfce_keys_spec)" || true
+  why="$(obs_box_xfce_grade_channel "$home" "$user" xfce4-keyboard-shortcuts obs_box_xfce_keys_spec)" || true
   if [ "$why" = ok ]; then
     printf 'OK|(xfce-keys) brightness, Print / Alt+Print -> flameshot%s bound\n' "$([ "$(strih_box_role)" = stream ] && echo ', the headphone keys')"
   else

@@ -114,10 +114,14 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
   header + a blank line + one value per line, `-r -R` removes a subtree, a missing property reads rc 1.
 - **Under a live xfconfd the daemon's memory is the truth:** `verify-live` (the read-back + the
   `xfconf-query -l` list) decides "unchanged" before anything is set; the saved file lags.
-- **A `replace` subtree holds only what the spec declares:** `stray_under_replace` (both `check` on a
-  file and `verify-live` on the daemon) fails a property under a replaced path that is not declared, not
-  an ancestor of one and not inside a declared property (a panel plugin's own settings stay allowed), so
-  a key binding or plugin the spec dropped is found and the next run re-applies.
+- **A `replace` subtree loses what the spec dropped:** `stray_under_replace` (both `check` on a file and
+  `verify-live` on the daemon) fails a DIRECT child of a replaced path that is neither declared nor an
+  ancestor of a declared property (a dropped key binding, `panel-2`, `plugin-18`), so the next run
+  re-applies. Anything deeper (a running panel's own `mode`, opacity, a plugin's settings) is the app's
+  detail and never stray, or every run would reset and restart the operator's panel. The panel-global
+  `/panels/dark-mode` (4.18+) is declared (`true`, dark like tint2).
+- **Verify grades what setup trusts:** `obs_box_xfce_grade_channel` grades the daemon (`verify-live`)
+  while the user's xfconfd runs, the file otherwise ((xfce-settings), (xfce-keys), (panel-config)).
 - **After a live panel apply** `obs_box_xfce_panel_restart` runs `xfce4-panel --restart` ON THE DISPLAY
   (`strih_kiosk_x_run`: `DISPLAY=:0` + the operator's Xauthority, as the user, plus the bus env), waits
   up to 10 s for a NEW panel process, then `verify-live` reads the layout back: a panel that saved its
@@ -147,7 +151,9 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
    points lightdm at xfce, writes the files while no xfconfd runs). Stop OBS first only if step 4 swaps
    the bundle (the genlock deploy does that itself).
 2. Reboot. Confirm `pgrep -u newlevel -x xfce4-session`, OBS + restreamer + the session apps up,
-   `pgrep -u newlevel localsearch-3` empty.
+   `pgrep -u newlevel -f localsearch-3` empty. Then run setup-strih TWICE inside the XFCE session: the
+   second run must print `xfconf xfce4-panel: unchanged ...` for every channel and must NOT restart the
+   panel (a running panel that writes something under a declared container must never make it re-apply).
 3. `sudo ./scripts/verify-strih.sh --box stream-snv`: items 32 (baseline kiosk = autologin xfce), 44,
    48 PASS.
 4. The operator list: touchpad tap + two-finger scroll, the mouse wheel in the Restreamer windows,

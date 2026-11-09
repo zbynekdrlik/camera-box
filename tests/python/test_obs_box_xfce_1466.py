@@ -163,6 +163,28 @@ def test_replace_drops_the_old_subtree_and_arrays_keep_their_child_properties(tm
     assert _xfconf("check", str(f), "-", stdin=bad).returncode == 1
 
 
+def test_only_a_dropped_direct_child_of_a_replaced_subtree_is_stale(tmp_path):
+    """A running panel keeps its own settings under a declared panel (mode, opacity ...): never stale,
+    or every run would reset and restart the operator's panel. A dropped panel / plugin / key is."""
+    spec = ("/panels\treplace\n/plugins\treplace\n/panels\tarray:int\t1\n/panels/dark-mode\tbool\ttrue\n"
+            "/panels/panel-1/size\tuint\t30\n/plugins/plugin-1\tstring\tclock\n")
+    f = tmp_path / "panel.xml"
+    f.write_text(_xfconf("merge", "xfce4-panel", str(tmp_path / "none.xml"), "-", stdin=spec).stdout)
+    text = f.read_text().replace('<property name="size" type="uint" value="30" />',
+                                 '<property name="size" type="uint" value="30" /><property name="mode" type="uint" value="0" />'
+                                 '<property name="background-style" type="uint" value="0" />')
+    text = text.replace('<property name="plugin-1" type="string" value="clock" />',
+                        '<property name="plugin-1" type="string" value="clock"><property name="digital-format" type="string" value="%R" /></property>')
+    f.write_text(text)
+    assert _xfconf("check", str(f), "-", stdin=spec).stdout.strip() == "ok"
+    f.write_text(text.replace("</channel>", '<property name="plugins2" type="int" value="1" /></channel>'))
+    assert _xfconf("check", str(f), "-", stdin=spec).stdout.strip() == "ok"          # not under a root
+    stale = text.replace('<property name="plugin-1" ', '<property name="plugin-9" type="string" value="pager" /><property name="plugin-1" ')
+    f.write_text(stale)
+    r = _xfconf("check", str(f), "-", stdin=spec)
+    assert r.returncode == 1 and "/plugins/plugin-9 is not declared" in r.stdout, r.stdout
+
+
 def test_an_unreadable_file_or_another_channel_is_never_merged_over(tmp_path):
     f = tmp_path / "x.xml"
     f.write_text("<channel name='xfwm4'><property")
@@ -478,6 +500,18 @@ def test_the_graded_xfce_box_passes_only_with_the_session_up_and_the_indexer_dow
     rows = _rows(box.grade())
     assert rows["(xfce-hidden)"] == "OK", rows
     assert len(box.grade().stdout.splitlines()) == 8
+
+
+def test_under_a_live_xfconfd_verify_grades_the_daemon_not_a_lagging_file(tmp_path):
+    box = Box(tmp_path, running=("xfconfd", "xfce4-session"))
+    assert box.install().returncode == 0               # applied live: the daemon holds them, no file yet
+    rows = _rows(box.grade())
+    assert rows["(xfce-settings)"] == "OK" and rows["(xfce-keys)"] == "OK", box.grade().stdout
+    st = box.live()
+    st["xfwm4"]["/general/use_compositing"] = "true"
+    (tmp_path / "xfconfd.json").write_text(__import__("json").dumps(st))
+    row = [ln for ln in box.grade().stdout.splitlines() if "(xfce-settings)" in ln][0]
+    assert row.startswith("FAIL|") and "running xfconfd" in row, row
 
 
 def test_a_compositor_switched_back_on_fails_the_settings_row(tmp_path):
