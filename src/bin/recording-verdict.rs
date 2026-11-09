@@ -415,7 +415,8 @@ struct Args {
     /// the PAIRED lipsync-test-mode recording of the SAME rig state, from `scripts/av_sync_measure.py`
     /// and `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when
     /// given together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
-    /// comparing it against this recording's own QR/QPSK offset (`camera_box::lipsync_cross_check`).
+    /// comparing it against this recording's own QR/QPSK offset minus `--av-expected-ms` (the
+    /// test feed's measured leg, issue 1032) (`camera_box::lipsync_cross_check`).
     /// LIVE since issue 1032 recorded the 7.11 -> 8.11 paired evidence (`RECORDED_CLEAN_PAIRED_RUNS`
     /// reached `REQUIRED_CLEAN_PAIRED_RUNS`): a Disagree verdict makes `--av-sync` exit non-zero
     /// (the JSON is still printed first).
@@ -2978,16 +2979,23 @@ fn decode_for_grouped(
 /// caller never supplied `--syncnet-offset-ms` (the pre-930 behavior: no `lipsync_cross_check`
 /// key at all), `Some` otherwise — `camera_box::lipsync_cross_check::evaluate` itself decides
 /// Agree/Disagree/Unknown.
+///
+/// issue 1032: SyncNet is compared against the QR/QPSK RESIDUAL, `raw − av_expected_ms`
+/// (`av_window::residual_offset_ms`, the A/V gate's own function): the raw offset carries the
+/// test feed's measured leg (the direct feed reads −46 ms when production A/V is 0), SyncNet on
+/// real faces does not. With `--av-expected-ms 0` (the optical feed) the two are the same.
 fn lipsync_cross_check_for(
     qr_qpsk_raw_offset_ms: f64,
     av_expected_ms: f64,
     syncnet_offset_ms: Option<f64>,
 ) -> Option<camera_box::lipsync_cross_check::LipsyncCrossCheck> {
     let syncnet_offset_ms = syncnet_offset_ms?;
-    let _ = av_expected_ms;
     Some(camera_box::lipsync_cross_check::evaluate(
         Some(syncnet_offset_ms),
-        Some(qr_qpsk_raw_offset_ms),
+        Some(camera_box::av_window::residual_offset_ms(
+            qr_qpsk_raw_offset_ms,
+            av_expected_ms,
+        )),
         camera_box::lipsync_cross_check::LIPSYNC_CROSS_CHECK_TOLERANCE_MS,
     ))
 }
@@ -3054,6 +3062,8 @@ fn run_av_sync(args: &Args) -> Result<()> {
         json["lipsync_cross_check"] = serde_json::json!({
             "syncnet_offset_ms": cross_check.syncnet_offset_ms,
             "qr_qpsk_offset_ms": cross_check.qr_qpsk_offset_ms,
+            "qr_qpsk_raw_offset_ms": report.offset.offset_ms,
+            "av_expected_ms": args.av_expected_ms,
             "delta_ms": cross_check.delta_ms,
             "tolerance_ms": cross_check.tolerance_ms,
             "verdict": format!("{:?}", cross_check.verdict),
@@ -3065,7 +3075,9 @@ fn run_av_sync(args: &Args) -> Result<()> {
         });
         tracing::info!(
             syncnet_offset_ms = ?cross_check.syncnet_offset_ms,
-            qr_qpsk_offset_ms = report.offset.offset_ms,
+            qr_qpsk_offset_ms = ?cross_check.qr_qpsk_offset_ms,
+            qr_qpsk_raw_offset_ms = report.offset.offset_ms,
+            av_expected_ms = args.av_expected_ms,
             delta_ms = ?cross_check.delta_ms,
             verdict = ?cross_check.verdict,
             gate_pass,

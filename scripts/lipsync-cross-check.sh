@@ -27,7 +27,13 @@ set -euo pipefail
 #     --qrqpsk-marker-log  <path to that recording's cam2 QPSK emit-log CSV> \
 #     --verdict-bin <path to the recording-verdict binary> \
 #     --asset-baseline-ms <the pinned asset's own intrinsic A/V offset, ms> \
+#     [--av-expected-ms <the QR/QPSK recording's expected A/V leg, ms; default: the rig test feed's>] \
 #     [--workdir <scratch dir, default: a mktemp -d>]
+#
+# `--av-expected-ms` (issue 1032): SyncNet is compared against the QR/QPSK RESIDUAL. The direct
+# test feed reads -46 ms when production A/V is 0 (scripts/lib/rig-test-feed.sh), the optical feed
+# 0; the default reads the same `rig_test_feed_av_expected_ms` the E2E A/V gate uses. The fold is
+# LIVE since issue 1032: a Disagree makes this script exit non-zero (the JSON is printed first).
 #
 # `--verdict-bin` is REQUIRED, with NO local-build default -- recording-verdict needs `--features
 # probe` to even exist as a binary, and this repo's Local Build Policy forbids building that
@@ -109,15 +115,24 @@ lipsync_aggregate_cmd() {
 # (`--syncnet-offset-ms=<value>`) rather than the space form so a NEGATIVE offset (video earlier
 # than audio) still parses even against an older recording-verdict binary that predates
 # `allow_negative_numbers` on this flag -- belt-and-braces alongside the clap-side fix.
+# An optional 5th <av_expected_ms> (issue 1032) appends `--av-expected-ms=<v>`, so recording-verdict
+# compares SyncNet against the QR/QPSK residual (raw - the test feed's leg), not the raw offset.
 lipsync_verdict_cmd() {
-  local bin="$1" recording="$2" marker_log="$3" syncnet_offset_ms="$4"
+  local bin="$1" recording="$2" marker_log="$3" syncnet_offset_ms="$4" av_expected_ms="${5:-}"
   printf '%s --av-sync %q --av-marker-log %q --syncnet-offset-ms=%q' \
     "$(printf '%q' "$bin")" "$recording" "$marker_log" "$syncnet_offset_ms"
+  if [ -n "$av_expected_ms" ]; then
+    printf ' --av-expected-ms=%q' "$av_expected_ms"
+  fi
 }
 
-# lipsync_default_av_expected_ms -- the expected QR/QPSK A/V offset of the rig's test feed.
+# lipsync_default_av_expected_ms -- the expected QR/QPSK A/V offset of the rig's test feed (issue
+# 1032): the SAME source the E2E A/V gate reads (`rig_test_feed_av_expected_ms`, scripts/lib/
+# rig-test-feed.sh): 0 on the optical feed, the measured direct-feed leg (-46) on the direct feed.
 lipsync_default_av_expected_ms() {
-  printf '0'
+  command -v rig_test_feed_av_expected_ms >/dev/null 2>&1 \
+    || . "$HERE/lib/rig-test-feed.sh"
+  rig_test_feed_av_expected_ms
 }
 
 # lipsync_mean_offset_from_report_json <report_json_text> -- pull `mean_offset_ms` out of
@@ -200,6 +215,7 @@ lipsync_cadence_attribution() {
 main() {
   local lipsync_recording="" qrqpsk_recording="" qrqpsk_marker_log="" verdict_bin=""
   local asset_baseline_ms=""
+  local av_expected_ms=""
   local workdir=""
   # issue 1174: optional cam2 emit-cadence journal (captured over the lipsync recording window) --
   # when given, the same single cross-check command ALSO prints the CADENCE-WARP/CLEAN/UNKNOWN
@@ -212,9 +228,10 @@ main() {
       --qrqpsk-marker-log) qrqpsk_marker_log="$2"; shift 2 ;;
       --verdict-bin) verdict_bin="$2"; shift 2 ;;
       --asset-baseline-ms) asset_baseline_ms="$2"; shift 2 ;;
+      --av-expected-ms) av_expected_ms="$2"; shift 2 ;;
       --workdir) workdir="$2"; shift 2 ;;
       --lipsync-cadence-log) lipsync_cadence_log="$2"; shift 2 ;;
-      *) echo "usage: $0 --lipsync-recording <p> --qrqpsk-recording <p> --qrqpsk-marker-log <p> --verdict-bin <p> --asset-baseline-ms <ms> [--workdir <d>] [--lipsync-cadence-log <p>]" >&2; exit 2 ;;
+      *) echo "usage: $0 --lipsync-recording <p> --qrqpsk-recording <p> --qrqpsk-marker-log <p> --verdict-bin <p> --asset-baseline-ms <ms> [--av-expected-ms <ms>] [--workdir <d>] [--lipsync-cadence-log <p>]" >&2; exit 2 ;;
     esac
   done
   [ -n "$lipsync_recording" ] || { echo "FAIL: --lipsync-recording is required" >&2; exit 2; }
@@ -298,12 +315,16 @@ main() {
   echo "[lipsync-cross-check] SyncNet aggregated offset (raw, includes asset baseline): ${syncnet_offset_ms}ms" >&2
   echo "[lipsync-cross-check] asset baseline: ${asset_baseline_ms}ms -> rig-added offset (baseline-corrected): ${rig_added_ms}ms" >&2
 
-  echo "[lipsync-cross-check] cross-checking against the paired QR/QPSK recording" >&2
-  eval "$(lipsync_verdict_cmd "$verdict_bin" "$qrqpsk_recording" "$qrqpsk_marker_log" "$rig_added_ms")"
+  [ -n "$av_expected_ms" ] || av_expected_ms="$(lipsync_default_av_expected_ms)"
+  echo "[lipsync-cross-check] cross-checking against the paired QR/QPSK recording (expected A/V leg ${av_expected_ms}ms)" >&2
+  # issue 1032: the fold is live, so a Disagree exits non-zero; remove our own workdir first.
+  local rc=0
+  eval "$(lipsync_verdict_cmd "$verdict_bin" "$qrqpsk_recording" "$qrqpsk_marker_log" "$rig_added_ms" "$av_expected_ms")" || rc=$?
 
   if [ "$made_workdir" = true ]; then
     rm -rf "$workdir"
   fi
+  return "$rc"
 }
 
 # Run main only when EXECUTED, not when SOURCED (tests/harness_lipsync_cross_check.rs sources
