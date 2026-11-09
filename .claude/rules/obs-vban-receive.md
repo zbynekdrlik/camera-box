@@ -471,13 +471,20 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   `input_recreate` now: `SetInputName` old -> `<name> (seed replace N)` (read back), CreateInput the new
   one with a HIDDEN item in each scene the old one was in (+ the state, `SetSceneItemIndex` to the old
   index), `RemoveInput` the aside one, then show the items that were visible (a few round trips of gap,
-  never a double sound). A refused create renames the old input back (`kept the old input`); a refused
-  rename removes nothing. The next launch seed RESUMES from an aside input when `<name>` is absent (OBS
-  died mid-replace: the state comes from it, never a fresh create in the program scene) and removes one
-  next to a matching `<name>`. An aside input a holder still keeps after its remove is named in the
-  status (`still lingers as`), never a failure. The dock side (treat a removed source as absent) is the
-  obs project's. Tests: `tests/python/test_program_audio_replace_1495.py` (a fake OBS whose dock
-  re-pins by name).
+  never a double sound). Monitoring and the `audio_monitor` filters (the operator's headphones: they
+  play whatever the items show) are put back only AFTER the old input is gone, the program filters
+  before (review round 1). A refused create renames the old input back (`kept the old input`); a refused
+  rename removes nothing. The next launch seed RESUMES from an aside input that still holds scene items
+  when `<name>` is absent (OBS died mid-replace: the state comes from it, never a fresh create in the
+  program scene); a removed aside a holder keeps (listed, in no scene) is never a resume source. Next
+  to a matching `<name>`, an aside with scene items FINISHES the replace (`<name>` gets an item in each
+  of its scenes, the state, the visibility, then the aside goes: a replace that died after its create
+  left `<name>` hidden), any other aside is removed; after a successful replace the stale asides are
+  removed. An aside input a holder still keeps after its remove is named in the status (`still lingers
+  as`), never a failure. Unchanged limits: a second item of the input in one scene and an item inside a
+  group are not seen by `input_state_read` (lost at the replace). The dock side (treat a removed source
+  as absent) is the obs project's. Tests: `tests/python/test_program_audio_replace_1495.py` (a fake OBS
+  whose dock re-pins by name).
 - **Collection port:** the `stream-pp` preset converts the program input to the same source
   (`--program-audio-vban PORT:STREAM:MS` / `none`); the collection keeps the mixer keys on the object.
   Every OTHER VBAN receive source is dropped with a DROP line on every preset (review round 2: the
