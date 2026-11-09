@@ -654,7 +654,7 @@ _obs_box_panel_xfce_rows() {
   fi
   why="$(obs_box_xfce_grade_channel "$home" "$user" xfce4-panel obs_box_xfce_panel_spec "$home")" || true
   if [ "$why" != ok ]; then
-    printf 'FAIL|(panel-config) %s -- re-run setup-strih.sh step 16h with the session logged out (issue 1466)\n' "${why:-no answer}"
+    printf 'FAIL|(panel-config) %s -- re-run setup-strih.sh step 16h, it applies through a running xfconfd (issue 1466)\n' "${why:-no answer}"
   elif ! bad="$(obs_box_xfce_panel_launchers_ok "$home")"; then
     printf 'FAIL|(panel-config) %s missing or not the declared launcher -- re-run setup-strih.sh step 16h\n' "$bad"
   else

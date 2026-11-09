@@ -422,13 +422,13 @@ obs_box_session_grade_rows() {
   if [ "$why" = ok ]; then
     printf 'OK|(xfce-settings) xfwm4 compositing off, the session never saved on logout\n'
   else
-    printf 'FAIL|(xfce-settings) %s -- re-run setup-strih.sh step 15 with the session logged out\n' "${why:-no answer}"
+    printf 'FAIL|(xfce-settings) %s -- re-run setup-strih.sh step 15 (it applies through a running xfconfd)\n' "${why:-no answer}"
   fi
   why="$(obs_box_xfce_grade_channel "$home" "$user" xfce4-keyboard-shortcuts obs_box_xfce_keys_spec)" || true
   if [ "$why" = ok ]; then
     printf 'OK|(xfce-keys) brightness, Print / Alt+Print -> flameshot%s bound\n' "$([ "$(strih_box_role)" = stream ] && echo ', the headphone keys')"
   else
-    printf 'FAIL|(xfce-keys) %s -- re-run setup-strih.sh step 15 with the session logged out\n' "${why:-no answer}"
+    printf 'FAIL|(xfce-keys) %s -- re-run setup-strih.sh step 15 (it applies through a running xfconfd)\n' "${why:-no answer}"
   fi
   if [ "$(cat "$OBS_BOX_XFCE_POLKIT_RULE" 2>/dev/null; printf x)" = "$(obs_box_xfce_polkit_rule_text "$user"; printf x)" ]; then
     printf 'OK|(xfce-polkit) %s lets %s power off + reboot\n' "$OBS_BOX_XFCE_POLKIT_RULE" "$user"
