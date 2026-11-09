@@ -139,7 +139,8 @@ def test_the_launcher_appears_only_where_flameshot_is_installed(tmp_path):
     for box in ("stream-pp", "strih-pp"):       # every role (one Linux workstation type)
         r = _bash('obs_box_panel_launchers "$1"', str(home), env=env, box=box)
         rows = [ln.split("|") for ln in r.stdout.splitlines()]
-        assert rows[-1] == ["screenshot", "Snímka obrazovky", "%s gui" % (tmp_path / "flameshot"),
+        assert rows[-1] == ["screenshot", "Snímka obrazovky",   # issue 1465 item 7: its own scope
+                            "/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-%s -- " % "screenshot" + "%s gui" % (tmp_path / "flameshot"),
                             "org.flameshot.Flameshot"], rows
 
 

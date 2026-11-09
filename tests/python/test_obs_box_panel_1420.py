@@ -77,7 +77,8 @@ def test_every_app_the_box_has_gets_a_launcher_started_through_its_unit(tmp_path
     assert ex["obs"] == "systemctl --user start strih-obs.service"
     assert ex["shading"] == "systemctl --user start bkshading-panel-app.service"
     assert ex["restreamer"] == "systemctl --user start restreamer.service"
-    assert ex["rustdesk"] == str(tmp_path / "rustdesk")
+    # issue 1465 item 7: a binary launcher starts its app in its own scope, never in the panel unit
+    assert ex["rustdesk"] == "/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-%s -- " % "rustdesk" + str(tmp_path / "rustdesk")
 
 
 def test_a_box_without_an_app_gets_no_launcher_for_it(tmp_path):
