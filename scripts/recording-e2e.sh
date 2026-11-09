@@ -2074,6 +2074,9 @@ cleanup() {
   cg_chain_cleanup_burns_first "${CG_HOST_IP:-}" "$HERE/obs_phase2.py"
   # issue 1404: a live YouTube broadcast is stopped (StopStream + the restreamer session) in the background.
   youtube_leg_cleanup_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"
+  # issue 1485: an abort before [7/8] never reached the normal-path disarm; the background watch loop
+  # then held the job open ~50 min. An instant kill, a no-op when it was never armed.
+  live_freeze_watch_stop "${FREEZE_WATCH_PID_FILE:-}"
   # #281 Fix#3: clear the rig-active heartbeat + stop its refresher — before the cam/OBS
   # restores (which may hang). Once the heartbeat lapses, the rig-restore watchdog is free to
   # recover prod if this run left the rig stranded (e.g. the trap itself is interrupted).
