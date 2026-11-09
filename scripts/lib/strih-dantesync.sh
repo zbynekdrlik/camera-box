@@ -98,34 +98,54 @@ strih_dantesync_running_argv() {
   printf '%s\n' "$argv"
 }
 
-# strih_dantesync_join_verdict IP -> verify-strih item 6d (issue 1439, 1.11.2026): the NIC dantesync
-# joined PTP on in THIS boot vs the NIC that carries IP (the box's STRIH_IP, the rig NIC):
-#   ok:<iface> | wrong:<joined>:<rig> | nojoin (no join line this boot) | norig (no NIC holds IP).
-# dantesync 1.20.0 picks the first IPv4 interface it lists and never re-selects, so a boot that
-# addresses the VBAN leg first kept stream-snv off the Dante clock for a whole event; the owner's
-# ruling is an explicitly configured NIC (dantesync#131), which this grade stands in for until then.
-# ONE bounded journal read (the newest match of this boot), never the whole journal. Always rc 0.
-strih_dantesync_join_verdict() {
-  local ip="${1-}" line joined rig="" ifl rest
-  line="$(journalctl -u dsync -b --no-pager -o cat -g 'Joined Multicast Groups on' -n 1 2>/dev/null || true)"
-  joined="${line##*Joined Multicast Groups on }"
-  joined="${joined%% *}"
-  if [ -n "$ip" ]; then
-    while IFS= read -r ifl; do
-      case "$ifl" in
-        *" inet ${ip}/"*) rest="${ifl#*: }"; rig="${rest%% *}"; break ;;
-      esac
-    done < <(ip -o -4 addr show 2>/dev/null || true)
+# strih_dantesync_rig_nic -> the rig NIC dsync binds PTP to (issue 1439, ROZHODNUTE 1.11.2026: set
+# explicitly, never by chance), resolved by the ONE rig-NIC rule strih_lx_rig_nic (STRIH_NIC_IFACE, then
+# the fact STRIH_NIC_DRIVER, then the NIC carrying STRIH_IP). rc 1 + nothing on stdout when unresolved.
+# STRIH_DANTESYNC_SYSFS (default /sys) is the test seam.
+strih_dantesync_rig_nic() {
+  local nic
+  nic="$(strih_lx_rig_nic "${STRIH_DANTESYNC_SYSFS:-/sys}" "$(ip -o -4 addr show 2>/dev/null || true)" \
+    "$(strih_lx_ip 2>/dev/null || true)")" || return 1
+  [ -n "$nic" ] || return 1
+  printf '%s\n' "$nic"
+}
+
+# strih_dantesync_iface_verdict READ CONFIGURED JOINED RIG -> verify-strih item 6d (issue 1439): dsync's
+# OWN /status names the NIC it was told (ptp_interface_configured) and the one it joined (ptp_interface).
+#   unreadable (READ != 1) | norig (no rig NIC) | not-configured (no --interface) |
+#   configured-elsewhere:<c>:<rig> | joined-elsewhere:<j|->:<rig> | ok:<rig>. Pure, always rc 0.
+strih_dantesync_iface_verdict() {
+  local read="${1-}" conf="${2-}" joined="${3-}" rig="${4-}"
+  if [ "$read" != 1 ]; then echo unreadable
+  elif [ -z "$rig" ]; then echo norig
+  elif [ -z "$conf" ]; then echo not-configured
+  elif [ "$conf" != "$rig" ]; then echo "configured-elsewhere:${conf}:${rig}"
+  elif [ "$joined" != "$rig" ]; then echo "joined-elsewhere:${joined:--}:${rig}"
+  else echo "ok:${rig}"
   fi
-  if [ -z "$rig" ]; then
-    echo norig
-  elif [ -z "$line" ] || [ "$joined" = "$line" ] || [ -z "$joined" ]; then
-    echo nojoin
-  elif [ "$joined" = "$rig" ]; then
-    echo "ok:${rig}"
-  else
-    echo "wrong:${joined}:${rig}"
+}
+
+# strih_dantesync_iface_grade RIG -> reads 127.0.0.1:8898/status ONCE (bounded) and prints the verdict
+# above. A dead endpoint, an empty or non-JSON answer is `unreadable`, never a pass. Always rc 0.
+strih_dantesync_iface_grade() {
+  local rig="${1-}" body pair="" read=0 conf="" joined=""
+  body="$(curl -s -m 3 http://127.0.0.1:8898/status 2>/dev/null || true)"
+  if [ -n "$body" ]; then
+    pair="$(printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict):
+    sys.exit(1)
+v = [d.get("ptp_interface_configured"), d.get("ptp_interface")]
+print("\t".join(x if isinstance(x, str) else "" for x in v))
+' 2>/dev/null)" && read=1
   fi
+  conf="${pair%%$'\t'*}"
+  joined="${pair#*$'\t'}"
+  strih_dantesync_iface_verdict "$read" "$conf" "$joined" "$rig"
 }
 
 # strih_dantesync_unit_masked PATH -> 0 iff PATH is an operator mask: a symlink to /dev/null

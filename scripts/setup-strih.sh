@@ -153,8 +153,8 @@ echo "  dantesync role: ${DS_ROLE}  (args: '${DS_ARGS:-<bare NTP master>}')"
 # issue 1372: the unit is rewritten, reloaded and the daemon (re)started ONLY on a real change
 # (strih_dantesync_install, scripts/lib/strih-dantesync.sh) -- restarting the fleet date master steps
 # the whole rig's date, so a redeploy on an unchanged unit keeps it running.
-DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_lx_ip)")" \
-  || fail "strih_dantesync_unit_text refused to emit a unit for role '$DS_ROLE' args '$DS_ARGS'"
+DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_dantesync_rig_nic)")" \
+  || fail "no dsync unit for role '$DS_ROLE' args '$DS_ARGS' (issue 1439: is the rig NIC resolvable? STRIH_NIC_IFACE overrides)"
 strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE" \
   || fail "dsync.service install failed (role '${DS_ROLE}') -- see the line above"
 

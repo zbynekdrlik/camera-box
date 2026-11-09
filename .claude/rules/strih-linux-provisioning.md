@@ -461,6 +461,32 @@ a restart trigger by design, so a `not-applied` master is deployed in the nightl
 **Live acceptance on the next strih-snv genlock deploy:** `ActiveEnterTimestamp` of dantesync on strih-snv
 unchanged, the master's `last_date_step_ts` unchanged, and the deploy log shows the `kept running` line.
 
+## dsync binds PTP to the declared rig NIC: `--interface` (issue 1439, ROZHODNUTÉ 1.11.2026)
+
+The owner ruled that dsync's PTP NIC is set explicitly, never picked by chance. On 1.11.2026,
+stream-snv's VBAN-leg NIC got its address first, and dantesync 1.20.0 joined PTP there for a whole
+production.
+
+- **The unit.** `strih_dantesync_unit_text ROLE ARGS RIG_NIC` appends `--interface <RIG_NIC>` to
+  ExecStart. A name that is not 1-15 of `[A-Za-z0-9._-]`, or one that starts with `-`, emits nothing.
+- **No ExecStartPre wait.** dsync >= 1.21 waits for the configured NIC and never falls back. The 1.11
+  stopgap waited for the rig IP, which only worked while the rig NIC had the lowest ifindex.
+- **Where the NIC comes from.** setup-strih step 2 and verify item 6c both use
+  `strih_dantesync_rig_nic` (`scripts/lib/strih-dantesync.sh`). It follows the ONE rig-NIC rule,
+  `strih_lx_rig_nic`: `STRIH_NIC_IFACE`, then the fact `STRIH_NIC_DRIVER`, then the NIC carrying
+  STRIH_IP. An unresolved NIC fails step 2, so no unit is ever written without the flag.
+- **Verify item 6d** (`strih_dantesync_iface_grade` over the pure `strih_dantesync_iface_verdict`)
+  reads dsync's OWN `/status` once, bounded. Both `ptp_interface_configured` and `ptp_interface` must
+  equal the rig NIC. The verdicts are `not-configured` / `configured-elsewhere` / `joined-elsewhere` /
+  `unreadable` / `norig`, all FAIL. The boot-journal join reader is gone.
+- **Rollout cost.** The first setup-strih run after this change rewrites the unit, so it restarts
+  dsync once on each box. On the date master that keeps the fleet date (`date-offset.json`, since
+  1.15).
+- **The 1361 golden** renders the unit with `enp7s0` (render.sh `${STRIH_NIC_IFACE:-enp7s0}`), the
+  strih-snv rig NIC.
+- **Camboxes** (setup-device's `--ntp-server strih.lan` unit) are the next item on issue 1439.
+- Tests: `tests/python/test_strih_dantesync_interface_1439.py`.
+
 ## Ubuntu 26.04 (owner ROZHODNUTÉ 18.9.2026)
 
 The strih-snv notebook runs **Ubuntu 26.04 LTS (resolute)**, NOT 24.04 (owner: „chcem prejst na 26

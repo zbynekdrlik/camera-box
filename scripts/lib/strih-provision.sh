@@ -1080,20 +1080,19 @@ strih_install_bundle_prefix() {
 # strih_lx_dantesync_role_ok: an ambiguous shape (server WITH args, client with master/empty args, an
 # unknown role) emits NOTHING and returns 1 -- but a plain server role is CORRECT and NEVER refused
 # (the post-M4 fact), reversing the pre-M4 "always fail-closed on server mode" behaviour.
-# Issue 1439 (1.11.2026): RIG_IP, when given, adds ONE ExecStartPre that waits up to 120 s until
-# `ip -o -4 addr show` lists the rig NIC's address; a timeout fails the start and Restart=always tries
-# again. dantesync 1.20.0 joins PTP on the first IPv4 interface it lists and never re-selects, so on
-# stream-snv a boot that addressed the VBAN-leg NIC first kept it off the Dante clock for a whole
-# event. The rig NIC has the lowest ifindex on every Linux OBS box, so once its IP exists it is the one
-# dantesync picks. No `$` in the line (systemd expands it). A malformed RIG_IP emits nothing (rc 1).
+# Issue 1439 (ROZHODNUTE 1.11.2026: the PTP NIC is set explicitly, never picked by chance): RIG_NIC,
+# when given, appends `--interface <RIG_NIC>` to ExecStart. dsync >= 1.21 waits for that NIC and
+# never falls back, so the unit needs no ExecStartPre wait (the 1.11 stopgap relied on the rig NIC
+# having the lowest ifindex). A NIC name that is not 1-15 of [A-Za-z0-9._-] emits nothing (rc 1).
 strih_dantesync_unit_text() {
   local role="${1:?dantesync role (client|server) required}"
   local args="${2-}"
-  local execargs="" waitpre=""
+  local execargs="" iface=""
   if [ "$#" -ge 3 ]; then
-    local rig_ip="${3-}" d='[0123456789]{1,3}'
-    [[ "$rig_ip" =~ ^${d}\.${d}\.${d}\.${d}$ ]] || return 1
-    waitpre="ExecStartPre=/usr/bin/timeout 120 /bin/sh -c 'until ip -o -4 addr show | grep -qF \" ${rig_ip}/\"; do sleep 1; done'"$'\n'
+    local nic="${3-}" LC_ALL=C up='ABCDEFGHIJKLMNOPQRSTUVWXYZ' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789'
+    [[ "$nic" =~ ^[-._${dg}${up}${lo}]{1,15}$ ]] || return 1
+    case "$nic" in -*) return 1 ;; esac
+    iface=" --interface ${nic}"
   fi
   case "$role" in
     server)
@@ -1115,7 +1114,7 @@ Wants=network.target
 
 [Service]
 Type=simple
-${waitpre}ExecStart=/usr/local/bin/dsync${execargs}
+ExecStart=/usr/local/bin/dsync${execargs}${iface}
 Restart=always
 RestartSec=5
 StandardOutput=journal
