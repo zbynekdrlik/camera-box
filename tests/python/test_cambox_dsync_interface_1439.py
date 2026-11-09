@@ -318,19 +318,29 @@ def _dsync_box(tmp_path, nics, unit_text=OLD_UNIT, status=None):
         unit_dir.joinpath("dsync.service").write_text(unit_text)
     stub = box["stub"]
     stub.joinpath("python3").symlink_to(sys.executable)
-    (box["state"] / "status.json").write_text(status if status is not None else _status("enp3s0", "enp3s0"))
+    # /status answers in order, one JSON per line; past the last line the last one repeats
+    seq = status if isinstance(status, list) else [status if status is not None else _status("enp3s0", "enp3s0")]
+    (box["state"] / "status.jsonl").write_text("\n".join(seq) + "\n")
     stub.joinpath("curl").write_text(
         f'#!{sys.executable}\nimport os\nst = os.environ["FAKE_STATE"]\n'
+        'n = len([l for l in open(os.path.join(st, "log")) if l.startswith("curl ")])\n'
         'open(os.path.join(st, "log"), "a").write("curl status\\n")\n'
-        'print(open(os.path.join(st, "status.json")).read(), end="")\n')
+        'seq = open(os.path.join(st, "status.jsonl")).read().split("\\n")[:-1]\n'
+        'print(seq[min(n, len(seq) - 1)], end="")\n')
     stub.joinpath("curl").chmod(0o755)
+    stub.joinpath("sleep").unlink()
+    stub.joinpath("sleep").write_text(
+        f'#!{sys.executable}\nimport os, sys, time\n'
+        'open(os.path.join(os.environ["FAKE_STATE"], "log"), "a").write("sleep " + " ".join(sys.argv[1:]) + "\\n")\n'
+        'time.sleep(float(sys.argv[1]))\n')
+    stub.joinpath("sleep").chmod(0o755)
     return box, unit_dir, fs
 
 
-def _program(unit_dir, fs):
+def _program(unit_dir, fs, wait="0", poll="1"):
     return build(f'. "{UNITS}"\ncambox_ro_units_apply_program', env={
         "CAMBOX_RO_UNITS_UNIT_DIR": str(unit_dir), "CAMBOX_RO_UNITS_FS_ROOT": str(fs),
-        "CAMBOX_RO_UNITS_DSYNC_WAIT_S": "0", "CAMBOX_RO_UNITS_DSYNC_POLL_S": "1"})
+        "CAMBOX_RO_UNITS_DSYNC_WAIT_S": wait, "CAMBOX_RO_UNITS_DSYNC_POLL_S": poll})
 
 
 def _bound(nic="enp3s0"):
@@ -408,10 +418,62 @@ def test_a_restart_that_never_locks_fails_the_box(tmp_path):
     assert "not locked" in proc.stderr, proc.stderr
 
 
-def test_the_wait_budget_defaults_to_150_s():
+def test_the_read_back_polls_until_dsync_locks(tmp_path):
+    # the cold lock (~95 s live): unlocked first, locked on the second read
+    box, unit_dir, fs = _dsync_box(tmp_path, {"enp3s0": True},
+                                   status=[_status("enp3s0", "enp3s0", locked=False), _status("enp3s0", "enp3s0")])
+    proc = run_text(box, _program(unit_dir, fs, wait="5", poll="1"))
+    calls = log(box)
+    assert proc.returncode == 0, proc.stdout + proc.stderr + "\n".join(calls)
+    restart = index(calls, "systemctl restart dsync root=ro")
+    after = calls[restart:]
+    assert [c for c in after if c.startswith(("curl", "sleep"))] == ["curl status", "sleep 1", "curl status"], after
+    assert "OK: dsync locked on enp3s0" in proc.stdout and "2 read(s)" in proc.stdout, proc.stdout
+
+
+def test_the_read_back_gives_up_at_the_budget_and_names_the_reads(tmp_path):
+    box, unit_dir, fs = _dsync_box(tmp_path, {"enp3s0": True}, status=_status("enp3s0", "enp3s0", locked=False))
+    proc = run_text(box, _program(unit_dir, fs, wait="2", poll="1"))
+    calls = log(box)
+    assert proc.returncode != 0
+    reads = [c for c in calls if c == "curl status"]
+    assert 2 <= len(reads) <= 3, calls
+    assert "not locked" in proc.stderr and "budget 2 s" in proc.stderr, proc.stderr
+
+
+def test_a_failed_reload_never_restarts_dsync(tmp_path):
+    box, unit_dir, fs = _dsync_box(tmp_path, {"enp3s0": True})
+    proc = run_text(box, _program(unit_dir, fs), FAKE_DAEMON_RELOAD_RC="1")
+    calls = log(box)
+    assert proc.returncode != 0
+    assert unit_dir.joinpath("dsync.service").read_text() == _bound(), "the unit landed in the window"
+    assert not any("restart dsync" in c for c in calls), "\n".join(calls)
+    assert "dsync not restarted" in proc.stderr and "reload failed" in proc.stderr, proc.stderr
+
+
+def test_the_wait_budget_defaults_to_150_s_and_a_poll_never_exceeds_it():
     text = build(f'. "{UNITS}"\ncambox_ro_units_apply_program',
                  env={"CAMBOX_RO_UNITS_UNIT_DIR": "/x"})
     assert "_rou_ds_wait=150\n" in text and "_rou_ds_poll=5\n" in text, text
+    text = build(f'. "{UNITS}"\ncambox_ro_units_apply_program', env={
+        "CAMBOX_RO_UNITS_UNIT_DIR": "/x", "CAMBOX_RO_UNITS_DSYNC_WAIT_S": "3", "CAMBOX_RO_UNITS_DSYNC_POLL_S": "10"})
+    assert "_rou_ds_wait=3\n" in text and "_rou_ds_poll=3\n" in text, text
+    text = build(f'. "{UNITS}"\ncambox_ro_units_apply_program', env={
+        "CAMBOX_RO_UNITS_UNIT_DIR": "/x", "CAMBOX_RO_UNITS_DSYNC_WAIT_S": "1e3", "CAMBOX_RO_UNITS_DSYNC_POLL_S": "0"})
+    assert "_rou_ds_wait=150\n" in text and "_rou_ds_poll=5\n" in text, text
+
+
+def test_a_box_without_python3_is_named_by_the_verdict():
+    block = "NOPY=1\nNIC=enp3s0\nEXEC=/usr/local/bin/dsync --ntp-server strih.lan --interface enp3s0\nSTATUS=0\nEND\n"
+    assert _verdict(block) == "unreadable:no-python3-on-the-box"
+
+
+def test_cli_names_an_unresolved_nic_as_dsync_not_bound(tmp_path):
+    from test_cambox_ro_units_1394 import _cli
+    r, _ = _cli(tmp_path, "--apply", "--box", "cam1", env={"FAKE_DSYNC_NIC_HOST": "10.77.9.61"})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "cam1 (dsync not bound: the LAN NIC does not resolve" in r.stderr, r.stderr
+    assert "the unit files are in place" not in r.stderr, r.stderr
 
 
 def test_strih_wrappers_are_the_shared_grade():

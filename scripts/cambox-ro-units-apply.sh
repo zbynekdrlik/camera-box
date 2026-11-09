@@ -333,6 +333,8 @@ for _i in "${!NAMES[@]}"; do
     FAILED+=("$_name (root-rw: $(ro_window_holders "$_out"); nothing was started)")
   else
     case "$_out" in
+      *"dsync.service is not written, dsync is never bound to a guess"*)
+        FAILED+=("$_name (dsync not bound: the LAN NIC does not resolve, see its PLAN line; the rest of the unit set ran, issue 1439)") ;;
       *"OK: the unit files are written"* | *"OK: nothing to write on"*)
         FAILED+=("$_name (the unit files are in place; a step outside the rw window failed: $(first_fail_line "$_out"))") ;;
       *) FAILED+=("$_name (rc=$_rc; the unit set did not land: $(first_fail_line "$_out"))") ;;

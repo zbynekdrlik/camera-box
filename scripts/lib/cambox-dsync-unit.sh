@@ -25,7 +25,10 @@
 #                                        read-only on-box text for verify-device (ba): the LAN NIC, the
 #                                        unit's ExecStart and dsync's own /status, then END
 #   cambox_dsync_verify_verdict BLOCK    pure: ok:<nic> | gather-incomplete | nic-unresolved |
-#                                        unit-not-bound:<ExecStart> | the dsync_iface_verdict tokens
+#                                        unit-not-bound:<ExecStart> | unreadable:no-python3-on-the-box |
+#                                        the dsync_iface_verdict tokens
+#   cambox_dsync_apply_prelude / _plan_cmds / _restart_cmds
+#                                        the live apply's dsync part (see the section at the end)
 #
 # Consumers: setup-device STEP 17 (the unit), verify-device (ba) (the grade), and the live apply
 # cambox_ro_units_apply_program (scripts/lib/cambox-ro-units.sh), which embeds these via `declare -f`.
@@ -95,14 +98,16 @@ cambox_dsync_gather_remote_snippet() {
   printf '_d_nic="$(cambox_lan_nic %q 2>/dev/null)" || _d_nic=""\n' "$sys"
   printf 'echo "NIC=$_d_nic"\n'
   printf 'echo "EXEC=$(sed -n '\''s/^ExecStart=//p'\'' %q 2>/dev/null | tail -n 1)"\n' "$unit"
+  printf 'command -v python3 >/dev/null 2>&1 || echo "NOPY=1"\n'
   printf 'if _d_f="$(dsync_iface_read_status)"; then echo "STATUS=1"; echo "FIELDS=$_d_f"; else echo "STATUS=0"; fi\n'
   printf 'echo END\n'
 }
 
 cambox_dsync_verify_verdict() {
-  local block="${1-}" line nic="" exec_="" status="" fields="" end=0 rest conf joined v
+  local block="${1-}" line nic="" exec_="" status="" fields="" end=0 nopy=0 rest conf joined v
   while IFS= read -r line; do
     case "$line" in
+      NOPY=1) nopy=1 ;;
       NIC=*) nic="${line#NIC=}" ;;
       EXEC=*) exec_="${line#EXEC=}" ;;
       STATUS=*) status="${line#STATUS=}" ;;
@@ -120,6 +125,113 @@ cambox_dsync_verify_verdict() {
   conf="${rest%%$'\t'*}"
   joined="${rest#*$'\t'}"
   [ "$status" = 1 ] || { conf=""; joined=""; }
+  [ "$nopy" != 1 ] || { echo "unreadable:no-python3-on-the-box"; return 0; }
   v="$(dsync_iface_verdict "${status:-0}" "$conf" "$joined" "$nic")"
   echo "$v"
+}
+
+# --- the live apply's dsync part (issue 1439) -----------------------------------------------------
+# Three emitters scripts/lib/cambox-ro-units.sh cambox_ro_units_apply_program splices into its ONE
+# remote program (kept here so that program stays one window and one function). They share its
+# shell: `_rou_box`, `_rou_rl_need` (the sha comparator), `_rou_reloaded` (the daemon-reload held),
+# and the `_rou_ds_*` names below; the window itself writes the unit with `_rou_write` when
+# `_rou_do_ds` = 1 and sets `_rou_ds_written`.
+#   cambox_dsync_apply_prelude UNIT SYSROOT WAIT_S POLL_S  the values + the embedded functions; a bad
+#                                                          WAIT_S/POLL_S reads as the default 150/5
+#   cambox_dsync_apply_plan_cmds     step 1: the NIC resolved ON the box, the wanted unit, the PLAN /
+#                                    NOTE line, a named FAIL when the NIC does not resolve
+#   cambox_dsync_apply_restart_cmds  step 3: `systemctl restart dsync` only when the unit was written
+#                                    and the reload held, then /status read until locked + bound or
+#                                    past WAIT_S (at least two reads when WAIT_S > 0), named with the
+#                                    reads and the seconds it took
+
+cambox_dsync_apply_prelude() {
+  local unit="${1-}" sys="${2-}" wait="${3-}" poll="${4-}"
+  [[ "$wait" =~ ^[0123456789]{1,4}$ ]] || wait=150
+  [[ "$poll" =~ ^[123456789][0123456789]{0,2}$ ]] || poll=5
+  wait=$((10#$wait))
+  poll=$((10#$poll))
+  # a poll longer than the budget would read once, right after the restart: always a cold-lock FAIL
+  if [ "$wait" -gt 0 ] && [ "$poll" -gt "$wait" ]; then poll="$wait"; fi
+  printf '_rou_ds_unit=%q\n' "$unit"
+  printf '_rou_ds_sys=%q\n' "$sys"
+  printf '_rou_ds_wait=%s\n' "$wait"
+  printf '_rou_ds_poll=%s\n' "$poll"
+  declare -f cambox_lan_nic cambox_dsync_unit_text dsync_iface_verdict dsync_iface_status_fields dsync_iface_read_status
+}
+
+cambox_dsync_apply_plan_cmds() {
+  cat <<'DSPLAN'
+# issue 1439: dsync's unit, bound to the LAN NIC resolved on THIS box; only where dsync.service exists
+# (a box without it needs setup-device, like the netconsole unit).
+_rou_ds_present=0
+[ ! -e "$_rou_ds_unit" ] || _rou_ds_present=1
+_rou_ds_nic=""
+_rou_ds_body=""
+_rou_do_ds=0
+_rou_ds_bad=0
+if [ "$_rou_ds_present" = 1 ]; then
+  if _rou_ds_nic="$(cambox_lan_nic "$_rou_ds_sys")" && _rou_ds_body="$(cambox_dsync_unit_text "$_rou_ds_nic")"; then
+    if _rou_rl_need "$_rou_ds_unit" "$_rou_ds_body"; then _rou_do_ds=1; fi
+  else
+    _rou_ds_bad=1
+  fi
+fi
+if [ "$_rou_ds_present" = 0 ]; then
+  echo "NOTE: no $_rou_ds_unit on $_rou_box -- dsync is not provisioned here; re-run setup-device.sh for it (issue 1439)"
+elif [ "$_rou_ds_bad" = 1 ]; then
+  echo "PLAN ($_rou_box): dsync PTP NIC <unresolved>; unit not written (issue 1439)"
+  echo "FAIL: [issue 1394] the LAN NIC of $_rou_box does not resolve (the line above) -- dsync.service is not written, dsync is never bound to a guess (issue 1439)" >&2
+else
+  echo "PLAN ($_rou_box): dsync PTP NIC $_rou_ds_nic; unit $([ "$_rou_do_ds" = 1 ] && echo write || echo in-place) (issue 1439)"
+fi
+DSPLAN
+}
+
+cambox_dsync_apply_restart_cmds() {
+  cat <<'DSRESTART'
+if [ "$_rou_ds_written" = 1 ]; then
+  if [ "$_rou_reloaded" != 1 ]; then
+    echo "FAIL: [issue 1394] dsync not restarted on $_rou_box: the reload failed, so the new unit is not loaded (issue 1439)" >&2
+    _rou_rc=1
+  elif ! systemctl restart dsync; then
+    echo "FAIL: [issue 1394] dsync did not restart on $_rou_box -- read: journalctl -u dsync -n 20 (issue 1439)" >&2
+    _rou_rc=1
+  else
+    _rou_ds_v=""
+    _rou_ds_lk=""
+    _rou_ds_t0="$(date +%s)"
+    _rou_ds_reads=0
+    # bounded by the count AND the deadline: a read can take curl's 3 s, so the count alone overran it
+    _rou_ds_n=$((_rou_ds_wait / _rou_ds_poll))
+    for ((_rou_i = 0; _rou_i <= _rou_ds_n; _rou_i++)); do
+      if [ "$_rou_i" != 0 ]; then
+        [ $(($(date +%s) - _rou_ds_t0)) -lt "$_rou_ds_wait" ] || break
+        sleep "$_rou_ds_poll"
+      fi
+      _rou_ds_read=0
+      _rou_ds_f=""
+      if _rou_ds_f="$(dsync_iface_read_status)"; then _rou_ds_read=1; fi
+      _rou_ds_reads=$((_rou_ds_reads + 1))
+      _rou_ds_lk="${_rou_ds_f%%$'\t'*}"
+      _rou_ds_rest="${_rou_ds_f#*$'\t'}"
+      _rou_ds_v="$(dsync_iface_verdict "$_rou_ds_read" "${_rou_ds_rest%%$'\t'*}" "${_rou_ds_rest#*$'\t'}" "$_rou_ds_nic")"
+      if [ "$_rou_ds_v" = "ok:$_rou_ds_nic" ] && [ "$_rou_ds_lk" = true ]; then break; fi
+    done
+    _rou_ds_took="${_rou_ds_reads} read(s) in $(($(date +%s) - _rou_ds_t0)) s, budget ${_rou_ds_wait} s"
+    if [ "$_rou_ds_v" = unreadable ] && ! command -v python3 >/dev/null 2>&1; then
+      echo "FAIL: [issue 1394] dsync's /status on $_rou_box cannot be read: no python3 on the box ($_rou_ds_took, issue 1439)" >&2
+      _rou_rc=1
+    elif [ "$_rou_ds_v" != "ok:$_rou_ds_nic" ]; then
+      echo "FAIL: [issue 1394] dsync on $_rou_box is not bound to $_rou_ds_nic: $_rou_ds_v ($_rou_ds_took, issue 1439)" >&2
+      _rou_rc=1
+    elif [ "$_rou_ds_lk" != true ]; then
+      echo "FAIL: [issue 1394] dsync on $_rou_box is bound to $_rou_ds_nic but not locked ($_rou_ds_took) -- re-read /status, the cold lock takes ~95 s (issue 1439)" >&2
+      _rou_rc=1
+    else
+      echo "OK: dsync locked on $_rou_ds_nic (--interface, configured and joined; $_rou_ds_took; issue 1439)"
+    fi
+  fi
+fi
+DSRESTART
 }
