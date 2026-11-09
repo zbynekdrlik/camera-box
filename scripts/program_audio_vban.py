@@ -147,6 +147,20 @@ def mbc_vban_transport_problem(kind, settings, muted, want_stream, want_port):
     return None
 
 
+def mbc_dante_transport_problem(kind, muted):
+    """Pure (issue 1495): rig-mode TEST's #901 item-2 decision for a Linux stream box whose program-audio
+    input (`mbc` on stream-snv) is the obs release's dante_input source (the box's Dante device stream-obs,
+    which subscribes mbc-snv's stream mix). A short problem string, or None when the input is that source,
+    unmuted. Mute is named FIRST and alone, like the other two checks. The source has no settings: which
+    transmitter it hears is the device's dante-input.toml (verify-strih item 9 grades it)."""
+    if muted:
+        return "input is MUTED (mute must be OFF for the measurement chain to be usable)"
+    if kind != DANTE_SOURCE_KIND:
+        return ("input kind is %r, expected the Dante source %r (the box's program Dante device, issue 1495)"
+                % (kind, DANTE_SOURCE_KIND))
+    return None
+
+
 def kind_available(obs, kind):
     """True when OBS has the input KIND loaded (GetInputKindList, unversioned ids). An OBS that does not
     answer reads False: never remove an input for a kind that might not be creatable."""

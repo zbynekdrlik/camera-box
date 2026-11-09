@@ -84,13 +84,34 @@ def _rig_mode(tmp_path, rig, body, env=None):
 
 
 def test_rig_mode_grades_the_linux_stream_box_mbc_as_the_vban_source(tmp_path):
+    # stream-snv's VBAN rollback shape (issue 1495 moved it to Dante: the next test)
+    import vban_leg_fakes_1439 as fk
     rig = _rig(tmp_path)
-    p = _rig_mode(tmp_path, rig, "verify_mbc_dante_transport; echo AFTER")
+    p = _rig_mode(tmp_path, rig, "verify_mbc_dante_transport; echo AFTER", env={"STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()})
     assert p.returncode == 0, p.stderr
     assert "AFTER" in p.stdout
     (argv,) = [c for c in _py_calls(rig) if c[:1] == ["mbc-input-check"]]
     assert argv[argv.index("--host") + 1] == "10.77.9.204" and argv[argv.index("--input") + 1] == "mbc"
     assert argv[argv.index("--vban-stream") + 1] == "stream" and argv[argv.index("--vban-port") + 1] == "6980"
+
+
+def test_rig_mode_grades_a_dante_stream_box_mbc_as_the_dante_input(tmp_path):
+    # issue 1495: the real stream-snv takes its program from its Dante device stream-obs
+    rig = _rig(tmp_path)
+    p = _rig_mode(tmp_path, rig, "verify_mbc_dante_transport; echo AFTER")
+    assert p.returncode == 0, p.stderr
+    assert "AFTER" in p.stdout and "Dante-input check" in p.stdout and "'stream-obs'" in p.stdout
+    (argv,) = [c for c in _py_calls(rig) if c[:1] == ["mbc-input-check"]]
+    assert argv[argv.index("--host") + 1] == "10.77.9.204" and argv[argv.index("--input") + 1] == "mbc"
+    assert argv[argv.index("--dante-device") + 1] == "stream-obs"
+    assert "--vban-stream" not in argv and "--vban-port" not in argv
+
+
+def test_rig_mode_a_failed_dante_input_check_ends_test(tmp_path):
+    rig = _rig(tmp_path)
+    p = _rig_mode(tmp_path, rig, "verify_mbc_dante_transport; echo AFTER", env={"FAKE_MBC_RC": "1"})
+    assert p.returncode != 0 and "AFTER" not in p.stdout
+    assert [c for c in _py_calls(rig) if c[:1] == ["mbc-input-check"] and "--dante-device" in c]
 
 
 def test_rig_mode_keeps_the_dante_check_on_a_windows_stream_box(tmp_path):

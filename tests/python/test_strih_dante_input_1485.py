@@ -79,11 +79,14 @@ SITE = "# test site file (fake names)\nRX1=Program L|foh-tx|MASTER-L\nRX2=Progra
 
 # --- facts --------------------------------------------------------------------------------------------
 
-def test_only_strih_snv_takes_the_program_from_dante():
+def test_only_the_snv_boxes_take_the_program_from_dante():
+    # issue 1495: stream-snv too, through its own device stream-obs (`<STRIH_ROLE>-obs`)
     r = _bash('for b in strih-snv strih-pp stream-snv stream-pp; do (strih_box_load "$b" >/dev/null; '
-              'if strih_program_dante_declared; then echo "$b yes"; else echo "$b no"; fi); done')
+              'if strih_program_dante_declared; then echo "$b yes $(strih_dante_input_device)"; '
+              'else echo "$b no"; fi); done')
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split("\n")[:4] == ["strih-snv yes", "strih-pp no", "stream-snv no", "stream-pp no"]
+    assert r.stdout.split("\n")[:4] == ["strih-snv yes strih-obs", "strih-pp no", "stream-snv yes stream-obs",
+                                        "stream-pp no"]
 
 
 def test_strih_snv_has_no_vban_program_and_keeps_its_input_name():

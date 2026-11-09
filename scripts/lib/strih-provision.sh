@@ -386,7 +386,7 @@ strih_lx_seed_manifest_json() {
     ai="$(strih_lx_program_audio_input)" || return 1
     printf '  "camera_latency_ms": %s,\n' "$lat"
     printf '  "program_audio_input": "%s",\n' "$ai"
-    printf '  "program_audio_dante": {"device": "%s"}\n' "$STRIH_DANTE_INPUT_DEVICE"
+    printf '  "program_audio_dante": {"device": "%s"}\n' "$(strih_dante_input_device)"
   elif vban="$(strih_lx_program_audio_vban_json)"; then
     ai="$(strih_lx_program_audio_input)" || return 1
     printf '  "camera_latency_ms": %s,\n' "$lat"

@@ -21,6 +21,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stream_box_fakes_1462 import calls, ffmpeg_calls, make_rig  # noqa: E402
+import vban_leg_fakes_1439 as fk  # noqa: E402
+import pytest  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 LIB = REPO / "scripts" / "lib"
@@ -62,7 +64,9 @@ def test_a_windows_class_row_an_unknown_and_an_empty_host_read_windows(tmp_path)
 # --- the mbc VBAN expectation from the box facts --------------------------------------------------
 
 def test_the_linux_stream_box_expects_its_fact_stream_and_port(tmp_path):
-    p, _ = _run(tmp_path, 'out="$(stream_mbc_vban_expect 10.77.9.204)"; printf "[%s] loaded=[%s]\\n" "$out" "${STRIH_BOX_LOADED:-}"')
+    # stream-snv's VBAN rollback shape (issue 1495 moved its program to Dante, tests below)
+    p, _ = _run(tmp_path, 'out="$(stream_mbc_vban_expect 10.77.9.204)"; printf "[%s] loaded=[%s]\\n" "$out" "${STRIH_BOX_LOADED:-}"',
+                env={"STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()})
     assert p.returncode == 0, p.stderr
     # the facts are read in a subshell: the caller's shell never gets a loaded box
     assert p.stdout.strip() == "[stream 6980 mbc] loaded=[]"
@@ -76,8 +80,7 @@ def test_a_windows_stream_box_expects_nothing(tmp_path):
 
 
 def test_the_expectation_follows_the_fact_file(tmp_path):
-    boxes = tmp_path / "boxes"
-    shutil.copytree(REPO / "scripts" / "strih-boxes", boxes)
+    boxes = fk.pre_1495_boxes(tmp_path / "boxes")
     f = boxes / "stream-snv.env"
     t = f.read_text()
     assert t.count("STRIH_PROGRAM_VBAN_STREAMS=stream\n") == 1 and t.count("STRIH_PROGRAM_VBAN_PORT=6980\n") == 1
@@ -117,8 +120,7 @@ def test_a_linux_box_whose_facts_declare_no_program_vban_refuses_by_name(tmp_pat
 
 
 def test_facts_that_do_not_load_are_named_apart_from_facts_that_declare_none(tmp_path):
-    boxes = tmp_path / "boxes"
-    shutil.copytree(REPO / "scripts" / "strih-boxes", boxes)
+    boxes = fk.pre_1495_boxes(tmp_path / "boxes")
     f = boxes / "stream-snv.env"
     t = f.read_text()
     assert t.count("STRIH_PROGRAM_VBAN_PORT=6980\n") == 1
@@ -129,6 +131,32 @@ def test_facts_that_do_not_load_are_named_apart_from_facts_that_declare_none(tmp
     assert p.stdout.strip() == "RC=1"
     assert "did not load" in p.stderr and "declare no program VBAN stream" not in p.stderr
     assert "STRIH_PROGRAM_VBAN_PORT 'oops'" in p.stderr, "the loader's own line names the bad fact"
+
+
+# --- issue 1495: the stream box's program from its own Dante device --------------------------------------
+
+def test_the_real_stream_snv_takes_its_program_from_the_dante_device_stream_obs(tmp_path):
+    p, _ = _run(tmp_path, 'out="$(stream_program_dante_input 10.77.9.204)"; printf "[%s] loaded=[%s]\\n" "$out" "${STRIH_BOX_LOADED:-}"')
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == "[stream-obs mbc] loaded=[]", "read in a subshell, like the VBAN reader"
+
+
+@pytest.mark.parametrize("host,fleet", [
+    ("10.77.9.204", WIN_STREAM_FLEET),                               # a Windows stream box
+    ("10.77.8.204", "stream-pp|10.77.8.204|linux-genlock|always"),   # a VBAN-fed Linux stream box
+    ("192.0.2.10", "stream-zz|192.0.2.10|linux-genlock|always"),     # no fact file
+])
+def test_any_other_box_is_no_dante_stream_box(tmp_path, host, fleet):
+    p, _ = _run(tmp_path, 'if out="$(stream_program_dante_input "$1")"; then echo "OK[$out]"; else echo "RC=$?"; fi',
+                host, env={"OBS_FLEET": fleet})
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == "RC=1"
+
+
+def test_the_pre_1495_stream_snv_is_no_dante_stream_box(tmp_path):
+    p, _ = _run(tmp_path, 'if out="$(stream_program_dante_input 10.77.9.204)"; then echo "OK[$out]"; else echo "RC=$?"; fi',
+                env={"STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()})
+    assert p.returncode == 0 and p.stdout.strip() == "RC=1", p.stdout + p.stderr
 
 
 # --- the bash builders, run as text on the fake box -----------------------------------------------

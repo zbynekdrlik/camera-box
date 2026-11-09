@@ -142,6 +142,25 @@ stream_box_obs_restart_hint() {
   fi
 }
 
+# stream_program_dante_input HOST -> issue 1495: on a Linux stream box whose facts take the program from its
+# Dante device (STRIH_DANTE_DEVICES names `stream-obs`, the obs release's dante_input source), print
+# `<device> <input>` (the input name may hold spaces: `read -r device input`), rc 0. rc 1, nothing printed,
+# on any other box (a Windows one, a VBAN-fed one) or when the facts do not load (the VBAN reader then names
+# why). Facts load in a SUBSHELL, like stream_mbc_vban_expect.
+stream_program_dante_input() {
+  local host="${1-}" dir="${BASH_SOURCE[0]%/*}" name
+  [ "$(stream_box_platform "$host")" = "linux" ] || return 1
+  name="$(obs_fleet_name_for_host "$host" 2>/dev/null)" || return 1
+  [ -n "$name" ] || return 1
+  (
+    command -v strih_box_load >/dev/null 2>&1 || . "${dir}/strih-box-facts.sh"
+    command -v strih_program_dante_declared >/dev/null 2>&1 || . "${dir}/strih-dante-input.sh"
+    strih_box_load "$name" >/dev/null 2>&1 && strih_program_dante_declared || exit 1
+    i="$(strih_lx_program_audio_input)" && d="$(strih_dante_input_device)" || exit 1
+    printf '%s %s\n' "$d" "$i"
+  )
+}
+
 # stream_mbc_vban_expect HOST -> on a Linux stream box, print `<stream> <port> <input>`: the VBAN
 # stream name and UDP port the box's program-audio OBS input (the vendored obs-vban receive source,
 # issue 1439) must carry, then that input's NAME (which may hold spaces, so it comes last: read it with

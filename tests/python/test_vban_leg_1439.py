@@ -16,6 +16,9 @@ klasicku". The hand fix of 23.10.2026 10:04 is codified into setup-strih / verif
   * setup-strih step 13 = strih_vban_leg_install, verify-strih item 9 = strih_vban_leg_grade, every role.
 
 Tier-0: bash + pytest only; nmcli / ip / nft / systemctl / sysctl are the fakes of vban_leg_fakes_1439.py.
+issue 1495 moved the real stream-snv to ONE NIC (VLAN 70 on its rig NIC) + Dante; the `mac:` leg tests here
+run on a copy of the box facts with stream-snv in its pre-1495 shape (fk.pre_1495_boxes_dir), and the real
+facts are pinned by the two tests that say so.
 The nft ruleset is pinned to the real nft 1.0.9 render (captured in a throwaway network namespace) and
 to the live stream-snv table read on 23.10.2026.
 """
@@ -61,6 +64,7 @@ GRADE_FNS = 'ok() { printf "OK|%s\\n" "$*"; }\nbad() { printf "BAD|%s\\n" "$*"; 
 def _bash(body, *args, env=None, path_prefix=None):
     """BODY under the callers' strict mode with the provisioning libs sourced; values reach it as $1.. only."""
     e = fk.os_env_without(LEAKY)
+    e["STRIH_BOXES_DIR"] = fk.pre_1495_boxes_dir()
     if path_prefix:
         e["PATH"] = "%s:%s" % (path_prefix, e["PATH"])
     e.update(env or {})
@@ -72,8 +76,7 @@ def _bash(body, *args, env=None, path_prefix=None):
 def _boxes_with(tmp_path, box, edits):
     d = tmp_path / "boxes"
     if not d.exists():
-        import shutil
-        shutil.copytree(BOXES, d)
+        fk.pre_1495_boxes(d)
     f = d / ("%s.env" % box)
     t = f.read_text()
     for old, new in edits:
@@ -108,13 +111,17 @@ LEG_BODY = ('strih_box_load "$1" || exit 9\n'
             '"$(strih_lx_program_vban_sender)"')
 
 
-def test_stream_snv_has_the_nic_leg_strih_snv_the_vlan_leg_every_other_box_none():
+def test_stream_snv_and_strih_snv_have_the_vlan_leg_every_other_box_none():
+    # the REAL facts: issue 1495 put stream-snv's leg on VLAN 70 of its rig NIC (the USB-C NIC retired)
+    real = {"STRIH_BOXES_DIR": str(BOXES)}
+    assert _bash(LEG_BODY, "stream-snv", env=real).stdout.strip() == "vlan:70|%s|%s:6980" % (LEG_ADDR, SENDER)
+    assert _bash(LEG_BODY, "strih-snv", env=real).stdout.strip() == "vlan:70|%s|%s" % (STRIH_LEG_ADDR, STRIH_SENDER)
+    # the pre-1495 shape the `mac:` tests below run on
     assert _bash(LEG_BODY, "stream-snv").stdout.strip() == "mac:%s|%s|%s" % (LEG_MAC, LEG_ADDR, SENDER)
-    assert _bash(LEG_BODY, "strih-snv").stdout.strip() == "vlan:70|%s|%s" % (STRIH_LEG_ADDR, STRIH_SENDER)
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
         if box in ("stream-snv", "strih-snv"):
             continue
-        r = _bash(LEG_BODY, box)
+        r = _bash(LEG_BODY, box, env=real)
         assert r.returncode == 0, (box, r.stderr)
         assert r.stdout.strip() == "none|none|none", box
 
@@ -522,12 +529,13 @@ def _dante_text(sender="10.77.7.30", port="6980,6981", intercom="v0.6.23", obs="
     return r.stdout
 
 
-def test_only_strih_snv_declares_dante_devices():
-    """Owner 2.11.2026: PP gets no Dante, and VBAN stays."""
+def test_only_the_snv_boxes_declare_dante_devices():
+    """Owner 2.11.2026: PP gets no Dante, and VBAN stays. issue 1495: stream-snv's own device stream-obs."""
+    want = {"strih-snv": STRIH_DEVICES, "stream-snv": "stream-obs=4440:8800:4455:30000-30031"}
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
-        r = _bash('strih_box_load "$1" || exit 9\nstrih_lx_dante_devices', box)
+        r = _bash('strih_box_load "$1" || exit 9\nstrih_lx_dante_devices', box, env={"STRIH_BOXES_DIR": str(BOXES)})
         assert r.returncode == 0, (box, r.stderr)
-        assert r.stdout.strip() == (STRIH_DEVICES if box == "strih-snv" else "none"), box
+        assert r.stdout.strip() == want.get(box, "none"), box
 
 
 def test_the_dante_ruleset_is_the_real_nft_render():

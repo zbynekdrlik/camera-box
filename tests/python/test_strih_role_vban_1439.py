@@ -43,10 +43,11 @@ def _vban_era_boxes():
     """issue 1485: strih-snv takes its program from the Dante device strih-obs now, so this file -- the
     obs-vban strih role it pins -- reads strih-snv as of the VBAN program (the three facts back, the Dante
     OBS device off its device list), the rollback shape. strih-pp is its real, live VBAN box."""
+    import vban_leg_fakes_1439 as fk
     d = Path(tempfile.mkdtemp(prefix="strih-boxes-vban-era-"))
     atexit.register(shutil.rmtree, d, True)
-    for f in REAL_BOXES.glob("*.env"):
-        (d / f.name).write_text(f.read_text())
+    shutil.rmtree(d)
+    fk.pre_1495_boxes(d)   # issue 1495: stream-snv as of its VBAN program too (the rollback shape)
     f = d / "strih-snv.env"
     t = f.read_text()
     for old, new in (("STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n"),

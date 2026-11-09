@@ -32,6 +32,12 @@
 #        reapply`, a refused reapply FAILS by name, an identity change (vlan.parent, vlan.id, the interface
 #        name) and an existing INACTIVE VLAN profile are refused untouched -- arming its autoconnect would
 #        make NetworkManager activate it at once (a maintenance-window job).
+#      - mac -> vlan (issue 1495, stream-snv moved its leg from the USB-C NIC onto VLAN 70 of the rig NIC):
+#        an ETHERNET vban-dante70 bound to a physical NIC other than the rig NIC is the retired NIC leg. It is
+#        deleted only AFTER the VLAN came up and read back, then the VLAN is read back again (one reapply
+#        restores a routing rule the old profile's deactivation took). A VLAN created this run that does not
+#        read back goes down again, disarmed, so the box keeps ONE interface on the leg address (the old one).
+#        One bound to the rig NIC is never touched. verify's `(vban-leg) leftover` row FAILs what is left.
 #   2. nftables `table inet vban_dante70` (the house pattern of scripts/lib/dscp-nft.sh: a dedicated
 #      table, `table` / `delete table` atomic replace, never `flush ruleset`, applied by its own boot
 #      oneshot, never the distro nftables.service): IN on the leg only the sender's VBAN + echo
@@ -465,7 +471,7 @@ _strih_vban_leg_rig_link_wait() {
 
 # _strih_vban_leg_vlan_warning PARENT ID -> the loud line printed before a first VLAN creation.
 _strih_vban_leg_vlan_warning() {
-  echo "  WARNING: creating VLAN ${2} on the rig NIC ${1} -- the atlantic driver resets the rig link for ~8 s the first time a VLAN enters its HW filter (issue 1439, 23.10.2026): NDI, PTP and ssh on this box drop for that time; done once, never again on a re-run"
+  echo "  WARNING: creating VLAN ${2} on the rig NIC ${1} -- a NIC driver may reset the rig link the first time a VLAN enters its HW filter (the atlantic driver does, ~8 s, issue 1439, 23.10.2026): NDI, PTP and ssh on this box drop for that time; done once, never again on a re-run"
 }
 
 # _strih_vban_leg_active_on IF -> the UUID of the profile active on IF ('' when none); rc 1 + a named
@@ -827,7 +833,7 @@ strih_vban_leg_grade() {
       ok "(vban-leg) vban: $((a2 - a1)) packets from ${sender} to UDP ${port} on ${ifc} in ${wait} s"
     else
       if strih_program_dante_declared 2>/dev/null; then   # issue 1485: the program is on Dante, VBAN is only the hub's fallback
-        note "(vban-leg) vban: no VBAN from ${sender} on ${ifc} in ${wait} s -- this box takes its program from the Dante device strih-obs (graded by (program-dante)); the console's VBAN is not needed"
+        note "(vban-leg) vban: no VBAN from ${sender} on ${ifc} in ${wait} s -- this box takes its program from the Dante device $(strih_dante_input_device) (graded by (program-dante)); the console's VBAN is not needed"
       else
         bad "(vban-leg) vban: no VBAN from ${sender} arrived on ${ifc} in ${wait} s -- is the console ${sender} sending stream '${stream}' to ${addr}:${port}?"
       fi

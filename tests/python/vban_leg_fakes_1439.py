@@ -273,6 +273,45 @@ sys.exit(2)
 '''
 
 
+# issue 1495: stream-snv's facts before it moved to ONE NIC + Dante (9.11.2026): the USB-C NIC leg and
+# mbc.lan's VBAN `stream`. The tests that pin the `mac:` leg / the stream role's obs-vban source run on a
+# copy of the box facts with these lines (the rollback shape the fact file names).
+STREAM_SNV_PRE_1495 = {
+    "STRIH_PROGRAM_VBAN_STREAMS": "stream", "STRIH_PROGRAM_VBAN_PORT": "6980", "STRIH_PROGRAM_VBAN_RESERVE_MS": "80",
+    "STRIH_PROGRAM_VBAN_LEG": "mac:00:e0:4c:68:01:85", "STRIH_PROGRAM_VBAN_SENDER": "10.77.7.232",
+    "STRIH_DANTE_DEVICES": "none",
+}
+BOXES = Path(__file__).resolve().parent.parent.parent / "scripts" / "strih-boxes"
+
+
+def pre_1495_boxes(dest):
+    """Copy the box facts to DEST (a new dir) with stream-snv in its pre-issue-1495 shape; return DEST."""
+    import re
+    import shutil
+    dest = Path(dest)
+    shutil.copytree(BOXES, dest)
+    f = dest / "stream-snv.env"
+    t = f.read_text()
+    for k, v in STREAM_SNV_PRE_1495.items():
+        t, n = re.subn(r"(?m)^%s=.*$" % k, "%s=%s" % (k, v), t)
+        assert n == 1, k
+    f.write_text(t)
+    return dest
+
+
+_PRE_1495_DIR = None
+
+
+def pre_1495_boxes_dir():
+    """One shared pre-issue-1495 copy per test process (removed at exit)."""
+    global _PRE_1495_DIR
+    if _PRE_1495_DIR is None:
+        import tempfile
+        _PRE_1495_DIR = tempfile.TemporaryDirectory(prefix="boxes-pre-1495-")
+        pre_1495_boxes(Path(_PRE_1495_DIR.name) / "boxes")
+    return str(Path(_PRE_1495_DIR.name) / "boxes")
+
+
 def install(bin_dir, state_path, proc_sys):
     """Write the fakes into BIN_DIR; return the env additions."""
     bin_dir = Path(bin_dir)

@@ -8,11 +8,12 @@
 # dlink's Dante device). The plugin reads ~/.camera-box/dante-input.toml of the OBS user ONCE at module
 # load (no file = no device and no source kind); the format is the release's dante-input.example.toml.
 #
-# Which box: one whose fact STRIH_DANTE_DEVICES names the device `strih-obs` (its ports
-# arc:cmc:flows:rxfirst-rxlast). Such a box takes its program from Dante: the loader then refuses the
-# VBAN program facts (STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS none) and keeps
-# STRIH_PROGRAM_AUDIO_INPUT as the input's name. Every other box gets no file (a stale one we wrote is
-# removed) and keeps obs-vban.
+# Which box: one whose fact STRIH_DANTE_DEVICES names the program device `<STRIH_ROLE>-obs` (its ports
+# arc:cmc:flows:rxfirst-rxlast): `strih-obs` on a strih box (strih-snv), `stream-obs` on a stream box
+# (stream-snv since issue 1495, distinct from mbc's own Dante device `mbc-snv`). Such a box takes its program
+# from Dante: the loader then refuses the VBAN program facts (STRIH_PROGRAM_VBAN_STREAMS / _PORT /
+# _RESERVE_MS none) and keeps STRIH_PROGRAM_AUDIO_INPUT as the input's name (`ASIO zvuk`, `mbc`). Every
+# other box gets no file (a stale one we wrote is removed) and keeps obs-vban.
 #
 # The SITE data (which Dante transmitter and channel each RX channel subscribes) is never in this
 # PUBLIC repo: it lives in an untracked per-box file the supervisor places, STRIH_DANTE_INPUT_SITE_FILE
@@ -44,18 +45,28 @@ if ! declare -F strih_dante_ptp_pin_ready >/dev/null; then
   . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-ptp.sh"   # in-process PTP: the 319 bind right + the media clock row
 fi
 
+# The strih role's device name (issue 1485); the loaded box's own is strih_dante_input_device.
 STRIH_DANTE_INPUT_DEVICE="strih-obs"
 STRIH_DANTE_INPUT_SOURCE_KIND="dante_input"
 STRIH_DANTE_INPUT_NETWORK_RATE=96000
 STRIH_DANTE_INPUT_HEADER="# ~/.camera-box/dante-input.toml -- written by camera-box setup-strih step 13 (issue 1485); every run rewrites it"
 
-# strih_dante_input_ports DEVICES -> `arc cmc flows rx_port_base` of the strih-obs device in DEVICES (the
-# fact's value); nothing + rc 1 when DEVICES names no strih-obs. Pure.
+# strih_dante_input_device -> the loaded box's program Dante device: `<STRIH_ROLE>-obs` (issue 1495).
+strih_dante_input_device() {
+  local role
+  role="$(strih_box_role 2>/dev/null)" || role=strih
+  case "$role" in stream) printf 'stream-obs\n' ;; *) printf '%s\n' "$STRIH_DANTE_INPUT_DEVICE" ;; esac
+}
+
+# strih_dante_input_ports DEVICES [NAME] -> `arc cmc flows rx_port_base` of the program device NAME (default
+# the loaded box's, strih_dante_input_device) in DEVICES (the fact's value); nothing + rc 1 when DEVICES names
+# no such device.
 strih_dante_input_ports() {
-  local d spec ports first
+  local d spec ports first name="${2-}"
+  [ -n "$name" ] || name="$(strih_dante_input_device)"
   for d in ${1:-}; do
     case "$d" in
-      "${STRIH_DANTE_INPUT_DEVICE}="*)
+      "${name}="*)
         spec="${d#*=}"; ports="${spec%:*}"; first="${spec##*:}"; first="${first%%-*}"
         printf '%s %s\n' "${ports//:/ }" "$first"
         return 0 ;;
@@ -127,7 +138,7 @@ strih_dante_input_toml() {
   done <<<"$chans"
   printf '%s\n\n' "$STRIH_DANTE_INPUT_HEADER"
   printf 'name = "%s"\niface = "%s"\nnetwork_rate = %s\nrx = [%s]\n' \
-    "$STRIH_DANTE_INPUT_DEVICE" "$iface" "$STRIH_DANTE_INPUT_NETWORK_RATE" "$rx"
+    "$(strih_dante_input_device)" "$iface" "$STRIH_DANTE_INPUT_NETWORK_RATE" "$rx"
   printf 'arc_port = %s\ncmc_port = %s\nflows_port = %s\nrx_port_base = %s\n' "$arc" "$cmc" "$flows" "$base"
   printf '%s' "$subs"
 }
@@ -157,9 +168,9 @@ strih_dante_input_install() {
     if [ -f "$dest" ] && head -n 1 "$dest" 2>/dev/null | grep -qxF "$STRIH_DANTE_INPUT_HEADER"; then
       rm -f "$dest" && echo "  dante-input: removed ${dest} (this box takes no Dante program)"
     elif [ -f "$dest" ]; then
-      echo "  WARNING: ${dest} exists but this box's facts declare no ${STRIH_DANTE_INPUT_DEVICE} Dante device -- not ours, left alone" >&2
+      echo "  WARNING: ${dest} exists but this box's facts declare no $(strih_dante_input_device) Dante device -- not ours, left alone" >&2
     else
-      echo "  dante-input: no ${STRIH_DANTE_INPUT_DEVICE} Dante device on this box (STRIH_DANTE_DEVICES) -- no ${dest}"
+      echo "  dante-input: no $(strih_dante_input_device) Dante device on this box (STRIH_DANTE_DEVICES) -- no ${dest}"
     fi
     strih_dante_ptp_port_remove || return 1
     return 0
@@ -170,7 +181,7 @@ strih_dante_input_install() {
   group="$(id -gn "$user" 2>/dev/null)" || { echo "dante-input: no user ${user}" >&2; return 1; }
   install -d -m 0755 -o "$user" -g "$group" "$(dirname "$dest")" || return 1
   obs_box_write_if_changed_rendered "$dest" 0644 "${user}:${group}" "dante-input" strih_dante_input_toml "$iface" "$ports" "$chans" || return 1
-  echo "  dante-input: ${STRIH_DANTE_INPUT_DEVICE} on ${iface}, $(printf '%s\n' "$chans" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
+  echo "  dante-input: $(strih_dante_input_device) on ${iface}, $(printf '%s\n' "$chans" | wc -l) RX channel(s) from $(strih_dante_input_site_file) -- OBS loads it at its next start"
   strih_dante_ptp_port_install || { echo "dante-input: the right to bind UDP 319 for the in-process PTP follower failed (above)" >&2; return 1; }
 }
 
@@ -215,15 +226,16 @@ strih_dante_input_status_verdict() {
 # strih_dante_input_grade SCN_BIN WS_HOST LOG -> verify-strih item 9's `(program-dante)` rows (through the
 # caller's ok / bad / note). Always rc 0.
 strih_dante_input_grade() {
-  local scn="${1-}" ws="${2-}" log="${3-}" name kind dest home user l1 l2 v start errs wait="${STRIH_DANTE_INPUT_WAIT_S:-12}"
+  local scn="${1-}" ws="${2-}" log="${3-}" name kind dest home user l1 l2 v start errs wait="${STRIH_DANTE_INPUT_WAIT_S:-12}" dev
   name="$(strih_lx_program_audio_input 2>/dev/null)" || name="ASIO zvuk"
   user="${STRIH_LX_USER:-newlevel}"
   home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6 || true)"; home="${home:-/home/${user}}"
   dest="$(_strih_dante_input_dest "$home")"
-  if [ -f "$dest" ] && grep -q "^name = \"${STRIH_DANTE_INPUT_DEVICE}\"$" "$dest" 2>/dev/null; then
-    ok "(program-dante) ${dest} declares the ${STRIH_DANTE_INPUT_DEVICE} device ($(grep -c '^\[\[subscribe\]\]' "$dest") subscription(s))"
+  dev="$(strih_dante_input_device)"
+  if [ -f "$dest" ] && grep -q "^name = \"${dev}\"$" "$dest" 2>/dev/null; then
+    ok "(program-dante) ${dest} declares the ${dev} device ($(grep -c '^\[\[subscribe\]\]' "$dest") subscription(s))"
   else
-    bad "(program-dante) ${dest} is missing or names no ${STRIH_DANTE_INPUT_DEVICE} device -- re-run setup-strih.sh step 13 (the site file $(strih_dante_input_site_file) must exist), then restart OBS"
+    bad "(program-dante) ${dest} is missing or names no ${dev} device -- re-run setup-strih.sh step 13 (the site file $(strih_dante_input_site_file) must exist), then restart OBS"
   fi
   if [ -n "${STRIH_DANTE_INPUT_KIND_FILE:-}" ]; then kind="$(cat "$STRIH_DANTE_INPUT_KIND_FILE" 2>/dev/null || true)"
   else kind="$(python3 "$scn" --host "$ws" --audio-input-kind 2>/dev/null || echo absent)"; fi

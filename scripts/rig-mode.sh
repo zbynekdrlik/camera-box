@@ -1164,6 +1164,18 @@ verify_mbc_dante_transport() {
   # receive source on the VBAN stream + port of its box facts, so the check grades that instead. A
   # Linux box without those facts refuses here, before any read, and so does an input name that is
   # not the one its facts declare (STRIH_PROGRAM_AUDIO_INPUT) -- the check would grade another input.
+  # issue 1495: a stream box whose facts take the program from its Dante device grades the dante_input kind.
+  if expect="$(stream_program_dante_input "$STREAM_IP")"; then
+    read -r vban_stream vban_input <<<"$expect"
+    if [ "$MBC_INPUT_NAME" != "$vban_input" ]; then
+      echo "ERROR: [#901] MBC_INPUT_NAME='${MBC_INPUT_NAME}' but the stream box ${STREAM_IP}'s facts name its program-audio input '${vban_input}' (STRIH_PROGRAM_AUDIO_INPUT) -- set MBC_INPUT_NAME to that name or fix the facts (issue 1495)" >&2
+      exit 1
+    fi
+    echo "[obs stream ${STREAM_IP}] #901 mbc Dante-input check (dante_input source of the device '${vban_stream}', unmuted): input='${MBC_INPUT_NAME}' (issue 1495)"
+    python3 "$here/obs_phase2.py" mbc-input-check --host "$STREAM_IP" --input "$MBC_INPUT_NAME" \
+      --dante-device "$vban_stream" --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream mbc] /'
+    return
+  fi
   if ! expect="$(stream_mbc_vban_expect "$STREAM_IP")"; then
     echo "ERROR: [#901] the stream box ${STREAM_IP} is Linux but its mbc VBAN stream is not declared -- see the line above (issue 1462)" >&2
     exit 1
