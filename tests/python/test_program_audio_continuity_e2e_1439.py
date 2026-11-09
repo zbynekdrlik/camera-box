@@ -334,3 +334,29 @@ def test_a_dante_stream_box_without_device_lines_is_unknown(tmp_path):
     assert "GATE=1" in r.stdout, r.stdout + r.stderr
     b = _block(tmp_path)
     assert b["verdict"] == "UNKNOWN" and b["stream_dante"]["verdict"] == "UNKNOWN", b
+
+
+def test_a_dante_closing_line_after_the_mix_closes_is_waited_for(tmp_path):
+    # the mix's closing lines are in the first reads, the device's 2nd status line after the stop only later
+    _verdict(tmp_path)
+    _marks(tmp_path, 42000, 42100)
+    full = _dante_box(tmp_path)
+    lines = (tmp_path / "dante" / "log.txt").read_text().splitlines()
+    statuses = [i for i, l in enumerate(lines) if "dante-input status:" in l]
+    short_dir = tmp_path / "short"
+    short_dir.mkdir()
+    cut = short_dir / "log.txt"
+    cut.write_text("\n".join(lines[: statuses[-1]] + lines[statuses[-1] + 1:]) + "\n")
+    short = _fake_box(short_dir, log=cut)
+    flip = tmp_path / "flip.sh"
+    flip.write_text(f"""#!/usr/bin/env bash
+set -euo pipefail
+n=$(cat '{tmp_path}/count' 2>/dev/null || echo 0); echo $((n + 1)) > '{tmp_path}/count'
+if [ "$n" -lt 2 ]; then exec '{short}' "$@"; else exec '{full}' "$@"; fi
+""")
+    flip.chmod(0o755)
+    r = _run(tmp_path, _gate_body(), flip, STRIH_BOXES_DIR=_real_facts(), PROGRAM_AUDIO_CONTINUITY_WAIT_S="5",
+             PROGRAM_AUDIO_CONTINUITY_STEP_S="1")
+    assert "GATE=0" in r.stdout, r.stdout + r.stderr
+    assert "closing status line is not in the log yet" in r.stdout
+    assert _block(tmp_path)["stream_dante"]["verdict"] == "PASS"

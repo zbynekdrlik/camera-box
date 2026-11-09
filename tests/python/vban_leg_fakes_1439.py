@@ -103,7 +103,13 @@ elif cmd == ["connection", "add"]:
 elif cmd == ["connection", "delete"]:
     x = prof(a[2]); s["profiles"].remove(x)
     for d in [d for d, u in s["active"].items() if u == x["uuid"]]:
-        del s["active"][d]; s["applied"].pop(d, None)
+        gone = s["applied"].pop(d, None) or {}
+        del s["active"][d]
+        # issue 1495: model a rule two active profiles share being removed with the one that goes
+        if s.get("delete_drops_shared_rules") and gone.get("ipv4.routing-rules"):
+            for dd, pr in s["applied"].items():
+                if pr.get("ipv4.routing-rules") == gone["ipv4.routing-rules"]:
+                    pr["ipv4.routing-rules"] = ""
 elif cmd == ["device", "reapply"]:
     d = a[2]
     if d not in s["active"] or s.get("reapply_fails"):
@@ -210,7 +216,17 @@ import json, os, re, sys
 s["log"].append(["nft"] + a)
 def save(): json.dump(s, open(p, "w"))
 if a[:1] == ["-f"]:
-    s["nft_loaded_file"] = open(a[1]).read(); s["nft_render"] = nft_render(s["nft_loaded_file"])
+    text = open(a[1]).read()
+    m = re.search(r"(?m)^table inet (\S+)$", text)
+    if m and m.group(1) != "vban_dante70":   # issue 1495: another table (the retiring filter) is kept apart
+        s.setdefault("nft_other", {})[m.group(1)] = nft_render(text)
+        save(); sys.exit(0)
+    s["nft_loaded_file"] = text; s["nft_render"] = nft_render(s["nft_loaded_file"])
+    save(); sys.exit(0)
+if a[:3] == ["delete", "table", "inet"]:
+    if a[3] not in s.get("nft_other", {}):
+        sys.stderr.write("Error: No such file or directory\n"); save(); sys.exit(1)
+    del s["nft_other"][a[3]]
     save(); sys.exit(0)
 if a == ["list", "table", "inet", "vban_dante70"]:
     if s.get("nft_unreadable"):

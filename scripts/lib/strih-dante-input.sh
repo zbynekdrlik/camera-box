@@ -244,6 +244,8 @@ strih_dante_input_grade() {
   else
     bad "(program-dante) OBS '${name}' is '${kind:-absent}', not the ${STRIH_DANTE_INPUT_SOURCE_KIND} source -- restart OBS so strih_scenes.py --bootstrap switches it (the bundle must be the obs release with dante-input.so)"
   fi
+  # issue 1495 review: the per-channel meter row is source-agnostic (OBS's own meter of the input)
+  strih_program_vban_channels_row "$ws" "$name" "(program-dante)" "a channel arrives empty: the transmitter's channel or the site file's subscription (RX<n>), issue 1495"
   strih_dante_ptp_port_grade   # reads no log: graded even when the log is not readable
   if [ -z "$log" ] || [ ! -r "$log" ]; then bad "(program-dante) no readable OBS log -- the device is not graded"; return 0; fi
   start="$(LC_ALL=C grep -a 'dante-input start: config=' "$log" | tail -n 1 || true)"

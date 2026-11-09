@@ -266,6 +266,32 @@ def test_the_stream_mode_folds_under_its_own_key(tmp_path):
     assert b["stream_dante"]["device"] == "stream-obs" and "stream Dante: rx_loss +2" in b["failures"]
 
 
+@pytest.mark.parametrize("verdict,row", [("silent-channel", "BAD"), ("ok", "OK"), ("quiet", "NOTE")])
+def test_the_dante_grade_reads_the_per_channel_meter_of_mbc(tmp_path, verdict, row):
+    # review round 1: verify item 9's per-channel row is source-agnostic, so the Dante grade runs it too
+    ch = tmp_path / "channels"
+    ch.write_text("channel_verdict=%s\nchannel_detail=ch2 -100.0 dB while ch1 -30.0 dB\n" % verdict)
+    kf = tmp_path / "kind"
+    kf.write_text("dante_input")
+    r = _bash('ok() { echo "OK $*"; }; bad() { echo "BAD $*"; }; note() { echo "NOTE $*"; }\n'
+              'strih_box_load stream-snv >/dev/null; strih_dante_input_grade scn 127.0.0.1 ""',
+              env={"STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(ch), "STRIH_DANTE_INPUT_KIND_FILE": str(kf),
+                   "STRIH_DANTE_INPUT_TOML": str(tmp_path / "none.toml")})
+    assert r.returncode == 0, r.stderr
+    rows = [line for line in r.stdout.splitlines() if "ch2 -100.0 dB" in line]
+    assert len(rows) == 1 and rows[0].startswith(row + " (program-dante)"), r.stdout
+    assert "'mbc' is the dante_input source" in r.stdout
+
+
+def test_the_per_point_report_names_the_dante_device_on_a_dante_stream_box():
+    rep = _load("e2e_report_youtube_1495", SCRIPTS / "e2e_report_youtube.py")
+    pa = {"verdict": "PASS", "pass": True, "stream_dante": {"verdict": "PASS", "device": "stream-obs"}}
+    text = rep.points_markdown({"program_audio_continuity": pa})
+    assert "dante_input (stream-obs) PASS" in text and "prijímač obs-vban" not in text
+    text = rep.points_markdown({"program_audio_continuity": {"verdict": "PASS", "pass": True}})
+    assert "prijímač obs-vban PASS" in text
+
+
 def test_the_strih_defaults_are_unchanged(tmp_path, capsys):
     res = CONT.decide(_window(), 1, 3)
     assert res["device"] == "strih-obs" and res["verdict"] == "PASS"

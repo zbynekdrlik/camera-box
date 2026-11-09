@@ -113,18 +113,35 @@ _program_audio_continuity_strih_gate() {
   python3 "$py" --unknown "the strih OBS log could not be read from ${host} (${tries} tries)" --fold-into "$block" 2>&1 | sed 's/^/    /' || true
 }
 
-# _program_audio_continuity_stream_dante HERE DEVICE LOG FROM START END BLOCK -> issue 1495: fold the stream box's
-# own Dante device (stream-obs) into BLOCK, graded on the SAME stream OBS log slice the mix checks read. The
-# slice is read until the mix's closing ASRC / telemetry lines (60 s) are in, so the device's second status
-# line after the stop (10 s apart) is in it; a slice that never came is UNKNOWN.
+# _program_audio_continuity_stream_dante HERE DEVICE LOG FROM START END BLOCK HOST NAME -> issue 1495: fold the
+# stream box's own Dante device (stream-obs) into BLOCK, graded on the SAME stream OBS log slice the mix checks
+# read. The mix's closing ASRC / telemetry lines come every 60 s, so they can be in the log before the device's
+# SECOND status line after the stop (10-20 s): a retryable result reads the slice again, bounded like the mix
+# (_WAIT_S / _STEP_S). A slice that never came is UNKNOWN.
 _program_audio_continuity_stream_dante() {
-  local here="$1" dev="$2" log="$3" from="$4" s="$5" e="$6" block="$7" py="${1}/dante_input_continuity.py"
+  local here="$1" dev="$2" log="$3" from="$4" s="$5" e="$6" block="$7" host="${8-}" name="${9-}"
+  local py="${1}/dante_input_continuity.py" res="${3}.dante.json" raw step tries i
   if [ ! -s "$log" ] || ! _program_audio_continuity_count_ok "$from" || ! _program_audio_continuity_count_ok "$s" \
      || ! _program_audio_continuity_count_ok "$e"; then
     python3 "$py" --box stream --device "$dev" --unknown "the stream OBS log slice was not read (see the line above)" \
       --fold-into "$block" 2>&1 | sed 's/^/    /' || true
     return 0
   fi
+  step="${PROGRAM_AUDIO_CONTINUITY_STEP_S:-10}"
+  _program_audio_continuity_count_ok "$step" || step=10
+  tries=$(( ${PROGRAM_AUDIO_CONTINUITY_WAIT_S:-90} / (step > 0 ? step : 1) + 1 ))
+  for ((i = 1; i < tries; i++)); do
+    python3 "$py" --box stream --device "$dev" --log "$log" --first-line "$from" --start-line "$s" --end-line "$e" \
+      --out "$res" >/dev/null 2>&1 || true
+    python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("retryable") else 1)' "$res" 2>/dev/null \
+      || break
+    echo "    [program-audio] the stream Dante device's closing status line is not in the log yet -- reading again in ${step} s (${i}/${tries})"
+    sleep "$step"
+    if raw="$(_program_audio_continuity_read slice "$host" "$name" "$from" 2>/dev/null | tr -d '\r')" && [ -n "$raw" ]; then
+      tail -n +2 <<<"$raw" >"$log"
+    fi
+  done
+  rm -f "$res"
   python3 "$py" --box stream --device "$dev" --log "$log" --first-line "$from" --start-line "$s" --end-line "$e" \
     --fold-into "$block" 2>&1 | sed 's/^/    /' || true
 }
@@ -315,7 +332,8 @@ program_audio_continuity_gate() {
   fi
   [ -s "$block" ] || python3 "$py" --unknown "the continuity decision wrote no result" --input "$input" \
     "${vban[@]}" --out "$block" >/dev/null 2>&1 || true
-  [ -z "$sdev" ] || _program_audio_continuity_stream_dante "$here" "$sdev" "$log" "${from:-}" "$scount" "$ecount" "$block" || true
+  [ -z "$sdev" ] || _program_audio_continuity_stream_dante "$here" "$sdev" "$log" "${from:-}" "$scount" "$ecount" "$block" \
+    "$host" "$sname" || true
   _program_audio_continuity_strih_gate "$dir" "$block" || true
   rc=0
   if [ -n "$verdict" ] && [ -f "$verdict" ]; then

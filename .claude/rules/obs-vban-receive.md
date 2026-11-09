@@ -664,8 +664,19 @@ USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `
   deactivation took with it; still wrong = rc 1). The seconds between the read-back and the delete are the
   only time two interfaces carry the address.
 - A VLAN that does not come up leaves the old leg untouched (program audio keeps flowing).
-- A VLAN created THIS run that does not read back is taken down + disarmed (`autoconnect no`)
-  (`_strih_vban_leg_rollback_new_vlan`): ONE interface on the address again, setup fails by name.
+- The old leg stays FILTERED while the main table already names the VLAN: before NetworkManager is touched,
+  `_strih_vban_leg_retiring_filter` loads the same ruleset rendered for the old NIC as its own live table
+  `inet vban_dante70_retiring` (only while an ACTIVE NIC leg carries the address,
+  `_strih_vban_leg_carrying_nic_leg`); it is deleted once the old leg is retired. On a failure path it stays
+  until the next good run (known limit: it is not persistent, so a reboot in between leaves the old leg
+  unfiltered; verify's leftover row FAILs that box anyway).
+- A VLAN created THIS run that does not read back is DELETED again (`_strih_vban_leg_rollback_new_vlan`), but
+  only on a vlan leg and only while an ACTIVE NIC leg still carries the address: ONE interface on the address
+  again, setup fails by name, the next run creates the VLAN anew. With no such NIC leg (the 8.11 shape: the USB
+  NIC gone, its profile inactive) the VLAN stays, it is the only leg. A `mac:` leg is never rolled back.
+- The retired NIC is parked under `vban-dante70-retired` (`ipv4.method disabled`, IPv6 off, autoconnect), so
+  NetworkManager's automatic DHCP profile never takes the audio-VLAN port with a second default route.
+- A profile whose name nmcli cannot read fails the scan (rc 1), never "not ours".
 - A `vban-dante70` ethernet profile bound to the rig NIC is never touched (a WARN; verify FAILs it).
 - verify item 9 `(vban-leg) leftover`: the leg address on any other interface, and on a vlan leg any
   ethernet `vban-dante70` profile left, FAIL.

@@ -13,6 +13,7 @@ next to the new VLAN carrying the same address. Pinned here:
   * verify item 9 FAILs a leftover NIC-leg profile and the leg address on any other interface.
 Fakes: vban_leg_fakes_1439.py (nmcli keeps saved vs applied profiles, ip derives from the applied ones).
 """
+import json
 import re
 import sys
 from pathlib import Path
@@ -123,11 +124,94 @@ def test_a_vlan_that_does_not_read_back_is_rolled_back_to_the_one_nic_leg(tmp_pa
     assert VLAN_IF in r.stderr and NIC_IF in r.stderr, r.stderr
     s = b.st()
     assert VLAN_IF not in s["active"], "the new VLAN is taken down again"
-    made = [p for p in s["profiles"] if p["type"] == "vlan"]
-    assert made and made[0]["props"]["connection.autoconnect"] == "no", "and never re-armed"
+    assert not [p for p in s["profiles"] if p["type"] == "vlan"], "and removed: the next run creates it again"
     assert s["active"].get(NIC_IF) == OLD_UUID, "the NIC leg keeps the program audio"
     assert _carriers_of_addr(s) == [NIC_IF]
     assert _rig_touched(s) == []
+    assert "vban_dante70_retiring" in s.get("nft_other", {}), "the old leg stays filtered"
+
+
+def test_a_rerun_after_a_rollback_creates_the_vlan_again(tmp_path):
+    b = _box(tmp_path, extra_default=[VLAN_IF])
+    assert b.run("strih_vban_leg_install").returncode != 0
+    s = b.st()
+    s["extra_default"] = []
+    b.state.write_text(json.dumps(s))
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _carriers_of_addr(b.st()) == [VLAN_IF]
+
+
+def test_a_vlan_that_does_not_read_back_stays_when_no_nic_leg_carries_the_address(tmp_path):
+    # the 8.11 shape: the USB NIC dropped off the bus, its profile is inactive -- the VLAN is the only leg
+    b = _box(tmp_path, old_active=False, extra_default=[VLAN_IF])
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode != 0
+    s = b.st()
+    assert VLAN_IF in s["active"] and _carriers_of_addr(s) == [VLAN_IF], "never left with no leg"
+
+
+def test_a_mac_leg_created_this_run_is_never_rolled_back(tmp_path):
+    # the rollback is the vlan transition's; a fresh mac: leg whose read-back fails stays the box's leg
+    b = t39.Box(tmp_path, profiles=[t39._rig_profile()], active={RIG_IF: RIG_UUID},
+                applied={RIG_IF: t39._rig_profile()["props"]}, extra_default=[NIC_IF])
+    b.nic(NIC_IF, t39.LEG_MAC)
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode != 0
+    s = b.st()
+    assert s["active"].get(NIC_IF) and _carriers_of_addr(s) == [NIC_IF]
+    assert not fk.calls(s, "nmcli", "connection", "delete")
+
+
+def test_the_old_leg_stays_filtered_until_it_is_retired(tmp_path):
+    b = _box(tmp_path)
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode == 0, r.stdout + r.stderr
+    s = b.st()
+    nft = [c for c in s["log"] if c[0] == "nft"]
+    loads = [i for i, c in enumerate(s["log"]) if c[:2] == ["nft", "-f"]]
+    assert len(loads) >= 1 and any(c[1:] == ["delete", "table", "inet", "vban_dante70_retiring"] for c in nft), nft
+    assert s.get("nft_other", {}) == {}, "removed once the old leg is gone"
+    first_up = next(i for i, c in enumerate(s["log"]) if c[0] == "nmcli" and "connection" in c and "up" in c)
+    retiring = [i for i in loads if i < first_up]
+    assert retiring, "loaded before the VLAN comes up"
+    assert "keeps the old NIC leg %s filtered" % NIC_IF in r.stdout
+
+
+def test_a_vlan_that_does_not_come_up_keeps_the_old_leg_filtered(tmp_path):
+    b = _box(tmp_path, carrier={VLAN_IF: False})
+    assert b.run("strih_vban_leg_install").returncode != 0
+    other = b.st().get("nft_other", {})
+    assert NIC_IF in other.get("vban_dante70_retiring", ""), other
+
+
+def test_the_retired_nic_is_parked_without_an_ip(tmp_path):
+    b = _box(tmp_path)
+    assert b.run("strih_vban_leg_install").returncode == 0
+    parked = [p for p in b.st()["profiles"] if p["props"].get("connection.id") == "vban-dante70-retired"]
+    assert len(parked) == 1, "NetworkManager's automatic DHCP profile never takes the audio-VLAN port"
+    p = parked[0]["props"]
+    assert p["connection.interface-name"] == NIC_IF and p["ipv4.method"] == "disabled" and p["ipv6.method"] == "disabled"
+    # a rerun parks nothing twice
+    assert b.run("strih_vban_leg_install").returncode == 0
+    assert len([p for p in b.st()["profiles"] if p["props"].get("connection.id") == "vban-dante70-retired"]) == 1
+
+
+def test_a_rule_the_old_leg_took_with_it_comes_back_by_one_reapply(tmp_path):
+    b = _box(tmp_path, delete_drops_shared_rules=True)
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode == 0, r.stdout + r.stderr
+    s = b.st()
+    assert fk.calls(s, "nmcli", "device", "reapply", VLAN_IF)
+    assert "reapplied once" in r.stdout
+    assert s["applied"][VLAN_IF]["ipv4.routing-rules"] == "priority 100 from %s table 70" % ADDR
+
+
+def test_a_rule_that_does_not_come_back_fails_by_name(tmp_path):
+    b = _box(tmp_path, delete_drops_shared_rules=True, reapply_fails=True)
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode != 0
+    assert "after retiring the NIC leg" in r.stderr and "policy rule" in r.stderr, r.stderr
 
 
 def test_a_rerun_after_a_run_that_left_the_nic_leg_retires_it(tmp_path):
