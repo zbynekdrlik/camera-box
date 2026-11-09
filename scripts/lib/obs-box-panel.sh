@@ -541,9 +541,10 @@ obs_box_panel_install() {
   # issue 1466: an xfce box runs xfce4-panel with the same launchers; tint2's files stay (moving back to
   # openbox is one fact line), its unit is disabled and never started.
   if [ "$(strih_box_desktop)" = xfce ]; then
-    strih_session_apps_user_systemctl "$user" disable "$OBS_BOX_PANEL_UNIT" \
-      || { echo "obs-box-panel: systemctl --user disable ${OBS_BOX_PANEL_UNIT} failed" >&2; return 1; }
-    echo "  ${OBS_BOX_PANEL_UNIT} disabled (STRIH_DESKTOP=xfce: xfce4-panel carries the launchers)"
+    # --now: a box moved live from openbox stops its tint2 at once (the conversion reboots anyway)
+    strih_session_apps_user_systemctl "$user" disable --now "$OBS_BOX_PANEL_UNIT" \
+      || { echo "obs-box-panel: systemctl --user disable --now ${OBS_BOX_PANEL_UNIT} failed" >&2; return 1; }
+    echo "  ${OBS_BOX_PANEL_UNIT} disabled + stopped (STRIH_DESKTOP=xfce: xfce4-panel carries the launchers)"
     obs_box_xfce_panel_install "$repo" "$home" "$user" || { echo "obs-box-panel: the xfce4-panel could not be provisioned (above)" >&2; return 1; }
     return 0
   fi
@@ -668,7 +669,15 @@ _obs_box_panel_xfce_rows() {
   obs_box_panel_kbd_row "$repo" "$home" "$user"
   obs_box_panel_files_row "$repo" "$home"
   obs_box_panel_power_row "$repo" "$user"
-  obs_box_panel_shot_row "$home"
+  # the Print keys of an xfce box are xfce4-keyboard-shortcuts, graded by item 48's (xfce-keys) row
+  local ini="${home}/.config/flameshot/flameshot.ini"
+  if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_SHOT_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
+    printf 'FAIL|(panel-shot) %s not installed -- re-run setup-strih.sh step 16h (issue 1481)\n' "$OBS_BOX_PANEL_SHOT_PACKAGE"
+  elif [ ! -f "$ini" ] || [ "$(obs_box_panel_shot_ini_merge "$home" < "$ini")" != "$(cat "$ini")" ]; then
+    printf 'FAIL|(panel-shot) %s missing or not saving to ~/%s -- re-run setup-strih.sh step 16h\n' "$ini" "$OBS_BOX_PANEL_SHOT_DIR"
+  else
+    printf 'OK|(panel-shot) flameshot installed, saves to ~/%s (the Print keys: (xfce-keys))\n' "$OBS_BOX_PANEL_SHOT_DIR"
+  fi
   wins="$(strih_session_apps_wmctrl "$user" "$home")"
   if [ -z "$wins" ]; then
     printf 'NOTE|(panel-window) not graded: wmctrl on :0 answered nothing (X down or no client list)\n'

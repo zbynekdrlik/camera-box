@@ -43,10 +43,12 @@ same word (`/usr/share/xsessions/xfce.desktop`, read on strih-snv: xfce4 4.20).
     masked for the user (a `/dev/null` link, no user bus needed); xfwm4 `general/use_compositing=false`;
     xfce4-session `general/SaveOnExit=false`; the keys; the polkit rule
     `/etc/polkit-1/rules.d/50-obs-box-power.rules` (power-off + reboot, incl. `-multiple-sessions`, for the
-    desktop user only; logind answered `challenge` in the XFCE session).
+    desktop user only and only `subject.local && subject.active`, never an ssh login; logind answered
+    `challenge` in the XFCE session).
   - An openbox box loses the XDG entry and the polkit rule.
-- **Step 16h (`obs_box_panel_install`):** on an xfce box tint2's files stay but its unit is DISABLED,
-  then `obs_box_xfce_panel_install`: the xfce4-pulseaudio-plugin on the stream role, each launcher's
+- **Step 16h (`obs_box_panel_install`):** on an xfce box tint2's files stay but its unit is
+  `disable --now`ed, then `obs_box_xfce_panel_install` (every file through
+  `obs_box_write_if_changed_rendered`): the xfce4-pulseaudio-plugin on the stream role, each launcher's
   `.desktop` in its plugin folder `~/.config/xfce4/panel/launcher-<id>/obs-box-panel-<id>.desktop` (the
   panel reads it there and never copies it), the panel channel.
 
@@ -70,10 +72,19 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
   merged over).
 - `check FILE SPEC` = `ok` or the first difference (an array exactly, in order).
 - ElementTree output, indented; a re-merge prints the same bytes (idempotent).
-- **Never written under a live xfconfd:** `obs_box_xfce_write_channel` skips a file that would change
-  while the user's `xfconfd` runs (WARN); verify FAILs until setup re-runs with the session logged out
-  (the user.ini rule). The slice-2 conversion runs setup from the openbox session, so the files land
-  before the first XFCE login.
+- **The write decision is by PROPERTY:** a channel file whose declared properties all hold is never
+  touched (xfconfd writes `"/>"` + `version="1.1"`, so a byte compare would rewrite it every run).
+- **A live xfconfd owns its files** (linger + the autologin keep it up, so "log out first" is never
+  reachable): `obs_box_xfce_write_channel` then applies the spec THROUGH it, `obs_box_xfconf.py apply`
+  = `xfconf-query -c CH -p P -n [-a] -t T -s V` per property (every `replace` first as `-r -R`) on the
+  user's bus (`sudo -u <user> env XDG_RUNTIME_DIR=/run/user/<uid> DBUS_SESSION_BUS_ADDRESS=unix:path=.../bus`
+  as root), each read back with `xfconf-query -p` (an array prints `Value is an array with N items:`);
+  a failure FAILS the step by name. xfconfd saves the file itself. Without xfconfd (the slice-2
+  conversion from openbox) the file is merged + written.
+- **Process checks:** `pgrep -x` matches the process NAME, cut by the kernel at 15 characters, and
+  procps refuses a longer pattern (zero matches). The hidden-app row therefore uses
+  `pgrep -u <user> -f '(^|/)<name>( |$)'`; `-x` only for short names (xfconfd, xfce4-session,
+  xfce4-panel). The test's fake pgrep enforces both rules.
 - Every file goes through `obs_box_write_if_changed[_rendered]` (the stdin form fed only `printf '%s\n'
   "$var"`, the 1474 sweep).
 
@@ -82,14 +93,16 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
 - Item 44 (`obs_box_panel_grade_rows`, still `OBS_BOX_PANEL_ROWS`=10): on an xfce box
   `_obs_box_panel_xfce_rows` grades `(panel-pkg)` xfce4-panel, `(panel-config)` the panel properties +
   every launcher plugin file, `(panel-unit)` tint2's unit NOT enabled + an `xfce4-panel` running for the
-  user, `(panel-window)` class `xfce4-panel.Xfce4-panel`; the other six rows are the openbox box's.
+  user, `(panel-window)` class `xfce4-panel.Xfce4-panel`, `(panel-shot)` the flameshot package + ini
+  only (the Print keys are `(xfce-keys)`); the other five rows are the openbox box's.
 - Item 48 (`obs_box_session_grade_report`, on the item-43/44 line): `(session-start)` on every box, then
   one NOTE on openbox, or on xfce `(xfce-pkg)`, `(xfce-session-entry)`, `(xfce-hidden)` (files + the
   mask + none of their processes running), `(xfce-settings)`, `(xfce-keys)`, `(xfce-polkit)`,
   `(xfce-running)` (an `xfce4-session` for the user) = `OBS_BOX_XFCE_ROWS` 8.
 - Seams: `OBS_BOX_SESSION_START_BIN`, `OBS_BOX_XFCE_POLKIT_RULE`, `OBS_BOX_XFCE_XSESSION`,
   `OBS_BOX_XFCE_PGREP`. Tests: `tests/python/test_obs_box_xfce_1466.py` (stub `chown`; a root:root file
-  always re-reads as written as non-root).
+  always re-reads as written as non-root; a fake `pgrep` with the 15-character rule and a fake
+  `xfconf-query` over a JSON "xfconfd" that logs the bus address).
 
 ## UNVERIFIED until slice 2 on stream-snv (supervisor)
 
@@ -99,7 +112,10 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
 - the `xfce4-panel.Xfce4-panel` WM_CLASS in `wmctrl -lx`;
 - that xfsettingsd does not fight the session start's xrandr layout or the display watch (no
   displays.xml profile is written);
-- that the pulseaudio plugin with keyboard shortcuts off leaves the XF86Audio keys to the shortcut.
+- that the pulseaudio plugin with keyboard shortcuts off leaves the XF86Audio keys to the shortcut;
+- the live apply: `xfconf-query` as the user through `sudo -u` on `/run/user/<uid>/bus` reaches the
+  running xfconfd (run a setup-strih re-run once INSIDE the XFCE session and read
+  `applied through ... read back`), and xfce4-panel picks a changed layout up live.
 
 ## Slice 2 runbook (stream-snv, supervisor)
 

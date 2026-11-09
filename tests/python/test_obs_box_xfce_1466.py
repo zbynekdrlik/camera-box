@@ -232,6 +232,71 @@ def test_the_panel_keys_match_the_openbox_key_commands():
 
 # --- the install + the grade, end to end on a fake box ----------------------------------------------------
 
+FAKE_PGREP = r"""#!%(py)s
+# a pgrep with the real rules this lib depends on: -x matches the process NAME, which the kernel cuts at
+# 15 characters (a longer -x pattern is refused and matches nothing, like procps); -f searches the whole
+# command line as an extended regex. The "processes" are the command lines in RUNNING, one per line.
+import re, sys
+args = sys.argv[1:]
+mode, pat = None, None
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "-u":
+        i += 2
+        continue
+    if a in ("-x", "-f"):
+        mode = a
+    else:
+        pat = a
+    i += 1
+procs = [ln for ln in open(%(running)r).read().splitlines() if ln.strip()]
+if mode == "-x":
+    if len(pat) > 15:
+        sys.stderr.write("pgrep: pattern that searches for process name longer than 15 characters will result in zero matches\n")
+        sys.exit(1)
+    hit = any(ln.split()[0].rsplit("/", 1)[-1][:15] == pat for ln in procs)
+else:
+    hit = any(re.search(pat, ln) for ln in procs)
+sys.exit(0 if hit else 1)
+"""
+
+FAKE_XFCONF_QUERY = r"""#!%(py)s
+# xfconf-query against a JSON "xfconfd" (channel -> path -> value or list); logs each call + its bus.
+import json, os, sys
+state_f, log_f = %(state)r, %(log)r
+st = json.load(open(state_f)) if os.path.exists(state_f) else {}
+args = sys.argv[1:]
+with open(log_f, "a") as f:
+    f.write(os.environ.get("DBUS_SESSION_BUS_ADDRESS", "-") + " " + " ".join(args) + "\n")
+if os.path.exists(%(broken)r):
+    sys.stderr.write("broken bus\n"); sys.exit(1)
+ch = args[args.index("-c") + 1]
+p = args[args.index("-p") + 1]
+props = st.setdefault(ch, {})
+vals = [args[i + 1] for i, a in enumerate(args) if a == "-s"]
+if "-r" in args:
+    gone = [k for k in props if k == p or k.startswith(p + "/")]
+    for k in gone:
+        del props[k]
+    json.dump(st, open(state_f, "w"))
+    sys.exit(0 if gone else 1)
+if vals:
+    props[p] = vals if ("-a" in args or len(vals) > 1) else vals[0]
+    json.dump(st, open(state_f, "w"))
+    sys.exit(0)
+if p not in props:
+    sys.stderr.write("Property \"%%s\" does not exist on channel \"%%s\".\n" %% (p, ch)); sys.exit(1)
+v = props[p]
+if isinstance(v, list):
+    print("Value is an array with %%d items:\n" %% len(v))
+    for x in v:
+        print(x)
+else:
+    print(v)
+"""
+
+
 class Box:
     def __init__(self, tmp_path, running=()):
         self.tmp = tmp_path
@@ -239,20 +304,31 @@ class Box:
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         (tmp_path / "xsession.desktop").write_text("[Desktop Entry]\n")
-        pg = self.bin / "pgrep"
-        pg.write_text("#!/bin/sh\nfor a; do last=$a; done\ngrep -qx \"$last\" %s\n" % (tmp_path / "running"))
-        pg.chmod(0o755)
+        for name, text in (("pgrep", FAKE_PGREP), ("xfconf-query", FAKE_XFCONF_QUERY)):
+            f = self.bin / name
+            f.write_text(text % {"py": sys.executable, "running": str(tmp_path / "running"),
+                                 "state": str(tmp_path / "xfconfd.json"), "log": str(tmp_path / "xfconf-query.log"),
+                                 "broken": str(tmp_path / "bus-broken")})
+            f.chmod(0o755)
         self.set_running(*running)
 
     def set_running(self, *procs):
         (self.tmp / "running").write_text("".join(p + "\n" for p in procs))
+
+    def live(self):
+        import json
+        f = self.tmp / "xfconfd.json"
+        return json.loads(f.read_text()) if f.exists() else {}
 
     def env(self):
         e = _seams(self.tmp)
         e.update({"OBS_BOX_SESSION_START_BIN": str(self.tmp / "obs-box-session-start"),
                   "OBS_BOX_XFCE_POLKIT_RULE": str(self.tmp / "50-obs-box-power.rules"),
                   "OBS_BOX_XFCE_XSESSION": str(self.tmp / "xsession.desktop"),
-                  "OBS_BOX_XFCE_PGREP": str(self.bin / "pgrep")})
+                  "OBS_BOX_XFCE_PGREP": str(self.bin / "pgrep"),
+                  "STRIH_SESSION_APPS_EUID": "1000",
+                  "XDG_RUNTIME_DIR": str(self.tmp / "run"),
+                  "PATH": "%s:%s" % (self.bin, os.environ["PATH"])})
         return e
 
     def install(self, box="stream-snv"):
@@ -284,7 +360,8 @@ def test_the_xfce_install_writes_every_file_and_a_rerun_writes_nothing(tmp_path)
     assert 'name="use_compositing" type="bool" value="false"' in (ch / "xfwm4.xml").read_text()
     assert 'name="SaveOnExit" type="bool" value="false"' in (ch / "xfce4-session.xml").read_text()
     assert "flameshot gui" in (ch / "xfce4-keyboard-shortcuts.xml").read_text()
-    assert f'subject.user == "{ME}"' in (tmp_path / "50-obs-box-power.rules").read_text()
+    rule = (tmp_path / "50-obs-box-power.rules").read_text()
+    assert f'subject.user == "{ME}"' in rule and "subject.local && subject.active &&" in rule
     again = box.install()
     assert again.returncode == 0, again.stderr
     # every user-owned file is unchanged; the two root:root files read as written only because this test
@@ -294,12 +371,65 @@ def test_the_xfce_install_writes_every_file_and_a_rerun_writes_nothing(tmp_path)
     assert "xfconf xfwm4:" in again.stdout and "unchanged" in again.stdout
 
 
-def test_a_running_xfconfd_keeps_its_channel_files_and_setup_warns(tmp_path):
+def test_the_fake_pgrep_refuses_a_long_process_name_like_procps(tmp_path):
+    box = Box(tmp_path, running=("/usr/bin/xfce4-power-manager --daemon",))
+    pg = str(box.bin / "pgrep")
+    assert subprocess.run([pg, "-u", ME, "-x", "xfce4-power-manager"]).returncode == 1
+    assert subprocess.run([pg, "-u", ME, "-f", "(^|/)xfce4-power-manager( |$)"]).returncode == 0
+
+
+@pytest.mark.parametrize("proc", ["xfce4-power-manager", "xfce4-screensaver", "tracker-miner-fs-3",
+                                  "localsearch-3", "update-notifier"])
+def test_a_running_hidden_app_fails_the_row_whatever_its_name_length(tmp_path, proc):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    box.set_running("xfce4-session", "/usr/libexec/%s --some-arg" % proc)
+    r = box.grade()
+    row = [ln for ln in r.stdout.splitlines() if "(xfce-hidden)" in ln][0]
+    assert row.startswith("FAIL|") and proc in row, row
+
+
+def test_a_live_xfconfd_gets_the_properties_through_xfconf_query_and_its_file_is_never_written(tmp_path):
     box = Box(tmp_path, running=("xfconfd",))
     r = box.install()
-    assert r.returncode == 0, r.stderr
-    assert "xfconfd runs and would overwrite it" in r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
     assert not (box.home / ".config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml").exists()
+    live = box.live()
+    assert live["xfwm4"]["/general/use_compositing"] == "false"
+    assert live["xfce4-session"]["/general/SaveOnExit"] == "false"
+    assert live["xfce4-keyboard-shortcuts"]["/commands/custom/override"] == "true"
+    assert "applied through" in r.stdout and "read back" in r.stdout
+    log = (tmp_path / "xfconf-query.log").read_text()
+    assert "unix:path=%s/bus" % (tmp_path / "run") in log    # the user's own session bus
+    # the replace runs first: a stale custom key the spec does not declare is gone
+    box_state = box.live()
+    box_state["xfce4-keyboard-shortcuts"]["/commands/custom/<Super>e"] = "thunar"
+    (tmp_path / "xfconfd.json").write_text(__import__("json").dumps(box_state))
+    assert box.install().returncode == 0
+    assert "/commands/custom/<Super>e" not in box.live()["xfce4-keyboard-shortcuts"]
+
+
+def test_a_failed_live_apply_fails_setup_by_name(tmp_path):
+    box = Box(tmp_path, running=("xfconfd",))
+    (tmp_path / "bus-broken").write_text("")
+    r = box.install()
+    assert r.returncode != 0
+    assert "could not be applied through" in r.stderr and "broken bus" in r.stderr, r.stderr
+
+
+def test_a_file_that_already_holds_every_property_is_left_alone_even_under_xfconfd(tmp_path):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    f = box.home / ".config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
+    # xfconfd's own layout: no space before />, version 1.1, extra properties -- the same declared values
+    f.write_text(LIVE_XFWM4.replace('"use_compositing" type="bool" value="true"', '"use_compositing" type="bool" value="false"'))
+    before = f.read_text()
+    box.set_running("xfconfd")
+    r = box.install()
+    assert r.returncode == 0, r.stderr
+    assert "xfconf xfwm4: %s unchanged" % f in r.stdout
+    assert f.read_text() == before
+    assert "-c xfwm4" not in ((tmp_path / "xfconf-query.log").read_text() if (tmp_path / "xfconf-query.log").exists() else "")
 
 
 def test_the_graded_xfce_box_passes_only_with_the_session_up_and_the_indexer_down(tmp_path):
@@ -361,6 +491,58 @@ def test_the_panel_install_writes_each_launcher_into_its_plugin_folder_and_grade
     assert "ok" in r.stdout.splitlines() and "LAUNCHERS-OK" in r.stdout, r.stdout
     f = box.home / ".config/xfce4/panel/launcher-2/obs-box-panel-power.desktop"
     assert "Name=Vypnúť" in f.read_text()
+
+
+# the verify item-44 rows of an xfce box: the shared-row helpers (discord / kbd / files / power, each with
+# its own tests) are stand-ins here; systemctl, dpkg-query and wmctrl are the box's answers.
+PANEL_ROWS_STUBS = '''chown() { :; }
+dpkg-query() { echo "install ok installed"; }
+systemctl() { if [ "$2" = is-enabled ]; then cat "$TINT2_STATE"; else :; fi; }
+strih_session_apps_wmctrl() { printf '0x01 0 xfce4-panel.Xfce4-panel host xfce4-panel\\n'; }
+obs_box_panel_discord_row() { echo 'NOTE|(panel-discord) stub'; }
+obs_box_panel_kbd_row() { echo 'OK|(panel-kbd) stub'; }
+obs_box_panel_files_row() { echo 'OK|(panel-files) stub'; }
+obs_box_panel_power_row() { echo 'OK|(panel-power) stub'; }
+'''
+
+
+def _panel_rows(box, tint2):
+    (box.tmp / "tint2").write_text(tint2 + "\n")
+    env = dict(box.env(), TINT2_STATE=str(box.tmp / "tint2"))
+    return _bash(PANEL_ROWS_STUBS + 'obs_box_xfce_panel_install "$1" "$2" "$3" >/dev/null\n'
+                 'shot="$2/.config/flameshot"; mkdir -p "$shot"; obs_box_panel_shot_ini_merge "$2" < /dev/null > "$shot/flameshot.ini"\n'
+                 'obs_box_panel_grade_rows "$1" "$2" "$3"', str(REPO), str(box.home), ME, env=env)
+
+
+def test_the_xfce_panel_rows_are_ten_and_grade_xfce4_panel(tmp_path):
+    box = Box(tmp_path, running=("xfce4-panel",))
+    r = _panel_rows(box, "disabled")
+    rows = r.stdout.splitlines()
+    assert r.returncode == 0 and len(rows) == 10, r.stdout + r.stderr
+    got = _rows(r)
+    # (panel-launchers) is the shared row over the applications dir, written by the tint2 half of step 16h
+    for k in ("(panel-pkg)", "(panel-config)", "(panel-unit)", "(panel-shot)", "(panel-window)"):
+        assert got[k] == "OK", (k, r.stdout)
+    assert "xfce4-panel" in [ln for ln in rows if "(panel-pkg)" in ln][0]
+
+
+def test_an_enabled_tint2_or_a_missing_xfce4_panel_fails_the_unit_row(tmp_path):
+    box = Box(tmp_path, running=("xfce4-panel",))
+    assert _rows(_panel_rows(box, "enabled"))["(panel-unit)"] == "FAIL"
+    box.set_running()
+    assert _rows(_panel_rows(box, "disabled"))["(panel-unit)"] == "FAIL"
+
+
+def test_the_session_report_prints_every_row_on_both_desktops(tmp_path):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    body = ('ok() { echo "OK $*"; }\nbad() { echo "BAD $*"; }\nnote() { echo "NOTE $*"; }\n'
+            'obs_box_session_grade_report "$1" "$2" "$3"; echo "RC=$?"')
+    r = _bash(body, str(REPO), str(box.home), ME, env=box.env())
+    assert "RC=0" in r.stdout and len([ln for ln in r.stdout.splitlines() if ln[:2] in ("OK", "BA", "NO")]) == 8, r.stdout
+    assert box.install(box="strih-snv").returncode == 0
+    r = _bash(body, str(REPO), str(box.home), ME, box="strih-snv", env=box.env())
+    assert "RC=0" in r.stdout and len(r.stdout.splitlines()) == 3, r.stdout
 
 
 # --- the wiring ---------------------------------------------------------------------------------------------

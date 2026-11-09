@@ -24,9 +24,9 @@
 #   * obs_box_session_grade_report REPO HOME USER -- verify-strih item 48 (OBS_BOX_XFCE_ROWS rows on an
 #     xfce box, the session-start row + one NOTE on an openbox box).
 # The xfconf channel files are MERGED and graded by property (scripts/obs_box_xfconf.py): the running XFCE
-# apps rewrite them. While the desktop user's xfconfd runs, a channel file that would change is NOT
-# written (xfconfd would overwrite it from memory): a WARN, and verify FAILs until setup re-runs with the
-# session down (the user.ini rule of strih-operator.md).
+# apps rewrite them. A file whose declared properties all hold is never touched. While the desktop user's
+# xfconfd runs (linger + autologin keep it up), the properties go THROUGH it (xfconf-query on the user's
+# bus, each read back), never into its file, which it would overwrite from memory.
 #
 # Test seams: OBS_BOX_SESSION_START_BIN, OBS_BOX_XFCE_POLKIT_RULE, OBS_BOX_XFCE_XSESSION (paths);
 # OBS_BOX_XFCE_PGREP (the process reader).
@@ -76,9 +76,11 @@ obs_box_xfce_polkit_rule_text() {
   cat <<EOF
 // issue 1466 -- WRITTEN BY setup-strih.sh step 15 (STRIH_DESKTOP=xfce); do not hand-edit.
 // The operator powers off / reboots the OBS box from the panel without a password: logind answered
-// \`challenge\` in the XFCE session (measured on strih-snv 8.11.2026).
+// \`challenge\` in the XFCE session (measured on strih-snv 8.11.2026). Only from the local, active
+// session (the panel), never from an ssh login.
 polkit.addRule(function(action, subject) {
-    if ((action.id == "org.freedesktop.login1.power-off" ||
+    if (subject.local && subject.active &&
+        (action.id == "org.freedesktop.login1.power-off" ||
          action.id == "org.freedesktop.login1.power-off-multiple-sessions" ||
          action.id == "org.freedesktop.login1.reboot" ||
          action.id == "org.freedesktop.login1.reboot-multiple-sessions") &&
@@ -185,20 +187,45 @@ _obs_box_xfce_repo() { (cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd); }
 # obs_box_xfce_xfconfd_running USER -> rc 0 while the user's xfconfd runs (its channels are then its own).
 obs_box_xfce_xfconfd_running() { "$OBS_BOX_XFCE_PGREP" -u "${1:?user required}" -x xfconfd >/dev/null 2>&1; }
 
-# obs_box_xfce_write_channel HOME USER CHANNEL SPEC_FN [ARGS...] -> merge + write-if-changed one channel file,
-# skipped with a WARN while the user's xfconfd runs and the file would change. rc 1 on a failure.
+# obs_box_xfce_apply_live USER CHANNEL (stdin: the SPEC) -> set the declared properties through USER's RUNNING
+# xfconfd (xfconf-query on the user's session bus, as the user when run as root) and read each back.
+obs_box_xfce_apply_live() {
+  local user="${1:?user required}" channel="${2:?channel required}" uid rt
+  local -a runner
+  uid="$(id -u "$user")" || return 1
+  rt="/run/user/${uid}"
+  if [ "${STRIH_SESSION_APPS_EUID:-$(id -u)}" = 0 ]; then
+    runner=(sudo -u "$user" env "XDG_RUNTIME_DIR=${rt}" "DBUS_SESSION_BUS_ADDRESS=unix:path=${rt}/bus")
+  else
+    rt="${XDG_RUNTIME_DIR:-$rt}"
+    runner=(env "DBUS_SESSION_BUS_ADDRESS=unix:path=${rt}/bus")
+  fi
+  python3 "$(_obs_box_xfce_repo)/scripts/obs_box_xfconf.py" apply "$channel" - "${runner[@]}" >/dev/null
+}
+
+# obs_box_xfce_write_channel HOME USER CHANNEL SPEC_FN [ARGS...] -> one channel file holds the declared
+# properties: nothing is touched when every one already holds (graded by property: xfconfd rewrites the
+# file in its own layout); while the user's xfconfd runs they are applied THROUGH it (it owns the file and
+# writes it from memory); otherwise the file is merged + written. rc 1 on a failure.
 obs_box_xfce_write_channel() {
-  local home="$1" user="$2" channel="$3" file merged
+  local home="$1" user="$2" channel="$3" file merged spec
   shift 3
   file="$(obs_box_xfce_channel_path "$home" "$channel")"
   strih_user_home_dir "$home" "$user" "$(dirname "$file")" || { echo "obs-box-xfce: cannot create $(dirname "$file")" >&2; return 1; }
+  if [ -f "$file" ] && obs_box_xfce_check "$file" "$@" >/dev/null; then
+    echo "  xfconf ${channel}: ${file} unchanged (every declared property holds)"
+    return 0
+  fi
+  if obs_box_xfce_xfconfd_running "$user"; then
+    spec="$("$@")" || { echo "obs-box-xfce: the ${channel} properties could not be rendered" >&2; return 1; }
+    printf '%s\n' "$spec" | obs_box_xfce_apply_live "$user" "$channel" \
+      || { echo "obs-box-xfce: ${channel} could not be applied through ${user}'s running xfconfd (above)" >&2; return 1; }
+    echo "  xfconf ${channel}: applied through ${user}'s running xfconfd and read back (it saves ${file} itself)"
+    return 0
+  fi
   # the helper prints exactly one trailing newline; the stdin write below puts it back
   merged="$(obs_box_xfce_merge "$channel" "$file" "$@")" || { echo "obs-box-xfce: ${file} could not be merged (above)" >&2; return 1; }
   [ -n "$merged" ] || { echo "obs-box-xfce: ${file}: the merge printed nothing" >&2; return 1; }
-  if obs_box_xfce_xfconfd_running "$user" && [ "$(cat "$file" 2>/dev/null)" != "$merged" ]; then
-    echo "  WARNING: issue 1466: ${file} not written -- ${user}'s xfconfd runs and would overwrite it; re-run step 15/16h with the session logged out (verify FAILs it until then)"
-    return 0
-  fi
   printf '%s\n' "$merged" | obs_box_write_if_changed "$file" 0644 "${user}:$(id -gn "$user")" "xfconf ${channel}" || return 1
 }
 
@@ -246,7 +273,7 @@ obs_box_session_install() {
 # pulseaudio plugin on the stream role, each launcher's .desktop in its plugin folder, the panel channel.
 obs_box_xfce_panel_install() {
   : "${1:?repo required}"
-  local home="${2:?home required}" user="${3:?user required}" pid kind lid name ex icon f grp w
+  local home="${2:?home required}" user="${3:?user required}" pid kind lid name ex icon f grp
   grp="$(id -gn "$user")" || return 1
   if [ "$(strih_box_role)" = stream ] \
     && [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_XFCE_PANEL_PLUGIN_PKG" 2>/dev/null || true)" != "install ok installed" ]; then
@@ -258,9 +285,8 @@ obs_box_xfce_panel_install() {
     IFS='|' read -r _ name ex icon < <(obs_box_panel_launchers "$home" | grep "^${lid}|")
     f="$(obs_box_xfce_launcher_file "$home" "$pid" "$lid")"
     strih_user_home_dir "$home" "$user" "$(dirname "$f")" || { echo "obs-box-xfce: cannot create $(dirname "$f")" >&2; return 1; }
-    w="$(_obs_box_panel_put_text "$(obs_box_panel_desktop_text "$name" "$ex" "$icon")" "$f")" || return 1
-    chown "${user}:${grp}" "$f" 2>/dev/null || true
-    echo "  ${f} ${w} (xfce4-panel launcher: ${name})"
+    obs_box_write_if_changed_rendered "$f" 0644 "${user}:${grp}" "xfce4-panel launcher ${name}" \
+      obs_box_panel_desktop_text "$name" "$ex" "$icon" || return 1
   done < <(obs_box_xfce_panel_plugins "$home")
   obs_box_xfce_write_channel "$home" "$user" xfce4-panel obs_box_xfce_panel_spec "$home"
 }
@@ -312,7 +338,9 @@ obs_box_session_grade_rows() {
   while IFS=' ' read -r id proc; do
     [ -n "$id" ] || continue
     [ "$(cat "${adir}/${id}.desktop" 2>/dev/null; printf x)" = "$(obs_box_xfce_hidden_text "$id"; printf x)" ] || bad="${bad:+$bad, }${id}.desktop"
-    if "$OBS_BOX_XFCE_PGREP" -u "$user" -x "$proc" >/dev/null 2>&1; then running="${running:+$running, }${proc}"; fi
+    # -f on the command line, never -x: a process NAME is cut at 15 characters (xfce4-power-manager,
+    # xfce4-screensaver, tracker-miner-fs-3 would never match, pgrep refuses the pattern)
+    if "$OBS_BOX_XFCE_PGREP" -u "$user" -f "(^|/)${proc}( |\$)" >/dev/null 2>&1; then running="${running:+$running, }${proc}"; fi
   done < <(obs_box_xfce_hidden_autostarts)
   while IFS= read -r id; do
     [ "$(readlink "${home}/.config/systemd/user/${id}" 2>/dev/null)" = /dev/null ] || bad="${bad:+$bad, }${id} not masked"
