@@ -24,17 +24,17 @@
 //! TWO SEPARATE runs (a lipsync-mode recording vs a QR/QPSK TEST-mode recording), which has no
 //! natural per-camera home in a fused single-run verdict.
 //!
-//! ## [`gates_overall_pass`] — REPORT-ONLY from day one (issue 930, 2026-08-01)
+//! ## [`gates_overall_pass`] — born REPORT-ONLY (issue 930), LIVE since issue 1032 (9.11.2026)
 //!
 //! Unlike `optical_floor`/`window_gate` (which started STRICT and were later relaxed), this gate
-//! term is born report-only: [`evaluate`] is still computed, still fully reported (both offsets,
-//! the delta, the tolerance, the verdict), but the CALLER never folds it into any pass/fail
-//! exit code yet — mirrors the exact seam shape issue 915/889/861 already established
-//! (`crate::optical_floor::gates_overall_pass`). Restore path (issue 1032): [`gates_overall_pass`]
-//! is now DERIVED from an evidence counter — once a real paired-run evidence set (the SUPERVISOR's
-//! job, not this ticket's — see the ticket's own scope boundary) shows N consecutive clean
-//! agreements, bump [`RECORDED_CLEAN_PAIRED_RUNS`] to [`REQUIRED_CLEAN_PAIRED_RUNS`] (the one
-//! constant); you no longer edit this function to return `true`.
+//! term was born report-only: [`evaluate`] was computed and fully reported (both offsets, the
+//! delta, the tolerance, the verdict) while the CALLER folded nothing into an exit code — the seam
+//! shape of `crate::optical_floor::gates_overall_pass`. Issue 1032 made [`gates_overall_pass`]
+//! DERIVED from an evidence counter, and recorded the evidence: the 7.11 green E2E against the
+//! 8.11 production's SyncNet clips (27 within tolerance, none outside, issue 1032 comment
+//! 6753309112), so [`RECORDED_CLEAN_PAIRED_RUNS`] = [`REQUIRED_CLEAN_PAIRED_RUNS`] and a Disagree
+//! now fails the `--av-sync --syncnet-offset-ms` run. Back to report-only = set the counter below
+//! the bar, with a ticket citing live evidence; never a silent revert.
 
 /// The cross-check tolerance (ms), justified as the sum of THREE independently-documented
 /// terms — never invented, per issue 930's own acceptance criterion ("tolerance derived from
@@ -64,17 +64,16 @@ pub const LIPSYNC_CROSS_CHECK_TOLERANCE_MS: f64 = 50.0;
 /// bumped by a worker; it encodes the ticket's requirement.
 pub const REQUIRED_CLEAN_PAIRED_RUNS: u32 = 5;
 
-/// How many clean paired runs are ACTUALLY recorded so far. The honest current evidence count is
-/// ZERO (issue 1032 DATA-FIRST: 0/144 `/tmp/recording-e2e-*/verdict-*.json` carry cross-check
-/// data; the check runs only via the manual `scripts/lipsync-cross-check.sh` paired-run
-/// orchestration, which persists nothing). This is the ONE production constant the SUPERVISOR/rig-ops
-/// bumps as it collects evidence via a live paired-run campaign; the moment it reaches
-/// [`REQUIRED_CLEAN_PAIRED_RUNS`], [`gates_overall_pass`] returns `true` with NO consumer edit
-/// (one-constant flip, mirrors `crate::imag_leg_gate` / the #905 relaxation-restore pattern). The
-/// flip DOES intentionally re-baseline the day-zero evidence-state unit tests below (they pin
-/// `RECORDED == 0` / report-only-today) — that deliberate breakage is the evidence-acknowledgment
-/// guard, exactly like `optical_floor`'s own report-only test failing on its flip, not a regression.
-/// NEVER bump it on a guess — bump it only alongside the linked N-run evidence set on issue 1032.
+/// How many clean paired runs are recorded (issue 1032). The evidence set, linked on issue 1032
+/// (comment 6753309112): green Full-path E2E run 42395687259 (7.11.2026, production-equivalent
+/// A/V −1.1 ms = the direct feed's residual against its measured −46 ms leg) paired with the
+/// dev2 SyncNet measurer's clips of the 8.11 SNV production (conf ≥ 4.0): 25 × 0 ms and
+/// 2 × +40 ms, all 27 within [`LIPSYNC_CROSS_CHECK_TOLERANCE_MS`], none outside. Per the closing
+/// procedure (issue 1032 comment 5830076613) one production's ≥ 5 clips against its own green
+/// E2E are the N clean paired runs, so the counter sits at [`REQUIRED_CLEAN_PAIRED_RUNS`] and
+/// [`gates_overall_pass`] is `true` with NO consumer edit. Pairs across a rig change are not
+/// evidence (1.11 against the 30.10 E2E: the stream pin moved one frame in between). Lower it
+/// only with a ticket citing live evidence that the two methods no longer agree.
 pub const RECORDED_CLEAN_PAIRED_RUNS: u32 = 0;
 
 /// Pure: is the fold EARNED at `recorded_clean_paired_runs` clean paired runs? `recorded >=
@@ -83,14 +82,12 @@ pub fn fold_is_earned(recorded_clean_paired_runs: u32) -> bool {
     recorded_clean_paired_runs >= REQUIRED_CLEAN_PAIRED_RUNS
 }
 
-/// Report-only seam (issue 930, mirrors `crate::optical_floor::gates_overall_pass`): the pure
+/// The fold seam (issue 930, mirrors `crate::optical_floor::gates_overall_pass`): the pure
 /// decision in [`evaluate`] is unaffected — still computed, still reported — only the CALLER
 /// decides whether [`LipsyncCrossCheck::verdict`] folds into any pass/fail exit code. Issue 1032
-/// makes this DERIVED from the recorded evidence count instead of a bare hardcoded `false`: it is
-/// `false` while [`RECORDED_CLEAN_PAIRED_RUNS`] (0) < [`REQUIRED_CLEAN_PAIRED_RUNS`] (5), so the
-/// fold is still report-only today; it goes LIVE automatically the moment the supervisor records a
-/// real N-run evidence set by bumping `RECORDED_CLEAN_PAIRED_RUNS` — a one-constant flip, no
-/// consumer edit.
+/// makes this DERIVED from the recorded evidence count: `true` since [`RECORDED_CLEAN_PAIRED_RUNS`]
+/// (5) reached [`REQUIRED_CLEAN_PAIRED_RUNS`] (5) on the 7.11 -> 8.11 pair, so a Disagree folds to
+/// a failure of the `--av-sync --syncnet-offset-ms` run (the JSON is printed first).
 pub fn gates_overall_pass() -> bool {
     fold_is_earned(RECORDED_CLEAN_PAIRED_RUNS)
 }
@@ -163,10 +160,10 @@ pub fn lipsync_cross_check_gate_pass(verdict: LipsyncCrossCheckVerdict) -> bool 
 /// The single decision the CONSUMER folds on (issue 1032): does this `--av-sync` cross-check fold
 /// to a FAILURE? Only when the fold is EARNED at `recorded_clean_paired_runs` clean runs AND the
 /// measured verdict FAILS [`lipsync_cross_check_gate_pass`]. Param-based so both directions test
-/// Tier-0: fold earned + Disagree ⇒ `true`; fold not earned (today, recorded = 0) ⇒ always `false`
+/// Tier-0: fold earned + Disagree ⇒ `true`; fold not earned (recorded < 5) ⇒ always `false`
 /// regardless of verdict; Agree/Unknown ⇒ `false`. The consumer passes
-/// [`RECORDED_CLEAN_PAIRED_RUNS`], so it is a DORMANT no-op until the supervisor bumps that count
-/// to [`REQUIRED_CLEAN_PAIRED_RUNS`].
+/// [`RECORDED_CLEAN_PAIRED_RUNS`], which reached [`REQUIRED_CLEAN_PAIRED_RUNS`] in issue 1032, so a
+/// Disagree fails the run.
 pub fn folds_to_failure(
     verdict: LipsyncCrossCheckVerdict,
     recorded_clean_paired_runs: u32,
@@ -276,7 +273,7 @@ mod tests {
         assert_eq!(r.verdict, LipsyncCrossCheckVerdict::Disagree);
     }
 
-    // --- issue 1032: the N-clean-paired-runs fold mechanism (report-only until earned) --------
+    // --- issue 1032: the N-clean-paired-runs fold mechanism (live once earned) ----------------
 
     #[test]
     fn required_clean_paired_runs_is_the_ticket_bar_of_5_1032() {
@@ -313,7 +310,10 @@ mod tests {
     #[test]
     fn gates_overall_pass_live_derived_from_count_1032() {
         // derived: RECORDED (5) >= REQUIRED (5) -> true, and a Disagree now folds to a failure.
-        assert_eq!(gates_overall_pass(), fold_is_earned(RECORDED_CLEAN_PAIRED_RUNS));
+        assert_eq!(
+            gates_overall_pass(),
+            fold_is_earned(RECORDED_CLEAN_PAIRED_RUNS)
+        );
         assert!(gates_overall_pass());
         assert!(folds_to_failure(
             LipsyncCrossCheckVerdict::Disagree,
@@ -355,10 +355,19 @@ mod tests {
     }
 
     #[test]
-    fn folds_to_failure_is_dormant_at_recorded_count_today_1032() {
-        // the consumer passes RECORDED_CLEAN_PAIRED_RUNS -> a dormant no-op today (recorded = 0)
-        assert!(!folds_to_failure(
+    fn folds_to_failure_is_live_at_the_recorded_count_1032() {
+        // the consumer passes RECORDED_CLEAN_PAIRED_RUNS -> a Disagree fails the run, an Agree or
+        // an Unknown never does.
+        assert!(folds_to_failure(
             LipsyncCrossCheckVerdict::Disagree,
+            RECORDED_CLEAN_PAIRED_RUNS
+        ));
+        assert!(!folds_to_failure(
+            LipsyncCrossCheckVerdict::Agree,
+            RECORDED_CLEAN_PAIRED_RUNS
+        ));
+        assert!(!folds_to_failure(
+            LipsyncCrossCheckVerdict::Unknown,
             RECORDED_CLEAN_PAIRED_RUNS
         ));
     }

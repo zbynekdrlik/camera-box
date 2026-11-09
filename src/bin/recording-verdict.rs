@@ -416,10 +416,9 @@ struct Args {
     /// and `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when
     /// given together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
     /// comparing it against this recording's own QR/QPSK offset (`camera_box::lipsync_cross_check`).
-    /// Report-only TODAY (issue 1032: `gates_overall_pass` is derived-`false` while
-    /// `RECORDED_CLEAN_PAIRED_RUNS` < `REQUIRED_CLEAN_PAIRED_RUNS`, so it does not affect this CLI's
-    /// exit code); once the supervisor records N>=5 clean paired runs, a Disagree verdict makes
-    /// `--av-sync` exit non-zero (the JSON is still printed first).
+    /// LIVE since issue 1032 recorded the 7.11 -> 8.11 paired evidence (`RECORDED_CLEAN_PAIRED_RUNS`
+    /// reached `REQUIRED_CLEAN_PAIRED_RUNS`): a Disagree verdict makes `--av-sync` exit non-zero
+    /// (the JSON is still printed first).
     /// `allow_negative_numbers`: video-earlier-than-audio is half the real outcome space and must
     /// parse as a bare `-N` value (clap 4 otherwise reads a leading `-` as a new flag).
     #[arg(long, allow_negative_numbers = true)]
@@ -3041,10 +3040,9 @@ fn run_av_sync(args: &Args) -> Result<()> {
     {
         let gate_pass =
             camera_box::lipsync_cross_check::lipsync_cross_check_gate_pass(cross_check.verdict);
-        // issue 1032: fold-earned check against the recorded evidence count. DORMANT today —
-        // RECORDED_CLEAN_PAIRED_RUNS (0) < REQUIRED_CLEAN_PAIRED_RUNS (5), so this is always
-        // `false` and the run still exits 0; it goes live the instant the supervisor bumps the
-        // recorded count to 5 (one-constant flip in src/lipsync_cross_check.rs).
+        // issue 1032: fold-earned check against the recorded evidence count. LIVE —
+        // RECORDED_CLEAN_PAIRED_RUNS reached REQUIRED_CLEAN_PAIRED_RUNS on the 7.11 -> 8.11 pair,
+        // so a Disagree sets this and the run exits non-zero below.
         lipsync_folds_to_failure = camera_box::lipsync_cross_check::folds_to_failure(
             cross_check.verdict,
             camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
@@ -3088,9 +3086,8 @@ fn run_av_sync(args: &Args) -> Result<()> {
     );
     // issue 1032 — fold the lipsync cross-check into this --av-sync run's exit code. The JSON above
     // is ALWAYS printed first (the operator sees both offsets + the delta) before the run fails.
-    // DORMANT today: `folds_to_failure` is always `false` while RECORDED_CLEAN_PAIRED_RUNS (0) <
-    // REQUIRED_CLEAN_PAIRED_RUNS (5), so exit behavior is byte-identical to before; it goes LIVE
-    // the moment the supervisor records N>=5 clean paired runs by bumping that one constant.
+    // LIVE since issue 1032: the recorded evidence count meets the bar, so only a Disagree fails;
+    // an Agree or an Unknown (one side unmeasured) exits 0 as before.
     if lipsync_folds_to_failure {
         anyhow::bail!(
             "lipsync cross-check DISAGREE: SyncNet vs QR/QPSK differ beyond the {}ms tolerance \
