@@ -100,12 +100,12 @@ def test_restart_decision_refuses_a_bad_input(args):
 
 # --- the unit comparison + drop-in probe -----------------------------------------------------
 
-def _unit_text(role="server", args="", rig_ip=None):
-    # issue 1439: setup-strih and verify-strih render the unit with the box's rig IP (the boot wait).
-    if rig_ip is None:
+def _unit_text(role="server", args="", rig_nic=None):
+    # issue 1439: setup-strih and verify-strih render the unit with the rig NIC (`--interface`).
+    if rig_nic is None:
         r = _bash(LIB, 'strih_dantesync_unit_text "$R" "$A"', env={"R": role, "A": args})
     else:
-        r = _bash(LIB, 'strih_dantesync_unit_text "$R" "$A" "$IP"', env={"R": role, "A": args, "IP": rig_ip})
+        r = _bash(LIB, 'strih_dantesync_unit_text "$R" "$A" "$NIC"', env={"R": role, "A": args, "NIC": rig_nic})
     assert r.returncode == 0, r.stderr
     return r.stdout  # the exact bytes setup-strih writes (the heredoc ends with ONE newline)
 
@@ -555,7 +555,7 @@ def test_setup_strih_step2_goes_through_the_caller():
     lib = DS_LIB.read_text()
     src = s.index('. "${HERE}/lib/strih-dantesync.sh"')
     guard = s.index('if [ "${BASH_SOURCE[0]}" != "${0}" ]; then')
-    emit = s.index('DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_lx_ip)")"')
+    emit = s.index('DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_dantesync_rig_nic)")"')
     call = s.index('strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE"')
     assert src < guard, "the lib is sourced before the source-guard, so a sourced setup (the tests) has it"
     assert guard < emit < call, "step 2 emits the unit text, then hands it to the caller"
@@ -613,7 +613,7 @@ def _verify_item(tmp_path, unit, argv):
     sc.chmod(0o755)
     harness = ('set -euo pipefail\n. "$LIBP"\n. "$DSLIB"\n'
                'ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nDS_ROLE_V=server\n'
-               'strih_lx_ip() { echo 10.77.9.202; }\n'  # issue 1439: the box IP fact, no fact file here
+               'strih_dantesync_rig_nic() { echo enp7s0; }\n'  # issue 1439: the rig NIC, no box here
                + block + '\necho END\n')
     r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, cwd=str(REPO), timeout=60,
                        env=dict(os.environ, LIBP=str(LIB), DSLIB=str(DS_LIB), STRIH_DANTESYNC_PROC=str(proc),
@@ -624,9 +624,9 @@ def _verify_item(tmp_path, unit, argv):
 
 def test_verify_item_6c_runs_under_set_e_and_grades_each_state(tmp_path):
     unit = tmp_path / "dsync.service"
-    runs = ["/usr/local/bin/dsync"]
+    runs = ["/usr/local/bin/dsync", "--interface", "enp7s0"]
     assert _verify_item(tmp_path, unit, runs).startswith("FAIL (dantesync-unit)"), "missing"
-    unit.write_text(_unit_text(rig_ip="10.77.9.202"))
+    unit.write_text(_unit_text(rig_nic="enp7s0"))
     assert _verify_item(tmp_path, unit, runs).startswith("PASS (dantesync-unit)"), "a kept daemon passes"
     assert _verify_item(tmp_path, unit, None).startswith("PASS (dantesync-unit)"), "items 6/6b grade liveness"
     assert "not the unit's ExecStart" in _verify_item(tmp_path, unit, runs + ["--ntp-server", "strih.lan"])

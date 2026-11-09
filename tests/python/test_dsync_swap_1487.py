@@ -49,7 +49,7 @@ def _old_unit(text):
 
 
 @pytest.mark.parametrize("args", ["server ''", "client '--ntp-server strih.lan'",
-                                  "server '' 10.77.9.204"])
+                                  "server '' enp56s0"])
 def test_the_derived_unit_equals_what_setup_strih_renders(args):
     """Equal bytes, or the next deploy restarts the date master for a unit that only moved."""
     r = bash(f'set -euo pipefail; . scripts/lib/strih-provision.sh; strih_dantesync_unit_text {args}')
