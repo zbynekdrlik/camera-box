@@ -73,7 +73,8 @@ def _bash(script, *args, env=None):
 
 
 def _sysfs(tmp_path, nics):
-    """A fake /sys: class/net/<nic>, with a `device` link for every nic mapped to True."""
+    """A fake /sys: class/net/<nic>. True = a `device` link and carrier 1 (the cabled NIC);
+    "nocarrier" = a `device` link and carrier 0 (an unplugged port); False = no device link."""
     sysroot = tmp_path / "sys"
     (sysroot / "class" / "net").mkdir(parents=True)
     devs = tmp_path / "devices"
@@ -84,6 +85,7 @@ def _sysfs(tmp_path, nics):
             target = devs / nic
             target.mkdir(parents=True)
             (d / "device").symlink_to(target)
+            (d / "carrier").write_text("1\n" if has_device is True else "0\n")
     return sysroot
 
 
@@ -117,6 +119,25 @@ def test_no_or_two_pci_nics_fail_by_name_and_print_nothing(tmp_path, nics, why):
     assert "cambox_lan_nic" in r.stderr, r.stderr
     if why == "two":
         assert "enp3s0" in r.stderr and "enp4s0" in r.stderr, r.stderr
+
+
+# The live fleet (read 9.11.2026): every SNV cambox has TWO onboard r8169 ports, and the cabled one
+# differs per box (cam2 enp3s0, cam3 enp1s0, cam5 enp2s0); the other port is down, carrier 0.
+@pytest.mark.parametrize("nics,want", [
+    ({"lo": False, "enp1s0": "nocarrier", "enp3s0": True, "wlp2s0": False}, "enp3s0"),
+    ({"lo": False, "enp1s0": True, "enp3s0": "nocarrier", "wlp2s0": False}, "enp1s0"),
+    ({"lo": False, "enp1s0": "nocarrier", "enp2s0": True, "wlo1": False}, "enp2s0"),
+])
+def test_the_cabled_port_of_two_onboard_ports_is_the_lan_nic(tmp_path, nics, want):
+    r = _nic(_sysfs(tmp_path, nics))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == want + "\n"
+
+
+def test_no_cabled_port_fails_by_name(tmp_path):
+    r = _nic(_sysfs(tmp_path, {"enp1s0": "nocarrier", "enp3s0": "nocarrier"}))
+    assert r.returncode == 1 and r.stdout == ""
+    assert "cambox_lan_nic" in r.stderr and "carrier" in r.stderr, r.stderr
 
 
 def test_a_missing_net_class_fails_by_name(tmp_path):
