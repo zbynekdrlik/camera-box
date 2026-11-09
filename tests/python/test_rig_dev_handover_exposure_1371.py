@@ -147,4 +147,4 @@ def test_the_probe_line_the_orchestrator_captures_is_what_the_decision_parses(tm
     r = subprocess.run(cli + ["snapshot-state"], capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     e = _item().decide({"exposure": (r.stdout, r.returncode)})
-    assert e["status"] == d.SUPERVISOR and "iso=800 d002=36000" in e["message"]
+    assert e["status"] == d.SUPERVISOR and "iso=800 shutterAngle=36000" in e["message"]  # issue 1452: a gphoto2-era snapshot reads as REST
