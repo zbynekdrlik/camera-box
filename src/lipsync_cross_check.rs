@@ -74,7 +74,7 @@ pub const REQUIRED_CLEAN_PAIRED_RUNS: u32 = 5;
 /// [`gates_overall_pass`] is `true` with NO consumer edit. Pairs across a rig change are not
 /// evidence (1.11 against the 30.10 E2E: the stream pin moved one frame in between). Lower it
 /// only with a ticket citing live evidence that the two methods no longer agree.
-pub const RECORDED_CLEAN_PAIRED_RUNS: u32 = 0;
+pub const RECORDED_CLEAN_PAIRED_RUNS: u32 = 5;
 
 /// Pure: is the fold EARNED at `recorded_clean_paired_runs` clean paired runs? `recorded >=
 /// REQUIRED`. Param-based so both directions unit-test Tier-0 without touching the module constant.
