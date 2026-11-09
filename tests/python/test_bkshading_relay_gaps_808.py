@@ -241,6 +241,7 @@ def _deploy_env(tmp, remote_sha, was_active="active", ro_fails=False):
         'case "$cmd" in\n'
         # issue 1407: the ro close is the shared emitter's text -- run it on the fake box.
         '  *"remount,ro"*) PATH="__BOX__:$PATH" bash -c "$cmd"; exit $? ;;\n'
+        '  *"uname -n"*) printf "cam9\\n" ;;\n'  # issue 1452: the box names itself (a default-pin box)
         '  *"is-active"*) printf "__WAS__\\n" ;;\n'
         # issue 808 slice B: a cambox root is read-only, so the deploy runs its remount cycle.
         '  *"findmnt"*) printf "ro,relatime\\n" ;;\n'
@@ -883,7 +884,8 @@ def _source_box():
 def _non_roster_box():
     # any resolvable cambox that is neither the source box nor cam2
     src = _source_box()
-    for cam in ("cam3", "cam4", "cam5", "cam6", "cam7", "cam1"):
+    # issue 1452: boxes on the fleet-default pin first (cam3/cam5 take the REST pin, _good_block reads the default)
+    for cam in ("cam4", "cam6", "cam7", "cam1", "cam3", "cam5"):
         if cam not in (src, "cam2"):
             return cam
     raise AssertionError("no non-roster cambox")

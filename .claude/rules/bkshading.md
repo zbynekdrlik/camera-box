@@ -389,6 +389,14 @@ from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It i
   key names, pinned by pytest against `CORE_CONFIG_KEYS` + `plan_writes`, so renaming a relay key
   breaks that test first. See `.claude/rules/camera-test-settings.md`.
 
+## shading v0.2.x = the REST relay, chosen per box (issue 1452)
+
+The relay drives the camera over the Blackmagic REST API on the camera's USB-C link (CDC-NCM); the
+gphoto2 text above is the v0.1.x relay, still the fleet default. Which box runs which, the camera link
+file and the service's pin: `.claude/rules/shading-pinned-release.md`. The issue-1238 preflight prints
+`focusNorm` (lens/focus normalised) from a REST relay, whose `focusDistance` is always null. The E2E
+test-camera step speaks REST too (`.claude/rules/camera-test-settings.md`).
+
 ## The fleet upgrade carries the relay (issue 1452)
 
 `scripts/deploy-fleet.sh` deploys the relay of the SAME CI run on every cambox that has one, through

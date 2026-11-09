@@ -205,7 +205,10 @@ executes `(az)` up to the next marker). `(ba)` (issue 1439, dsync's PTP NIC: `/s
 joined == the LAN NIC, the unit's ExecStart carrying `--interface <NIC>`, `scripts/lib/cambox-dsync-unit.sh`)
 sits after `(ak)`, before `(az)` (`tests/python/test_cambox_dsync_interface_1439.py` executes `(ba)` up to
 the next marker, so its comment lines never START with `# (`: a parenthesised aside cut the first
-draft's slice); the next free letter is `(bb)`.
+draft's slice). `(bb)` (issue 1452, the camera's USB-C link file + networkd + no route/DNS on an enx*
+link, `scripts/lib/bkshading-camera-link.sh`) sits after `(ak)`, before `(ba)`
+(`tests/python/test_shading_rest_1452.py` executes `(bb)` up to the next marker); the next free letter
+is `(bc)`.
 
 ## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
 

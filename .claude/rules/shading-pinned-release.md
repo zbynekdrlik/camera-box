@@ -1,6 +1,10 @@
 ---
 paths:
   - "scripts/shading-release.pin"
+  - "scripts/shading-release-rest.pin"
+  - "scripts/shading-release-boxes.txt"
+  - "scripts/lib/bkshading-camera-link.sh"
+  - "tests/python/test_shading_rest_1452.py"
   - "scripts/lib/shading-release.sh"
   - "scripts/bkshading-deploy-relay.sh"
   - "scripts/bkshading-deploy-service.sh"
@@ -18,7 +22,9 @@ what camera-box reads. camera-box pins a release, deploys it and keeps the deplo
 layer: every `scripts/bkshading-*`, the `systemd/bkshading-*` units, the rig gates, the strih seed
 generator. A relay or service change goes to the shading project.
 
-- **One pin:** `scripts/shading-release.pin`: the tag, the commit, the sha256 of each of the four assets.
+- **The pins:** `scripts/shading-release.pin` = the fleet DEFAULT (the tag, the commit, the sha256 of each
+  of the four assets); since issue 1452 the relay pin is chosen PER BOX (below), and the service keeps the
+  default pin.
 - **`scripts/lib/shading-release.sh`:** `shading_release_fetch` by the exact tag into
   `<tree>/shading-release/<tag>/` (git-ignored); the sha256 must equal the pin AND the release's
   `.sha256`; `shading_release_relay` / `shading_release_service` also run the binary for its version
@@ -42,11 +48,45 @@ generator. A relay or service change goes to the shading project.
   ignored, so a misspelled `[[cameras]]` exits 0 with `ok: 0 cameras`.
 - **`scripts/bkshading.example.toml`** is camera-box's seed for the Windows install.
 
+## The relay pin is chosen per box (issue 1452, shading#6, owner 9.11.2026)
+
+shading v0.2.x drives the camera over the Blackmagic REST API on its USB-C link (CDC-NCM) with NO
+gphoto2 fallback, and REST answers only on a Pocket 6K at fw >= 8.6 / a Pocket 4K at fw >= 9.8 with
+Blackmagic Camera Setup -> Network access -> "Web media manager" ON (else 404 = shading offline).
+- **`scripts/shading-release-boxes.txt`** lists `<box> <pin file>`; a box not listed takes the default.
+  Today `cam3` + `cam5` -> `scripts/shading-release-rest.pin` (v0.2.2); PP stays on v0.1.2 until the
+  owner turns Web media manager on there. Add a box only after its camera answers
+  `GET /control/api/v1/lens/iris` on the link. The box = the relay host's own name (lower case, no
+  domain): a cambox camN, a handheld SBC by its hostname.
+- **`shading_pin_file_for_box ROOT BOX`** resolves it; every relay consumer sets the lib's
+  `SHADING_RELEASE_PIN_FILE` from it, so the fetch and the two sha256 proofs are the same code for
+  every pin. Seams: `SHADING_RELEASE_PIN_FILE` alone = that ONE pin for every box (the deploy tests);
+  `SHADING_RELEASE_BOXES_FILE` = another map (its pin files relative to the map's dir).
+- **Consumers:** deploy-fleet fetches every pin its set needs before any box and passes `--box camN`;
+  `bkshading-deploy-relay.sh --box <name>` takes that box's pin and, before anything changes, reads
+  the box's own `uname -n`: a name whose pin differs is REFUSED ("pass --box cam3"); an unreadable name
+  is REFUSED without `--box` and keeps the given `--box` pin with a NOTE; setup-device takes `$DEVICE_NAME`'s pin; verify-device (ao) and
+  rig-dev-handover item 15 grade each box against its own pin (the handover also against origin/main's
+  map + pin, `shading_pin_version_for_box_at_ref`).
+- **The service stays on the default pin.** A v0.2.x panel sends `apertureStep` for +/-, which a
+  v0.1.x relay ignores, so a venue's service moves only once every relay it drives is on v0.2.x.
+- **The camera link file** every relay box carries: `scripts/lib/bkshading-camera-link.sh`
+  (`05-bkshading-camera.network`, the contract's text byte for byte, pinned against
+  `tests/fixtures/shading_pinned_rest/CONTRACT.md`): setup-device `[bkshading-relay]`, the SBC
+  `--install` + `--check` row (2c), verify-device (bb). A pin declaring `SHADING_RELAY_TRANSPORT=rest`
+  (`shading_pin_transport`) makes `bkshading-deploy-relay.sh` run the live-box program after the swap
+  on a cambox (amd64), so every REST relay deploy carries its link file. Any other live cambox:
+  `bash scripts/lib/bkshading-camera-link.sh --apply-program | ssh root@<box> bash -s` (one verified ro
+  window, `networkctl reload` only after the close; never on an SBC, whose root may be rw by design).
+  setup-device's write is enable-only: the link comes up at the next boot or with that program. systemd-networkd is the cambox netplan renderer, so the
+  file takes effect; its match (`Driver=cdc_ncm` + `ID_VENDOR_ID=1edb`) never claims the `enp*` LAN.
+
 ## Bumping the pin
 
 1. `scripts/shading-release.pin`: the tag, the commit, the four sha256 from the release's `.sha256` files.
 2. Copy the tag's `docs/CONTRACT.md` and `bkshading/service/src/preview/ndi_paths.rs` into
-   `tests/fixtures/shading_pinned/`.
+   `tests/fixtures/shading_pinned/` (for the REST pin: `docs/CONTRACT.md` into
+   `tests/fixtures/shading_pinned_rest/`; `tests/shading_pin_1487.rs` `PINS` lists every pin file).
 3. `cargo test --test shading_pin_1487` reads the release and the tag over HTTPS and fails until the pin
    and the copies hold; `tests/python/test_bkshading_ndi_provision_1157.py` compares
    `scripts/lib/bkshading-ndi-runtime.sh` with the copy. Read the contract's diff: a gphoto2 key,

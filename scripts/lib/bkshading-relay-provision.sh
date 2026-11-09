@@ -25,6 +25,8 @@ _BKRP_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_BKRP_HERE/bkshading-relay-runtime.sh"
 # shellcheck source=scripts/lib/shading-release.sh
 . "$_BKRP_HERE/shading-release.sh"  # issue 1487: the pinned relay
+# shellcheck source=scripts/lib/bkshading-camera-link.sh
+. "$_BKRP_HERE/bkshading-camera-link.sh"  # issue 1452: the camera's USB-C link file
 
 # --- targets (resolved per call, so an env override set after sourcing still applies) -------------
 _bkrp_init() {
@@ -160,8 +162,9 @@ bkshading_relay_expected_enable_state() {
 # (cam2 -- the SAME box rig-mode.sh passes as `cam2=$PAINTER_IP` and cam2_is_painter_box pins).
 bkshading_relay_roster_painter_box() { printf '%s\n' cam2; }
 
-# bkshading_relay_pin_version -> the version the pin in this tree says, the (ao) grade's WANT.
-bkshading_relay_pin_version() { shading_pin_version "$(cd "$_BKRP_HERE/../.." && pwd)" 2>/dev/null || true; }
+# bkshading_relay_pin_version [BOX] -> the version this tree pins for BOX (issue 1452: per box,
+# scripts/shading-release-boxes.txt; no BOX = the fleet default), the (ao) grade's WANT.
+bkshading_relay_pin_version() { shading_pin_version_for_box "$(cd "$_BKRP_HERE/../.." && pwd)" "${1:-}" 2>/dev/null || true; }
 
 # bkshading_relay_provision_binary_plan RELAY_ARG -> local:<path> | url:<url> | release | none
 #   Where setup-device.sh takes the relay binary from: an explicit --relay-binary that is an existing
@@ -180,15 +183,21 @@ bkshading_relay_provision_binary_plan() {
   printf '%s\n' release
 }
 
-# bkshading_relay_provision_fetch_binary PLAN DEST_DIR
+# bkshading_relay_provision_fetch_binary PLAN DEST_DIR [BOX]
+#   BOX (issue 1452) picks this box's pin (scripts/shading-release-boxes.txt); none = the fleet default.
 #   Carry out a bkshading_relay_provision_binary_plan: stdout = the local path of the verified relay
 #   binary, rc 0; or stdout = ONE line saying why there is none, rc 1 (the caller records it -- it
 #   never aborts the provisioner). Progress goes to stderr. curl is overridable for Tier-0 tests
 #   (BKSHADING_RELAY_CURL). No fallback: only the pinned bytes pass.
 bkshading_relay_provision_fetch_binary() {
-  local plan="${1:-none}" dir="${2:-}" root out bin
+  local plan="${1:-none}" dir="${2:-}" box="${3:-}" root out bin pinf
   local curl="${BKSHADING_RELAY_CURL:-curl}" asset="$SHADING_ASSET_RELAY_AMD64"
   root="$(cd "$_BKRP_HERE/../.." && pwd)"
+  if ! pinf="$(shading_pin_file_for_box "$root" "$box" 2>&1)"; then
+    printf '%s\n' "$pinf"
+    return 1
+  fi
+  local SHADING_RELEASE_PIN_FILE="$pinf"
   [ -n "$dir" ] && mkdir -p "$dir" || { echo "no download dir for the relay binary"; return 1; }
   bin="$dir/bkshading-relay"
   case "$plan" in

@@ -143,6 +143,20 @@ except Exception:
 print(v if isinstance(v, int) and not isinstance(v, bool) else "")' "${1:-}"
 }
 
+# issue 1452 (shading v0.2.x, the REST relay): `params.focusDistance` is always null there; the focus
+# position is `params.focusNorm` (REST lens/focus `normalised`, 0..1, read only). Same guards: a bool,
+# a non-number, a non-dict body or an absent field print EMPTY; 0 and 1 are real values.
+bkshading_preflight_state_focus_norm() {
+  python3 -c 'import json,sys
+try:
+    d = json.loads(sys.argv[1])
+    v = (d.get("params") or {}).get("focusNorm")
+except Exception:
+    v = None
+ok = isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1
+print(round(v, 3) if ok else "")' "${1:-}"
+}
+
 # --- pure classifier -----------------------------------------------------------------------------
 # bkshading_preflight_classify <online 0|1> <camera> <shutter> [min_denom=500] -> one of:
 #   ok | warn-slow | warn-unknown | skip-offline
@@ -274,6 +288,14 @@ bkshading_preflight_focus_distance_message() {
     "$label" "$ip" "$camera" "$distance"
 }
 
+# issue 1452: the REST relay's focus position (lens/focus normalised, 0 = near .. 1 = far), the same
+# informational line as the d003 distance: a position, never a mode.
+bkshading_preflight_focus_norm_message() {
+  local label="$1" ip="$2" camera="$3" norm="$4"
+  printf "    bkshading relay check (%s, %s): camera '%s' reports focus position focusNorm=%s (lens/focus normalised; informational only -- a position does NOT prove manual-focus MODE is engaged; see NOTE below)\n" \
+    "$label" "$ip" "$camera" "$norm"
+}
+
 # issue 1237/1238: FOCUS-MODE + auto/manual EXPOSURE-MODE honesty NOTE. The relay's GET /api/state
 # does NOT expose either -- confirmed (issue 1238, honest research against the authoritative TalOrg
 # BMPCC-over-PTP control-point list) to be a HARDWARE FACT, not merely unread: the BMPCC's documented
@@ -355,6 +377,10 @@ bkshading_preflight_report() {
       focus_distance="$(bkshading_preflight_state_focus_distance "$raw" || true)"
       if [ -n "$focus_distance" ]; then
         bkshading_preflight_focus_distance_message "$label" "$ip" "$camera" "$focus_distance"
+      else
+        # issue 1452: a REST relay (v0.2.x) reports the focus as focusNorm, focusDistance null
+        focus_distance="$(bkshading_preflight_state_focus_norm "$raw" || true)"
+        [ -z "$focus_distance" ] || bkshading_preflight_focus_norm_message "$label" "$ip" "$camera" "$focus_distance"
       fi
       bkshading_preflight_focus_note_message "$label"
     fi

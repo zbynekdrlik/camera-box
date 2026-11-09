@@ -5,16 +5,20 @@
 # enforce, the THIN TRANSPORT half. Owner, 25.9.2026: "shutter a iso boli na zlych hodnotach tak
 # tie si mas uz ty vediet pri teste skontrolovat a nastavit kedze uz mas shading pripojenie".
 #
-# The ONE test camera (a BMPCC, fed through the HDMI splitter into every cambox) is reachable over
-# USB-PTP with gphoto2 on whichever cambox has its USB-C (the bkshading relay path, issue 808 --
-# never Bluetooth). recording-e2e.sh calls camera_test_settings_enforce right AFTER the issue-808
-# relay pause (so exactly one gphoto2 user exists) and after the temporary relay-restore trap (so an
-# abort here still restores the relays). This lib only moves bytes: ssh + sysfs presence + gphoto2
-# get/set. EVERY decision (which keys, the baseline diff, the set list, the read-back grade, the
-# presence/ack/pinned matrix) lives in the pure scripts/camera_test_settings.py (pytest Tier-0).
+# The ONE test camera (a BMPCC, fed through the HDMI splitter into every cambox) is reachable on
+# whichever cambox has its USB-C. Since issue 1452 (shading#6, owner 9.11.2026) it is driven over the
+# official Blackmagic REST API on the camera's own USB-C network link (CDC-NCM), the way the shading
+# v0.2.x relay does it: `curl` ON the cambox to http://<camera>/control/api/v1/<endpoint>, the camera
+# found the relay's way (the cdc_ncm link of a vendor-1edb device, the DHCP lease's SERVER_ADDRESS,
+# else the other host of the link's /30). gphoto2/PTP is gone. recording-e2e.sh calls
+# camera_test_settings_enforce right AFTER the issue-808 relay pause (so the relay cannot write the
+# camera at the same time) and after the temporary relay-restore trap (so an abort here still restores
+# the relays). This lib only moves bytes: ssh + sysfs presence + curl get/put. EVERY decision (which
+# endpoints, the baseline diff, the PUT list, the read-back grade, the presence/ack/pinned matrix)
+# lives in the pure scripts/camera_test_settings.py (pytest Tier-0).
 #
 # Flow:
-#   1. baseline status (scripts/camera-test-baseline.json): pinned = iso + d002 both have values.
+#   1. baseline status (scripts/camera-test-baseline.json): pinned = iso + a shutter unit have values.
 #   2. resolve the box holding the camera: a sysfs idVendor=1edb (Blackmagic) scan over the
 #      candidate boxes -- the relay-paused source cambox + cam2 -- first hit wins. No PTP session
 #      is opened just to look.
@@ -22,8 +26,8 @@
 #      rig-fleet.txt (the existing scripts/lib/cambox-offline-ack.sh mechanism).
 #   4. unverified-* -> a LOUD report-only UNVERIFIED (never a silent pass), return 0.
 #      abort-*      -> a named ERROR, exit 1.
-#      enforce      -> ONE gphoto2 read session, the plan, and when something differs: the issue-1271
-#                      rig-busy guard, ONE gphoto2 --set-config session, ONE read-back session, grade;
+#      enforce      -> ONE REST read session, the plan, and when something differs: the issue-1271
+#                      rig-busy guard, ONE PUT session, ONE read-back session, grade;
 #                      a key that does not read back aborts. Nothing is restored after the run: the
 #                      baseline IS the test state.
 #
@@ -63,7 +67,7 @@ camera_test_settings_baseline_path() {
 }
 
 # Remote text: prints `CTS_USB:1` when a Blackmagic USB device is enumerated on the box, else
-# `CTS_USB:0`. Reads sysfs only (no gphoto2, no PTP session).
+# `CTS_USB:0`. Reads sysfs only (no network request to the camera).
 camera_test_settings_presence_cmds() {
   local vendor marker
   vendor="$(camera_test_settings_usb_vendor)"
@@ -98,56 +102,99 @@ camera_test_settings_ssh() {
     -o ConnectTimeout=8 root@"$ip" "$cmd"
 }
 
-# Remote exit codes of the single-gphoto2-user checks below.
-camera_test_settings_rc_no_pgrep() { printf '%s\n' 96; }
+# Remote exit codes of the session checks below.
+camera_test_settings_rc_no_link() { printf '%s\n' 95; }
+camera_test_settings_rc_no_curl() { printf '%s\n' 96; }
 camera_test_settings_rc_relay_active() { printf '%s\n' 97; }
-camera_test_settings_rc_gphoto2_busy() { printf '%s\n' 98; }
 
-# Remote text for ONE gphoto2 session with the given (already validated, plain-token) argv. The
-# issue-808 pause is best-effort (it never confirms the unit stopped), so "exactly one gphoto2 user"
-# is CHECKED on the box, in the same command, right before the session:
-#   - the relay unit must be really stopped: only inactive / failed / unknown (or no systemctl
-#     answer) pass. activating (auto-restart), deactivating, reloading and active refuse (exit 97);
-#   - pgrep must exist (exit 96 otherwise -- a missing pgrep must not silently skip the next check);
-#   - no gphoto2 process may be running (exit 98).
-# shellcheck disable=SC2016  # the $(...) / $_cts_rs are REMOTE shell text, expanded on the box
-camera_test_settings_gphoto2_cmd() {
-  local unit
+# The endpoints a GET may name (camera_test_settings.py READ_ENDPOINTS), checked before the text is built.
+camera_test_settings_get_ok() {
+  case "${1:-}" in
+    video/iso | video/shutter | video/whiteBalance | video/whiteBalanceTint | lens/iris | system/format) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The endpoints a PUT may name (the enforceable ones), and the shape of its JSON body: ONE numeric
+# field. Both are checked here before the text is built, so a body can never carry shell syntax.
+camera_test_settings_put_ok() {
+  case "${1:-}" in
+    video/iso | video/shutter | video/whiteBalance | video/whiteBalanceTint | lens/iris) ;;
+    *) return 1 ;;
+  esac
+  [[ "${2:-}" =~ ^\{\"[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]+\":-?[0123456789]+(\.[0123456789]+)?\}$ ]]
+}
+
+# Remote text for ONE REST session: `get EP...` (one `CTS_GET <ep> <http code> <body>` line each) or
+# `put EP|JSON...` (one `CTS_PUT <ep> <http code>` line each). Before any request, in the same
+# command:
+#   - the relay unit must be really stopped (issue-808 pause): only inactive / failed / unknown (or no
+#     systemctl answer) pass, anything else exits 97 -- a running relay would write the camera too;
+#   - curl must exist (exit 96);
+#   - the camera's address: the cdc_ncm link of a vendor-1edb USB device, the lease's SERVER_ADDRESS
+#     (else ROUTER), else the other host of the link's /30 -- exit 95 when there is no such link or
+#     no address (no camera link file, the camera's Web media manager off, the link not up yet).
+# Every request is bounded (`curl -m 5`), and the line names the camera found (`CTS_CAMERA`).
+# shellcheck disable=SC2016  # the $(...) / $_cts_* are REMOTE shell text, expanded on the box
+camera_test_settings_rest_cmd() {
+  local mode="${1:?get|put}" unit spec ep body
+  shift
   unit="$(bkshading_relay_unit_name)"
   printf '_cts_rs="$(systemctl is-active %s 2>/dev/null)"; case "$_cts_rs" in inactive|failed|unknown|"") ;; *) echo "CTS_RELAY_ACTIVE $_cts_rs"; exit %s;; esac; ' \
     "$unit" "$(camera_test_settings_rc_relay_active)"
-  printf 'command -v pgrep >/dev/null 2>&1 || { echo CTS_NO_PGREP; exit %s; }; ' \
-    "$(camera_test_settings_rc_no_pgrep)"
-  printf 'if pgrep -x gphoto2 >/dev/null 2>&1; then echo CTS_GPHOTO2_BUSY; exit %s; fi; ' \
-    "$(camera_test_settings_rc_gphoto2_busy)"
-  printf 'timeout 20 gphoto2 %s\n' "$*"
+  printf 'command -v curl >/dev/null 2>&1 || { echo CTS_NO_CURL; exit %s; }; ' "$(camera_test_settings_rc_no_curl)"
+  printf '_cts_net=%q; _cts_lease=%q; ' "${CAMERA_TEST_SETTINGS_NET_SYSFS:-/sys/class/net}" "${CAMERA_TEST_SETTINGS_LEASES_DIR:-/run/systemd/netif/leases}"
+  printf '%s' '_cts_cam=""; _cts_if=""; for _cts_n in "$_cts_net"/*; do '
+  printf '%s' '_cts_d="$(readlink -f "$_cts_n/device/driver" 2>/dev/null)"; [ "${_cts_d##*/}" = cdc_ncm ] || continue; '
+  printf '%s' '[ "$(cat "$(readlink -f "$_cts_n/device" 2>/dev/null)/../idVendor" 2>/dev/null)" = 1edb ] || continue; '
+  printf '%s' '_cts_if="${_cts_n##*/}"; _cts_ix="$(cat "$_cts_n/ifindex" 2>/dev/null)"; '
+  printf '%s' '_cts_cam="$(sed -n "s/^SERVER_ADDRESS=//p" "$_cts_lease/$_cts_ix" 2>/dev/null | head -n 1)"; '
+  printf '%s' '[ -n "$_cts_cam" ] || _cts_cam="$(sed -n "s/^ROUTER=//p" "$_cts_lease/$_cts_ix" 2>/dev/null | head -n 1 | cut -d" " -f1)"; '
+  printf '%s' 'if [ -z "$_cts_cam" ]; then _cts_a="$(ip -4 -o addr show dev "$_cts_if" 2>/dev/null | awk "{print \$4}" | head -n 1)"; '
+  printf '%s' 'case "$_cts_a" in */30) _cts_ip="${_cts_a%/30}"; _cts_l="${_cts_ip##*.}"; _cts_b=$((_cts_l / 4 * 4)); '
+  printf '%s' 'if [ $((_cts_l - _cts_b)) = 1 ]; then _cts_p=$((_cts_b + 2)); else _cts_p=$((_cts_b + 1)); fi; _cts_cam="${_cts_ip%.*}.$_cts_p";; esac; fi; '
+  printf '%s' 'break; done; '
+  printf '[ -n "$_cts_cam" ] || { echo "CTS_NO_LINK ${_cts_if:-none}"; exit %s; }; ' "$(camera_test_settings_rc_no_link)"
+  printf '%s' 'echo "CTS_CAMERA $_cts_if $_cts_cam"; _cts_t="$(mktemp)"; '
+  for spec in "$@"; do
+    if [ "$mode" = get ]; then
+      camera_test_settings_get_ok "$spec" || { echo "camera_test_settings_rest_cmd: refused GET '$spec'" >&2; return 1; }
+      printf '_cts_c="$(curl -s -m 5 -o "$_cts_t" -w "%%{http_code}" "http://$_cts_cam/control/api/v1/%s")"; echo "CTS_GET %s ${_cts_c:-000} $(tr -d "\\n\\r" <"$_cts_t" 2>/dev/null)"; : >"$_cts_t"; ' "$spec" "$spec"
+    else
+      ep="${spec%%|*}"
+      body="${spec#*|}"
+      camera_test_settings_put_ok "$ep" "$body" || { echo "camera_test_settings_rest_cmd: refused PUT '$spec'" >&2; return 1; }
+      printf '_cts_c="$(curl -s -m 5 -o /dev/null -w "%%{http_code}" -X PUT -H "Content-Type: application/json" -d '"'"'%s'"'"' "http://$_cts_cam/control/api/v1/%s")"; echo "CTS_PUT %s ${_cts_c:-000}"; ' "$body" "$ep" "$ep"
+    fi
+  done
+  printf '%s\n' 'rm -f "$_cts_t"'
 }
 
 # camera_test_settings_transport_abort RC LABEL IP WHAT [CONSEQUENCE] -> exits 1 with a message naming
-# the cause of a failed ssh + gphoto2 session. Only called for a non-zero RC. CONSEQUENCE (default:
-# the E2E's refusal) ends the generic transport message.
+# the cause of a failed ssh + REST session. Only called for a non-zero RC. CONSEQUENCE (default: the
+# E2E's refusal) ends the generic transport message.
 camera_test_settings_transport_abort() {
   local rc="$1" label="$2" ip="$3" what="$4" cause
   local consequence="${5:-refusing to run on an unknown exposure}"
   case "$rc" in
     "$(camera_test_settings_rc_relay_active)")
-      echo "ERROR: issue 1371: bkshading-relay is still active on $label ($ip) -- the issue-808 relay pause did not take, so the $what would race the relay's own gphoto2; refusing." >&2
+      echo "ERROR: issue 1371: bkshading-relay is still active on $label ($ip) -- the issue-808 relay pause did not take, so the $what would race the relay's own camera writes; refusing." >&2
       exit 1
       ;;
-    "$(camera_test_settings_rc_gphoto2_busy)")
-      echo "ERROR: issue 1371: another gphoto2 process is running on $label ($ip) (possibly this step's own timed-out set) -- refusing to start the $what next to it (exactly one gphoto2 user)." >&2
+    "$(camera_test_settings_rc_no_curl)")
+      echo "ERROR: issue 1452: curl is not available on $label ($ip) -- the camera's REST API cannot be reached, so the $what is refused." >&2
       exit 1
       ;;
-    "$(camera_test_settings_rc_no_pgrep)")
-      echo "ERROR: issue 1371: pgrep is not available on $label ($ip) -- cannot prove no other gphoto2 process is running, so the $what is refused." >&2
+    "$(camera_test_settings_rc_no_link)")
+      echo "ERROR: issue 1452: the test camera is on USB ($label, $ip) but has no network link to it -- no cdc_ncm link of the camera with an address (the camera link file, verify-device.sh (bb); the camera's Blackmagic Camera Setup -> Network access -> Web media manager ON; firmware >= 8.6 on a Pocket 6K / 9.8 on a Pocket 4K) -- $consequence." >&2
       exit 1
       ;;
     124) cause="timed out" ;;
-    127) cause="command not found on the box (is gphoto2 installed?)" ;;
+    127) cause="command not found on the box" ;;
     255) cause="ssh failed" ;;
-    *) cause="gphoto2 or ssh error" ;;
+    *) cause="curl or ssh error" ;;
   esac
-  echo "ERROR: issue 1371: the test camera is on USB ($label, $ip) but its gphoto2 $what failed: transport rc=$rc ($cause) -- $consequence." >&2
+  echo "ERROR: issue 1371: the test camera is on USB ($label, $ip) but its REST $what failed: transport rc=$rc ($cause) -- $consequence." >&2
   exit 1
 }
 
@@ -197,7 +244,7 @@ camera_test_settings_enforce() {
   py="$here/camera_test_settings.py"
   baseline="$(camera_test_settings_baseline_path "$here")"
   ack="$(camera_test_settings_ack_name)"
-  echo "[0/8] test-camera shutter/ISO enforce over the bkshading USB path (issue 1371; baseline $baseline)"
+  echo "[0/8] test-camera shutter/ISO enforce over the camera's REST API on its USB-C link (issues 1371 + 1452; baseline $baseline)"
   if ! command -v python3 >/dev/null 2>&1; then
     echo "ERROR: issue 1371: python3 not found -- the test-camera settings step cannot decide anything; refusing to run blind." >&2
     exit 1
@@ -232,9 +279,9 @@ camera_test_settings_enforce() {
     unverified-unpinned)
       echo "::warning title=issue 1371 test-camera settings UNVERIFIED::the test camera is not on USB and the baseline is not pinned yet -- shutter/ISO NOT checked this run"
       echo "    UNVERIFIED (issue 1371): the test camera's shutter/ISO were NOT read or set this run."
-      echo "    The camera is not on USB of: $checked${unread:+ (UNREADABLE: $unread)}; the baseline $baseline has iso/d002 = null."
-      echo "    Report-only until the supervisor pins the baseline (issue 1350: plug the BMPCC USB-C into the source cambox, then pin iso + d002)."
-      echo "    Once iso/d002 are pinned, an absent camera ABORTS the run."
+      echo "    The camera is not on USB of: $checked${unread:+ (UNREADABLE: $unread)}; the baseline $baseline has no iso + shutter pinned."
+      echo "    Report-only until the supervisor pins the baseline (plug the BMPCC USB-C into the source cambox, then pin iso + the shutter)."
+      echo "    Once iso + the shutter are pinned, an absent camera ABORTS the run."
       return 0
       ;;
     unverified-acked)
@@ -259,18 +306,19 @@ camera_test_settings_enforce() {
       ;;
   esac
 
-  local read_args raw plan setargs readback grade read_rc
+  local read_eps raw plan setreqs readback grade read_rc
   rc=0
-  read_args="$(python3 "$py" read-args)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ -z "$read_args" ]; then
-    echo "ERROR: issue 1371: could not build the gphoto2 read arguments (rc=$rc) -- refusing to run blind." >&2
+  read_eps="$(python3 "$py" read-endpoints)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$read_eps" ]; then
+    echo "ERROR: issue 1371: could not build the REST read endpoints (rc=$rc) -- refusing to run blind." >&2
     exit 1
   fi
   read_rc=0
-  raw="$(camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || read_rc=$?
+  # shellcheck disable=SC2086  # read_eps = the words of camera_test_settings.py READ_ENDPOINTS, each checked by camera_test_settings_get_ok
+  raw="$(camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_rest_cmd get $read_eps)")" || read_rc=$?
   if [ "$action" = abort-unpinned ]; then
     local suggestion
-    echo "ERROR: issue 1371: the test camera IS on USB ($found_label, $found_ip) but the baseline $baseline is not pinned (iso/d002 null) -- refusing to run without a pinned exposure." >&2
+    echo "ERROR: issue 1371: the test camera IS on USB ($found_label, $found_ip) but the baseline $baseline is not pinned (iso + a shutter unit null) -- refusing to run without a pinned exposure." >&2
     [ "$read_rc" -eq 0 ] || camera_test_settings_transport_abort "$read_rc" "$found_label" "$found_ip" read
     rc=0
     suggestion="$(python3 "$py" suggest <<<"$raw")" || rc=$?
@@ -284,15 +332,21 @@ camera_test_settings_enforce() {
   fi
   [ "$read_rc" -eq 0 ] || camera_test_settings_transport_abort "$read_rc" "$found_label" "$found_ip" read
 
+  printf '%s\n' "$raw" | { grep '^CTS_CAMERA ' || true; } | _cts_prefix
   rc=0
   plan="$(python3 "$py" plan --baseline "$baseline" <<<"$raw")" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "ERROR: issue 1371: the test camera is on USB ($found_label, $found_ip) but its gphoto2 read output was unreadable (decision rc=$rc) -- refusing to run on an unknown exposure." >&2
+  if [ "$rc" -eq 8 ]; then
+    printf '%s\n' "$plan" | _cts_prefix
+    echo "ERROR: issue 1452: the test camera reports its shutter in a unit the baseline $baseline does not pin (see above) -- refusing to guess a conversion." >&2
     exit 1
   fi
-  printf '%s\n' "$plan" | { grep -v '^SETARGS ' || true; } | _cts_prefix
-  setargs="$(printf '%s\n' "$plan" | sed -n 's/^SETARGS //p')"
-  if [ -z "$setargs" ]; then
+  if [ "$rc" -ne 0 ]; then
+    echo "ERROR: issue 1371: the test camera is on USB ($found_label, $found_ip) but its REST read was unreadable (decision rc=$rc; video/iso + video/shutter must answer 200) -- refusing to run on an unknown exposure." >&2
+    exit 1
+  fi
+  printf '%s\n' "$plan" | { grep -v '^SETREQ ' || true; } | _cts_prefix
+  setreqs="$(_cts_requests "$plan" SETREQ)"
+  if [ -z "$setreqs" ]; then
     echo "    ok: the test camera is already at the baseline -- nothing set"
     return 0
   fi
@@ -314,7 +368,7 @@ camera_test_settings_enforce() {
     echo "ERROR: issue 1371: the test camera's production exposure could not be stored (${snap:-no snapshot path}, rc=$rc, see above) -- refusing to overwrite the owner's ISO/shutter without a record the EVENT switch can restore." >&2
     exit 1
   fi
-  readback="$(_cts_set_and_readback "$found_ip" "$found_label" "$pw" "$setargs" "$read_args" \
+  readback="$(_cts_set_and_readback "$found_ip" "$found_label" "$pw" "$setreqs" "$read_eps" \
     "refusing to run on an unknown exposure")" || exit 1
   rc=0
   grade="$(python3 "$py" grade --baseline "$baseline" <<<"$readback")" || rc=$?
@@ -325,7 +379,7 @@ camera_test_settings_enforce() {
       return 0
       ;;
     5)
-      echo "ERROR: issue 1371: a test-camera setting did NOT read back after --set-config (see MISMATCH above) -- refusing to run on a camera that ignores the baseline." >&2
+      echo "ERROR: issue 1371: a test-camera setting did NOT read back after its PUT (see MISMATCH above) -- refusing to run on a camera that ignores the baseline." >&2
       exit 1
       ;;
     *)
@@ -335,24 +389,44 @@ camera_test_settings_enforce() {
   esac
 }
 
-# _cts_set_and_readback IP LABEL PW SETARGS READ_ARGS CONSEQUENCE -> ONE --set-config session, then
-# ONE read-back session; prints the read-back text. Shared by the E2E enforce and the EVENT restore,
-# so both handle every transport code the same way. The single-gphoto2-user refusals (96/97/98) and
-# a failed read-back exit 1 through camera_test_settings_transport_abort (CONSEQUENCE ends the
-# message); any other set rc is only a WARNING, because the read-back decides. Call it as
-# `x="$(_cts_set_and_readback ...)" || exit 1` -- it runs in the command-substitution subshell.
+# _cts_requests PLAN TAG -> the plan's `TAG <endpoint> <json>` lines as `endpoint|json` words (one per
+# line), the form camera_test_settings_rest_cmd put takes.
+_cts_requests() {
+  printf '%s\n' "${1:-}" | sed -n "s/^$2 \([^ ]*\) \(.*\)$/\1|\2/p"
+}
+
+# _cts_set_and_readback IP LABEL PW SETREQS READ_EPS CONSEQUENCE -> ONE PUT session, then ONE read-back
+# session; prints the read-back text. Shared by the E2E enforce and the EVENT restore, so both handle
+# every transport code the same way. The session refusals (95/96/97) and a failed read-back exit 1
+# through camera_test_settings_transport_abort (CONSEQUENCE ends the message); a PUT the camera answers
+# with anything but 2xx, or a failed PUT session, is only a WARNING, because the read-back decides. Call
+# it as `x="$(_cts_set_and_readback ...)" || exit 1` -- it runs in the command-substitution subshell.
 _cts_set_and_readback() {
-  local ip="$1" label="$2" pw="$3" setargs="$4" read_args="$5" consequence="$6" rc=0 readback
-  camera_test_settings_ssh "$ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$setargs")" >/dev/null || rc=$?
+  local ip="$1" label="$2" pw="$3" setreqs="$4" read_eps="$5" consequence="$6" rc=0 out readback
+  local -a reqs=()
+  local putcmd
+  mapfile -t reqs <<<"$setreqs"
+  if ! putcmd="$(camera_test_settings_rest_cmd put "${reqs[@]}")"; then
+    echo "ERROR: issue 1452: a planned PUT was refused before it was sent (see above) -- $consequence." >&2
+    exit 1
+  fi
+  out="$(camera_test_settings_ssh "$ip" "$pw" "$putcmd")" || rc=$?
   case "$rc" in
     0) ;;
-    "$(camera_test_settings_rc_relay_active)" | "$(camera_test_settings_rc_gphoto2_busy)" | "$(camera_test_settings_rc_no_pgrep)")
+    "$(camera_test_settings_rc_relay_active)" | "$(camera_test_settings_rc_no_curl)" | "$(camera_test_settings_rc_no_link)")
       camera_test_settings_transport_abort "$rc" "$label" "$ip" set "$consequence"
       ;;
-    *) echo "    WARNING: issue 1371: gphoto2 --set-config exited rc=$rc -- the read-back decides" >&2 ;;
+    *) echo "    WARNING: issue 1452: the PUT session exited rc=$rc -- the read-back decides" >&2 ;;
   esac
+  printf '%s\n' "$out" | { grep '^CTS_PUT ' || true; } | while read -r _t ep code; do
+    case "$code" in
+      2??) ;;
+      *) echo "    WARNING: issue 1452: PUT $ep answered HTTP $code -- the read-back decides" >&2 ;;
+    esac
+  done
   rc=0
-  readback="$(camera_test_settings_ssh "$ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || rc=$?
+  # shellcheck disable=SC2086  # read_eps = the words of camera_test_settings.py READ_ENDPOINTS, each checked by camera_test_settings_get_ok
+  readback="$(camera_test_settings_ssh "$ip" "$pw" "$(camera_test_settings_rest_cmd get $read_eps)")" || rc=$?
   [ "$rc" -eq 0 ] || camera_test_settings_transport_abort "$rc" "$label" "$ip" read-back "$consequence"
   printf '%s\n' "$readback"
 }
@@ -367,7 +441,7 @@ camera_test_settings_manual_consume_hint() {
   printf '%s\n' "python3 scripts/camera_test_settings.py consume"
 }
 
-# Remote text: stop the relay on the camera box before the restore's gphoto2 sessions. The relay is
+# Remote text: stop the relay on the camera box before the restore's REST sessions. The relay is
 # normally already stopped (TEST mode stopped+disabled it); this covers a rig that ran an E2E
 # outside TEST mode. The EVENT switch starts + enables the relay right after the restore.
 camera_test_settings_relay_stop_cmds() {
@@ -397,7 +471,7 @@ _cts_consume() {
 _cts_restore_apply() {
   local here="$1" strih="$2" stream="$3" pw="$4" snap="$5"
   shift 5
-  local py read_args raw plan setargs readback grade rc read_rc
+  local py read_eps raw plan setreqs readback grade rc read_rc
   local consequence="the production exposure was NOT restored"
   py="$here/camera_test_settings.py"
   _cts_find_camera "$pw" "$@"
@@ -406,37 +480,38 @@ _cts_restore_apply() {
     exit 1
   fi
   echo "    camera on USB: $CTS_FOUND_LABEL ($CTS_FOUND_IP)"
-  # issue 1271: the relay stop and the camera's PTP session are rig mutations too -- the shared
+  # issue 1271: the relay stop and the camera's REST session are rig mutations too -- the shared
   # read-only rig-busy guard runs BEFORE them (its exit 1 ends this subshell, never the EVENT switch),
   # and again right before the set.
   stray_session_check_assert "$here" "$strih" "$stream" "the test-camera production exposure read"
   camera_test_settings_ssh "$CTS_FOUND_IP" "$pw" "$(camera_test_settings_relay_stop_cmds)" >/dev/null 2>&1 || true
 
   rc=0
-  read_args="$(python3 "$py" read-args)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ -z "$read_args" ]; then
-    echo "ERROR: issue 1371: could not build the gphoto2 read arguments (rc=$rc) -- $consequence." >&2
+  read_eps="$(python3 "$py" read-endpoints)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$read_eps" ]; then
+    echo "ERROR: issue 1371: could not build the REST read endpoints (rc=$rc) -- $consequence." >&2
     exit 1
   fi
   read_rc=0
-  raw="$(camera_test_settings_ssh "$CTS_FOUND_IP" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || read_rc=$?
+  # shellcheck disable=SC2086  # read_eps = the words of camera_test_settings.py READ_ENDPOINTS, each checked by camera_test_settings_get_ok
+  raw="$(camera_test_settings_ssh "$CTS_FOUND_IP" "$pw" "$(camera_test_settings_rest_cmd get $read_eps)")" || read_rc=$?
   [ "$read_rc" -eq 0 ] || camera_test_settings_transport_abort "$read_rc" "$CTS_FOUND_LABEL" "$CTS_FOUND_IP" read "$consequence"
 
   rc=0
   plan="$(python3 "$py" restore-plan --snapshot "$snap" <<<"$raw")" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "ERROR: issue 1371: the restore could not be planned (decision rc=$rc: 3 = unreadable camera output, 7 = invalid snapshot) -- $consequence." >&2
+    echo "ERROR: issue 1371: the restore could not be planned (decision rc=$rc: 3 = unreadable camera output, 7 = invalid snapshot, 8 = the camera reports its shutter in another unit than the snapshot) -- $consequence." >&2
     exit 1
   fi
-  printf '%s\n' "$plan" | { grep -v '^RESTOREARGS ' || true; } | _cts_prefix
-  setargs="$(printf '%s\n' "$plan" | sed -n 's/^RESTOREARGS //p')"
-  if [ -z "$setargs" ]; then
+  printf '%s\n' "$plan" | { grep -v '^RESTOREREQ ' || true; } | _cts_prefix
+  setreqs="$(_cts_requests "$plan" RESTOREREQ)"
+  if [ -z "$setreqs" ]; then
     _cts_consume "$py" "$snap"
     exit 21
   fi
 
   stray_session_check_assert "$here" "$strih" "$stream" "the test-camera production exposure restore"
-  readback="$(_cts_set_and_readback "$CTS_FOUND_IP" "$CTS_FOUND_LABEL" "$pw" "$setargs" "$read_args" \
+  readback="$(_cts_set_and_readback "$CTS_FOUND_IP" "$CTS_FOUND_LABEL" "$pw" "$setreqs" "$read_eps" \
     "$consequence")" || exit 1
   rc=0
   grade="$(python3 "$py" restore-grade --snapshot "$snap" <<<"$readback")" || rc=$?
@@ -444,7 +519,7 @@ _cts_restore_apply() {
   case "$rc" in
     0) ;;
     5)
-      echo "ERROR: issue 1371: a production setting did NOT read back after --set-config (see MISMATCH above) -- $consequence." >&2
+      echo "ERROR: issue 1371: a production setting did NOT read back after its PUT (see MISMATCH above) -- $consequence." >&2
       exit 1
       ;;
     *)

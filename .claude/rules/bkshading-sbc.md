@@ -96,6 +96,12 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   every cambox at its next provisioning. The image builders write through it too (issue 1400):
   `create-usb-linux.sh`'s first-boot (rw) fstab takes the canon `/var/cache` line, and
   `build-image.sh`'s overlay image the whole tmpfs set (details: `provisioning-scripts.md`).
+- **The camera's USB-C link file (issue 1452).** `--install` writes `05-bkshading-camera.network`
+  (`scripts/lib/bkshading-camera-link.sh`, the shading v0.2.x contract's file) into the networkd dir
+  and enables systemd-networkd; `--check` row (2c) grades it byte for byte. The REST relay finds the
+  camera through that link's DHCP lease. The arm64 relay's pin is the SBC hostname's
+  (`scripts/shading-release-boxes.txt`): deploy with `bkshading-deploy-relay.sh --host <sbc> --box
+  <hostname> --arch arm64`.
 - **The SBC is never part of `deploy-fleet.sh`** (issue 1452: the fleet upgrade carries the relay
   of every CAMBOX it touches; the handheld is not in any `CAMERA_SET`). Its relay is deployed by hand.
 - **Deploy uses `bkshading-deploy-relay.sh --arch arm64`.** `--arch arm64` fetches the

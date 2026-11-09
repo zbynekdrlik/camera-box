@@ -23,6 +23,82 @@ SHADING_ASSET_RELAY_ARM64="bkshading-relay-linux-arm64"
 SHADING_ASSET_SERVICE_LINUX="bkshading-service-linux-amd64.tar.gz"
 SHADING_ASSET_SERVICE_WINDOWS="bkshading-service-windows-amd64.exe"
 
+# issue 1452 (shading#6, owner 9.11.2026): the relay pin is chosen PER BOX. A v0.2.x relay drives the
+# camera over its REST API with no gphoto2 fallback, so it may go only on a box whose camera serves REST.
+# scripts/shading-release-boxes.txt lists `<box> <pin file>` (the file relative to scripts/); a box not
+# listed takes scripts/shading-release.pin, the fleet default. The pin files all have the same format, so
+# every function below reads whichever one SHADING_RELEASE_PIN_FILE names: a caller sets it from
+# shading_pin_file_for_box. Seams: SHADING_RELEASE_PIN_FILE alone = that ONE pin for every box (the
+# deploy tests); SHADING_RELEASE_BOXES_FILE = another map (its pin files relative to the map's dir).
+
+# _shading_box_key BOX -> the lower-case short name of BOX (CAM3, cam3.lan -> cam3); nothing + rc 1 for a
+# name that is not a plain token.
+_shading_box_key() {
+  local b
+  b="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  b="${b%%.*}"
+  [[ "$b" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789-]*$ ]] || return 1
+  printf '%s\n' "$b"
+}
+
+# shading_pin_map_entry MAP_TEXT BOX -> the pin file name the map gives BOX (nothing when not listed).
+# Pure: comments and blank lines are skipped, the first entry for a box wins.
+shading_pin_map_entry() {
+  local key line box file
+  key="$(_shading_box_key "${2:-}")" || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    read -r box file _ <<<"$line" || true
+    [ -n "${box:-}" ] && [ -n "${file:-}" ] || continue
+    if [ "$(_shading_box_key "$box" 2>/dev/null || true)" = "$key" ]; then
+      printf '%s\n' "$file"
+      return 0
+    fi
+  done <<<"${1:-}"
+  return 0
+}
+
+# shading_pin_file_for_box ROOT BOX -> the pin file this box's relay takes (an absolute path); rc 1 + a
+# named line when the map names a pin file that is missing or not a plain name.
+shading_pin_file_for_box() {
+  local root="${1:?tree required}" box="${2:-}" map dir entry
+  if [ -n "${SHADING_RELEASE_PIN_FILE:-}" ] && [ -z "${SHADING_RELEASE_BOXES_FILE:-}" ]; then
+    printf '%s\n' "$SHADING_RELEASE_PIN_FILE"
+    return 0
+  fi
+  map="${SHADING_RELEASE_BOXES_FILE:-${root%/}/scripts/shading-release-boxes.txt}"
+  dir="$(dirname "$map")"
+  entry=""
+  [ -z "$box" ] || [ ! -f "$map" ] || entry="$(shading_pin_map_entry "$(cat "$map")" "$box")"
+  if [ -z "$entry" ]; then
+    printf '%s\n' "${SHADING_RELEASE_PIN_FILE:-${root%/}/scripts/shading-release.pin}"
+    return 0
+  fi
+  if ! [[ "$entry" =~ ^[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]+\.pin$ ]] || [ ! -f "$dir/$entry" ]; then
+    echo "shading-release: ${map} names '${entry}' for ${box}, which is no pin file in ${dir}" >&2
+    return 1
+  fi
+  printf '%s\n' "$dir/$entry"
+}
+
+# shading_pin_version_for_box ROOT BOX -> the release version this box's relay must print.
+shading_pin_version_for_box() {
+  local pin
+  pin="$(shading_pin_file_for_box "$@")" || return 1
+  SHADING_RELEASE_PIN_FILE="$pin" shading_pin_version "${1:?tree required}"
+}
+
+# shading_pin_version_for_box_at_ref ROOT REF BOX -> the version REF's tree (origin/main) gives BOX, read
+# with `git show` (the handover grades a box against the merged pin too); nothing when unreadable.
+shading_pin_version_for_box_at_ref() {
+  local root="${1:?tree required}" ref="${2:?ref required}" box="${3:-}" map entry pin
+  map="$(git -C "$root" show "${ref}:scripts/shading-release-boxes.txt" 2>/dev/null || true)"
+  entry="$(shading_pin_map_entry "$map" "$box")"
+  [[ "$entry" =~ ^[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]*$ ]] || return 0
+  pin="scripts/${entry:-shading-release.pin}"
+  shading_pin_version_of_text "$(git -C "$root" show "${ref}:${pin}" 2>/dev/null || true)"
+}
+
 # _shading_pin_field ROOT KEY -> the value of KEY in ROOT's pin file (nothing when unreadable).
 _shading_pin_field() {
   sed -n "s/^${2}=//p" "${SHADING_RELEASE_PIN_FILE:-${1}/scripts/shading-release.pin}" 2>/dev/null | head -n 1
@@ -53,6 +129,13 @@ shading_pin_version_of_text() {
     esac
   done <<<"${1:-}"
   return 0
+}
+
+# shading_pin_transport ROOT -> `rest` when the pin declares SHADING_RELAY_TRANSPORT=rest (issue 1452: the
+# v0.2.x relay drives the camera over its USB-C link, which needs the camera link file), else `gphoto2`.
+shading_pin_transport() {
+  [ "$(_shading_pin_field "${1:?tree required}" SHADING_RELAY_TRANSPORT)" = rest ] && { printf '%s\n' rest; return 0; }
+  printf '%s\n' gphoto2
 }
 
 # _shading_asset_key ASSET -> the pin file key of ASSET; nothing + rc 1 for an unknown asset.

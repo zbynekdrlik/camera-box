@@ -197,8 +197,11 @@
 #        lists no IP (each listed one is named) and no networks.discovery and parses as JSON; a
 #        camera-box.service.d/ndi-discovery.conf drop-in, when present, points NDI_CONFIG_DIR at /etc/ndi
 #        (setup-device.sh STEP 7 and `ndi-discovery.sh --cambox-apply` remove both).
+#   (bb) the camera's USB-C link (issue 1452, shading#6) -- HARD FAIL: /etc/systemd/network/
+#        05-bkshading-camera.network byte-equals the shading contract's file, systemd-networkd is
+#        enabled, and no enx* link carries a default route or DNS (the camera is never the box's way out).
 #   (ao) bkshading relay provisioned (issue 808) -- HARD FAIL: the relay binary is executable and on
-#        the shading pin (issue 1487), the
+#        THIS box's shading pin (issue 1487; per box since issue 1452, scripts/shading-release-boxes.txt), the
 #        installed bkshading-relay.service BYTE-matches the repo unit, /etc/bkshading/relay.env carries
 #        CAMERA_BOX_CAPTURE_FPS=<int> + the issue-1431 registration (BKSHADING_REGISTER_URL =
 #        http://strih.lan:8770/api/relays/register, BKSHADING_RELAY_ID = this camN), gphoto2 is installed,
@@ -1016,8 +1019,10 @@ Checks:
   (an) NDI discovery receiver config (issues 1342, 1389): a cambox carries NO networks.ips (mDNS
       only) -- /etc/ndi/ndi-config.v1.json lists no IP and no networks.discovery, and a camera-box
       NDI_CONFIG_DIR drop-in, if left, points at /etc/ndi
-  (ao) bkshading relay provisioned (issue 808): binary + byte-matching unit + env (registers as camN
-      at strih.lan, issue 1431) + gphoto2, and the
+  (bb) the camera's USB-C link (issue 1452): the contract's 05-bkshading-camera.network, networkd
+      enabled, no default route or DNS on an enx* link
+  (ao) bkshading relay provisioned (issue 808): binary (on this box's pin, issue 1452) + byte-matching
+      unit + env (registers as camN at strih.lan, issue 1431) + gphoto2, and the
       unit enable-state matches the rig mode (TEST: source box + cam2 disabled; CAMERA_BOX_RIG_MODE=test|event,
       else read from cam2's painter state)
   (aq) no GRUB menu and no countdown (#1394): the generated /boot/grub/grub.cfg hides the menu with
@@ -1935,6 +1940,24 @@ else
   ok "off-box remote logging live: netconsole armed -> ${REMOTELOG_SINK}:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> $(remote_log_journal_url "$REMOTELOG_SINK") (this box's venue strih; the next #1309 stick death ships its kernel+journal off-box, #1311, issue 1394)"
 fi
 
+# (bb) the camera's USB-C link file (issue 1452) -- HARD FAIL ------------------------------------------
+# shading v0.2.x drives the camera over REST on its USB CDC-NCM link; the relay reads the camera's address
+# from systemd-networkd's lease of that link. One read-only ssh gather, graded by the camera-link lib.
+# Inserted after the (ak) check and before the (ba) one, outside the slices other tests EXECUTE. No comment
+# line here may start with a check marker (the slice tests cut at one).
+bbrc=0
+BB_BLOCK="$(ssh_box "$(bkshading_camera_link_gather_snippet)")" || bbrc=$?
+BB_V="$(bkshading_camera_link_verdict "$BB_BLOCK")"
+if [ "$bbrc" -ne 0 ]; then
+  fail "could not read the camera link state (ssh rc=$bbrc, issue 1452)"
+elif [ "$BB_V" = ok ]; then
+  ok "the camera's USB-C link file is the shading contract's, systemd-networkd enabled, no route or DNS through the camera (issue 1452)"
+else
+  while IFS= read -r _reason; do
+    [ -n "$_reason" ] && fail "camera link: ${_reason#FAIL: } (issue 1452)"
+  done <<< "$BB_V"
+fi
+
 # (ba) dsync PTP NIC (issue 1439) -- HARD FAIL ----------------------------------------------------------
 # ROZHODNUTE 1.11.2026: dsync binds PTP to the box's LAN NIC, never to the first IPv4 interface it
 # lists: the bkshading USB camera link took the join on cam1, 20.8.2026. One read-only ssh gather: the LAN
@@ -2291,7 +2314,7 @@ case "$RELAY_MODE" in
 esac
 RELAY_EXPECTED="$(bkshading_relay_expected_enable_state "$CAMERA_NAME" "$RELAY_MODE" "$RELAY_SRC_BOX" "$RELAY_PAINTER_BOX")"
 RELAY_ID_WANT="$(bkshading_relay_id_for_device "$CAMERA_NAME" || true)"
-RELAY_PROV_VERDICT="$(bkshading_relay_provision_verdict "$RELAY_PROV_BLOCK" "$RELAY_EXPECTED" "$RELAY_ID_WANT" "$(bkshading_relay_pin_version)")"
+RELAY_PROV_VERDICT="$(bkshading_relay_provision_verdict "$RELAY_PROV_BLOCK" "$RELAY_EXPECTED" "$RELAY_ID_WANT" "$(bkshading_relay_pin_version "$CAMERA_NAME")")"
 if [ "$aorc" -ne 0 ]; then
   fail "could not read the bkshading relay provisioning state over SSH (rc=$aorc, issue 808)"
 elif [ "$RELAY_PROV_VERDICT" = ok ]; then
