@@ -105,7 +105,9 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
   always re-reads as written as non-root; a fake `pgrep` with the 15-character rule and a fake
   `xfconf-query` over a JSON "xfconfd" that logs the bus address).
 - **The real daemon:** `tests/python/test_obs_box_xfconf_real_daemon_1466.py` runs `apply` against the
-  REAL xfconfd on a private `dbus-daemon` (CI's python job apt-installs `xfconf dbus`), then grades the
+  REAL xfconfd on a private `dbus-daemon` (CI's python job apt-installs `xfconf libxfconf-0-3 dbus`:
+  Ubuntu's `xfconf` only RECOMMENDS its own library, so with `--no-install-recommends` xfconf-query exits
+  127, run 42615136396; on a box the xfce4 desktop pulls it in), then grades the
   file the daemon saves with `check`; a host without xfconf FAILS it by name. dev1 has no xfconf: run it
   with `OBS_BOX_TEST_XFCONF_ROOT=<dir>` after `apt-get download xfconf libxfconf-0-3 libxfce4util7` +
   `dpkg-deb -x` of each into `<dir>` (from a script file in a worktree lane). Measured 9.11.2026 on
