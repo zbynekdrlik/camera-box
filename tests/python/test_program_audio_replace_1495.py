@@ -193,7 +193,8 @@ class LingeringObs:
         if t in setters:
             attr, key = setters[t]
             setattr(src, attr, d[key])
-        elif t == "CreateSourceFilter":
+        elif t == "CreateSourceFilter" and all(f["filterName"] != d["filterName"] for f in src.filters):
+            # obs-websocket refuses a filter name the source already has
             src.filters.append({"filterName": d["filterName"], "filterKind": d["filterKind"],
                                 "filterIndex": len(src.filters), "filterEnabled": True,
                                 "filterSettings": d["filterSettings"]})
@@ -279,7 +280,7 @@ def test_the_program_audio_is_never_doubled_and_never_absent_for_longer_than_the
     pro = [e["PRO"] for e in obs.events]
     assert all(len(a) <= 1 for a in pro), "old and new are never mixed together (no double sound)"
     gaps = [i for i, a in enumerate(pro) if not a]
-    assert len(gaps) <= 3, "only the few requests between the old item's removal and the new item's show: %r" % gaps
+    assert len(gaps) <= 1, "only the old input's removal, the next request shows the new item: %r" % gaps
 
 
 def test_a_create_obs_refuses_keeps_the_old_input_in_every_scene():
@@ -358,6 +359,39 @@ def test_a_replace_interrupted_after_its_create_is_finished_never_left_hidden():
     assert obs.audible("PRO") == [new], "the program audio is back on PRO"
     assert new.sync == 58 and [f["filterName"] for f in new.filters] == ["Sluchadla operatora", "Limiter"]
     assert obs.by_name(NAME + " (seed replace 1)") is None
+
+
+def test_finishing_a_replace_that_already_restored_part_of_the_state_is_idempotent():
+    # the replace died after the levels and the program filters: the finish never duplicates a filter
+    obs = LingeringObs(old_name=NAME + " (seed replace 1)", dock_pin=False)
+    new = Src(NAME, DANTE_KIND, sync=58, volume=0.7)
+    new.filters = [{"filterName": "Limiter", "filterKind": "limiter_filter", "filterIndex": 0,
+                    "filterEnabled": False, "filterSettings": {"threshold": -6.0}}]
+    obs.sources.append(new)
+    obs._add_item("PRO", new, False)
+    obs._add_item("Zaloha", new, False)
+    st = _seed(obs)
+    assert st.startswith("matched (finished the interrupted replace"), st
+    assert [(f["filterName"], f["filterEnabled"]) for f in new.filters] == [
+        ("Sluchadla operatora", True), ("Limiter", False)]
+    assert obs.items_of(new) == {"PRO": [(1, True)], "Development": [], "Zaloha": [(0, False)]}
+    assert new.sync == 58 and obs.audible("PRO") == [new]
+
+
+def test_a_kind_change_after_an_interrupted_replace_takes_the_state_from_the_aside():
+    # the box facts changed the wanted kind between the interrupted replace and this seed: `mbc` (hidden,
+    # no state) is of neither kind, the aside still carries the visible items and the operator state
+    obs = LingeringObs(old_name=NAME + " (seed replace 1)", dock_pin=False)
+    half = Src(NAME, "pulse_input_capture")
+    obs.sources.append(half)
+    obs._add_item("PRO", half, False)
+    st = _seed(obs)
+    assert st.startswith("replaced (was pulse_input_capture"), st
+    new = obs.by_name(NAME)
+    assert new.kind == DANTE_KIND
+    assert obs.items_of(new) == {"PRO": [(1, True)], "Development": [], "Zaloha": [(0, False)]}
+    assert new.sync == 58 and obs.audible("PRO") == [new]
+    assert {n for n in obs.listed() if n.startswith(NAME)} == {NAME}, "both old inputs are gone"
 
 
 def test_a_lingering_removed_aside_is_never_a_resume_source():
