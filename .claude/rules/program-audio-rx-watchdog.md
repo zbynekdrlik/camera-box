@@ -21,21 +21,29 @@ a loss during a production was invisible until someone heard it (owner: zero aud
 - **Nested, like `genlock_lock`:** `_parse_log_facets` returns `(facets, nested)`; the server attaches
   every non-None nested object after `build_bundle_state` (the flat every-value-a-string contract of
   the version-integrity gate stays). One entry per receiver, keyed `obs-vban:<input>` / `dante`:
-  `kind`, `name`, `events` (gated delta sum), `deltas` (gated + named), `pairs`, `rebases`,
-  `gap_max_s`, `age_s` (newest status line behind the log head). Omitted when the tail has no
+  `kind`, `name`, `events` (gated delta sum + the Dante state faults), `deltas` (gated + named), `pairs`,
+  `silent_pairs` (Dante pairs whose `delivered_frames` did not move), `rebases`, `gap_max_s`,
+  `age_s` (newest status line behind the log head). Omitted when the tail has no
   receiver status line.
 - **Stateless window delta, the obs-vban pacer's 660 s:** a delta is counted only between two status
   lines of ONE receiver that are BOTH inside the window. The obs-vban status line is written per
   received packet, so a sender off for longer than the window (the console overnight) never reads
-  as one loss at resume; a pause of 1-11 min inside the window DOES (its starve second is counted
-  `lost`, plus one re-anchor) and shows as `gap_max_s`. Stated choice: that is program audio gone.
+  as one loss at resume; a pause up to ~10 min inside the window DOES (its starve second is counted
+  `lost`, plus one re-anchor) and shows as `gap_max_s`, once a pass sees both lines (the longer the
+  pause, the shorter the time the pair is inside the window). Stated choice: that is program audio
+  gone. The obs-vban PACER arm keeps its 2-pass confirm over the same 660 s window and has the same
+  latent one-pass-only case (not changed in this lane).
 - **Rebase, never a loss:** a counter that went DOWN, or between the two lines an `obs-vban receive
   anchored:` / `obs-vban receive worker: ... stopped` line of THAT source, or a `dante-input start:`
   line. A re-created source can already count past the old values in 10 s, so the re-init line is
   the signal, not only the backwards step.
 - **GATED** (= a loss): obs-vban `lost` (concealed slots included, ROZHODNUTÉ 6359382787),
   `re_anchors` (the held second of a re-anchor is never in `lost`), `emit_missed`; Dante
-  `DANTE_RX_GATED`, pinned equal to `scripts/dante_input_continuity.py` `GATED`. **NAMED** only:
+  `DANTE_RX_GATED`, pinned equal to `scripts/dante_input_continuity.py` `GATED`, plus the Dante
+  STATE faults the E2E gate also fails on, counted per line inside the window: `clock_faults` (a
+  status line with `clock=` not `media` or `holdover=` not 0) and `errors` (a `dante-input error:`
+  line). The obs-vban difference from the E2E gate (`late`, `stale` not gated) is deliberate and
+  pinned by a test. **NAMED** only:
   obs-vban late / stale / reordered / concealed / silence_ms (a late packet's slot is already in
   `lost`), Dante rx_late / overruns / late_blocks. A counter absent on one side (an older release) is
   simply not counted.
@@ -46,18 +54,28 @@ a loss during a production was invisible until someone heard it (owner: zero aud
 
 - `audio_mixer_decision.classify_program_rx(entry, rx_key, reachable, log_head_age_s)`: SKIP / NONE
   (the facts name no receiver: resolume) / UNKNOWN (no entry for that key) / STALE (log head frozen >
-  180 s -- decided BEFORE the loss, or a dead OBS's last window pages forever -- or the newest status
-  line older than 180 s: the sender stopped) / LOSS / HEALTHY. `analyze(..., rx_key=)`, CLI
-  `--rx-key`, prints `rx_*`.
+  180 s -- decided BEFORE the loss, or a dead OBS's last window pages forever) / LOSS / SILENT (the
+  program stopped while the OBS log is live: the newest status line older than 180 s with the log
+  head <= 60 s old, or every counted Dante pair without delivered frames) / STALE (the status line is
+  old with no proof the log is live) / HEALTHY. `analyze(..., rx_key=)`, CLI `--rx-key`, prints `rx_*`.
+- **SILENT is never paged (a stated residual, review round 1):** a dead sender, a dropped NIC or a down
+  leg (the 8.11.2026 stream-snv USB NIC class) reads SILENT on the machine channel only, because a
+  console switched off overnight reads exactly the same; paging silence needs a production gate (the
+  venue streams / rig EVENT mode, `scripts/lib/avsync-production.sh`), an owner decision recorded on
+  issue 1460 as a follow-up candidate.
 - **The receiver comes from the box FACTS, never a literal:** `scripts/lib/program-audio-rx.sh`
   `program_audio_rx_key NAME` (facts in a subshell): `STRIH_PROGRAM_VBAN_STREAMS != none` ->
   `obs-vban:<STRIH_PROGRAM_AUDIO_INPUT>`; a declared Dante program device -> `dante`; no fact file ->
   nothing (NONE); a fact file that does not load -> rc 1 (the arm logs FACTS, never NONE). A bench
   source (`VBAN bench (issue 1460)`) is never the program key, so its scheduled losses never page.
 - **The fifth arm of `audio-mixer-alert-watchdog.sh`** (`handle_program_rx`, prefix + key base
-  `program-rx`): the obs-fleet `audio-mixer` roster, 2-pass confirm (the 660 s window keeps one loss
-  in two passes), arm + box throttle, PRODUCTION-CRITICAL `watchdog_notify_key "program-rx-<box>"`,
-  STALE resets the confirm, HEALTHY = one machine-channel RECOVERY line.
+  `program-rx`): the obs-fleet `audio-mixer` roster, LOSS pages on its FIRST pass (`handle_arm`
+  threshold 1, review round 1: the timer's `OnUnitActiveSec=5min` + `RandomizedDelaySec=2min` makes
+  passes 300-420 s apart, so a loss pair (~650 s visible in the 660 s window) is seen by ONE pass
+  in ~27 % of cases and a 2-pass confirm missed it; a counter delta is a fact, not a noisy reading),
+  the arm + box throttle keeps one ongoing loss one incident, PRODUCTION-CRITICAL
+  `watchdog_notify_key "program-rx-<box>"`, HEALTHY = one machine-channel RECOVERY line. A test pins
+  the window above the timer's longest pass gap + one status period.
 - **SHIPS DISABLED inside an ENABLED watchdog:** the audio-mixer timer already runs on dev1, so the
   arm grades and LOGS every pass but pages only with `AUDIO_MIXER_PROGRAM_RX_PAGE=1` (a unit drop-in,
   `systemd/audio-mixer-alert-watchdog.README.md`). Tests pin the default (a LOSS logged, notify never
@@ -67,6 +85,8 @@ a loss during a production was invisible until someone heard it (owner: zero aud
 
 - **Session identity:** `audio_mix_session` = the `HH:MM:SS.mmm` stamp of the newest audio-reset
   `buffering type:` line (`audio_mix_session_from_log`: tail, else the head slice of a bounded read).
+  Residual: a mid-session audio reset whose line has left the tail but is not in the 2 MB head reads
+  the start-up stamp (time of day only), so that one case keeps the count-only compare.
   The watchdog stores it per box (`<box>_mix_late_session`); a CHANGED identity with a stored count
   stores 0 and re-runs the decision with `--prev-mix-late 0`, so a new session whose count is EQUAL
   or HIGHER is graded from zero (the confirm is kept). An absent identity on either side changes
