@@ -875,6 +875,9 @@ _strih_lx_verify() {
   local sha="$1" vpolls="${STRIH_LX_VERIFY_POLLS:-24}" vsecs="${STRIH_LX_VERIFY_POLL_SECS:-10}"
   local settle="${STRIH_LX_VERIFY_SETTLE_SECS:-90}"
   local i=0 have_first=0 first_pid="" first_r="" first_t=0 line pid restarts bs verdict="FAIL: no read-back" url
+  local -a ab=()
+  # issue 1425: graded only when the staged tree declares the fact (a historical build before it does not).
+  [ -n "${STRIH_LX_PREP_ABUF:-}" ] || echo "NOTE: [${STRIH_LX_BOX} verify] the staged tree declares no STRIH_AUDIO_BUFFERING_MS (a build before issue 1425) -- the started OBS's audio buffering is not graded"
   url="$(strih_lx_bundle_state_url "$STRIH_LX_PREP_HOST")"
   while [ "$i" -lt "$vpolls" ]; do
     [ "$i" -gt 0 ] && sleep "$vsecs"
@@ -882,13 +885,14 @@ _strih_lx_verify() {
     line="$(_strih_lx_ssh "$(strih_lx_remote_readback_cmd "$STRIH_LX_PREP_STAGE")" 2>/dev/null)" || line=""
     pid="$(_strih_lx_field pid "$line")"; restarts="$(_strih_lx_field restarts "$line")"
     bs="$(curl -s -m 8 "$url" 2>/dev/null | jq -r '.genlock_build_sha // empty' 2>/dev/null)" || bs=""
-    if ! verdict="$(strih_lx_deploy_verdict "$sha" "$(_strih_lx_field installed "$line")" "$(_strih_lx_field active "$line")" "$bs" "$STRIH_LX_PREP_LIBSHA" "$(_strih_lx_field lib "$line")" "$(_strih_lx_field tick "$line")" "${STRIH_LX_PREP_TAG:-}" "$(_strih_lx_field obs_tag "$line")" "${STRIH_LX_PREP_HUB:-}" "$(_strih_lx_field hub "$line")" "$(_strih_lx_field jxs "$line")" "${STRIH_LX_PREP_ABUF:-}" "$(_strih_lx_field abuf "$line")")"; then
+    if [ -n "${STRIH_LX_PREP_ABUF:-}" ]; then ab=("$STRIH_LX_PREP_ABUF" "$(_strih_lx_field abuf "$line")"); else ab=(); fi
+    if ! verdict="$(strih_lx_deploy_verdict "$sha" "$(_strih_lx_field installed "$line")" "$(_strih_lx_field active "$line")" "$bs" "$STRIH_LX_PREP_LIBSHA" "$(_strih_lx_field lib "$line")" "$(_strih_lx_field tick "$line")" "${STRIH_LX_PREP_TAG:-}" "$(_strih_lx_field obs_tag "$line")" "${STRIH_LX_PREP_HUB:-}" "$(_strih_lx_field hub "$line")" "$(_strih_lx_field jxs "$line")" "${ab[@]}")"; then
       have_first=0; continue
     fi
     if [ "$have_first" = 1 ]; then
       if verdict="$(strih_lx_stable_verdict "$first_pid" "$first_r" "$pid" "$restarts")"; then
         if [ $((SECONDS - first_t)) -ge "$settle" ]; then
-          echo "# ${STRIH_LX_BOX}: VERIFIED -- marker + libobs bytes = $sha (obs ${STRIH_LX_PREP_TAG:-?}), strih-obs active (MainPID $pid stable for $((SECONDS - first_t)) s, NRestarts $restarts), render tick ENABLED, audio buffering FIXED ${STRIH_LX_PREP_ABUF:-?} ms, :8899=$bs${STRIH_LX_PREP_HUB:+, intercom hub $STRIH_LX_PREP_HUB running}"
+          echo "# ${STRIH_LX_BOX}: VERIFIED -- marker + libobs bytes = $sha (obs ${STRIH_LX_PREP_TAG:-?}), strih-obs active (MainPID $pid stable for $((SECONDS - first_t)) s, NRestarts $restarts), render tick ENABLED${STRIH_LX_PREP_ABUF:+, audio buffering FIXED $STRIH_LX_PREP_ABUF ms}, :8899=$bs${STRIH_LX_PREP_HUB:+, intercom hub $STRIH_LX_PREP_HUB running}"
           return 0
         fi
         verdict="FAIL: MainPID $pid stable for $((SECONDS - first_t)) s only (settle ${settle} s)"

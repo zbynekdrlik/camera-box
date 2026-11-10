@@ -104,6 +104,10 @@ obs_audio_buffering_install() {
 # Always rc 0 (a report, called as a bare statement under the caller's errexit); stdout only.
 obs_audio_buffering_running_note() {
   local home="${1-}" user="${2-}" ms="${3-}" f newest="" last="" what v
+  if ! command -v pgrep >/dev/null 2>&1; then
+    echo "  WARNING: cannot tell whether OBS runs (no pgrep on this box) -- if it does, restart strih-obs.service so it reads ~/${OBS_AUDIO_BUFFERING_MARKER_REL} (issue 1425)"
+    return 0
+  fi
   if ! pgrep -u "$user" -x obs >/dev/null 2>&1; then
     echo "  OBS is not running -- it reads ~/${OBS_AUDIO_BUFFERING_MARKER_REL} at its next start"
     return 0
@@ -168,11 +172,11 @@ obs_audio_buffering_verdict() {
   fi
   fact="$((10#$fact))"
   if [ "$marker" = "$OBS_AUDIO_BUFFERING_ABSENT" ]; then
-    echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} is missing (the fact is ${fact} ms) -- re-run setup-strih step 5, then restart strih-obs.service"
+    echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} is missing (the fact is ${fact} ms) -- re-run setup-strih (it writes the marker before step 1), then restart strih-obs.service"
     return 1
   fi
   if ! obs_audio_buffering_ms_ok "$marker" || [ "$((10#$marker))" != "$fact" ]; then
-    echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} reads '${marker}', the box fact STRIH_AUDIO_BUFFERING_MS is ${fact} ms -- re-run setup-strih step 5, then restart strih-obs.service"
+    echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} reads '${marker}', the box fact STRIH_AUDIO_BUFFERING_MS is ${fact} ms -- re-run setup-strih (it writes the marker before step 1), then restart strih-obs.service"
     return 1
   fi
   if [ -z "$log" ]; then
