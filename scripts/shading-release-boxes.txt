@@ -8,6 +8,10 @@
 # `GET /control/api/v1/lens/iris` on the link (.claude/rules/shading-pinned-release.md).
 cam3 shading-release-rest.pin
 cam5 shading-release-rest.pin
+# The handheld SBC boards (owner 10.11.2026 via shading: REST relay 0.2.x on cam1-shading + cam2-shading; their
+# cameras plug in later -- cam4-shading joins with its camera in PP).
+cam1-shading shading-release-rest.pin
+cam2-shading shading-release-rest.pin
 # A strih box listed here takes that pin for its bkshading SERVICE (setup-strih step 16c, verify item 31).
 # A v0.2.x panel sends apertureStep, which a v0.1.x relay ignores, so a venue moves once its cameras are on
 # the REST relay. strih-snv: owner 10.11.2026 (cam3 + cam5 on v0.2.2; cam2's gphoto2 relay keeps the gap).
