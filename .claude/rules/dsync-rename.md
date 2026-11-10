@@ -91,7 +91,9 @@ reads each one with the same `dsync --version` reader and prints it in its own s
 deploy cadence) and nothing rolls them. An unreachable `reach` one (alex-nb) is `SKIPPED (unreachable`
 like a rolled node; one named on the command line is graded on the pin as before. The handover check
 (item `dantesync`) turns the rows into a Slovak `pozor:` note on its line and the summary
-(`rig-dev-handover-check.md`). Tests: `tests/python/test_dsync_self_upgraded_version_1487.py`.
+(`rig-dev-handover-check.md`), and the 30-min `fleet-parity-alert-watchdog.sh` logs them (one
+`self-upgraded below the pin` line; never drift, never a catch-up roll, never a page). Tests:
+`tests/python/test_dsync_self_upgraded_version_1487.py`, `tests/python/test_fleet_parity_1426.py`.
 
 **resolume-snv** moved on 2.11.2026 by dsync's own `install.ps1`, once. That is not a path: only
 camera-box moves rig boxes. It reads SAME at the new location, so the upgrader only checks its tray
