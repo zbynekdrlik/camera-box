@@ -178,3 +178,29 @@ def test_gate_report_rows_carry_the_net_layout_row():
     r = _bash(f'set -euo pipefail; . "{LIB}"; win_baseline_report_rows resolume-snv="{LIVE}"')
     assert re.search(r"resolume-snv\s+win_baseline net_layout\s+OK", r.stdout), r.stdout
     assert r.returncode == 0
+
+
+def test_a_failed_read_in_the_section_is_unknown_never_drift(tmp_path):
+    # review finding: a Get-* read that failed used to leave its lines out and grade as DRIFT
+    p = _variant(tmp_path, "ip=Ethernet 4|10.77.9.201|23|Dhcp\n",
+                 "err=ip|The WS-Management service cannot process the request.\n")
+    p.write_text(p.read_text().replace("ip=Dante70|10.77.7.107|24|Manual\n", ""))
+    rc, verdict, row = _grade(p)
+    assert (rc, verdict) == (11, "UNKNOWN"), row
+    assert "err=ip" in row, row
+
+
+def test_gather_reads_active_store_and_stops_on_a_missing_ndi_config():
+    r = _bash(f'set -euo pipefail; . "{LIB}"; win_net_layout_gather_ps')
+    assert "Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore" in r.stdout
+    assert "Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore" in r.stdout
+    assert "-Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop" in r.stdout
+
+
+def test_gate_report_rows_skip_net_layout_for_an_undeclared_or_unread_host(tmp_path):
+    other = _variant(tmp_path, "host=RESOLUME-SNV", "host=STREAM")
+    r = _bash(f'set -euo pipefail; . "{LIB}"; win_baseline_report_rows stream-snv="{other}" '
+              f'resolume-snv="{tmp_path / "absent.txt"}"')
+    assert r.returncode == 0, r.stderr
+    assert "net_layout" not in r.stdout, r.stdout
+    assert "wer_dontshowui" in r.stdout, r.stdout

@@ -359,3 +359,13 @@ def test_the_preflight_reads_the_rest_relays_focus_norm(body, want):
     assert r.returncode == 0 and r.stdout.strip() == want, (body, r.stdout, r.stderr)
     m = _bash('. "$1"; bkshading_preflight_focus_norm_message cam3 10.0.0.3 "Pocket 6K" 0.42', PREFLIGHT).stdout
     assert "focusNorm=0.42" in m and "WARNING" not in m and "does NOT prove manual-focus MODE" in m
+
+
+def test_setup_strih_scopes_the_service_pin_to_its_two_calls():
+    # review finding: a global SHADING_RELEASE_PIN_FILE from step 16c on would hand every later
+    # shading lookup in setup-strih the strih box's pin
+    text = open(os.path.join(REPO, "scripts", "setup-strih.sh")).read()
+    assert not [ln for ln in text.splitlines() if ln.lstrip().startswith("SHADING_RELEASE_PIN_FILE=")], text
+    assert 'BKSH_PIN="$(shading_pin_file_for_box "${HERE}/.." "$STRIH_FACT_BOX")"' in text
+    assert 'SHADING_RELEASE_PIN_FILE="$BKSH_PIN" shading_release_service' in text
+    assert 'SHADING_RELEASE_PIN_FILE="$BKSH_PIN" shading_pin_tag' in text
