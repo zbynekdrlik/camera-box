@@ -29,7 +29,9 @@ overruns / late_blocks are timing only). The Dante device also fails the E2E gat
 that left the media clock (`clock=` not `media`, or `holdover=` not 0) and on a `dante-input error:`
 line: both are counted as events here too (`clock_faults`, `errors`, by line inside the window).
 `silent_pairs` counts the counted Dante pairs whose `delivered_frames` did not move (no audio
-reached OBS): never an event on its own -- the decision names an all-silent window SILENT.
+reached OBS): never an event on its own -- the decision names an all-silent window SILENT. A fault
+while the device starts (after a `dante-input start:`, before its first media-clock status line,
+within DANTE_RX_START_GRACE_S) is not counted (review round 2).
 
 Part of the bundle-state gather split (issue 1386): a PURE facet family re-exported by
 `bundle_state_gather` -- import it through that module. Ships in the :8899 server tree declared in
@@ -50,6 +52,10 @@ DANTE_RX_GATED = ("rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops",
 DANTE_RX_NAMED = ("rx_late", "overruns", "late_blocks")
 # Dante state faults counted per status / error line inside the window (events, like GATED)
 DANTE_RX_STATE_EVENTS = ("clock_faults", "errors")
+# After a `dante-input start:` the device's in-process PTP follower may need a few status lines to
+# reach the media clock (dsync's own cold lock is ~95 s): a fault before its first `clock=media
+# holdover=0` line within this grace is start-up, never an event (an OBS restart must not page).
+DANTE_RX_START_GRACE_S = 180
 # also read for the went-down (restart) check, never reported
 _VBAN_RX_TOTALS = ("received",)
 _DANTE_RX_TOTALS = ("rx_packets", "delivered_frames")
@@ -75,7 +81,8 @@ def _numbers(text, keys):
 class _Receiver:
     """The window state of one receiver."""
     __slots__ = ("kind", "name", "gated", "named", "prev", "prev_pos", "reinit", "deltas",
-                 "pairs", "silent_pairs", "rebases", "gap_max", "newest", "events_keys")
+                 "pairs", "silent_pairs", "rebases", "gap_max", "newest", "events_keys",
+                 "starting_until")
 
     def __init__(self, kind, name, gated, named, state_events=()):
         self.kind, self.name, self.gated, self.named = kind, name, gated, named
@@ -86,6 +93,7 @@ class _Receiver:
         self.deltas = {k: 0 for k in state_events}
         self.pairs = 0
         self.silent_pairs = 0
+        self.starting_until = None    # a Dante start's grace end, until its first media-clock line
         self.rebases = 0
         self.gap_max = 0.0
         self.newest = None
@@ -108,7 +116,10 @@ class _Receiver:
                 self.deltas[k] = self.deltas.get(k, 0) + counters[k] - prev[k]
 
     def note(self, key, pos, window_start):
-        """One state-fault line (`clock_faults` / `errors`) at `pos`, counted inside the window."""
+        """One state-fault line (`clock_faults` / `errors`) at `pos`, counted inside the window
+        unless the device is still starting (see DANTE_RX_START_GRACE_S)."""
+        if self.starting_until is not None and pos < self.starting_until:
+            return
         if pos >= window_start:
             self.deltas[key] = self.deltas.get(key, 0) + 1
 
@@ -172,10 +183,14 @@ def audio_rx_from_log(text, window_s=AUDIO_RX_WINDOW_S, tail=None):
             clock, hold = _DANTE_CLOCK_RE.search(fields), _DANTE_HOLDOVER_RE.search(fields)
             if (clock and clock.group(1) != "media") or (hold and hold.group(1) != "0"):
                 r.note("clock_faults", pos, window_start)
+            else:
+                r.starting_until = None       # the device reached the media clock: started
         elif "dante-input error:" in line:
             _dante_receiver(rx).note("errors", pos, window_start)
-        elif "dante-input start:" in line and DANTE_RX_KEY in rx:
-            rx[DANTE_RX_KEY].reinit = True
+        elif "dante-input start:" in line:
+            r = _dante_receiver(rx)
+            r.reinit = r.prev is not None
+            r.starting_until = pos + DANTE_RX_START_GRACE_S
     if not rx:
         return None
     return {key: rx[key].entry(head) for key in sorted(rx)}

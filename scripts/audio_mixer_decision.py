@@ -252,7 +252,11 @@ def classify_program_rx(entry, rx_key, box_reachable, log_head_age_s=None,
     if events > 0:
         return "LOSS"
     live = log_head_age_s is not None and log_head_age_s <= DEFAULT_LOG_LIVE_S
-    if age is not None and age > stale_after_s:
+    if age is None:
+        # review round 2: a receiver that never wrote a status line (only an error line) is never
+        # HEALTHY -- it delivers nothing
+        return "SILENT" if live else "UNKNOWN"
+    if age > stale_after_s:
         return "SILENT" if live else "STALE"
     pairs, silent = _int_or_none(entry.get("pairs")), _int_or_none(entry.get("silent_pairs"))
     if pairs and silent == pairs:
