@@ -67,6 +67,8 @@ dnsreg=Dante70|False
 netbios=Dante70|2
 binding=ms_msclient|False
 binding=ms_tcpip6|False
+binding=ms_rspndr|False
+binding=ms_lltdio|False
 binding=ms_server|False
 ndi_allowed=10.77.9.201
 ==WINBASELINE-EXIT== 0

@@ -91,6 +91,8 @@ BREAKS = [
     ("netbios=Dante70|2", "netbios=Dante70|0", "dante_netbios"),
     ("binding=ms_server|False", "binding=ms_server|True", "dante_binding: ms_server"),
     ("binding=ms_tcpip6|False\n", "", "dante_binding: ms_tcpip6"),
+    ("binding=ms_lltdio|False", "binding=ms_lltdio|True", "dante_binding: ms_lltdio"),
+    ("binding=ms_rspndr|False", "binding=ms_rspndr|True", "dante_binding: ms_rspndr"),
     ("ndi_allowed=10.77.9.201", "ndi_allowed=10.77.9.201,10.77.7.107", "ndi_allowed"),
     ("ndi_allowed=10.77.9.201", "ndi_allowed_unread=file not found", "ndi_allowed"),
 ]

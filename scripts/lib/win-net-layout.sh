@@ -4,6 +4,10 @@
 # section and a PURE grader, beside the Windows OBS-box baseline (scripts/lib/obs-box-baseline-win.sh,
 # which sources this file and puts the section into its ONE gather program).
 #
+# THE STANDARD: dstack docs/two-networks.md (owner ruling 10.11.2026, ONE standard for every PC with a
+# Dante leg, owned by dstack): this item grades its section 6 "Checking a PC" items 1-3 for Windows. Items
+# 4-7 (DNS, a TCP connect and an mDNS listen from another host, live flows) are checks from OUTSIDE the PC.
+#
 # WHY: on 10.11.2026 RESOLUME-SNV's Dante leg moved to a VLAN-70 virtual adapter "Dante70" on a new
 # Realtek USB 2.5GbE NIC (dstack#155; the owner asked for a gate row). A swapped NIC / USB port, a
 # DHCP Dante address or a second default route would break Dante or the LAN silently -- the same
@@ -49,7 +53,7 @@ win_net_layout_declared() {
             WNL_DANTE_VLAN="70"
             WNL_DANTE_IP="10.77.7.107/24"
             WNL_DANTE_METRIC="900"
-            WNL_DANTE_UNBOUND="ms_server ms_msclient ms_tcpip6"
+            WNL_DANTE_UNBOUND="ms_server ms_msclient ms_tcpip6 ms_lltdio ms_rspndr"
             WNL_NDI_ALLOWED="10.77.9.201"
             return 0 ;;
     esac
@@ -75,7 +79,7 @@ Write-WbSection 'net_layout' {
     foreach ($d in @(Get-DnsClient -InterfaceAlias $wnlDante -ErrorAction SilentlyContinue)) { "dnsreg=$($d.InterfaceAlias)|$($d.RegisterThisConnectionsAddress)" }
     $wnlDa = Get-NetAdapter -Name $wnlDante -ErrorAction SilentlyContinue
     if ($wnlDa) { foreach ($c in @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$($wnlDa.ifIndex)")) { "netbios=$wnlDante|$($c.TcpipNetbiosOptions)" } }
-    foreach ($b in @(Get-NetAdapterBinding -Name $wnlDante -ComponentID ms_server,ms_msclient,ms_tcpip6 -ErrorAction SilentlyContinue)) { "binding=$($b.ComponentID)|$($b.Enabled)" }
+    foreach ($b in @(Get-NetAdapterBinding -Name $wnlDante -ComponentID ms_server,ms_msclient,ms_tcpip6,ms_lltdio,ms_rspndr -ErrorAction SilentlyContinue)) { "binding=$($b.ComponentID)|$($b.Enabled)" }
   }
   try { $wnlNdi = Get-Content 'C:\ProgramData\NDI\ndi-config.v1.json' -Raw | ConvertFrom-Json; "ndi_allowed=$($wnlNdi.ndi.adapters.allowed -join ',')" } catch { "ndi_allowed_unread=$($_.Exception.Message)" }
 }
