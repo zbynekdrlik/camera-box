@@ -246,7 +246,7 @@ _E = {"events": 0, "age_s": 3}
     ({"age_s": 3}, "dante", 1, 1, "UNKNOWN"),
     ({"events": 2, "age_s": 3}, "dante", 1, amd.DEFAULT_LOG_FROZEN_S + 1, "STALE"),
     ({"events": 2, "age_s": amd.DEFAULT_STALE_AFTER_S + 50}, "dante", 1, 1, "LOSS"),
-    ({"events": 0, "age_s": amd.DEFAULT_STALE_AFTER_S + 1}, "dante", 1, 1, "STALE"),
+    ({"events": 0, "age_s": amd.DEFAULT_STALE_AFTER_S + 1}, "dante", 1, None, "STALE"),
     ({"events": 0, "age_s": amd.DEFAULT_STALE_AFTER_S}, "dante", 1, 1, "HEALTHY"),
     ({"events": 1, "age_s": 3}, "obs-vban:x", 1, None, "LOSS"),
     (_E, "obs-vban:x", 1, None, "HEALTHY"),
@@ -336,32 +336,45 @@ def _pages(log):
     return [ln for ln in log.splitlines() if "WOULD alert (LOSS)" in ln]
 
 
-def test_watchdog_a_loss_pages_once_after_the_confirm_and_recovers_log_only(tmp_path):
+def _alerts_now(log):
+    return [ln for ln in _pages(log) if "alert_now=1" in ln]
+
+
+def test_watchdog_a_loss_pages_on_its_first_pass_once_per_incident_and_recovers_log_only(tmp_path):
+    # review round 1: a counter delta is a fact, never a noisy reading -- the timer's 300-420 s pass
+    # gap let one pass alone see a loss in ~27 % of cases, so a 2-pass confirm missed real losses
     state = tmp_path / "state"
     first = _run(tmp_path, _body(3), state)
-    assert "program_rx=LOSS key=obs-vban:Zvuk z mixu" in first and not _pages(first), first
-    second = _run(tmp_path, _body(3), state)
-    page = _pages(second)
-    assert len(page) == 1 and "alert_now=1" in page[0], second
+    page = _alerts_now(first)
+    assert "program_rx=LOSS key=obs-vban:Zvuk z mixu" in first and len(page) == 1, first
     assert "VBAN vstup OBS 'Zvuk z mixu'" in page[0] and "lost=3" in page[0], page[0]
+    second = _run(tmp_path, _body(3), state)          # the same loss, still in the window
+    assert not _alerts_now(second), second
     healthy = _run(tmp_path, _body(0), state)
     assert "program_rx=HEALTHY" in healthy and not _pages(healthy), healthy
     assert [ln for ln in healthy.splitlines() if "RECOVERY:" in ln and "program-rx" in ln], healthy
 
 
 def test_watchdog_a_long_gap_is_named_in_the_page(tmp_path):
-    state = tmp_path / "state"
-    _run(tmp_path, _body(190, gap=130), state)
-    page = _pages(_run(tmp_path, _body(190, gap=130), state))
+    page = _alerts_now(_run(tmp_path, _body(190, gap=130), tmp_path / "state"))
     assert page and "medzera 130 s" in page[0], page
 
 
-def test_watchdog_stale_resets_the_confirm_and_never_pages(tmp_path):
+def test_watchdog_stale_never_pages(tmp_path):
     state = tmp_path / "state"
-    logs = [_run(tmp_path, b, state) for b in
-            (_body(3), _body(0, age=amd.DEFAULT_STALE_AFTER_S + 1), _body(3))]
-    assert not any(_pages(log) for log in logs), logs
-    assert "program_rx=STALE" in logs[1]
+    for _ in range(3):
+        log = _run(tmp_path, _body(0, age=amd.DEFAULT_STALE_AFTER_S + 1, head=amd.DEFAULT_LOG_LIVE_S + 1),
+                   state)
+        assert "program_rx=STALE" in log and not _pages(log), log
+
+
+def test_watchdog_a_silent_program_on_a_live_log_is_named_and_logged_never_paged(tmp_path):
+    # review round 1: the program stopped while OBS keeps logging (the sender, the NIC or the leg).
+    # Named SILENT on the machine channel; paging it outside a production is an owner decision.
+    state = tmp_path / "state"
+    for _ in range(2):
+        log = _run(tmp_path, _body(0, age=amd.DEFAULT_STALE_AFTER_S + 1, head=2), state)
+        assert "program_rx=SILENT" in log and "SILENT" in log and not _pages(log), log
 
 
 def test_watchdog_a_frozen_log_never_pages_its_last_loss(tmp_path):
@@ -381,8 +394,7 @@ def test_watchdog_a_box_without_a_receiver_in_its_facts_is_none(tmp_path):
 def test_watchdog_the_dante_box_grades_the_dante_entry(tmp_path):
     state = tmp_path / "state"
     body = _body(2, key="dante")
-    _run(tmp_path, body, state, box="strih-snv|10.77.9.202")
-    page = _pages(_run(tmp_path, body, state, box="strih-snv|10.77.9.202"))
+    page = _alerts_now(_run(tmp_path, body, state, box="strih-snv|10.77.9.202"))
     assert page and "Dante vstup OBS" in page[0], page
 
 
@@ -420,3 +432,55 @@ def test_watchdog_the_arm_ships_disabled_it_logs_a_loss_but_never_pages(tmp_path
         log = _run(tmp_path, _body(4), state, dry_run=False, notify=str(notify), page=None)
         assert "program_rx=LOSS" in log and "paging is DISABLED" in log, log
     assert not calls.exists()
+
+
+def test_the_window_outlives_the_longest_pass_gap_of_the_timer():
+    # review round 1: one pass must always see a loss pair (two status lines 10 s apart): the window
+    # covers the longest gap between two passes (OnUnitActiveSec + RandomizedDelaySec) + one period
+    timer = (_ROOT / "systemd/audio-mixer-alert-watchdog.timer").read_text()
+    period = int(re.search(r"^OnUnitActiveSec=(\d+)min", timer, re.M).group(1)) * 60
+    spread = int(re.search(r"^RandomizedDelaySec=(\d+)min", timer, re.M).group(1)) * 60
+    assert bsg.AUDIO_RX_WINDOW_S >= period + spread + 10 + 60, (period, spread)
+
+
+def test_the_pager_gates_the_e2e_obs_vban_counters_except_late_and_stale():
+    # late: the late packet's slot is already counted in lost; stale: a duplicate or an already-out
+    # slot (the slot is in lost), never a loss of its own -- a deliberate difference, pinned
+    import program_audio_continuity as pac
+    assert set(pac.VBAN_GATED) - set(bsg.VBAN_RX_GATED) == {"late", "stale"}
+    assert set(bsg.VBAN_RX_GATED) <= set(pac.VBAN_GATED)
+
+
+@pytest.mark.parametrize("bad", [dict(clock="free"), dict(holdover="1")])
+def test_a_dante_clock_fault_in_the_window_is_an_event(bad):
+    lines = [_dante(_t(0), delivered_frames=100), _dante(_t(10), delivered_frames=580, **bad),
+             _dante(_t(20), delivered_frames=1060)]
+    e = bsg.audio_rx_from_log(_text(lines))[bsg.DANTE_RX_KEY]
+    assert e["deltas"]["clock_faults"] == 1 and e["events"] == 1, e
+
+
+def test_a_dante_error_line_in_the_window_is_an_event():
+    lines = [_dante(_t(0), delivered_frames=100), f"{_t(5)}: dante-input error: rx socket closed",
+             _dante(_t(10), delivered_frames=580)]
+    e = bsg.audio_rx_from_log(_text(lines))[bsg.DANTE_RX_KEY]
+    assert e["deltas"]["errors"] == 1 and e["events"] == 1, e
+
+
+def test_dante_frames_that_do_not_advance_are_silent_pairs_never_an_event():
+    lines = [_dante(_t(s), delivered_frames=100) for s in (0, 10, 20)]
+    e = bsg.audio_rx_from_log(_text(lines))[bsg.DANTE_RX_KEY]
+    assert e["silent_pairs"] == 2 and e["pairs"] == 2 and e["events"] == 0, e
+    moving = [_dante(_t(0), delivered_frames=100), _dante(_t(10), delivered_frames=580)]
+    assert bsg.audio_rx_from_log(_text(moving))[bsg.DANTE_RX_KEY]["silent_pairs"] == 0
+
+
+@pytest.mark.parametrize("entry, head, verdict", [
+    ({"events": 0, "age_s": amd.DEFAULT_STALE_AFTER_S + 1}, 2, "SILENT"),
+    ({"events": 0, "age_s": amd.DEFAULT_STALE_AFTER_S + 1}, amd.DEFAULT_LOG_LIVE_S + 1, "STALE"),
+    ({"events": 0, "age_s": amd.DEFAULT_STALE_AFTER_S + 1}, None, "STALE"),
+    ({"events": 0, "age_s": 3, "pairs": 5, "silent_pairs": 5}, 2, "SILENT"),
+    ({"events": 0, "age_s": 3, "pairs": 5, "silent_pairs": 4}, 2, "HEALTHY"),
+    ({"events": 2, "age_s": 3, "pairs": 5, "silent_pairs": 5}, 2, "LOSS"),
+])
+def test_silent_is_a_live_log_whose_program_stopped(entry, head, verdict):
+    assert amd.classify_program_rx(entry, "dante", 1, head) == verdict

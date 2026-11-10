@@ -419,3 +419,12 @@ def test_handle_mix_late_no_longer_reads_the_arms_confirm_key():
     body = src[src.index("handle_mix_late() {"):]
     body = body[:body.index("\n}\n")]
     assert "_confirm_" not in body and "if handle_arm " in body, body
+
+
+def test_watchdog_a_session_change_while_a_rise_is_held_pages_the_new_sessions_count(tmp_path):
+    state = tmp_path / "state"
+    _run_watchdog(tmp_path, _sbody(3, "09:00:00.000"), state)
+    log = _run_watchdog(tmp_path, _sbody(5, "09:00:00.000"), state)     # LATE, held (confirm 1)
+    assert "mix_late=LATE" in log and not _pages(log), log
+    log = _run_watchdog(tmp_path, _sbody(5, "10:30:00.000"), state)     # restart: graded from 0, confirm 2
+    assert "new audio session" in log and len(_alerts_now(log)) == 1 and "z 0 na **5** (+5)" in log, log
