@@ -574,7 +574,14 @@ fn current_network_signature() -> crate::reannounce::NetworkSignature {
             // unrelated virtual interface flapping can't trigger a re-announce (#297 review).
             if !ifa.ifa_name.is_null() {
                 let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy();
-                if !crate::reannounce::is_discoverable_interface(&name) {
+                // issue 1452: the camera's USB-C link (cdc_ncm) is never the LAN.
+                let driver = std::fs::read_link(format!("/sys/class/net/{name}/device/driver"))
+                    .ok()
+                    .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()));
+                if !crate::reannounce::is_discoverable_interface_with_driver(
+                    &name,
+                    driver.as_deref(),
+                ) {
                     continue;
                 }
             }

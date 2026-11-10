@@ -120,8 +120,7 @@ pub const CAMERA_LINK_DRIVER: &str = "cdc_ncm";
 /// the link and the sender re-announced twice, listing the camera link address beside the LAN
 /// (the two-network standard: a non-Dante sender advertises the LAN address only).
 pub fn is_discoverable_interface_with_driver(name: &str, driver: Option<&str>) -> bool {
-    let _ = driver;
-    is_discoverable_interface(name)
+    is_discoverable_interface(name) && driver != Some(CAMERA_LINK_DRIVER)
 }
 
 /// Decide whether the NDI sender should be re-announced (destroyed + re-created so the NDI
