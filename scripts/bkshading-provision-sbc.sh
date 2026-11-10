@@ -72,13 +72,16 @@ set -euo pipefail
 #              the heal installed and its timer enabled + the DHCP gateway answers a ping (the WiFi
 #              rows are SKIPPED on a wired box with no wl* interface, e.g. a cambox) + the root
 #              filesystem is read-only + the root writers (bkshading_sbc_masked_units) masked +
-#              the logrotate drop-in (state in /run) in place;
+#              the logrotate drop-in (state in /run) in place + the journal shipped off-box
+#              (issue 808: systemd-journal-upload enabled, its wrapper + drop-in current);
 #              0 if all OK, 1 + remediation.
 #   --install  install gphoto2 (if missing), install + enable the (reused) relay unit, take the
 #              WiFi over from netplan + install the heal (a wl* board), write the read-only fstab +
-#              volatile journald + mask the root writers + the logrotate drop-in; enable-only,
-#              effective at the next
-#              reboot. Refuses (exit 2) on a cambox: setup-device.sh owns a cambox's root.
+#              volatile journald + mask the root writers + the logrotate drop-in, ship the RAM journal
+#              to the venue strih (issue 808: the strih fact files naming this board in
+#              STRIH_BKSHADING_RELAYS give the sinks; an unlisted board refuses, exit 1, nothing
+#              changed) and move a stale /etc/fake-hwclock.data forward from a synchronized clock;
+#              enable-only, effective at the next reboot. Refuses (exit 2) on a cambox: setup-device.sh owns a cambox's root.
 #
 # Exit codes: 0 = OK; 1 = not fully provisioned + remediation printed (or the root / the WiFi config
 # could not be read); 2 = bad argument / run on a cambox.
@@ -97,6 +100,10 @@ set -euo pipefail
 #   (ping), BKSHADING_SBC_NETPLAN_OTHER_DIRS ("/run/netplan /lib/netplan", the other directories
 #   netplan reads). The heal units go beside the relay unit (the directory of
 #   BKSHADING_SBC_UNIT_DEST).
+#   Off-box journal + clock (issue 808): BKSHADING_SBC_HOSTNAME (the board name, default the kernel
+#   hostname), BKSHADING_SBC_JU_BIN, BKSHADING_SBC_JU_SCRIPT, BKSHADING_SBC_APT_GET,
+#   BKSHADING_SBC_FAKE_HWCLOCK, BKSHADING_SBC_TIMEDATECTL, BKSHADING_SBC_NOW; STRIH_BOXES_DIR moves
+#   the strih fact files the sinks come from.
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -111,6 +118,10 @@ REPO="$(cd "$HERE/.." && pwd)"
 . "$HERE/lib/bkshading-sbc-wifi-probe.sh" # the WiFi link reads, shared with the heal (issue 808)
 # shellcheck source=scripts/lib/bkshading-camera-link.sh
 . "$HERE/lib/bkshading-camera-link.sh" # issue 1452: the camera's USB-C link file, shared with the camboxes
+# shellcheck source=scripts/lib/remote-logging.sh
+. "$HERE/lib/remote-logging.sh" # issue 808: the board journal to its venue strih (the issue-1311/1394 lib)
+# shellcheck source=scripts/lib/bkshading-sbc-remote-log.sh
+. "$HERE/lib/bkshading-sbc-remote-log.sh" # issue 808: its install/check + the boot clock file
 
 UNIT_NAME="$(bkshading_relay_unit_name)"
 UNIT_SRC="$REPO/systemd/$UNIT_NAME"
@@ -141,6 +152,13 @@ IP="${BKSHADING_SBC_IP:-ip}"
 PING="${BKSHADING_SBC_PING:-ping}"
 WPA_CONF="$WPA_CONF_DIR/$(bkshading_sbc_wpa_conf_name)"
 WIFI_IFACE="$(bkshading_sbc_wifi_iface)"
+# issue 808: the off-box journal + the boot clock file (scripts/lib/bkshading-sbc-remote-log.sh)
+JU_BIN="${BKSHADING_SBC_JU_BIN:-$REMOTE_LOG_JU_BIN}"
+JU_SCRIPT="${BKSHADING_SBC_JU_SCRIPT:-$REMOTE_LOG_BOARD_UPLOAD_SCRIPT_PATH}"
+JU_DROPIN="$UNIT_DIR/systemd-journal-upload.service.d/$REMOTE_LOG_BOARD_DROPIN_NAME"
+APT_GET="${BKSHADING_SBC_APT_GET:-apt-get}"
+FAKE_HWCLOCK="${BKSHADING_SBC_FAKE_HWCLOCK:-/etc/fake-hwclock.data}"
+TIMEDATECTL="${BKSHADING_SBC_TIMEDATECTL:-timedatectl}"
 
 MODE="${1:---check}"
 case "$MODE" in
@@ -493,6 +511,10 @@ do_install() {
   # The WiFi takeover is read and decided here too, so a board with no WiFi config to migrate is
   # refused before the root is remounted or any file is written.
   plan_wifi
+  # issue 808: the board's log sink candidates come from the strih fact files that name it; an unlisted
+  # board refuses here, before anything changes.
+  LOG_SINKS="$(remote_log_board_sink_ips "$(bkshading_sbc_board_name)")" \
+    || { echo "ERROR: this board has no log sink (above) -- nothing changed" >&2; exit 1; }
   if [ "$mode" = ro ]; then
     echo "  root is read-only (a re-run after the read-only reboot) -- remounting rw for the install"
     "$MOUNT" -o remount,rw / || { echo "ERROR: 'mount -o remount,rw /' failed -- nothing changed" >&2; exit 1; }
@@ -530,12 +552,15 @@ do_install() {
   echo "  camera link file $(bkshading_camera_link_network_path) in place (issue 1452)"
 
   apply_wifi
+  bkshading_sbc_remote_log_install "$LOG_SINKS" "$JU_SCRIPT" "$JU_DROPIN" "$JU_BIN" "$APT_GET" || exit 1
 
   # ENABLE-ONLY: never start/restart the relay here (provisioning-scripts.md) — reboot / the
   # post-reboot verify brings it live.
   "$SYSTEMCTL" daemon-reload
   "$SYSTEMCTL" enable "$UNIT_NAME"
   echo "  enabled $UNIT_NAME (NOT started -- reboot to take effect)"
+  "$SYSTEMCTL" enable systemd-journal-upload.service
+  echo "  enabled systemd-journal-upload.service (NOT started -- reboot to take effect)"
   enable_wifi
 
   if [ ! -x "$RELAY_BIN" ]; then
@@ -547,6 +572,7 @@ do_install() {
     echo "           deploy the arm64 build (bkshading-relay-linux-arm64), not the amd64 one." >&2
   fi
 
+  bkshading_sbc_clock_file_refresh "$FAKE_HWCLOCK" "$TIMEDATECTL"
   install_ro_root "$uuid" "$fstype"
   restore_root_mode || exit 1
   echo "install done. Reboot the board to bring the relay up on a read-only root, then verify with:"
@@ -811,6 +837,8 @@ do_check() {
     echo "FAIL: $LOGROTATE_DROPIN missing or differs -- logrotate would fail on the read-only root; re-run --install" >&2
     rc=1
   fi
+  # (7) issue 808: the RAM journal ships to the venue strih (every SBC, wired or WiFi)
+  bkshading_sbc_remote_log_check "$(bkshading_sbc_board_name)" "$JU_SCRIPT" "$JU_DROPIN" "$JU_BIN" "$SYSTEMCTL" || rc=1
 
   if [ "$rc" -ne 0 ]; then
     cat >&2 <<MSG
