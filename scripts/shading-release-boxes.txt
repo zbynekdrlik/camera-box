@@ -12,6 +12,12 @@ cam5 shading-release-rest.pin
 # cameras plug in later -- cam4-shading joins with its camera in PP).
 cam1-shading shading-release-rest.pin
 cam2-shading shading-release-rest.pin
+# Poprad (owner sets it up 11.11.2026 via shading): cam6 + cam7 (Pocket 6K, fw >= 8.6 + Web media manager),
+# the cam4-shading board, and the strih-pp service (every relay it drives is then on v0.2.x).
+cam6 shading-release-rest.pin
+cam7 shading-release-rest.pin
+cam4-shading shading-release-rest.pin
+strih-pp shading-release-rest.pin
 # A strih box listed here takes that pin for its bkshading SERVICE (setup-strih step 16c, verify item 31).
 # A v0.2.x panel sends apertureStep, which a v0.1.x relay ignores, so a venue moves once its cameras are on
 # the REST relay. strih-snv: owner 10.11.2026 (cam3 + cam5 on v0.2.2; cam2's gphoto2 relay keeps the gap).

@@ -62,12 +62,13 @@ def test_the_map_entry_parser_skips_comments_and_matches_a_box_case_and_domain_f
 
 def test_the_tree_puts_cam3_and_cam5_on_the_rest_pin_and_every_other_box_on_the_default():
     for box, want in (("cam3", "shading-release-rest.pin"), ("CAM5", "shading-release-rest.pin"),
-                      ("cam1", "shading-release.pin"), ("cam7", "shading-release.pin"),
+                      ("cam1", "shading-release.pin"), ("cam4", "shading-release.pin"),
+                      ("cam7", "shading-release-rest.pin"), ("cam4-shading", "shading-release-rest.pin"),
                       ("handheld-1", "shading-release.pin"), ("", "shading-release.pin")):
         r = _bash('. "$1"; shading_pin_file_for_box "$2" "$3"', LIB, REPO, box)
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == os.path.join(REPO, "scripts", want), (box, r.stdout)
-    r = _bash('. "$1"; shading_pin_version_for_box "$2" cam3; shading_pin_version_for_box "$2" cam7', LIB, REPO)
+    r = _bash('. "$1"; shading_pin_version_for_box "$2" cam3; shading_pin_version_for_box "$2" cam4', LIB, REPO)
     def _tag(pin):
         line = [x for x in open(os.path.join(REPO, "scripts", pin)).read().splitlines()
                 if x.startswith("SHADING_RELEASE_TAG=v")][0]
