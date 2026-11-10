@@ -118,7 +118,10 @@ line, which would move every head-age facet), add the parser to `_facets` as a N
 goldens and diff old vs new. Expect `text_sha256` / `timestamped_tail_lines` to change for the cases
 holding that text, and the inserted bytes to move the `bounded:concat` head/tail cut: an age-only
 facet there can shift by a second (issue 1460: `audio_mixer_age_s` 646 -> 645). Name every such
-input-caused change on the ticket; any other value change is a behaviour change.
+input-caused change on the ticket; any other value change is a behaviour change. Keep the inserted
+lines in TIME order with their neighbours: a line older than the one before it is a step back that
+`_file_order_elapsed` reads as 0, which shifts every later position and the head (issue 1460: lines
+at 00:24:20-50 inserted before a 00:24:10 line moved the head +40 s and changed six age facets).
 
 The strih/stream `:8899` server (`scripts/bundle-state-server.py` + pure parsers/builders behind
 `scripts/bundle_state_gather.py`) feeds `recording-e2e.sh`'s `[0/8]` version-integrity gate via
