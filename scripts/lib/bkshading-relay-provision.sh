@@ -149,6 +149,8 @@ bkshading_relay_expected_enable_state() {
   painter="$(printf '%s' "${4:-}" | tr '[:upper:]' '[:lower:]')"
   mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
   if [ "$mode" = event ]; then printf '%s\n' enabled; return 0; fi
+  # issue 1452 (owner 10.11.2026): a box on the REST relay pin runs its relay in every mode.
+  if [ -n "$dev" ] && bkshading_relay_box_always_on "$dev"; then printf '%s\n' enabled; return 0; fi
   if [ -z "$src" ]; then printf '%s\n' unknown; return 0; fi
   local roster=0
   if [ -n "$dev" ] && { [ "$dev" = "$src" ] || [ "$dev" = "$painter" ]; }; then roster=1; fi

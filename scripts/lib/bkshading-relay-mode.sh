@@ -159,21 +159,27 @@ bkshading_relay_mode_apply() {
       return 0
       ;;
   esac
-  local pair label ip
+  local pair label ip box_cmds box_verb
   for pair in "$@"; do
     label="${pair%%=*}"
     ip="${pair#*=}"
     if [ -z "$label" ] || [ -z "$ip" ] || [ "$label" = "$ip" ]; then
       continue
     fi
+    box_cmds="$cmds"; box_verb="$verb"
+    if [ "$action" = test ] && bkshading_relay_box_always_on "$label"; then
+      # issue 1452 (owner 10.11.2026): a REST relay v0.2.x opens no PTP session -- it stays on.
+      box_cmds="$(bkshading_relay_mode_start_cmds)"
+      box_verb="kept enabled+running (TEST mode -- REST relay v0.2.x opens no PTP session, issue 1452)"
+    fi
     _out=""; _rc=0
     _out="$(sshpass -p "$cam_pw" timeout 12 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
-      root@"$ip" "$cmds" 2>&1)" || _rc=$?
+      root@"$ip" "$box_cmds" 2>&1)" || _rc=$?
     _state="$(printf '%s\n' "$_out" | grep -oE '^RELAY_ENABLED=.*' | tail -n 1)"
     if [ "$_rc" -ne 0 ]; then
       # issue 1407: a failed ro close lists its writers on the box; this ONE line names them too.
       _holders="$(ro_window_holders "$_out")"
-      echo "    [issue 1311] bkshading-relay $verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)${_holders:+ (holders: $_holders)}" >&2
+      echo "    [issue 1311] bkshading-relay $box_verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)${_holders:+ (holders: $_holders)}" >&2
       _entry="$label ($ip)${_holders:+ [writers: $_holders]}"
       BKSHADING_RELAY_MODE_FAILED="${BKSHADING_RELAY_MODE_FAILED:+$BKSHADING_RELAY_MODE_FAILED, }$_entry"
       BKSHADING_RELAY_MODE_FAILED_BOXES="${BKSHADING_RELAY_MODE_FAILED_BOXES:+$BKSHADING_RELAY_MODE_FAILED_BOXES, }$label ($ip)"
@@ -184,7 +190,7 @@ bkshading_relay_mode_apply() {
       fi
       _failed=1
     else
-      echo "    [issue 1311] bkshading-relay $verb on $label ($ip) [${_state:-read-back n/a}]"
+      echo "    [issue 1311] bkshading-relay $box_verb on $label ($ip) [${_state:-read-back n/a}]"
     fi
   done
   [ "${_failed:-0}" -eq 0 ]

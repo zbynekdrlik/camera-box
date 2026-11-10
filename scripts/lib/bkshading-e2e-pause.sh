@@ -156,6 +156,13 @@ bkshading_e2e_pause_parse_state() {
 bkshading_e2e_pause_stop() {
   local label="$1" ip="$2" pw="$3" timeout_s="${4:-8}"
   local out
+  if bkshading_relay_box_always_on "$label"; then
+    # issue 1452 (owner 10.11.2026): a REST relay v0.2.x opens no PTP session on the shared hub, so
+    # the run leaves it running; "0" = nothing paused, the restore stays a no-op.
+    echo "    bkshading-relay on $label: left running (REST relay v0.2.x, no PTP session -- issue 1452)" >&2
+    printf '%s\n' 0
+    return 0
+  fi
   out="$(timeout "$timeout_s" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$ip" \
     "$(bkshading_e2e_pause_stop_cmds "$label")" 2>/dev/null)" || true
   bkshading_e2e_pause_parse_state "$label" "$out"
