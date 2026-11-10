@@ -437,7 +437,11 @@ EOF
 # --save-state=/var/lib/... is unwritable on the ro appliance). RuntimeDirectory creates the tmpfs
 # dir with the service user's ownership. A runtime-only cursor is fine — the box dies anyway, and on
 # a clean reboot the uploader simply resumes from the current boot.
+# EXEC (optional, issue 808): the ExecStart command instead of the uploader with its /run cursor -- the
+# handheld board's wrapper (remote_log_board_upload_script_content), which picks its sink at each start
+# and passes the same --save-state itself. Without it the text is the cambox drop-in, byte for byte.
 remote_log_journal_upload_dropin_content() {
+  local exec="${1:-${REMOTE_LOG_JU_BIN} --save-state=${REMOTE_LOG_JU_SAVE_STATE}}"
   cat <<EOF
 [Unit]
 # #1311 boot-order: on a cambox network-online.target is reached BEFORE the sink is reachable (masked
@@ -462,8 +466,117 @@ RuntimeDirectory=systemd/journal-upload
 # /run via RuntimeDirectory + --save-state below.
 StateDirectory=
 ExecStart=
-ExecStart=${REMOTE_LOG_JU_BIN} --save-state=${REMOTE_LOG_JU_SAVE_STATE}
+ExecStart=${exec}
 EOF
+}
+
+# --- the handheld shading board (issue 808): its RAM journal to its venue strih -----------------------
+# The board (an arm64 SBC on a read-only root, `Storage=volatile`) is not a camera: its venue is where
+# its relay REGISTERS, i.e. the strih fact files whose STRIH_BKSHADING_RELAYS name it
+# (`N=sbc-relay@register:<board>`). A travelling board is named by both venues, so it gets every such
+# strih as a candidate and its wrapper picks, at each start, the first one whose journal-remote port
+# answers. Only journal-upload: the kernel messages ride the journal (journald reads /dev/kmsg), the
+# board's WiFi driver is out-of-tree (netpoll unknown) and its failure class is a power or WiFi loss, not
+# a root medium dropping off the bus, so there is no netconsole. A WiFi drop is backfilled: the uploader
+# resumes from its /run cursor once a sink answers again.
+# shellcheck disable=SC2034  # consumed by scripts/lib/bkshading-sbc-remote-log.sh + bkshading-provision-sbc.sh
+REMOTE_LOG_BOARD_UPLOAD_SCRIPT_PATH="/usr/local/sbin/bkshading-journal-upload.sh"
+# shellcheck disable=SC2034  # consumed by scripts/bkshading-provision-sbc.sh
+REMOTE_LOG_BOARD_DROPIN_NAME="10-bkshading-board-upload.conf"
+# How long the wrapper waits for one candidate's TCP connect (a candidate at the OTHER venue is silent).
+REMOTE_LOG_BOARD_CONNECT_TIMEOUT_S=3
+
+# remote_log_board_sink_ips BOARD -> the space-separated STRIH_IP of every strih-role fact file whose
+# STRIH_BKSHADING_RELAYS has an `sbc-relay@register:BOARD` entry, in the loader's file order (the fact
+# file names, so strih-pp before strih-snv). Each venue is its own network with the same 10.77.8.0/23
+# numbering, so the other venue's strih address answers on the journal-remote port only if a host at
+# that address runs a receiver; the wrapper takes the first that answers. rc 1 + one `remote-logging:` stderr line,
+# nothing on stdout, for: a BOARD that is not a relay id (`_strih_box_relay_id`, the loader's own
+# grammar), a fact file that does not parse, no file naming it,
+# or a STRIH_IP that is not IPv4. Never a guessed or default address, never dev1. Runs in a subshell
+# like _remote_log_strih_row; STRIH_BOXES_DIR moves the fact dir.
+remote_log_board_sink_ips() {
+  (
+    set +f
+    shopt -u nullglob failglob nocaseglob nocasematch 2>/dev/null || true
+    IFS=$' \t\n'
+    board="${1-}"
+    if ! declare -F strih_box_parse_file >/dev/null; then
+      # shellcheck source=scripts/lib/strih-box-facts.sh
+      . "${REMOTE_LOG_LIB_DIR}/strih-box-facts.sh" || exit 1
+    fi
+    # the ONE relay-id grammar, the one the fact loader accepts in `register:<id>`
+    if ! _strih_box_relay_id "$board"; then
+      echo "remote-logging: '${board}' is not a shading board name (its relay id) -- no log sink (issue 808)" >&2
+      exit 1
+    fi
+    dir="$(strih_box_dir)"
+    sinks=""
+    for f in "$dir"/*.env; do
+      [ -f "$f" ] || continue
+      parsed="$(strih_box_parse_file "$f")" \
+        || { echo "remote-logging: ${f} does not parse -- no log sink for ${board} (issue 808)" >&2; exit 1; }
+      role="" relays="" ip=""
+      while IFS= read -r line; do
+        case "$line" in
+          STRIH_ROLE=*) role="${line#*=}" ;;
+          STRIH_BKSHADING_RELAYS=*) relays="${line#*=}" ;;
+          STRIH_IP=*) ip="${line#*=}" ;;
+        esac
+      done <<<"$parsed"
+      [ "$role" = strih ] || continue
+      hit=0
+      for e in $relays; do
+        [ "${e#*=}" = "sbc-relay@register:${board}" ] && hit=1
+      done
+      [ "$hit" = 1 ] || continue
+      remote_log_ipv4_ok "$ip" \
+        || { echo "remote-logging: ${f##*/} STRIH_IP '${ip}' is not an IPv4 address -- no log sink for ${board} (issue 808)" >&2; exit 1; }
+      sinks="${sinks:+${sinks} }${ip}"
+    done
+    [ -n "$sinks" ] || {
+      echo "remote-logging: no strih fact file in ${dir} names ${board} in STRIH_BKSHADING_RELAYS (N=sbc-relay@register:${board}) -- no log sink (issue 808)" >&2
+      exit 1
+    }
+    printf '%s\n' "$sinks"
+  )
+}
+
+# remote_log_board_upload_script_content SINK... -> the board's wrapper (written to
+# ${REMOTE_LOG_BOARD_UPLOAD_SCRIPT_PATH}, the ExecStart of its upload drop-in): at each start it takes
+# the FIRST candidate whose journal-remote port accepts a TCP connect within
+# ${REMOTE_LOG_BOARD_CONNECT_TIMEOUT_S} s and execs the uploader against it with the /run cursor; none =
+# exit 1 (the drop-in's Restart=always tries again). rc 1 + a stderr line, no output, for no sink or a
+# non-IPv4 one. The exec keeps the PID, so systemd's watchdog and notify see the uploader itself.
+# REMOTE_LOG_BOARD_UPLOAD_BIN replaces the uploader path in the wrapper ONLY (a test seam; the cambox
+# drop-in keeps the fixed REMOTE_LOG_JU_BIN).
+remote_log_board_upload_script_content() {
+  local s
+  [ "$#" -gt 0 ] || { echo "remote-logging: the board upload wrapper needs at least one sink (issue 808)" >&2; return 1; }
+  for s in "$@"; do
+    remote_log_ipv4_ok "$s" || { echo "remote-logging: board sink '${s}' is not an IPv4 address (issue 808)" >&2; return 1; }
+  done
+  cat <<SCRIPT
+#!/usr/bin/env bash
+# bkshading-journal-upload.sh (issue 808) -- GENERATED by scripts/lib/remote-logging.sh. Do not hand-edit;
+# re-run scripts/bkshading-provision-sbc.sh --install to change it. Ships this handheld board's RAM
+# journal to the venue strih's systemd-journal-remote: the first candidate (the strih fact files that
+# name this board) whose port answers.
+set -uo pipefail
+
+SINKS="$*"
+PORT="${REMOTE_LOG_JOURNAL_PORT}"
+WAIT_S="${REMOTE_LOG_BOARD_CONNECT_TIMEOUT_S}"
+for ip in \$SINKS; do
+  # shellcheck disable=SC2016  # \$1/\$2 expand in the probe shell, not here
+  if timeout "\$WAIT_S" bash -c ': >"/dev/tcp/\$1/\$2"' probe "\$ip" "\$PORT" 2>/dev/null; then
+    echo "bkshading-journal-upload: uploading to \${ip}:\${PORT}"
+    exec ${REMOTE_LOG_BOARD_UPLOAD_BIN:-$REMOTE_LOG_JU_BIN} --save-state=${REMOTE_LOG_JU_SAVE_STATE} --url="http://\${ip}:\${PORT}"
+  fi
+done
+echo "bkshading-journal-upload: no log sink answers on port \${PORT} (\${SINKS}) -- retrying" >&2
+exit 1
+SCRIPT
 }
 
 # remote_log_gather_remote_snippet -> the REMOTE bash run over ssh by verify-device.sh's (ak) check,

@@ -11,6 +11,8 @@ paths:
   - "tests/python/test_bkshading_sbc_wifi_takeover_808.py"
   - "tests/python/bkshading_sbc_fakes_808.py"
   - "tests/python/test_ro_root_808.py"
+  - "scripts/lib/bkshading-sbc-remote-log.sh"
+  - "tests/python/test_bkshading_sbc_remote_log_808.py"
   - "scripts/bkshading-wifi-heal.sh"
   - "scripts/bkshading_sbc_netplan_wifi.py"
   - "scripts/lib/bkshading-sbc-wifi-probe.sh"
@@ -371,8 +373,8 @@ pripajat na shading bridge a nie bridge na shading pc".
   the one travelling handheld `register:handheld-1`.
 - **Reaching the PP handheld from dev1:** dev1's own 10.77.8.0/23 route is the SNV LAN, so go through
   strih-pp: `ssh -o ProxyCommand='sshpass -p <pw> ssh -W %h:%p newlevel@strih-pp.lan' root@<ip>`.
-- **The SBC journal is RAM-only**, so a pre-reboot outage leaves no trace (the 28.10. case); shipping
-  it to the venue strih is an open item on issue 808.
+- **The SBC journal is RAM-only** (`Storage=volatile`), so since issue 808's off-box section below it
+  is SHIPPED to the venue strih; before that a pre-reboot outage left no trace (the 28.10. case).
 - **The panel shows the registration** (`CameraView.registration`, `RegistrationView`: relay id, the
   announced address, `ageS` since the last announcement, `announcingS` = the unbroken streak, `fresh`).
   The streak restarts after a gap longer than the 35 s TTL, so "beží 3 min" after an outage means
@@ -383,6 +385,86 @@ pripajat na shading bridge a nie bridge na shading pc".
 - Tests: `relay/tests/register_808.rs`, `service/tests/relay_register_808.rs` (the real announcer
   against the real router + aggregator over sockets), `tests/service.rs` registry cases, the panel
   Playwright test "a handheld that registers itself..." (`e2e-register-config.toml`, port 8783).
+
+## The board journal goes to its venue strih; the boot clock file moves forward (issue 808, 10.11.2026)
+
+The board's journal lives in RAM and its `/etc/fake-hwclock.data` stayed at 3.10 (the last rw boot:
+`fake-hwclock-save` is masked on the ro root, so every boot started at 3.10 until timesyncd synced,
+~44 s after the WiFi). Design: issue 808 comment 6755943555.
+- **Sinks come from the strih fact files, never a literal and never dev1.** A board is not a camera;
+  its venue is where its relay registers. `remote_log_board_sink_ips <board>` (in
+  `scripts/lib/remote-logging.sh`, the ONE issue-1311/1394 lib) = the `STRIH_IP` of every strih-role
+  fact file whose `STRIH_BKSHADING_RELAYS` names `sbc-relay@register:<board>`, in file order. Today:
+  cam1-shading -> strih-pp, cam2-shading -> strih-snv, cam4-shading -> BOTH (the travelling board).
+  `remote_log_sink_ip camN` would be WRONG here: cam4-shading drives the SNV cam3 block.
+- **The wrapper picks the venue at each start.** `/usr/local/sbin/bkshading-journal-upload.sh`
+  (`remote_log_board_upload_script_content`) probes each candidate's journal-remote port (19532, 3 s
+  TCP connect) and execs `systemd-journal-upload --save-state=/run/... --url=http://<ip>:19532` on the
+  first that answers; none = exit 1, and the drop-in's `Restart=always` (5 s) tries again. The drop-in
+  `systemd-journal-upload.service.d/10-bkshading-board-upload.conf` is the cambox drop-in with
+  ExecStart = the wrapper (`remote_log_journal_upload_dropin_content EXEC`; without the argument the
+  cambox text is byte-identical). The exec keeps the PID, so the unit's watchdog sees the uploader.
+  The candidates are probed in fact-file order (strih-pp before strih-snv). Both venues number their
+  separate networks 10.77.8.0/23, so the other venue's strih address answers only if a host there runs
+  a journal-remote receiver; check that before adding one at either venue. `REMOTE_LOG_BOARD_UPLOAD_BIN`
+  replaces the uploader path in the wrapper only (a test seam; the cambox drop-in keeps the constant).
+  Not verified in the real unit's sandbox by a test (the Debian trixie unit: DynamicUser,
+  MemoryDenyWriteExecute, WatchdogSec=3min): the live runbook below is the proof.
+- **Journal-upload only, no netconsole.** Kernel lines ride the journal (journald reads /dev/kmsg);
+  the WiFi driver is out-of-tree (`sprdwl_ng`, netpoll unknown); the board's failure class is a power
+  or WiFi loss, not a root medium dropping off the bus. A WiFi drop is backfilled: the uploader resumes
+  from its /run cursor and sends the RAM backlog once a sink answers. A power cut loses only what was
+  not yet uploaded.
+- **No receiver change.** The strih's systemd-journal-remote runs `SplitMode=host`, so the board
+  lands in its own `/var/log/journal/remote/remote-<board>*.journal`. The netconsole receiver
+  (`camN-kernel.log`) is untouched; the board sends no UDP.
+- **`--install`** resolves the sinks from the board name (`BKSHADING_SBC_HOSTNAME`, else the kernel
+  hostname = the relay id) right after the WiFi plan, BEFORE the rw remount: an unlisted board exits 1
+  naming the `N=sbc-relay@register:<board>` entry to add, nothing changed. Next to gphoto2 it
+  apt-installs `systemd-journal-remote` when the uploader binary is missing; later it writes the
+  wrapper (0755) + drop-in
+  (temp + rename, only on a difference), enables `systemd-journal-upload.service` after the
+  daemon-reload, never starts it. The copied `scripts/` dir must carry `strih-boxes/` (it does when
+  the whole dir is copied): the sinks are read on the board.
+- **The clock file** (`bkshading_sbc_clock_file_refresh`, in the rw window before the ro fstab): the
+  current UTC time goes into `/etc/fake-hwclock.data` only when the file exists, `timedatectl show -p
+  NTPSynchronized --value` is `yes`, the time is `YYYY-MM-DD HH:MM:SS` and later than the file (byte
+  compare under `LC_ALL=C`). Never an unsynchronized or older time; never a hard fail. Recorded limit:
+  the seconds before timesyncd syncs remain (no RTC, ro root); those journal entries carry the
+  provisioning date but keep their boot id and monotonic time. The file is refreshed ONLY by
+  `--install`, so between installs every boot starts at that install's date (less stale than 3.10,
+  same limit); `--check` prints the file's date as an informational OK line, never a FAIL.
+- **`--check` row (7)** (`bkshading_sbc_remote_log_check`, every SBC): the board is named by a fact
+  file, the uploader binary is there, the wrapper and the drop-in are byte-identical to this
+  checkout's generators (a fact change shows here), the unit is enabled. Active is NOT graded (it
+  depends on the strih answering), the cambox `(ak)` bar.
+- The lib is `scripts/lib/bkshading-sbc-remote-log.sh`; `bkshading-provision-sbc.sh` gains one call
+  per step. Tests: `tests/python/test_bkshading_sbc_remote_log_808.py` (the resolver over the real and
+  synthetic fact files, the wrapper run against a real loopback listener, `--install`/`--check` through
+  `_run_provision`, the clock rules). The fakes default the board to `cam2-shading`
+  (`_run_provision(hostname=...)`), an uploader binary present (`ju_present=False` = the apt branch),
+  a fake `timedatectl` (`FAKE_NTP_SYNC`) and `apt-get`.
+
+### Live runbook (supervisor, a board after this change)
+
+The boards: `cam1-shading` (ex handheld-2, PP fact; not yet installed), `cam2-shading` (SNV,
+10.77.9.189 on 2.11.), `cam4-shading` (ex handheld-1, the travelling one; PP 10.77.8.78 on 28.10.,
+reached from dev1 only through strih-pp, see above). For each, with the rig idle:
+1. The venue strih receiver is up: on the strih `ss -ltnp | grep ':19532 '` names systemd
+   (setup-strih step 16k; verify-strih item 46).
+2. Copy the CURRENT `scripts/` dir (with `strih-boxes/`) to the board, run
+   `scripts/bkshading-provision-sbc.sh --install` as root (it remounts the ro root rw and back). Read
+   the `the board journal ships to the venue strih: first answering of <ips>` and the `boot clock file`
+   lines (on a synced board: `moved from '2026-10-03 ...' to '<now>'`).
+3. Start it once without a reboot: `systemctl start systemd-journal-upload`, then
+   `journalctl -u systemd-journal-upload -n 5` shows `bkshading-journal-upload: uploading to <strih ip>:19532`.
+   (A reboot does the same; the unit is enabled.)
+4. On the venue strih: `ls -l /var/log/journal/remote/ | grep <board>` shows a `remote-<board>*.journal`
+   within a minute; `journalctl --file '/var/log/journal/remote/remote-<board>*.journal' -n 20` reads the
+   board's lines (the relay's register lines, the WiFi heal).
+5. `scripts/bkshading-provision-sbc.sh --check` on the board: row (7) OK, exit 0.
+6. After the next reboot `cat /etc/fake-hwclock.data` = the install time, and `journalctl -b` on the
+   strih file starts at that date instead of 3.10.
 
 ### Supervisor bench checklist (run when the prototype board arrives — the HARDWARE half, UNVERIFIED in code lanes)
 The code lane ships the provisioning + `--check`; these live-hardware steps are the supervisor's:
