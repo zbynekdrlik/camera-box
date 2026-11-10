@@ -7,6 +7,7 @@ paths:
   - "tests/python/test_strih_cambox_log_sink_1394.py"
   - "tests/harness_remote_logging_1311.rs"
   - "scripts/lib/cambox-ro-units.sh"
+  - "scripts/lib/bkshading-sbc-remote-log.sh"
 ---
 
 # cambox off-box remote logging — netconsole + systemd-journal-upload (#1311, Finding 1 step 2)
@@ -76,6 +77,18 @@ venue strih, with no router change for dev1.
 - `setup-device.sh` resolves it right after the box name, before the first write (`fail` when none).
 - Moving a camera between venues = the two fact files (the dantesync-fleet rule); the next
   re-point (below) or setup-device run follows.
+
+## The handheld shading boards use the same lib, journal-upload only (issue 808)
+
+A board (`camN-shading`, an arm64 SBC, RAM journal) is not a camera, so it never goes through
+`remote_log_sink_ip`: `remote_log_board_sink_ips <board>` gives the strih boxes whose
+`STRIH_BKSHADING_RELAYS` name it (both venues for the travelling one), the generated wrapper
+`/usr/local/sbin/bkshading-journal-upload.sh` picks the one that answers at each start, and the upload
+drop-in takes it as its ExecStart (`remote_log_journal_upload_dropin_content [EXEC]`, cambox text
+unchanged without the argument). No netconsole, no receiver change (SplitMode=host gives the board its
+own remote file). Installed and graded by `bkshading-provision-sbc.sh` through
+`scripts/lib/bkshading-sbc-remote-log.sh`: `.claude/rules/bkshading-sbc.md` (the off-box section +
+its live runbook).
 
 ## netconsole robustness — dynamic configfs target, MAC resolved at boot
 
