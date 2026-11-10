@@ -104,7 +104,7 @@ def test_the_travelling_board_gets_both_venues_and_the_others_one():
 
 
 def test_an_unlisted_or_bad_board_name_is_refused_by_name_never_guessed():
-    for board in ("cam9-shading", "cam2-shadingx", "cam2", "", "-x", "a b"):
+    for board in ("cam9-shading", "cam2-shadingx", "cam2", "", "-x", "a b", "c" * 65, "cam2-shading;x"):
         r = _bash('remote_log_board_sink_ips "$1"', board)
         assert r.returncode == 1, (board, r.stdout)
         assert r.stdout == ""
@@ -155,7 +155,7 @@ def _wrapper(tmp, sinks, port):
     fake_bin = tmp / "systemd-journal-upload"
     fake_bin.write_text('#!/usr/bin/env bash\nprintf "UPLOAD %s\\n" "$*"\n')
     fake_bin.chmod(0o755)
-    env = {"REMOTE_LOG_JOURNAL_PORT": str(port), "REMOTE_LOG_JU_BIN": str(fake_bin)}
+    env = {"REMOTE_LOG_JOURNAL_PORT": str(port), "REMOTE_LOG_BOARD_UPLOAD_BIN": str(fake_bin)}
     r = _bash('remote_log_board_upload_script_content "$@"', *sinks, env=env)
     assert r.returncode == 0, r.stderr
     script = tmp / "wrapper.sh"
@@ -231,7 +231,13 @@ def test_install_writes_the_upload_wrapper_and_dropin_and_only_enables_the_uploa
     assert "enable systemd-journal-upload.service" in log
     assert not [ln for ln in log if "journal-upload" in ln and ln.split()[0] in ("start", "restart")]
     assert not os.path.exists(p["apt_log"])  # the uploader is there: no apt
-    assert "10.77.9.202" in r.stdout or sinks[0] in r.stdout
+    assert f"first answering of {' '.join(sinks)} :19532" in r.stdout
+
+
+def test_the_cambox_uploader_path_ignores_the_board_test_seam():
+    r = _bash("remote_log_journal_upload_dropin_content",
+              env={"REMOTE_LOG_BOARD_UPLOAD_BIN": "/tmp/x", "REMOTE_LOG_JU_BIN": "/tmp/y"})
+    assert "ExecStart=/usr/lib/systemd/systemd-journal-upload --save-state=" in r.stdout
 
 
 def test_install_installs_the_uploader_package_when_missing(tmp_path):
@@ -239,6 +245,20 @@ def test_install_installs_the_uploader_package_when_missing(tmp_path):
     r, _c, _b = _run_provision("--install", root, ju_present=False)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "systemd-journal-remote" in pathlib.Path(_sbc_paths(root)["apt_log"]).read_text()
+    # with the other packages, before the relay unit or any board file is written
+    out = r.stdout
+    assert out.index("systemd-journal-remote") < out.index("installed ")
+
+
+def test_check_names_the_age_of_the_boot_clock_file(tmp_path):
+    root = str(tmp_path)
+    p = _sbc_paths(root)
+    _run_provision("--install", root)
+    os.makedirs(os.path.dirname(p["fake_hwclock"]), exist_ok=True)
+    pathlib.Path(p["fake_hwclock"]).write_text("2026-10-03 06:12:01\n")
+    r, _c, _b = _run_provision("--check", root)
+    assert "boot clock file" in r.stdout and "2026-10-03 06:12:01" in r.stdout
+    assert "refreshed only by --install" in r.stdout
 
 
 def test_install_refuses_an_unlisted_board_before_anything_changes(tmp_path):
