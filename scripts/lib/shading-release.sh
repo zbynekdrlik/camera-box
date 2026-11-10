@@ -294,7 +294,8 @@ strih_bkshading_version_grade() {
   local base="${1:?service base url required}" bin="${STRIH_BKSHADING_BIN:-/opt/bkshading/bkshading}"
   local root want json have
   root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  want="$(shading_pin_version "$root" 2>/dev/null || true)"
+  # issue 1452: the service follows the strih box's own pin (scripts/shading-release-boxes.txt).
+  want="$(shading_pin_version_for_box "$root" "${STRIH_FACT_BOX:-}" 2>/dev/null || true)"
   if [ -n "${STRIH_BKSHADING_VERSION_JSON_FILE:-}" ]; then
     json="$(cat -- "$STRIH_BKSHADING_VERSION_JSON_FILE" 2>/dev/null || true)"
   else

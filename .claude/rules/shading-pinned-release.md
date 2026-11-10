@@ -68,8 +68,12 @@ Blackmagic Camera Setup -> Network access -> "Web media manager" ON (else 404 = 
   is REFUSED without `--box` and keeps the given `--box` pin with a NOTE; setup-device takes `$DEVICE_NAME`'s pin; verify-device (ao) and
   rig-dev-handover item 15 grade each box against its own pin (the handover also against origin/main's
   map + pin, `shading_pin_version_for_box_at_ref`).
-- **The service stays on the default pin.** A v0.2.x panel sends `apertureStep` for +/-, which a
-  v0.1.x relay ignores, so a venue's service moves only once every relay it drives is on v0.2.x.
+- **The service takes its strih box's pin** (issue 1452): setup-strih step 16c sets
+  `SHADING_RELEASE_PIN_FILE` from `shading_pin_file_for_box <tree> $STRIH_FACT_BOX` and verify item 31's
+  `strih_bkshading_version_grade` reads `shading_pin_version_for_box` the same way. A v0.2.x panel sends
+  `apertureStep` for +/-, which a v0.1.x relay ignores, so a venue moves when its cameras are on v0.2.x:
+  strih-snv is on the REST pin since 10.11.2026 (owner, cam3 aperture steps; cam2's gphoto2 relay keeps
+  the one-way gap), strih-pp stays on the default pin.
 - **The camera link file** every relay box carries: `scripts/lib/bkshading-camera-link.sh`
   (`05-bkshading-camera.network`, the contract's text byte for byte, pinned against
   `tests/fixtures/shading_pinned_rest/CONTRACT.md`): setup-device `[bkshading-relay]`, the SBC
