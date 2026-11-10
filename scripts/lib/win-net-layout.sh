@@ -67,13 +67,14 @@ win_net_layout_gather_ps() {
     cat <<'PSNET'
 Write-WbSection 'net_layout' {
   $wnlDante = switch ($env:COMPUTERNAME) { 'RESOLUME-SNV' { 'Dante70' } default { '' } }
-  foreach ($a in @(Get-NetAdapter -Physical)) { "phys=$($a.Name)|$($a.InterfaceDescription)|$($a.Status)|$($a.LinkSpeed)|$($a.PnPDeviceID)" }
+  # A read that fails prints `err=<what>|<message>`, and the grader reads the layout as UNKNOWN.
+  try { foreach ($a in @(Get-NetAdapter -Physical -ErrorAction Stop)) { "phys=$($a.Name)|$($a.InterfaceDescription)|$($a.Status)|$($a.LinkSpeed)|$($a.PnPDeviceID)" } } catch { "err=phys|$($_.Exception.Message)" }
   if ($wnlDante) {
     foreach ($a in @(Get-NetAdapter -Name $wnlDante -ErrorAction SilentlyContinue)) { "virt=$($a.Name)|$($a.InterfaceDescription)|$($a.Status)" }
   }
-  foreach ($i in @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' })) { "ip=$($i.InterfaceAlias)|$($i.IPAddress)|$($i.PrefixLength)|$($i.PrefixOrigin)" }
-  foreach ($r in @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)) { "defroute=$($r.InterfaceAlias)|$($r.NextHop)|$($r.RouteMetric)" }
-  foreach ($m in @(Get-NetIPInterface -AddressFamily IPv4)) { "ifmetric=$($m.InterfaceAlias)|$($m.InterfaceMetric)|$($m.Dhcp)" }
+  try { foreach ($i in @(Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' })) { "ip=$($i.InterfaceAlias)|$($i.IPAddress)|$($i.PrefixLength)|$($i.PrefixOrigin)" } } catch { "err=ip|$($_.Exception.Message)" }
+  foreach ($r in @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore -ErrorAction SilentlyContinue)) { "defroute=$($r.InterfaceAlias)|$($r.NextHop)|$($r.RouteMetric)" }
+  try { foreach ($m in @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop)) { "ifmetric=$($m.InterfaceAlias)|$($m.InterfaceMetric)|$($m.Dhcp)" } } catch { "err=ifmetric|$($_.Exception.Message)" }
   if ($wnlDante) {
     foreach ($p in @(Get-NetAdapterAdvancedProperty -Name $wnlDante -RegistryKeyword VlanID -ErrorAction SilentlyContinue)) { "vlan=$($p.Name)|$($p.RegistryValue -join ',')" }
     foreach ($d in @(Get-DnsClient -InterfaceAlias $wnlDante -ErrorAction SilentlyContinue)) { "dnsreg=$($d.InterfaceAlias)|$($d.RegisterThisConnectionsAddress)" }
@@ -81,7 +82,7 @@ Write-WbSection 'net_layout' {
     if ($wnlDa) { foreach ($c in @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$($wnlDa.ifIndex)")) { "netbios=$wnlDante|$($c.TcpipNetbiosOptions)" } }
     foreach ($b in @(Get-NetAdapterBinding -Name $wnlDante -ComponentID ms_server,ms_msclient,ms_tcpip6,ms_lltdio,ms_rspndr -ErrorAction SilentlyContinue)) { "binding=$($b.ComponentID)|$($b.Enabled)" }
   }
-  try { $wnlNdi = Get-Content 'C:\ProgramData\NDI\ndi-config.v1.json' -Raw | ConvertFrom-Json; "ndi_allowed=$($wnlNdi.ndi.adapters.allowed -join ',')" } catch { "ndi_allowed_unread=$($_.Exception.Message)" }
+  try { $wnlNdi = Get-Content 'C:\ProgramData\NDI\ndi-config.v1.json' -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; "ndi_allowed=$($wnlNdi.ndi.adapters.allowed -join ',')" } catch { "ndi_allowed_unread=$($_.Exception.Message)" }
 }
 PSNET
 }
@@ -223,6 +224,10 @@ win_net_layout_grade() {
     fi
     if ! body="$(_win_baseline_section "$file" net_layout)"; then
         echo "net_layout UNKNOWN $host layout unread (no complete net_layout section)"
+        return 11
+    fi
+    if grep -q '^err=' <<<"${body//$'\r'/}"; then
+        echo "net_layout UNKNOWN $host layout read failed: $(grep '^err=' <<<"${body//$'\r'/}" | head -n 3 | paste -sd ';' -)"
         return 11
     fi
     fails="$(_wnl_grade_body "$body")"

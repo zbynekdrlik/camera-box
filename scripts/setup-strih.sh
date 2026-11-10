@@ -896,9 +896,9 @@ if WHY="$(obs_box_step_applies 16c)"; then   # issue 1412: scripts/lib/obs-box-r
 # from a checkout fetches it; no fallback. Enable-only, but a RUNNING service on another binary restarts
 # after the unit is written, so a deploy never leaves the panel on the old version.
 BKSH_OLD="$(sha256sum /opt/bkshading/bkshading 2>/dev/null || true)"
-SHADING_RELEASE_PIN_FILE="$(shading_pin_file_for_box "${HERE}/.." "$STRIH_FACT_BOX")" && BKSH_DIR="$(shading_release_service "${HERE}/..")" || fail "the pinned shading release (above)"
+BKSH_PIN="$(shading_pin_file_for_box "${HERE}/.." "$STRIH_FACT_BOX")" && BKSH_DIR="$(SHADING_RELEASE_PIN_FILE="$BKSH_PIN" shading_release_service "${HERE}/..")" || fail "the pinned shading release (above)"
 strih_bkshading_service_install "$BKSH_DIR" /opt/bkshading/bkshading || fail "bkshading service install from ${BKSH_DIR} failed (above)"
-echo "  installed bkshading service $(shading_pin_tag "${HERE}/..") -> /opt/bkshading/bkshading (web/ beside it)"
+echo "  installed bkshading service $(SHADING_RELEASE_PIN_FILE="$BKSH_PIN" shading_pin_tag "${HERE}/..") -> /opt/bkshading/bkshading (web/ beside it)"
 # Seed the operator config ONLY IF absent (the projector.json / bkshading.example.toml precedent).
 install -d -m 0755 /etc/bkshading
 if [ ! -f /etc/bkshading/bkshading.toml ]; then

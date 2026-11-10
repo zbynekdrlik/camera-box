@@ -202,6 +202,9 @@ win_baseline_report_rows() {
             printf '  %-14s win_baseline %-22s %-7s %s (report-only, does NOT block)\n' \
                 "$name" "$item" "$verdict" "$detail"
         done < <(win_baseline_grade "$file" || true)
+        # issue 1495: the network layout row only for a host that declares one (as win-baseline-check.sh).
+        local _host; _host="$(_wnl_host "$file")"
+        { [ -n "$_host" ] && win_net_layout_declared "$_host"; } || continue
         while read -r item verdict detail; do
             [ -n "$item" ] || continue
             printf '  %-14s win_baseline %-22s %-7s %s (report-only, does NOT block)\n' \

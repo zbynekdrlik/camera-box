@@ -140,6 +140,13 @@ camera_test_settings_rest_cmd() {
   local mode="${1:?get|put}" unit spec ep body
   shift
   unit="$(bkshading_relay_unit_name)"
+  # issue 1452 (owner 10.11.2026: the REST relay runs in every mode, the E2E pause leaves it on): on a
+  # box whose relay is always on, the session stops the relay only for its own requests and the EXIT
+  # trap starts it again whatever the session ends with, so its writes never race the relay's.
+  if [ -n "${CTS_FOUND_LABEL:-}" ] && bkshading_relay_box_always_on "$CTS_FOUND_LABEL"; then
+    printf '_cts_hold=0; if systemctl is-active --quiet %s 2>/dev/null; then systemctl stop %s 2>/dev/null && _cts_hold=1; fi; ' "$unit" "$unit"
+    printf 'trap '"'"'[ "$_cts_hold" = 1 ] && systemctl start %s 2>/dev/null; echo "CTS_RELAY_HOLD $_cts_hold"'"'"' EXIT; ' "$unit"
+  fi
   printf '_cts_rs="$(systemctl is-active %s 2>/dev/null)"; case "$_cts_rs" in inactive|failed|unknown|"") ;; *) echo "CTS_RELAY_ACTIVE $_cts_rs"; exit %s;; esac; ' \
     "$unit" "$(camera_test_settings_rc_relay_active)"
   printf 'command -v curl >/dev/null 2>&1 || { echo CTS_NO_CURL; exit %s; }; ' "$(camera_test_settings_rc_no_curl)"

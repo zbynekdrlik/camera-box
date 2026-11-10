@@ -158,7 +158,11 @@ bkshading_e2e_pause_stop() {
   local out
   if bkshading_relay_box_always_on "$label"; then
     # issue 1452 (owner 10.11.2026): a REST relay v0.2.x opens no PTP session on the shared hub, so
-    # the run leaves it running; "0" = nothing paused, the restore stays a no-op.
+    # the run leaves it running; "0" = nothing paused, the restore stays a no-op. A marker an earlier
+    # (cancelled) run left still owes a start: the relay is started and the marker cleared here.
+    timeout "$timeout_s" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$ip" \
+      "rm -f $(bkshading_e2e_pause_marker_path) 2>/dev/null; systemctl start $(bkshading_relay_unit_name) 2>/dev/null" \
+      >/dev/null 2>&1 || true
     echo "    bkshading-relay on $label: left running (REST relay v0.2.x, no PTP session -- issue 1452)" >&2
     printf '%s\n' 0
     return 0
