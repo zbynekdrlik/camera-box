@@ -584,3 +584,15 @@ def test_a_binary_the_pin_does_not_name_is_refused():
 def test_the_ci_run_flag_is_gone():
     r = _run_script(["--host", "10.77.9.201", "--run", "123", "--dry-run"])
     assert r.returncode == 2 and "unknown argument" in r.stderr, r.stderr
+
+
+def test_ssh_and_scp_never_read_a_stale_known_hosts_entry_1452():
+    # 10.11.2026: dev1's known_hosts held old keys for 10.77.9.147/.197 (other hosts had those
+    # addresses before the handheld boards). StrictHostKeyChecking=no alone then disables password
+    # auth on a CHANGED key, so every deploy failed `ssh rc=255` before touching the box.
+    import re as _re
+    text = open(os.path.join(REPO, "scripts", "bkshading-deploy-relay.sh")).read()
+    for fn in ("ssh_box", "scp_box"):
+        line = [ln for ln in text.splitlines() if ln.startswith(fn + "() {")][0]
+        assert "-o UserKnownHostsFile=/dev/null" in line, line
+        assert _re.search(r"-o LogLevel=ERROR", line), line
