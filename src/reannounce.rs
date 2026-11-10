@@ -127,8 +127,8 @@ pub fn is_discoverable_interface_with_driver(
     driver: Option<&str>,
     usb_vendor: Option<&str>,
 ) -> bool {
-    let _ = usb_vendor;
-    let camera_link = driver == Some(CAMERA_LINK_DRIVER);
+    let camera_link = driver == Some(CAMERA_LINK_DRIVER)
+        && usb_vendor.map(|v| v.trim().eq_ignore_ascii_case(CAMERA_LINK_USB_VENDOR)) == Some(true);
     is_discoverable_interface(name) && !camera_link
 }
 
