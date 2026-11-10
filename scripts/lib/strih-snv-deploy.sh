@@ -150,7 +150,7 @@ STRIH_LX_RETENTION_ARGS="--local-sweep --stages-only --stage-parent /tmp --keep-
 # issue 1426: per-box values strih_lx_prepare resolves for every requested setup-strih box (the dial
 # host, "<strih host> <stream host>" for the rig-busy guard, the fact-file hostname); strih_lx_apply
 # loads one box's values into the STRIH_LX_PREP_* globals. STRIH_LX_BOX names the box being deployed.
-declare -gA STRIH_LX_BOX_HOST=() STRIH_LX_BOX_GUARD=() STRIH_LX_BOX_HOSTNAME=() STRIH_LX_BOX_HUB=()
+declare -gA STRIH_LX_BOX_HOST=() STRIH_LX_BOX_GUARD=() STRIH_LX_BOX_HOSTNAME=() STRIH_LX_BOX_HUB=() STRIH_LX_BOX_ABUF=()
 STRIH_LX_BOX="strih-snv"
 
 # strih_lx_stage_dir SHA -> /tmp/genlock-stage-<sha>, the obs-backup-retention allowlist shape
@@ -263,14 +263,24 @@ strih_lx_session_units() {
 # one line `installed=<marker sha> active=<unit state> pid=<MainPID> restarts=<NRestarts>
 # lib=<sha256 of the installed libobs.so.30> tick=<1 when the newest OBS log is newer than the start
 # marker AND shows `render tick ENABLED`, else 0> hub=<the RUNNING intercom hub's /api/version, empty when
-# it does not answer> jxs=<the JPEG XS program output: off | started | failed | pending, see
-# strih_lx_remote_jxs_state_cmd>` (issue 1485, issue 1387).
+# it does not answer> abuf=<the started OBS's audio buffering, see strih_lx_remote_abuf_state_cmd>
+# jxs=<the JPEG XS program output: off | started | failed | pending, see
+# strih_lx_remote_jxs_state_cmd>` (issue 1485, issue 1387, issue 1425).
 strih_lx_remote_readback_cmd() {
   # shellcheck disable=SC2016  # expanded on the box, not here
-  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); L=$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -n 1); t=0; M=%s; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ] && LC_ALL=C grep -a -q "render tick ENABLED" "$L"; then t=1; fi; %s printf "installed=%%s obs_tag=%%s active=%%s pid=%%s restarts=%%s lib=%%s tick=%%s hub=%%s jxs=%%s\\n" "$(tr -d "[:space:]" 2>/dev/null < /opt/obs-genlock/GENLOCK_BUILD_SHA.txt)" "$(sed -n "s/^tag=//p" /opt/obs-genlock/OBS_RELEASE.txt 2>/dev/null | head -n 1)" "$(systemctl --user is-active strih-obs.service 2>/dev/null)" "$(systemctl --user show -p MainPID --value strih-obs.service 2>/dev/null)" "$(systemctl --user show -p NRestarts --value strih-obs.service 2>/dev/null)" "$(sha256sum /usr/lib/x86_64-linux-gnu/libobs.so.30 2>/dev/null | cut -d" " -f1)" "$t" "$(curl -fsS --max-time 3 http://127.0.0.1:8790/api/version 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)[sys.argv[1]])" version 2>/dev/null)" "$J"\n' "'$1/obs-start.marker'" "$(strih_lx_remote_jxs_state_cmd)"
+  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); L=$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -n 1); t=0; M=%s; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ] && LC_ALL=C grep -a -q "render tick ENABLED" "$L"; then t=1; fi; %s printf "installed=%%s obs_tag=%%s active=%%s pid=%%s restarts=%%s lib=%%s tick=%%s hub=%%s abuf=%%s jxs=%%s\\n" "$(tr -d "[:space:]" 2>/dev/null < /opt/obs-genlock/GENLOCK_BUILD_SHA.txt)" "$(sed -n "s/^tag=//p" /opt/obs-genlock/OBS_RELEASE.txt 2>/dev/null | head -n 1)" "$(systemctl --user is-active strih-obs.service 2>/dev/null)" "$(systemctl --user show -p MainPID --value strih-obs.service 2>/dev/null)" "$(systemctl --user show -p NRestarts --value strih-obs.service 2>/dev/null)" "$(sha256sum /usr/lib/x86_64-linux-gnu/libobs.so.30 2>/dev/null | cut -d" " -f1)" "$t" "$(curl -fsS --max-time 3 http://127.0.0.1:8790/api/version 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)[sys.argv[1]])" version 2>/dev/null)" "$A" "$J"\n' "'$1/obs-start.marker'" "$(strih_lx_remote_jxs_state_cmd) $(strih_lx_remote_abuf_state_cmd)"
 }
 
 # strih_lx_remote_jxs_state_cmd -> the on-box bash (one line, `;`-terminated) that sets J for the read-back,
+# strih_lx_remote_abuf_state_cmd -> the box text that sets A, with L = the newest OBS log and M = the start
+# marker already set (issue 1425, 28.10.2026: strih-pp's OBS started before setup wrote its audio-buffering
+# marker and ran NOT deterministic, the read-back passed): the LAST `genlock-audio-buffering:` line of an
+# OBS log newer than the marker = its FIXED ms (digits) or `nd` (NOT deterministic); `none` otherwise.
+strih_lx_remote_abuf_state_cmd() {
+  # shellcheck disable=SC2016  # expanded on the box, not here
+  printf '%s' 'A=none; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ]; then S="$(LC_ALL=C grep -a -o -E "genlock-audio-buffering: (FIXED [0123456789]+ ms|NOT deterministic)" "$L" 2>/dev/null | tail -n 1 || true)"; case "$S" in *" FIXED "*) A="${S//[!0123456789]/}" ;; *"NOT deterministic"*) A=nd ;; esac; fi;'
+}
+
 # with L = the newest OBS log and M = the start marker already set (issue 1387, 4.11.2026: a reboot left the
 # JPEG XS program output `did not start` and stream-snv black for ~30 min): `off` = no jxs-output.json that
 # says "enabled": true (nothing to start); else the newest start line of an OBS log newer than the marker:
@@ -336,9 +346,10 @@ RUNNER
 
 # --- pure verdicts --------------------------------------------------------------------------------
 
-# strih_lx_deploy_verdict WANT INSTALLED ACTIVE BS_SHA WANT_LIB LIB TICK [WANT_TAG TAG] [WANT_HUB HUB] [JXS] -> `OK`
-# (rc 0) or `FAIL: <why>` lines (rc 1). Fail-closed: an empty value anywhere is a FAIL, never "unknown =
-# fine". WANT_HUB (issue 1485) = the intercom pin's version on a box that runs a hub, empty on the stream role.
+# strih_lx_deploy_verdict WANT INSTALLED ACTIVE BS_SHA WANT_LIB LIB TICK [WANT_TAG TAG] [WANT_HUB HUB] [JXS]
+# [WANT_ABUF ABUF] -> `OK` (rc 0) or `FAIL: <why>` lines (rc 1). Fail-closed: an empty value anywhere is a
+# FAIL, never "unknown = fine". WANT_HUB (issue 1485) = the intercom pin's version on a box that runs a hub,
+# empty on the stream role. WANT_ABUF (issue 1425) = the box fact STRIH_AUDIO_BUFFERING_MS.
 strih_lx_deploy_verdict() {
   local want="${1:-}" installed="${2:-}" active="${3:-}" bs="${4:-}" want_lib="${5:-}" lib="${6:-}" tick="${7:-}" bad=0
   local want_tag="${8:-}" tag="${9:-}" want_hub="${10:-}" hub="${11:-}"
@@ -377,8 +388,31 @@ strih_lx_deploy_verdict() {
       *) echo "FAIL: the JPEG XS program output state is ${12:-<unreadable>}"; bad=1 ;;
     esac
   fi
+  # issue 1425: the 13th + 14th arguments (the box fact, the read-back's abuf= field) when passed.
+  if [ "$#" -ge 14 ]; then
+    strih_lx_abuf_verdict "${13}" "${14}" || bad=1
+  fi
   [ "$bad" = 0 ] && { echo "OK"; return 0; }
   return 1
+}
+
+# strih_lx_abuf_verdict FACT ABUF -> nothing (rc 0) when the started OBS is FIXED at the box fact, else
+# ONE `FAIL: <why>` line (rc 1). ABUF = the read-back's abuf= field. Pure.
+strih_lx_abuf_verdict() {
+  local want="${1:-}" ab="${2:-}" d='0123456789'
+  if ! [[ "$want" =~ ^[$d]{1,3}$ ]]; then
+    echo "FAIL: no box fact STRIH_AUDIO_BUFFERING_MS ('${want}') to grade the started OBS's audio buffering against (issue 1425)"; return 1
+  fi
+  case "$ab" in
+    nd) echo "FAIL: the started OBS logged 'genlock-audio-buffering: NOT deterministic' -- ~/.camera-box/genlock-audio-buffering-ms was missing or invalid when it started (setup-strih writes it before step 1); the box fact is $((10#$want)) ms (issue 1425)"; return 1 ;;
+    none) echo "FAIL: no genlock-audio-buffering line in an OBS log written after the start (issue 1425)"; return 1 ;;
+  esac
+  if ! [[ "$ab" =~ ^[$d]{1,4}$ ]]; then
+    echo "FAIL: the started OBS's audio buffering is ${ab:-<unreadable>} (issue 1425)"; return 1
+  fi
+  if [ "$((10#$ab))" != "$((10#$want))" ]; then
+    echo "FAIL: the started OBS is FIXED at $((10#$ab)) ms, the box fact STRIH_AUDIO_BUFFERING_MS is $((10#$want)) ms -- re-run setup-strih, then restart strih-obs.service (issue 1425)"; return 1
+  fi
 }
 
 # strih_lx_stable_verdict PID1 RESTARTS1 PID2 RESTARTS2 -> `OK` (rc 0) when the SAME non-zero MainPID
@@ -588,7 +622,7 @@ strih_lx_prepare() {
   STRIH_LX_PREP_WORK="$w"
   STRIH_LX_PREP_USER="${STRIH_LX_USER:-newlevel}"
   STRIH_LX_PREP_PW="${STRIH_LX_PW:-newlevel}"
-  STRIH_LX_BOX_HOST=(); STRIH_LX_BOX_GUARD=(); STRIH_LX_BOX_HOSTNAME=(); STRIH_LX_BOX_HUB=()
+  STRIH_LX_BOX_HOST=(); STRIH_LX_BOX_GUARD=(); STRIH_LX_BOX_HOSTNAME=(); STRIH_LX_BOX_HUB=(); STRIH_LX_BOX_ABUF=()
   for b in "${box_list[@]}"; do
     STRIH_LX_BOX="$b"
     host="$(fleet_box_ip "$b")" || { _strih_lx_fail resolve 2 3 "no ${b} host (STRIH_LX_IP / obs-fleet row)"; return; }
@@ -650,6 +684,8 @@ strih_lx_prepare() {
     # issue 1485: the read-back wants the pinned hub running on a box that runs one (not the stream role).
     STRIH_LX_BOX_HUB[$b]=""
     [ "$(strih_lx_fact "$b" STRIH_ROLE "$w/repo/scripts/strih-boxes")" = stream ] || STRIH_LX_BOX_HUB[$b]="${hub_tag#v}"
+    # issue 1425: the started OBS must hold the box's FIXED audio buffering (the read-back's abuf=).
+    STRIH_LX_BOX_ABUF[$b]="$(strih_lx_fact "$b" STRIH_AUDIO_BUFFERING_MS "$w/repo/scripts/strih-boxes")" || STRIH_LX_BOX_ABUF[$b]=""
   done
   STRIH_LX_BOX="$boxes"
   STRIH_LX_PREP_TOKEN="${STRIH_LX_GH_TOKEN:-}"
@@ -671,6 +707,7 @@ strih_lx_apply() {
   STRIH_LX_PREP_HOST="${STRIH_LX_BOX_HOST[$box]:-}"
   STRIH_LX_PREP_HOSTNAME="${STRIH_LX_BOX_HOSTNAME[$box]:-}"
   STRIH_LX_PREP_HUB="${STRIH_LX_BOX_HUB[$box]:-}"
+  STRIH_LX_PREP_ABUF="${STRIH_LX_BOX_ABUF[$box]:-}"
   local guard="${STRIH_LX_BOX_GUARD[$box]:-}"
   STRIH_LX_PREP_GUARD_STRIH="${guard%% *}"
   STRIH_LX_PREP_STREAM_HOST="${guard#* }"
@@ -845,13 +882,13 @@ _strih_lx_verify() {
     line="$(_strih_lx_ssh "$(strih_lx_remote_readback_cmd "$STRIH_LX_PREP_STAGE")" 2>/dev/null)" || line=""
     pid="$(_strih_lx_field pid "$line")"; restarts="$(_strih_lx_field restarts "$line")"
     bs="$(curl -s -m 8 "$url" 2>/dev/null | jq -r '.genlock_build_sha // empty' 2>/dev/null)" || bs=""
-    if ! verdict="$(strih_lx_deploy_verdict "$sha" "$(_strih_lx_field installed "$line")" "$(_strih_lx_field active "$line")" "$bs" "$STRIH_LX_PREP_LIBSHA" "$(_strih_lx_field lib "$line")" "$(_strih_lx_field tick "$line")" "${STRIH_LX_PREP_TAG:-}" "$(_strih_lx_field obs_tag "$line")" "${STRIH_LX_PREP_HUB:-}" "$(_strih_lx_field hub "$line")" "$(_strih_lx_field jxs "$line")")"; then
+    if ! verdict="$(strih_lx_deploy_verdict "$sha" "$(_strih_lx_field installed "$line")" "$(_strih_lx_field active "$line")" "$bs" "$STRIH_LX_PREP_LIBSHA" "$(_strih_lx_field lib "$line")" "$(_strih_lx_field tick "$line")" "${STRIH_LX_PREP_TAG:-}" "$(_strih_lx_field obs_tag "$line")" "${STRIH_LX_PREP_HUB:-}" "$(_strih_lx_field hub "$line")" "$(_strih_lx_field jxs "$line")" "${STRIH_LX_PREP_ABUF:-}" "$(_strih_lx_field abuf "$line")")"; then
       have_first=0; continue
     fi
     if [ "$have_first" = 1 ]; then
       if verdict="$(strih_lx_stable_verdict "$first_pid" "$first_r" "$pid" "$restarts")"; then
         if [ $((SECONDS - first_t)) -ge "$settle" ]; then
-          echo "# ${STRIH_LX_BOX}: VERIFIED -- marker + libobs bytes = $sha (obs ${STRIH_LX_PREP_TAG:-?}), strih-obs active (MainPID $pid stable for $((SECONDS - first_t)) s, NRestarts $restarts), render tick ENABLED, :8899=$bs${STRIH_LX_PREP_HUB:+, intercom hub $STRIH_LX_PREP_HUB running}"
+          echo "# ${STRIH_LX_BOX}: VERIFIED -- marker + libobs bytes = $sha (obs ${STRIH_LX_PREP_TAG:-?}), strih-obs active (MainPID $pid stable for $((SECONDS - first_t)) s, NRestarts $restarts), render tick ENABLED, audio buffering FIXED ${STRIH_LX_PREP_ABUF:-?} ms, :8899=$bs${STRIH_LX_PREP_HUB:+, intercom hub $STRIH_LX_PREP_HUB running}"
           return 0
         fi
         verdict="FAIL: MainPID $pid stable for $((SECONDS - first_t)) s only (settle ${settle} s)"

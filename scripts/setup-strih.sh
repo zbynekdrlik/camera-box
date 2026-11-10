@@ -99,6 +99,9 @@ STRIH_HOST="$(strih_lx_host)"
 BOX_NAME="$(strih_lx_hostname)"
 
 echo -e "${GREEN}=== ${BOX_NAME} setup (issue 1317 / 1361): Linux strih cutter, facts scripts/strih-boxes/${STRIH_FACT_BOX}.env, host ${STRIH_HOST} ===${NC}"
+# issue 1425: the audio-buffering marker FIRST -- libobs reads it once, at OBS start (28.10 strih-pp: 11 s too late); never restarts OBS.
+obs_audio_buffering_install "$USER_HOME" "$DESKTOP_USER" "$(strih_lx_audio_buffering_ms)" || fail "issue 1425: the fixed OBS audio buffering marker could not be written (above)"
+obs_audio_buffering_running_note "$USER_HOME" "$DESKTOP_USER" "$(strih_lx_audio_buffering_ms)"
 
 # ---------------------------------------------------------------------------------------------
 step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
@@ -366,7 +369,6 @@ obs_audio_monitor_install /usr/lib/x86_64-linux-gnu /usr/share || fail "issue 14
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"
 # issue 1317: ~/.config/obs-studio owned by the DESKTOP user (under sudo a bare `mkdir` roots it: `Permission denied`).
 strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "$OBS_CFG" || fail "cannot create ${OBS_CFG} as ${DESKTOP_USER} (above)"
-obs_audio_buffering_install "$USER_HOME" "$DESKTOP_USER" "$(strih_lx_audio_buffering_ms)" || fail "issue 1425: the fixed OBS audio buffering marker could not be written (above)"
 strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-profile-facts.txt" | sed 's/^/  /'
 rm -f "$GENLOCK_DIR/strih-lx-profile-facts.txt"   # issue 1414: the pre-rename name of the role file
 mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/null || true
