@@ -114,6 +114,20 @@ for box in $BOXES; do
       *) unknown_items="${unknown_items:+$unknown_items,}$item" ;;   # UNKNOWN (or no verdict at all)
     esac
   done <<<"$graded"
+  # issue 1495: the declared network layout, graded from the same gather. Only a host that declares
+  # one gets the row; an unread gather (no BEGIN line) is already UNKNOWN on every item above.
+  net_host="$(_wnl_host "$raw")"
+  if [ -n "$net_host" ] && win_net_layout_declared "$net_host"; then
+    net_rc=0
+    net_row="$(win_net_layout_grade "$raw")" || net_rc=$?
+    read -r item verdict detail <<<"$net_row"
+    echo "box=$box item=$item verdict=$verdict detail=$detail"
+    case "$net_rc" in
+      0) ;;
+      20) drift_items="${drift_items:+$drift_items,}$item"; box_rc=20 ;;
+      *) unknown_items="${unknown_items:+$unknown_items,}$item"; [ "$box_rc" = 20 ] || box_rc=11 ;;
+    esac
+  fi
   case "$box_rc" in
     0) overall=OK ;;
     20) overall=DRIFT; DRIFTED="${DRIFTED:+$DRIFTED }$box" ;;

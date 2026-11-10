@@ -44,6 +44,9 @@
 # died inside it) is unread -> UNKNOWN. Tests: tests/python/test_obs_box_baseline_win_1357.py.
 
 WIN_BASELINE_ITEMS="power_scheme sleep_ac hibernate_ac usb_selective_suspend wer_dontshowui"
+# issue 1495: the declared network layout (one more section in the ONE gather, its own grader).
+# shellcheck source=scripts/lib/win-net-layout.sh
+. "$(dirname "${BASH_SOURCE[0]}")/win-net-layout.sh"
 WIN_BASELINE_HIGH_PERF_GUID="8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
 WIN_BASELINE_HIGH_PERF_NAME="High performance"
 # space-separated stock GUIDs (lower case) / `|`-separated scheme NAMES (compared case-insensitively)
@@ -199,6 +202,11 @@ win_baseline_report_rows() {
             printf '  %-14s win_baseline %-22s %-7s %s (report-only, does NOT block)\n' \
                 "$name" "$item" "$verdict" "$detail"
         done < <(win_baseline_grade "$file" || true)
+        while read -r item verdict detail; do
+            [ -n "$item" ] || continue
+            printf '  %-14s win_baseline %-22s %-7s %s (report-only, does NOT block)\n' \
+                "$name" "$item" "$verdict" "$detail"
+        done < <(win_net_layout_grade "$file" || true)
     done
     return 0
 }
@@ -230,9 +238,12 @@ Write-WbSection 'sleep_ac' { powercfg /q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE }
 Write-WbSection 'hibernate_ac' { powercfg /q SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE }
 Write-WbSection 'usb_selective_suspend' { powercfg /q SCHEME_CURRENT $wbUsbSub $wbUsbSs }
 Write-WbSection 'wer_dontshowui' { reg query $wbWerKey /v DontShowUI }
+PSBODY
+    win_net_layout_gather_ps
+    cat <<'PSTAIL'
 Write-Output "==WINBASELINE-END=="
 exit 0
-PSBODY
+PSTAIL
 }
 
 # win_baseline_power_plan_ensure_ps -> the deploy program's step (0b): when the active scheme is NOT
