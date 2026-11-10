@@ -228,7 +228,11 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   root, numeric literals; a `#[cfg(test)]` parity test ties the literals to `libc`). The hot-path
   thread keeps FIFO 90; its forked children fall back to SCHED_OTHER. NO thread moves cores. Any
   FUTURE per-thread FIFO raise site must ALSO use this policy word, never a bare `SCHED_FIFO`.
-- **Follow-up (Finding A, still open):** the running fleet units on cam1/3/4/5/6/7 still carry the
-  process-wide FIFO until each box is RE-PROVISIONED — nothing in `deploy-fleet.sh` refreshes
-  `camera-box.service`; the M.2 migration re-provisions box by box, and check `(ah)` will only read
-  the fixed per-thread reality after each box's re-provision + redeploy (a supervisor step).
+- **Finding A (resolved on SNV, 10.11.2026):** cam2, cam3 and cam5 run the per-thread reality
+  (exactly one SCHED_FIFO thread, read live). The Poprad boxes cam1/4/6/7 were not read; check
+  `(ah)` on each at its next `verify-fleet.sh --venue pp`.
+- **STEP 2 decided NOT warranted (10.11.2026, the runbook's measurement):** on the uniform
+  7.0.0-38 preempt=full line cam3/cam5 read 0 capture drops, 0 SKIPPED, 0 re-seeds, 3 us jitter
+  over 10 min; cam2's events are its card's re-timing (issue 1482), not the kernel. The rejected
+  Approach 2 (move the NDI threads off core 3) is not warranted either. Re-open only on a measured
+  emit defect that follows the kernel.

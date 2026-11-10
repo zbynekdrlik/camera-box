@@ -61,52 +61,32 @@ handlers, so a hardirq can still preempt the prio-90 grab. `verify-device.sh` ch
 therefore keep WARNing "kernel is NOT PREEMPT_RT" after STEP 1 — that is EXPECTED and correct.
 STEP 1 is the free, low-risk first move; STEP 2 closes the remaining gap only if measured to matter.
 
-**Current deployment state (read-only, re-verified 2026-09-03) — STEP 1 is 3/7 done, not 3/4.**
-The 2026-09-01 note above was written for a 4-box active fleet; cam5/cam6/cam7 have since returned
-to `CAMERA_ACTIVE_SET` and were never upgraded, so the real figure is 3/7 and the active fleet the
-fused E2E gate sweeps is currently split across two scheduling models:
+**Current deployment state (read-only, re-verified 2026-11-10): STEP 1 is done on the whole fleet.**
+Issue 1446 put every cambox on ONE kernel line: the generic HWE image `7.0.0-38-generic` booted with
+`preempt=full` (`linux-lowlatency-hwe-24.04` now resolves to the generic HWE kernel + `lowlatency-kernel`),
+held by apt and graded HARD by `verify-device.sh` `(aw)` "fleet kernel line". Read live on cam2, cam3 and
+cam5: `/sys/kernel/debug/sched/preempt` = `(full)`, one `linux-image` installed, the xhci capture IRQ on
+the reserved core 2 (`smp_affinity_list=2`), exactly ONE SCHED_FIFO thread in camera-box (the
+capture+emit hot path, prio 90; every `ndis:*`, `disc:*` and tokio thread SCHED_OTHER). The
+2026-09-03 3/7 table and its cam4-control / cam5-canary notes are history: the cross-camera
+offset correlation they discussed became moot once every box ran the same kernel.
+
+**STEP 2 measurement (the go/no-go of this runbook, 2026-11-10, rig in TEST mode, 10 min of journal,
+no new tools):**
 
 ```
-cam1  7.0.0-30-generic    preempt=(full) lazy          99-lowlatency.cfg=yes
-cam2  7.0.0-30-generic    preempt=(full) lazy          99-lowlatency.cfg=yes
-cam3  7.0.0-30-generic    preempt=(full) lazy          99-lowlatency.cfg=yes
-cam4  6.8.0-134-generic   preempt=none (voluntary)     99-lowlatency.cfg=no
-cam5  6.8.0-134-generic   preempt=none (voluntary)     99-lowlatency.cfg=no
-cam6  6.8.0-134-generic   preempt=none (voluntary)     99-lowlatency.cfg=no
-cam7  6.8.0-134-generic   preempt=none (voluntary)     99-lowlatency.cfg=no
+box   Streaming: lines  capture-dropped  #707 SKIPPED  re-seeds  jitter_us  phase_lock
+cam3  120               0                0             0         3-4        stamp
+cam5  120               0                0             0         2-3        stamp
+cam2  120               0                5             3         970-1738   stamp
 ```
 
-cam1/cam2/cam3 run the lowlatency profile — `uname -r` = `7.0.0-30-generic`,
-`/sys/kernel/debug/sched/preempt` = `(full)`, `/etc/default/grub.d/99-lowlatency.cfg` present,
-single-kernel restored (old `6.8.0-134` purged). **cam4 (10.77.9.64) is deliberately still on the
-GA `6.8.0-134-generic` (preempt=none)** — it is the CONTROL box for the issue-1198 grabber-flap
-hypothesis and must NOT be upgraded until that hold is lifted (see issue 1198; the 2026-08-30 finding
-that cam2's 61.3 fps flap is card-internal, not the kernel, weakens that hold — a supervisor/owner
-call, not a code lane's). cam5/cam6/cam7 carry no such hold — they simply re-joined the active set
-un-upgraded. The xhci capture-IRQ fix (defect 3) is live on ALL SEVEN active boxes
-(`smp_affinity_list` off the grab core). `scripts/rt-kernel-upgrade.sh --box <ip>` correctly reads
-`noop:already-lowlatency` for cam1/cam2/cam3 and `ready` → `install-lowlatency /
-verify-lowlatency-config / grub-pin:*` for cam4, cam5, cam6 **and** cam7 — the planner itself needed
-no change, only this paragraph was behind reality.
-
-**Finishing STEP 1 is no longer only rollout housekeeping — it doubles as the cheap falsification of
-a candidate covariate for issue 1168's cross-camera constant offset.** Across 39 local verdict JSONs,
-each camera's `residual_offset_ms` (its deviation from that run's own median) averages
-cam1 +4.32 / cam2 +2.54 / cam3 +16.82 ms on the three lowlatency (`preempt=full`) boxes against
-cam4 −2.16 / cam5 −3.35 / cam6 −5.02 / cam7 −4.41 ms on the four GA (`preempt=none`) boxes, and the
-per-run group gap (`mean(cam1..3) − mean(cam4..7)`) is positive in 37 of 39 runs (median +11.0 ms).
-This is correlation, not causation: group membership is historical (which boxes happened to get
-upgraded first), not random, and cam3 — which also carries its own manual NDI upgrade — contributes
-a disproportionate share; drop cam3 and the gap roughly halves, though the sign separation survives.
-So a mid-cluster GA→lowlatency upgrade is now worth doing partly to re-measure that box's constant,
-not only to finish the rollout.
-
-**Recommended canary: cam5, not cam4** (reboot-class — a recommendation for the supervisor/owner,
-per this runbook's own canary-first protocol below; not something a code lane applies). cam5 sits
-mid-cluster and carries no open hold, unlike cam4 (the issue-1198 control box). No new procedure is
-needed — follow the existing "Canary first, then fleet" step and the "Measuring the benefit"
-before/after journal recipe further down this runbook, and additionally note cam5's per-camera
-`residual_offset_ms` before and after the reboot alongside the emit-jitter/underrun windows.
+cam3 and cam5 (pass-through Cam Links on the same splitter signal) run clean. cam2's numbers are its
+card re-timing (issue 1482: absorbed card steps, measured there), not the kernel: the same kernel and
+core split read 3 us on the other two boxes. **Decision: STEP 2 (a custom PREEMPT_RT kernel) is NOT
+warranted by the data**, and neither is the deeper "move the NDI threads off core 3" rework (the
+rejected Approach 2): the per-thread SCHED_FIFO hot path on the shared core 3 drops nothing. Re-open
+only on a measured emit defect that follows the kernel, never on a card's own timing.
 
 **Live state (read-only, 2026-08-20, cam1/cam2/cam3):** all three run `6.8.0-134-generic`
 (PREEMPT_DYNAMIC); `linux-lowlatency-hwe-24.04` candidate is apt-resolvable from the main archive
