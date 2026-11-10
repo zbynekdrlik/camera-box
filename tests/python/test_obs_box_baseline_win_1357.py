@@ -320,8 +320,11 @@ def test_check_reads_each_box_and_names_the_drift(tmp_path):
                        timeout=60)
     assert r.returncode == 20, r.stdout + r.stderr
     assert re.search(r"^box=stream-snv win_baseline=OK$", r.stdout, re.M), r.stdout
+    # issue 1495: RESOLUME-SNV declares a network layout; this pre-1495 fixture has no net_layout
+    # section, so that item is unread (UNKNOWN), never OK.
     assert re.search(r"^box=resolume-snv win_baseline=DRIFT "
-                     r"drift=power_scheme,sleep_ac,hibernate_ac,usb_selective_suspend,wer_dontshowui$",
+                     r"drift=power_scheme,sleep_ac,hibernate_ac,usb_selective_suspend,wer_dontshowui "
+                     r"unknown=net_layout$",
                      r.stdout, re.M), r.stdout
     assert re.search(r"box=resolume-snv item=power_scheme verdict=DRIFT detail=.*Balanced", r.stdout), r.stdout
 
@@ -334,9 +337,11 @@ def test_check_over_the_live_captures_names_the_wer_drift(tmp_path):
                             "OBS_FLEET_HOME": "stream-snv resolume-snv"},
                        timeout=60)
     assert r.returncode == 20, r.stdout + r.stderr
+    # issue 1495: the 27.9 resolume capture predates the net_layout section -> that item is unread.
+    tails = {"stream-snv": "", "resolume-snv": " unknown=net_layout"}
     for box in ("stream-snv", "resolume-snv"):
         assert f"box={box} item=wer_dontshowui verdict=DRIFT" in r.stdout, r.stdout
-        assert re.search(rf"^box={box} win_baseline=DRIFT drift=wer_dontshowui$", r.stdout, re.M), r.stdout
+        assert re.search(rf"^box={box} win_baseline=DRIFT drift=wer_dontshowui{tails[box]}$", r.stdout, re.M), r.stdout
     assert "unbound variable" not in r.stderr, r.stderr
 
 
