@@ -186,6 +186,16 @@ class Watchdog(unittest.TestCase):
         r, read, _ = self.run_pass(self.SNV, self.SNV_HOME, GATE_DRIFT, 20, dry=False)
         self.assertNotIn("strih-pp.lan", read("busy.log"))
 
+    def test_a_self_upgraded_node_behind_the_pin_is_logged_never_rolled_or_paged(self):
+        # issue 1487: the gate's report-only SELF-BEHIND row (a node dsync upgrades itself) is named
+        # in the watchdog log, never counted as drift, never caught up, never paged.
+        out = GATE_OK + ("  mbc            1.16.0       SELF-BEHIND (version=1.16.0 pin=1.17.0; "
+                         "dsync upgrades this node itself -- never rolled here)\n")
+        r, read, _ = self.run_pass(self.SNV, self.SNV_HOME, out, 0, dry=False)
+        self.assertIn("dantesync: gate rc=0 drift=none", r.stderr)
+        self.assertIn("self-upgraded below the pin (report-only, never rolled): mbc=1.16.0", r.stderr)
+        self.assertEqual(read("upgrade.log") + read("notify.log"), "")
+
     def test_dry_run_never_rolls_or_pages(self):
         shas = dict(self.SNV, **{"stream-pp.lan": B})
         up = {"stream-pp.lan": [4455, 8899]}

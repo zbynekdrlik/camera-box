@@ -97,7 +97,7 @@ def _stub_bin(tmp_path, versions):
     return b
 
 
-def _fleet(tmp_path, self_versions, **over):
+def _fleet(tmp_path, self_versions, extra=(), **over):
     versions = {ip: _PIN for ip in _ROLLED.values()}
     versions.update({_SELF[n]: v for n, v in self_versions.items() if v is not None})
     bindir = _stub_bin(tmp_path, versions)
@@ -117,8 +117,8 @@ def _fleet(tmp_path, self_versions, **over):
         "DANTESYNC_TRAY_SHA_RESOLUME_SNV": "a" * 64,
     })
     env.update(over)
-    return subprocess.run(["bash", str(_GATE), "--pin", _PIN, "--fleet-file", str(fleet), "--fleet"],
-                          capture_output=True, text=True, env=env)
+    return subprocess.run(["bash", str(_GATE), "--pin", _PIN, "--fleet-file", str(fleet), *extra,
+                           "--fleet"], capture_output=True, text=True, env=env)
 
 
 def test_fleet_names_a_self_upgraded_node_behind_the_pin_and_still_passes(tmp_path):
@@ -147,6 +147,23 @@ def test_fleet_an_unread_self_upgraded_node_is_a_note_and_the_gate_passes(tmp_pa
 def test_fleet_an_unreachable_self_upgraded_reach_node_is_skipped_by_name(tmp_path):
     r = _fleet(tmp_path, {"mbc": _PIN, "fohabl": _PIN, "iem-snv": _PIN, "companion-snv": _PIN})
     assert "  alex-nb SKIPPED (unreachable" in r.stdout, r.stdout
+
+
+def test_fleet_an_acked_offline_self_upgraded_node_is_excluded_never_dialled(tmp_path):
+    r = _fleet(tmp_path, {"mbc": _older(_PIN), "fohabl": _PIN, "iem-snv": _PIN, "companion-snv": _PIN},
+               CAMBOX_OFFLINE_ACK="mbc:moved to the bench")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert re.search(r"^\s+mbc\s+-\s+EXCLUDED \(acked offline", r.stdout, re.M), r.stdout
+    assert "DSYNC-SELF-UPGRADED WARNING: mbc" not in r.stderr
+    assert "SELF-BEHIND" not in r.stdout
+
+
+def test_fleet_a_named_self_upgraded_node_is_graded_on_the_pin_not_in_the_self_section(tmp_path):
+    r = _fleet(tmp_path, {"mbc": _older(_PIN), "fohabl": _PIN, "iem-snv": _PIN, "companion-snv": _PIN},
+               DANTESYNC_TRAY_SHA_MBC="a" * 64, extra=["--win", "mbc=newlevel@10.77.7.232"])
+    assert r.returncode == 20, r.stdout + r.stderr
+    assert re.search(r"^\s+mbc\s+\S+\s+DRIFT", r.stdout, re.M), r.stdout
+    assert not re.search(r"^\s+mbc\s+\S+\s+SELF-", r.stdout, re.M), r.stdout
 
 
 def test_a_self_upgraded_node_named_on_the_command_line_stays_pinned(tmp_path):
