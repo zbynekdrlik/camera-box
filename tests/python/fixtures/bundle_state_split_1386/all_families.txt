@@ -9,6 +9,7 @@ synthetic OBS log for the issue 1386 golden (every bundle_state_gather line fami
 23:40:00.500: genlock: wall-clock-slaved render tick ENABLED
 23:40:00.501: genlock: sub-frame jitter reserve engaged
 23:40:00.502: genlock: timestamp-aligned release armed
+23:40:00.600: 	buffering type:  dynamically increasing from 0 ms (genlock floor, issue 1425)
 23:40:04.000: [obs-vban] obs-vban pacing-config: target_ms=64 packet_samples=239 rate=48000 counters=reset stream='cg'
 23:40:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
 23:40:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
@@ -1131,6 +1132,13 @@ synthetic OBS log for the issue 1386 golden (every bundle_state_gather line fami
 00:24:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-52.0ms) [monitor-only, no write]
 00:24:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
 00:24:16.000: av-sync-dock: UPDATED offset=-52.0ms source=cluster matched=40 mad=12.5ms
+00:24:20.000: [obs-vban] obs-vban receive: received=900000 lost=12 late=0 re_anchors=0 stale=0 reordered=0 concealed=4 silence_ms=0.0 max_late_ms=-34.7 sender_ppm=+1.400 phase_ms=+0.50 fit=locked emit_late_ms=-28.0 emit_missed=0 receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
+00:24:25.000: dante-input status: clock=media holdover=0 gm=001dc1fffe0a polls=9 re_anchors=0 rx_packets=4000 rx_loss=0 rx_gaps=0 rx_late=1 socket_drops=0 blocks=300 underruns=0 overruns=0 delivered_frames=480000 rx_holes=0 rx_written_late=0 late_blocks=0 rebootstraps=0 max_process_us=80 obs_dropped=0 max_obs_us=40
+00:24:30.000: [obs-vban] obs-vban receive: received=900480 lost=15 late=0 re_anchors=0 stale=0 reordered=0 concealed=6 silence_ms=0.0 max_late_ms=-34.7 sender_ppm=+1.400 phase_ms=+0.50 fit=locked emit_late_ms=-28.0 emit_missed=1 receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
+00:24:35.000: dante-input status: clock=media holdover=0 gm=001dc1fffe0a polls=9 re_anchors=0 rx_packets=4000 rx_loss=2 rx_gaps=0 rx_late=1 socket_drops=0 blocks=300 underruns=0 overruns=0 delivered_frames=960000 rx_holes=1 rx_written_late=0 late_blocks=0 rebootstraps=0 max_process_us=80 obs_dropped=0 max_obs_us=40
+00:24:40.000: [obs-vban] obs-vban receive worker: source 'Zvuk z mixu' stopped (update)
+00:24:41.000: [obs-vban] obs-vban receive anchored: source 'Zvuk z mixu' frame=7 rate=48000 ch=2 receive_buffer_ms=40 -- holding its first second
+00:24:50.000: [obs-vban] obs-vban receive: received=400 lost=0 late=0 re_anchors=0 stale=0 reordered=0 concealed=0 silence_ms=0.0 max_late_ms=-34.7 sender_ppm=+1.400 phase_ms=+0.50 fit=locked emit_late_ms=-28.0 emit_missed=0 receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
 00:25:00.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=no state=ACQUIRE
 00:25:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=60 pending=0 timing_adjust_ms=0
 00:25:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0

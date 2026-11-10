@@ -99,5 +99,36 @@ systemctl --user list-timers | grep audio-mixer
 journalctl --user -u audio-mixer-alert-watchdog.service -n 40 --no-pager
 ```
 
+## PROGRAM-RX arm (issue 1460) -- ships DISABLED, enable after a live dry-run
+
+The fifth arm reads the nested `audio_rx` facet (the program-audio receiver's loss counter deltas
+over the last 660 s; `.claude/rules/program-audio-rx-watchdog.md`) and grades the receiver the box
+FACTS name: the obs-vban source on stream-pp / strih-pp, the Dante input on strih-snv / stream-snv,
+none on resolume. It logs every pass, but pages only with `AUDIO_MIXER_PROGRAM_RX_PAGE=1`. A LOSS
+pages on its first pass (a counter delta is a fact); SILENT (the program stopped while OBS keeps
+logging) is machine-channel only -- paging silence needs a production gate, an owner decision.
+
+```bash
+# 0. Redeploy the bundle-state server tree (every file of scripts/lib/bundle-state-files.txt, which
+#    now carries bundle_state_audio_rx.py) to strih-snv, stream-snv, strih-pp, stream-pp; restart
+#    strih-bundle-state-server.service; then read the facet (read-only):
+for h in 10.77.9.202 10.77.9.204 strih-pp.lan stream-pp.lan; do
+  curl -s "http://$h:8899/bundle-state.json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get("audio_rx"), indent=1), d.get("audio_mix_session"))'
+done
+#    Expect one entry per box (`obs-vban:Zvuk z mixu` / `obs-vban:ASIO zvuk` / `dante`), pairs > 0
+#    while the sender sends, and events 0 on a quiet program.
+# 1. Dry-run: `scripts/audio-mixer-alert-watchdog.sh --dry-run 2>&1 | grep program_rx` -- every
+#    home box reads program_rx=HEALTHY (or SILENT while its sender is off), resolume NONE.
+# 2. Enable paging with a drop-in, then read the next pass:
+mkdir -p ~/.config/systemd/user/audio-mixer-alert-watchdog.service.d
+printf '[Service]\nEnvironment=AUDIO_MIXER_PROGRAM_RX_PAGE=1\n' \
+  > ~/.config/systemd/user/audio-mixer-alert-watchdog.service.d/program-rx.conf
+systemctl --user daemon-reload
+journalctl --user -u audio-mixer-alert-watchdog.service --since -10min --no-pager | grep -E 'program_rx|pass end'
+```
+
+The MIX-LATE arm's session identity (`audio_mix_session`) needs the same server redeploy; until then
+it is absent and the arm keeps comparing counts only.
+
 Offline replay of a captured body: `AUDIO_MIXER_FETCH_CMD=<script printing the JSON>
 AUDIO_MIXER_ALERT_STATE_FILE=<scratch> scripts/audio-mixer-alert-watchdog.sh --dry-run`.

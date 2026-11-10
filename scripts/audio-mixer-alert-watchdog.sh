@@ -24,7 +24,13 @@
 #   * audio_mix_* -- the mix-wide `audio-telemetry #800 mix: mixed_late=` count (issue 1460),
 #     cumulative since the audio reset. The MIX-LATE arm stores the previous pass's count per box
 #     and pages LATE when it rose: a mix member fell behind the frozen mix window and was
-#     re-anchored, an audible hole on air. A lower count (new audio session) only re-baselines.
+#     re-anchored, an audible hole on air. A lower count (new audio session) only re-baselines;
+#     a changed `audio_mix_session` (the audio reset's stamp) grades the new session from 0.
+#   * audio_rx -- the program-audio RECEIVE facet (issue 1460, nested): per receiver the loss counter
+#     deltas of the last 660 s. The PROGRAM-RX arm grades the receiver the box FACTS name
+#     (scripts/lib/program-audio-rx.sh: the obs-vban source on stream-pp / strih-pp, the Dante input on
+#     strih-snv / stream-snv; none on resolume) and pages LOSS when a gated counter moved (lost incl.
+#     concealed slots, re_anchors, emit_missed; the Dante loss counters).
 # The MIXER arm also pages STALLED (issue 1385): the newest dump is > 180 s behind the log head
 # while the log head itself is live on the box's own clock (`obs_log_head_age_s` <= 60 s) -- the
 # audio thread stopped while OBS keeps logging, silence on air on a box without VBAN outputs.
@@ -56,12 +62,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"
+# shellcheck source=scripts/lib/program-audio-rx.sh
+. "$HERE/lib/program-audio-rx.sh"
 
 DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,54p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -82,6 +90,10 @@ LOG_LIVE_S="${AUDIO_MIXER_LOG_LIVE_S:-60}"            # log head this fresh = OB
 VBAN_STALE_AFTER_S="${AUDIO_MIXER_VBAN_STALE_AFTER_S:-180}"
 CONFIRM_THRESHOLD="${AUDIO_MIXER_CONFIRM_THRESHOLD:-2}"  # 2-pass confirm; one odd pass never fires
 ALERT_THROTTLE_PASSES="${AUDIO_MIXER_ALERT_THROTTLE_PASSES:-12}"  # ~1h at the 5-min cadence (render-freeze's)
+# issue 1460: the PROGRAM-RX arm SHIPS DISABLED inside this already-enabled watchdog -- it grades and
+# logs every pass, but pages only with AUDIO_MIXER_PROGRAM_RX_PAGE=1 (the supervisor's unit drop-in
+# after a live dry-run, systemd/audio-mixer-alert-watchdog.README.md).
+PROGRAM_RX_PAGE="${AUDIO_MIXER_PROGRAM_RX_PAGE:-0}"
 
 DECIDE="${AUDIO_MIXER_DECIDE:-$HERE/audio_mixer_decision.py}"
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
@@ -106,19 +118,23 @@ log() { printf '%s [audio-mixer-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%
 # read_state_field / write_state_field live in scripts/lib/watchdog-common.sh.
 
 # -- one arm's confirm + throttled, time-bucketed alert -----------------------------------------
-# handle_arm <box> <verdict> <state-prefix> <dedup-base> <body-text>
+# handle_arm <box> <verdict> <state-prefix> <dedup-base> <body-text> [threshold] -> rc 0 when the
+# verdict is CONFIRMED this pass (paged, throttled or a dry-run WOULD alert), rc 1 while still holding
+# for the confirm (issue 1460: the MIX-LATE arm advances its stored count on this return). The
+# threshold defaults to CONFIRM_THRESHOLD; the PROGRAM-RX arm passes 1 (a counter delta is a fact).
 handle_arm() {
   local box="$1" verdict="$2" prefix="$3" dedup_base="$4" body_text="$5"
+  local threshold="${6:-$CONFIRM_THRESHOLD}"
   local prev_confirm decision confirm act
   prev_confirm="$(read_state_field "${prefix}_confirm_${box}" 0)"
-  decision="$(obs_watchdog_confirm "$prev_confirm" 1 "$CONFIRM_THRESHOLD")"
+  decision="$(obs_watchdog_confirm "$prev_confirm" 1 "$threshold")"
   confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
   act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
   write_state_field "${prefix}_confirm_${box}" "${confirm:-0}"
-  log "$box $verdict confirm=$prev_confirm -> $confirm act=$act (threshold=$CONFIRM_THRESHOLD)"
+  log "$box $verdict confirm=$prev_confirm -> $confirm act=$act (threshold=$threshold)"
   if [ "${act:-0}" != "1" ]; then
-    log "$box $verdict this pass but not yet CONFIRMED across $CONFIRM_THRESHOLD passes -- holding"
-    return 0
+    log "$box $verdict this pass but not yet CONFIRMED across $threshold passes -- holding"
+    return 1
   fi
   write_state_field "${prefix}_alerted_${box}" 1
 
@@ -146,6 +162,7 @@ handle_arm() {
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- still $verdict"
   fi
+  return 0
 }
 
 # reset_arm_confirm <box> <prefix> -> zero this arm's pending confirmation only (issue 1385). The
@@ -217,8 +234,9 @@ handle_box() {
   local -a clock_args=()
   local vverdict events loss_ms dest vage loss_txt
   local bverdict bnow bstart bdelta bticks bsrc bage src_txt
-  local mlverdict mlnow mlprev mlage
-  local -a mix_args=()
+  local mlverdict mlnow mlprev mlage mlsess mlsess_prev
+  local -a mix_args=() rx_args=()
+  local rxkey rxrc=0 rxverdict
 
   if body="$(fetch_bundle_json "$ip" AUDIO_MIXER_FETCH_CMD)"; then reachable=1; else reachable=0; body=""; fi
   # issue 1385: the previous pass's log head age feeds the log-clock check (AUDIO_MIXER_NOW_EPOCH is
@@ -235,10 +253,25 @@ handle_box() {
     '' | *[!0123456789]*) mlprev="" ;;
     *) mix_args=(--prev-mix-late "$mlprev") ;;
   esac
-  out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" \
-    --tolerance "$TOLERANCE" --over-max "$OVER_MAX" --stale-after-s "$STALE_AFTER_S" \
-    --vban-stale-after-s "$VBAN_STALE_AFTER_S" --log-live-s "$LOG_LIVE_S" \
-    ${clock_args[@]+"${clock_args[@]}"} ${mix_args[@]+"${mix_args[@]}"} 2>/dev/null)"
+  # issue 1460: the program receiver this box's FACTS name ("" = none; rc 1 = facts unreadable)
+  rxkey="$(program_audio_rx_key "$box")" || rxrc=$?
+  [ -n "$rxkey" ] && rx_args=(--rx-key "$rxkey")
+  out="$(analyze_body "$body" "$reachable" ${clock_args[@]+"${clock_args[@]}"} \
+    ${mix_args[@]+"${mix_args[@]}"} ${rx_args[@]+"${rx_args[@]}"})"
+  # issue 1460: a CHANGED audio session (the audio reset's stamp) started its mixed_late count at 0,
+  # whatever its count now: grade it from 0 (store 0, the confirm kept). An absent identity on either
+  # side (an older gather, a first pass) changes nothing.
+  mlsess="$(field "$out" mix_session)"
+  mlsess_prev="$(read_state_field "${box}_mix_late_session" "")"
+  if [ "$reachable" = "1" ] && [ -n "$mlsess" ] && [ -n "$mlsess_prev" ] && [ "$mlsess" != "$mlsess_prev" ] \
+      && [ -n "$mlprev" ]; then
+    log "$box mix_late: a new audio session (reset at ${mlsess}, was ${mlsess_prev}) -- its count is graded from 0, not the stored ${mlprev}"
+    mlprev=0
+    write_state_field "${box}_mix_late_prev" 0
+    out="$(analyze_body "$body" "$reachable" ${clock_args[@]+"${clock_args[@]}"} \
+      --prev-mix-late 0 ${rx_args[@]+"${rx_args[@]}"})"
+  fi
+  [ -n "$mlsess" ] && write_state_field "${box}_mix_late_session" "$mlsess"
   mverdict="$(field "$out" mixer_verdict)"; ticks="$(field "$out" ticks)"
   over="$(field "$out" ticks_over)"; tick_ms="$(field "$out" tick_ms)"; age="$(field "$out" age_s)"
   head_age="$(field "$out" log_head_age_s)"
@@ -307,6 +340,61 @@ handle_box() {
   esac
 
   handle_mix_late "$box" "$ip" "${mlverdict:-}" "$mlnow" "$mlprev" "$mlage"
+
+  # PROGRAM-RX arm (issue 1460; independent, disjoint state)
+  rxverdict="$(field "$out" rx_verdict)"
+  [ "$rxrc" -eq 0 ] || rxverdict="FACTS"
+  handle_program_rx "$box" "$ip" "${rxverdict:-}" "$rxkey" "$out"
+  return 0
+}
+
+# analyze_body <body> <reachable> [extra analyze args...] -> the decision's key=value output.
+analyze_body() {
+  local body="$1" reachable="$2"
+  shift 2
+  printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" \
+    --tolerance "$TOLERANCE" --over-max "$OVER_MAX" --stale-after-s "$STALE_AFTER_S" \
+    --vban-stale-after-s "$VBAN_STALE_AFTER_S" --log-live-s "$LOG_LIVE_S" "$@" 2>/dev/null
+}
+
+# handle_program_rx <box> <ip> <verdict> <rx-key> <analyze-output> -- issue 1460, the PROGRAM-RX arm
+# (prefix + key base `program-rx`, PRODUCTION-CRITICAL time-bucketed). LOSS pages on its FIRST pass
+# (review round 1: a counter delta is a fact, and with the timer's 300-420 s pass gap only one pass
+# may see a loss); the arm + box throttle keeps one ongoing loss one incident. HEALTHY = one
+# machine-channel RECOVERY line once it had paged; SILENT (the program stopped on a live log) and
+# STALE (log frozen / unproven) are machine-channel only; NONE (no receiver in the facts), UNKNOWN,
+# FACTS (facts unreadable) and SKIP hold, never a page.
+handle_program_rx() {
+  local box="$1" ip="$2" verdict="$3" key="$4" out="$5" what deltas gap gap_txt
+  deltas="$(field "$out" rx_deltas)"; gap="$(field "$out" rx_gap_max_s)"
+  log "$box program_rx=${verdict:-<none>} key=${key:-<none>} events=$(field "$out" rx_events) deltas=${deltas} rebases=$(field "$out" rx_rebases) gap_max_s=${gap} age=$(field "$out" rx_age_s)"
+  case "$verdict" in
+    SKIP)    : ;;   # already logged for the mixer arm (same fetch)
+    NONE)    : ;;   # the box facts name no program receiver (resolume)
+    FACTS)   log "$box program_rx: the box facts did not load -- cannot tell which receiver to grade, holding, no page" ;;
+    UNKNOWN) log "$box program_rx: no audio_rx entry for ${key} (older gather / no status line yet) -- holding, no page" ;;
+    STALE)   log "$box program_rx: STALE -- no status line of ${key} for $(field "$out" rx_age_s)s and no proof the OBS log is live (frozen log / older gather) -- machine channel only, no page" ;;
+    SILENT)  log "$box program_rx: SILENT -- ${key} delivers no program audio (no status line for $(field "$out" rx_age_s)s, or no Dante frames delivered in the window) while OBS keeps logging: the sender, its NIC or the leg stopped -- machine channel only (paging silence outside a production is an owner decision, issue 1460), no page" ;;
+    HEALTHY) handle_healthy_arm "$box" "program-rx" ;;
+    LOSS)
+      if [ "$PROGRAM_RX_PAGE" != "1" ]; then
+        log "$box program_rx: LOSS (${deltas}) -- paging is DISABLED (AUDIO_MIXER_PROGRAM_RX_PAGE=0, the issue-1460 rollout default): machine channel only, no page"
+        return 0
+      fi
+      case "$key" in
+        dante) what="Dante vstup OBS (zariadenie dante-input)" ;;
+        *) what="VBAN vstup OBS '${key#obs-vban:}'" ;;
+      esac
+      gap_txt=""
+      case "$gap" in
+        '' | *[!0123456789]*) : ;;
+        *) [ "$gap" -gt 30 ] && gap_txt=" Medzi dvoma stavovými riadkami bola medzera ${gap} s: odosielateľ prestal posielať alebo vypadla sieť." ;;
+      esac
+      handle_arm "$box" "LOSS" "program-rx" "program-rx" \
+        "🚨 Programový zvuk ($REPO_SLUG): **$box** ($ip) — ${what} stratil zvuk za posledných ~11 min: **${deltas}**. Každý stratený slot je diera v programovom zvuku (aj zamaskovaný slot je strata).${gap_txt}" 1 ;;
+    *)       log "$box program_rx: unexpected verdict '${verdict:-<empty>}' -- holding, no page" ;;
+  esac
+  return 0
 }
 
 # handle_mix_late <box> <ip> <verdict> <now> <prev> <age> -- issue 1460, the MIX-LATE arm
@@ -319,7 +407,7 @@ handle_box() {
 # holes of the new session page (review round 1). An unchanged pass after a page is HEALTHY: one
 # machine-channel RECOVERY line (issue 1206), and the next separate rise is a new page.
 handle_mix_late() {
-  local box="$1" ip="$2" verdict="$3" now="$4" prev="$5" age="$6" confirm
+  local box="$1" ip="$2" verdict="$3" now="$4" prev="$5" age="$6"
   case "$verdict" in
     SKIP)    : ;;   # already logged for the mixer arm (same fetch)
     UNKNOWN) log "$box mix_late: no audio-telemetry #800 mix line (fresh OBS start / older build or gather) -- holding, no page" ;;
@@ -339,11 +427,8 @@ handle_mix_late() {
       handle_healthy_arm "$box" "audio-mix-late"
       write_state_field "${box}_mix_late_prev" "$now" ;;
     LATE)
-      handle_arm "$box" "LATE" "audio-mix-late" "audio-mixer-mixlate" \
-        "🚨 Zvukový mix ($REPO_SLUG): **$box** ($ip) — člen zvukového mixu OBS nestihol okno mixu a bol znovu zarovnaný (MIXED_LATE): počet stúpol z ${prev} na **${now}** (+$(( now - prev ))). Každé také zarovnanie je počuteľná diera vo zvuku z tohto OBS. Treba zistiť, ktorý zdroj mešká (OBS log: buffering-guard / MIXED_LATE). Potvrdené počas ${CONFIRM_THRESHOLD} kontrol."
-      confirm="$(read_state_field "audio-mix-late_confirm_${box}" 0)"
-      case "$confirm" in '' | *[!0123456789]*) confirm=0 ;; esac
-      if [ "$confirm" -ge "$CONFIRM_THRESHOLD" ]; then
+      if handle_arm "$box" "LATE" "audio-mix-late" "audio-mixer-mixlate" \
+        "🚨 Zvukový mix ($REPO_SLUG): **$box** ($ip) — člen zvukového mixu OBS nestihol okno mixu a bol znovu zarovnaný (MIXED_LATE): počet stúpol z ${prev} na **${now}** (+$(( now - prev ))). Každé také zarovnanie je počuteľná diera vo zvuku z tohto OBS. Treba zistiť, ktorý zdroj mešká (OBS log: buffering-guard / MIXED_LATE). Potvrdené počas ${CONFIRM_THRESHOLD} kontrol."; then
         write_state_field "${box}_mix_late_prev" "$now"
       fi ;;
     *)       log "$box mix_late: unexpected verdict '${verdict:-<empty>}' -- holding, no page" ;;

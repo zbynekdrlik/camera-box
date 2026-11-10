@@ -24,6 +24,7 @@ BUNDLE_STATE_SERVER_FILES=(
   bundle_state_log.py
   bundle_state_genlock.py
   bundle_state_audio.py
+  bundle_state_audio_rx.py
   bundle_state_vban.py
   bundle_state_av_offset.py
   bundle_state_host.py

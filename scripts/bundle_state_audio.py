@@ -414,6 +414,25 @@ def audio_mix_late_from_log(text, tail=None):
     return (newest[1], newest[2], str(round(head - newest[0])))
 
 
+def audio_mix_session_from_log(text, tail=None):
+    """issue 1460 -- the identity of the current audio SESSION: the `HH:MM:SS.mmm` stamp of the
+    newest audio-reset `buffering type:` line (libobs obs.c, printed once per audio reset), in the
+    tail, else in the head slice of a bounded read (a long session keeps it there), else `""`. The
+    dev1 MIX-LATE arm compares it between passes: a changed identity is a new session whose
+    cumulative mixed_late started at 0 (an OBS restart or an audio reset), whatever its count."""
+    stamped, _head = tail if tail is not None else timestamped_tail_lines(text)
+    for _pos, line in reversed(stamped):
+        if "buffering type:" in line:
+            return line.split(": ", 1)[0].strip()
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR not in t:
+        return ""
+    for _pos, line in reversed(_stamped_lines(t.partition(LOG_BOUNDED_READ_SEPARATOR)[0])):
+        if "buffering type:" in line:
+            return line.split(": ", 1)[0].strip()
+    return ""
+
+
 def _audio_stall_dump_in_head(text):
     """True only for a BOUNDED read whose head slice (the session's first 2 MB, before the
     separator) holds a complete `audio-stall #1367` dump line: this build has the probe and its
