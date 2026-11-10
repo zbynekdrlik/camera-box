@@ -25,7 +25,11 @@ GATED counters are the losses (`events` = their delta sum): obs-vban `lost` (con
 included: a concealed slot is a LOST slot, ROZHODNUTE 6359382787), `re_anchors` (the held second of
 a re-anchor is never counted in `lost`) and `emit_missed`; Dante the E2E gate's GATED tuple. NAMED
 counters are reported only (an obs-vban late packet's slot is already in `lost`; Dante rx_late /
-overruns / late_blocks are timing only).
+overruns / late_blocks are timing only). The Dante device also fails the E2E gate on a status line
+that left the media clock (`clock=` not `media`, or `holdover=` not 0) and on a `dante-input error:`
+line: both are counted as events here too (`clock_faults`, `errors`, by line inside the window).
+`silent_pairs` counts the counted Dante pairs whose `delivered_frames` did not move (no audio
+reached OBS): never an event on its own -- the decision names an all-silent window SILENT.
 
 Part of the bundle-state gather split (issue 1386): a PURE facet family re-exported by
 `bundle_state_gather` -- import it through that module. Ships in the :8899 server tree declared in
@@ -44,6 +48,8 @@ VBAN_RX_NAMED = ("late", "stale", "reordered", "concealed", "silence_ms")
 DANTE_RX_GATED = ("rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps",
                   "rx_written_late", "re_anchors", "obs_dropped")
 DANTE_RX_NAMED = ("rx_late", "overruns", "late_blocks")
+# Dante state faults counted per status / error line inside the window (events, like GATED)
+DANTE_RX_STATE_EVENTS = ("clock_faults", "errors")
 # also read for the went-down (restart) check, never reported
 _VBAN_RX_TOTALS = ("received",)
 _DANTE_RX_TOTALS = ("rx_packets", "delivered_frames")
@@ -52,6 +58,8 @@ _VBAN_STATUS_RE = re.compile(r"obs-vban receive: (.*?) source='(.*)'\s*$")
 _VBAN_REINIT_RE = re.compile(
     r"obs-vban receive (?:anchored: source '(.*?)' frame=|worker: source '(.*)' stopped)")
 _KV_RE = re.compile(r"(?:^|\s)([a-z_]+)=(-?\d+(?:\.\d+)?)(?=\s|$)")
+_DANTE_CLOCK_RE = re.compile(r"(?:^|\s)clock=(\S+)")
+_DANTE_HOLDOVER_RE = re.compile(r"(?:^|\s)holdover=(\S+)")
 DANTE_RX_KEY = "dante"
 
 
@@ -67,15 +75,17 @@ def _numbers(text, keys):
 class _Receiver:
     """The window state of one receiver."""
     __slots__ = ("kind", "name", "gated", "named", "prev", "prev_pos", "reinit", "deltas",
-                 "pairs", "rebases", "gap_max", "newest")
+                 "pairs", "silent_pairs", "rebases", "gap_max", "newest", "events_keys")
 
-    def __init__(self, kind, name, gated, named):
+    def __init__(self, kind, name, gated, named, state_events=()):
         self.kind, self.name, self.gated, self.named = kind, name, gated, named
+        self.events_keys = gated + state_events
         self.prev = None
         self.prev_pos = None
         self.reinit = False
-        self.deltas = {}
+        self.deltas = {k: 0 for k in state_events}
         self.pairs = 0
+        self.silent_pairs = 0
         self.rebases = 0
         self.gap_max = 0.0
         self.newest = None
@@ -91,25 +101,42 @@ class _Receiver:
             return
         self.pairs += 1
         self.gap_max = max(self.gap_max, pos - prev_pos)
+        if "delivered_frames" in counters and counters["delivered_frames"] == prev.get("delivered_frames"):
+            self.silent_pairs += 1
         for k in self.gated + self.named:
             if k in counters and k in prev:
                 self.deltas[k] = self.deltas.get(k, 0) + counters[k] - prev[k]
 
+    def note(self, key, pos, window_start):
+        """One state-fault line (`clock_faults` / `errors`) at `pos`, counted inside the window."""
+        if pos >= window_start:
+            self.deltas[key] = self.deltas.get(key, 0) + 1
+
     def entry(self, head):
         deltas = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in self.deltas.items()}
         return {"kind": self.kind, "name": self.name,
-                "events": sum(v for k, v in self.deltas.items() if k in self.gated),
-                "deltas": deltas, "pairs": self.pairs, "rebases": self.rebases,
-                "gap_max_s": round(self.gap_max), "age_s": round(head - self.newest)}
+                "events": sum(v for k, v in self.deltas.items() if k in self.events_keys),
+                "deltas": deltas, "pairs": self.pairs, "silent_pairs": self.silent_pairs,
+                "rebases": self.rebases, "gap_max_s": round(self.gap_max),
+                "age_s": round(head - self.newest) if self.newest is not None else None}
+
+
+def _dante_receiver(rx):
+    r = rx.get(DANTE_RX_KEY)
+    if r is None:
+        r = rx[DANTE_RX_KEY] = _Receiver("dante", "dante-input", DANTE_RX_GATED, DANTE_RX_NAMED,
+                                         DANTE_RX_STATE_EVENTS)
+    return r
 
 
 def audio_rx_from_log(text, window_s=AUDIO_RX_WINDOW_S, tail=None):
     """issue 1460 -- the nested `audio_rx` facet: `{key: entry}` for every program-audio receiver
     with a status line in the tail, or None when there is none (no receiver on this box -> the
     facet is omitted, UNKNOWN downstream, never a fake 0). An entry: `kind` (`obs-vban` / `dante`),
-    `name` (the obs-vban input / `dante-input`), `events` (the gated delta sum), `deltas` (every
-    gated and named counter seen on both sides of a counted pair), `pairs` (counted pairs),
-    `rebases`, `gap_max_s` (the longest gap between two counted status lines: a sender pause shows
+    `name` (the obs-vban input / `dante-input`), `events` (the gated delta sum + the Dante state
+    faults), `deltas` (every gated and named counter seen on both sides of a counted pair, and the
+    Dante `clock_faults` / `errors`), `pairs` (counted pairs), `silent_pairs` (Dante pairs whose
+    delivered_frames did not move), `rebases`, `gap_max_s` (the longest gap between two counted status lines: a sender pause shows
     there) and `age_s` (the newest status line behind the log head). `tail` = a precomputed
     `timestamped_tail_lines(text)`."""
     stamped, head = tail if tail is not None else timestamped_tail_lines(text)
@@ -138,13 +165,15 @@ def audio_rx_from_log(text, window_s=AUDIO_RX_WINDOW_S, tail=None):
             continue
         i = line.find("dante-input status:")
         if i >= 0:
-            r = rx.get(DANTE_RX_KEY)
-            if r is None:
-                r = rx[DANTE_RX_KEY] = _Receiver("dante", "dante-input", DANTE_RX_GATED,
-                                                 DANTE_RX_NAMED)
-            r.feed(pos, _numbers(line[i + len("dante-input status:"):].rstrip("\r"),
-                                 DANTE_RX_GATED + DANTE_RX_NAMED + _DANTE_RX_TOTALS),
+            r = _dante_receiver(rx)
+            fields = line[i + len("dante-input status:"):].rstrip("\r")
+            r.feed(pos, _numbers(fields, DANTE_RX_GATED + DANTE_RX_NAMED + _DANTE_RX_TOTALS),
                    window_start)
+            clock, hold = _DANTE_CLOCK_RE.search(fields), _DANTE_HOLDOVER_RE.search(fields)
+            if (clock and clock.group(1) != "media") or (hold and hold.group(1) != "0"):
+                r.note("clock_faults", pos, window_start)
+        elif "dante-input error:" in line:
+            _dante_receiver(rx).note("errors", pos, window_start)
         elif "dante-input start:" in line and DANTE_RX_KEY in rx:
             rx[DANTE_RX_KEY].reinit = True
     if not rx:

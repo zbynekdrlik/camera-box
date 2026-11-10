@@ -118,20 +118,22 @@ log() { printf '%s [audio-mixer-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%
 # read_state_field / write_state_field live in scripts/lib/watchdog-common.sh.
 
 # -- one arm's confirm + throttled, time-bucketed alert -----------------------------------------
-# handle_arm <box> <verdict> <state-prefix> <dedup-base> <body-text> -> rc 0 when the verdict is
-# CONFIRMED this pass (paged, throttled or a dry-run WOULD alert), rc 1 while still holding for the
-# confirm (issue 1460: the MIX-LATE arm advances its stored count on this return).
+# handle_arm <box> <verdict> <state-prefix> <dedup-base> <body-text> [threshold] -> rc 0 when the
+# verdict is CONFIRMED this pass (paged, throttled or a dry-run WOULD alert), rc 1 while still holding
+# for the confirm (issue 1460: the MIX-LATE arm advances its stored count on this return). The
+# threshold defaults to CONFIRM_THRESHOLD; the PROGRAM-RX arm passes 1 (a counter delta is a fact).
 handle_arm() {
   local box="$1" verdict="$2" prefix="$3" dedup_base="$4" body_text="$5"
+  local threshold="${6:-$CONFIRM_THRESHOLD}"
   local prev_confirm decision confirm act
   prev_confirm="$(read_state_field "${prefix}_confirm_${box}" 0)"
-  decision="$(obs_watchdog_confirm "$prev_confirm" 1 "$CONFIRM_THRESHOLD")"
+  decision="$(obs_watchdog_confirm "$prev_confirm" 1 "$threshold")"
   confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
   act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
   write_state_field "${prefix}_confirm_${box}" "${confirm:-0}"
-  log "$box $verdict confirm=$prev_confirm -> $confirm act=$act (threshold=$CONFIRM_THRESHOLD)"
+  log "$box $verdict confirm=$prev_confirm -> $confirm act=$act (threshold=$threshold)"
   if [ "${act:-0}" != "1" ]; then
-    log "$box $verdict this pass but not yet CONFIRMED across $CONFIRM_THRESHOLD passes -- holding"
+    log "$box $verdict this pass but not yet CONFIRMED across $threshold passes -- holding"
     return 1
   fi
   write_state_field "${prefix}_alerted_${box}" 1
@@ -343,6 +345,7 @@ handle_box() {
   rxverdict="$(field "$out" rx_verdict)"
   [ "$rxrc" -eq 0 ] || rxverdict="FACTS"
   handle_program_rx "$box" "$ip" "${rxverdict:-}" "$rxkey" "$out"
+  return 0
 }
 
 # analyze_body <body> <reachable> [extra analyze args...] -> the decision's key=value output.
@@ -355,10 +358,12 @@ analyze_body() {
 }
 
 # handle_program_rx <box> <ip> <verdict> <rx-key> <analyze-output> -- issue 1460, the PROGRAM-RX arm
-# (prefix + key base `program-rx`, PRODUCTION-CRITICAL time-bucketed). LOSS pages after the 2-pass
-# confirm (the facet's 660 s window keeps one loss in two passes); HEALTHY = one machine-channel
-# RECOVERY line once it had paged; STALE (sender stopped / log frozen) resets the confirm, log only;
-# NONE (no receiver in the facts), UNKNOWN, FACTS (facts unreadable) and SKIP hold, never a page.
+# (prefix + key base `program-rx`, PRODUCTION-CRITICAL time-bucketed). LOSS pages on its FIRST pass
+# (review round 1: a counter delta is a fact, and with the timer's 300-420 s pass gap only one pass
+# may see a loss); the arm + box throttle keeps one ongoing loss one incident. HEALTHY = one
+# machine-channel RECOVERY line once it had paged; SILENT (the program stopped on a live log) and
+# STALE (log frozen / unproven) are machine-channel only; NONE (no receiver in the facts), UNKNOWN,
+# FACTS (facts unreadable) and SKIP hold, never a page.
 handle_program_rx() {
   local box="$1" ip="$2" verdict="$3" key="$4" out="$5" what deltas gap gap_txt
   deltas="$(field "$out" rx_deltas)"; gap="$(field "$out" rx_gap_max_s)"
@@ -368,8 +373,8 @@ handle_program_rx() {
     NONE)    : ;;   # the box facts name no program receiver (resolume)
     FACTS)   log "$box program_rx: the box facts did not load -- cannot tell which receiver to grade, holding, no page" ;;
     UNKNOWN) log "$box program_rx: no audio_rx entry for ${key} (older gather / no status line yet) -- holding, no page" ;;
-    STALE)   log "$box program_rx: STALE -- no status line of ${key} for $(field "$out" rx_age_s)s (sender stopped?) or the log is frozen -- machine channel only, no page"
-             reset_arm_confirm "$box" "program-rx" ;;
+    STALE)   log "$box program_rx: STALE -- no status line of ${key} for $(field "$out" rx_age_s)s and no proof the OBS log is live (frozen log / older gather) -- machine channel only, no page" ;;
+    SILENT)  log "$box program_rx: SILENT -- ${key} delivers no program audio (no status line for $(field "$out" rx_age_s)s, or no Dante frames delivered in the window) while OBS keeps logging: the sender, its NIC or the leg stopped -- machine channel only (paging silence outside a production is an owner decision, issue 1460), no page" ;;
     HEALTHY) handle_healthy_arm "$box" "program-rx" ;;
     LOSS)
       if [ "$PROGRAM_RX_PAGE" != "1" ]; then
@@ -386,9 +391,10 @@ handle_program_rx() {
         *) [ "$gap" -gt 30 ] && gap_txt=" Medzi dvoma stavovými riadkami bola medzera ${gap} s: odosielateľ prestal posielať alebo vypadla sieť." ;;
       esac
       handle_arm "$box" "LOSS" "program-rx" "program-rx" \
-        "🚨 Programový zvuk ($REPO_SLUG): **$box** ($ip) — ${what} stratil zvuk za posledných ~11 min: **${deltas}**. Každý stratený slot je diera v programovom zvuku (aj zamaskovaný slot je strata).${gap_txt} Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
+        "🚨 Programový zvuk ($REPO_SLUG): **$box** ($ip) — ${what} stratil zvuk za posledných ~11 min: **${deltas}**. Každý stratený slot je diera v programovom zvuku (aj zamaskovaný slot je strata).${gap_txt}" 1 ;;
     *)       log "$box program_rx: unexpected verdict '${verdict:-<empty>}' -- holding, no page" ;;
   esac
+  return 0
 }
 
 # handle_mix_late <box> <ip> <verdict> <now> <prev> <age> -- issue 1460, the MIX-LATE arm

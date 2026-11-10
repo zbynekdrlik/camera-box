@@ -64,8 +64,13 @@ the nested `audio_rx` facet (scripts/bundle_state_audio_rx.py: the gated counter
 660 s; a concealed slot is a lost slot):
   SKIP unreachable; NONE the facts name no program receiver (resolume); UNKNOWN no entry (an older
   gather, no status line yet, the facts unreadable); STALE the log head is frozen (> 180 s, decided
-  before the loss: a dead OBS's last window would page forever) or the newest status line is older
-  than the stale bound (the sender stopped: log only); LOSS any gated delta > 0; HEALTHY otherwise.
+  before the loss: a dead OBS's last window would page forever); LOSS any gated delta > 0 (the
+  watchdog pages it on its FIRST pass: a counter delta is a fact, and the timer's 300-420 s pass
+  gap lets only one pass see a loss); SILENT the program stopped while the OBS log is LIVE (the
+  newest status line older than the stale bound with the log head <= 60 s old, or every counted
+  Dante pair without delivered frames -- named on the machine channel, never paged: a console off
+  overnight is silence too, so paging it needs a production gate, an owner decision); STALE the
+  status line is old with no proof the log is live; HEALTHY otherwise.
 
 No I/O -- pytest Tier-0 (the render_freeze_decision.py / issue 1199 python-mirror precedent).
 """
@@ -246,8 +251,12 @@ def classify_program_rx(entry, rx_key, box_reachable, log_head_age_s=None,
         return "UNKNOWN"
     if events > 0:
         return "LOSS"
+    live = log_head_age_s is not None and log_head_age_s <= DEFAULT_LOG_LIVE_S
     if age is not None and age > stale_after_s:
-        return "STALE"
+        return "SILENT" if live else "STALE"
+    pairs, silent = _int_or_none(entry.get("pairs")), _int_or_none(entry.get("silent_pairs"))
+    if pairs and silent == pairs:
+        return "SILENT"
     return "HEALTHY"
 
 
