@@ -95,12 +95,13 @@ def test_every_live_board_resolves_to_the_strih_boxes_that_name_it():
         assert r.stdout.split() == _expected_sinks(board), board
 
 
-def test_the_travelling_board_gets_both_venues_and_the_others_one():
+def test_each_board_gets_the_venue_that_lists_it():
     snv = _facts("strih-snv.env")["STRIH_IP"]
     pp = _facts("strih-pp.env")["STRIH_IP"]
     assert _bash('remote_log_board_sink_ips cam2-shading').stdout.split() == [snv]
     assert _bash('remote_log_board_sink_ips cam1-shading').stdout.split() == [pp]
-    assert sorted(_bash('remote_log_board_sink_ips cam4-shading').stdout.split()) == sorted([snv, pp])
+    # issue 1452: cam3's camera moved onto cam3's own USB (10.11.2026), so only strih-pp lists cam4-shading.
+    assert _bash('remote_log_board_sink_ips cam4-shading').stdout.split() == [pp]
 
 
 def test_an_unlisted_or_bad_board_name_is_refused_by_name_never_guessed():
