@@ -28,10 +28,11 @@ a loss during a production was invisible until someone heard it (owner: zero aud
 - **Stateless window delta, the obs-vban pacer's 660 s:** a delta is counted only between two status
   lines of ONE receiver that are BOTH inside the window. The obs-vban status line is written per
   received packet, so a sender off for longer than the window (the console overnight) never reads
-  as one loss at resume; a pause up to ~10 min inside the window DOES (its starve second is counted
-  `lost`, plus one re-anchor) and shows as `gap_max_s`, once a pass sees both lines (the longer the
-  pause, the shorter the time the pair is inside the window). Stated choice: that is program audio
-  gone. The obs-vban PACER arm keeps its 2-pass confirm over the same 660 s window and has the same
+  as one loss at resume; a pause inside the window pages (its starve second is counted `lost`, plus
+  one re-anchor) and shows as `gap_max_s`. A pause of p seconds keeps its pair inside the window for
+  about 650 - p s, so a pass is GUARANTEED to see it only up to ~230 s (650 - p >= the 420 s longest
+  pass gap); a longer pause pages only sometimes, and one longer than the window never. Stated
+  choice: a pause is program audio gone. The obs-vban PACER arm keeps its 2-pass confirm over the same 660 s window and has the same
   latent one-pass-only case (not changed in this lane).
 - **Rebase, never a loss:** a counter that went DOWN, or between the two lines an `obs-vban receive
   anchored:` / `obs-vban receive worker: ... stopped` line of THAT source, or a `dante-input start:`
@@ -43,7 +44,12 @@ a loss during a production was invisible until someone heard it (owner: zero aud
   STATE faults the E2E gate also fails on, counted per line inside the window: `clock_faults` (a
   status line with `clock=` not `media` or `holdover=` not 0) and `errors` (a `dante-input error:`
   line). The obs-vban difference from the E2E gate (`late`, `stale` not gated) is deliberate and
-  pinned by a test. **NAMED** only:
+  pinned by a test. A fault while the device STARTS (after a `dante-input start:`, before its first
+  `clock=media holdover=0` status line, within `DANTE_RX_START_GRACE_S` = 180 s: the in-process PTP
+  follower may need a few lines to lock, dsync's own cold lock is ~95 s) is never counted, so an OBS
+  restart or deploy never pages; a start that never reaches the media clock counts after the grace.
+  The start-up line shape is NOT read live yet (the supervisor reads the first status lines after an
+  OBS start on strih-snv once deployed). **NAMED** only:
   obs-vban late / stale / reordered / concealed / silence_ms (a late packet's slot is already in
   `lost`), Dante rx_late / overruns / late_blocks. A counter absent on one side (an older release) is
   simply not counted.
@@ -57,7 +63,8 @@ a loss during a production was invisible until someone heard it (owner: zero aud
   180 s -- decided BEFORE the loss, or a dead OBS's last window pages forever) / LOSS / SILENT (the
   program stopped while the OBS log is live: the newest status line older than 180 s with the log
   head <= 60 s old, or every counted Dante pair without delivered frames) / STALE (the status line is
-  old with no proof the log is live) / HEALTHY. `analyze(..., rx_key=)`, CLI `--rx-key`, prints `rx_*`.
+  old with no proof the log is live) / HEALTHY. A receiver that never wrote a status line (only an
+  error line) is never HEALTHY: LOSS while the error is in the window, then SILENT / UNKNOWN. `analyze(..., rx_key=)`, CLI `--rx-key`, prints `rx_*`.
 - **SILENT is never paged (a stated residual, review round 1):** a dead sender, a dropped NIC or a down
   leg (the 8.11.2026 stream-snv USB NIC class) reads SILENT on the machine channel only, because a
   console switched off overnight reads exactly the same; paging silence needs a production gate (the
