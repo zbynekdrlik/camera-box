@@ -70,17 +70,19 @@ Write-WbSection 'net_layout' {
   # A read that fails prints `err=<what>|<message>`, and the grader reads the layout as UNKNOWN.
   try { foreach ($a in @(Get-NetAdapter -Physical -ErrorAction Stop)) { "phys=$($a.Name)|$($a.InterfaceDescription)|$($a.Status)|$($a.LinkSpeed)|$($a.PnPDeviceID)" } } catch { "err=phys|$($_.Exception.Message)" }
   if ($wnlDante) {
-    foreach ($a in @(Get-NetAdapter -Name $wnlDante -ErrorAction SilentlyContinue)) { "virt=$($a.Name)|$($a.InterfaceDescription)|$($a.Status)" }
+    try { foreach ($a in @(Get-NetAdapter -Name $wnlDante -ErrorAction Stop)) { "virt=$($a.Name)|$($a.InterfaceDescription)|$($a.Status)" } } catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { "err=virt|$($_.Exception.Message)" } }
   }
   try { foreach ($i in @(Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' })) { "ip=$($i.InterfaceAlias)|$($i.IPAddress)|$($i.PrefixLength)|$($i.PrefixOrigin)" } } catch { "err=ip|$($_.Exception.Message)" }
-  foreach ($r in @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore -ErrorAction SilentlyContinue)) { "defroute=$($r.InterfaceAlias)|$($r.NextHop)|$($r.RouteMetric)" }
+  try { foreach ($r in @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop | Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' })) { "defroute=$($r.InterfaceAlias)|$($r.NextHop)|$($r.RouteMetric)" } } catch { "err=defroute|$($_.Exception.Message)" }
   try { foreach ($m in @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop)) { "ifmetric=$($m.InterfaceAlias)|$($m.InterfaceMetric)|$($m.Dhcp)" } } catch { "err=ifmetric|$($_.Exception.Message)" }
   if ($wnlDante) {
-    foreach ($p in @(Get-NetAdapterAdvancedProperty -Name $wnlDante -RegistryKeyword VlanID -ErrorAction SilentlyContinue)) { "vlan=$($p.Name)|$($p.RegistryValue -join ',')" }
-    foreach ($d in @(Get-DnsClient -InterfaceAlias $wnlDante -ErrorAction SilentlyContinue)) { "dnsreg=$($d.InterfaceAlias)|$($d.RegisterThisConnectionsAddress)" }
     $wnlDa = Get-NetAdapter -Name $wnlDante -ErrorAction SilentlyContinue
-    if ($wnlDa) { foreach ($c in @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$($wnlDa.ifIndex)")) { "netbios=$wnlDante|$($c.TcpipNetbiosOptions)" } }
-    foreach ($b in @(Get-NetAdapterBinding -Name $wnlDante -ComponentID ms_server,ms_msclient,ms_tcpip6,ms_lltdio,ms_rspndr -ErrorAction SilentlyContinue)) { "binding=$($b.ComponentID)|$($b.Enabled)" }
+    if ($wnlDa) {
+      try { foreach ($p in @(Get-NetAdapterAdvancedProperty -Name $wnlDante -RegistryKeyword VlanID -ErrorAction Stop)) { "vlan=$($p.Name)|$($p.RegistryValue -join ',')" } } catch { "err=vlan|$($_.Exception.Message)" }
+      try { foreach ($d in @(Get-DnsClient -InterfaceAlias $wnlDante -ErrorAction Stop)) { "dnsreg=$($d.InterfaceAlias)|$($d.RegisterThisConnectionsAddress)" } } catch { "err=dnsreg|$($_.Exception.Message)" }
+      try { foreach ($c in @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$($wnlDa.ifIndex)" -ErrorAction Stop)) { "netbios=$wnlDante|$($c.TcpipNetbiosOptions)" } } catch { "err=netbios|$($_.Exception.Message)" }
+      try { foreach ($b in @(Get-NetAdapterBinding -Name $wnlDante -ComponentID ms_server,ms_msclient,ms_tcpip6,ms_lltdio,ms_rspndr -ErrorAction Stop)) { "binding=$($b.ComponentID)|$($b.Enabled)" } } catch { "err=binding|$($_.Exception.Message)" }
+    }
   }
   try { $wnlNdi = Get-Content 'C:\ProgramData\NDI\ndi-config.v1.json' -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; "ndi_allowed=$($wnlNdi.ndi.adapters.allowed -join ',')" } catch { "ndi_allowed_unread=$($_.Exception.Message)" }
 }

@@ -73,7 +73,7 @@ Dante leg, dstack owns it); `net_layout` grades its section 6 items 1-3 for a Wi
 `scripts/lib/win-net-layout.sh` (sourced by the baseline lib) adds ONE graded item, `net_layout`, from a
 `net_layout` section in the same gather (Get-* reads only, `key=value` lines). Only a host that declares a
 layout (`win_net_layout_declared <COMPUTERNAME>`, today RESOLUME-SNV) gets the row in
-`win-baseline-check.sh`; the report rows print it for every box (`OK not declared` elsewhere).
+`win-baseline-check.sh` and the gate's report rows (`win_baseline_report_rows`); a box that declares none gets no row.
 - RESOLUME-SNV (dstack#155, 10.11.2026): one physical NIC Up = `Ethernet 4` Realtek Gaming USB 2.5GbE
   (USB VID_0BDA&PID_8156) at 2.5 Gbps, `Ethernet` (I225-V) and `Wi-Fi` Disabled; LAN 10.77.9.201/23 Dhcp,
   the ONLY default route via 10.77.8.1, interface metric 20; `Dante70` = Realtek Virtual Adapter, VlanID

@@ -144,7 +144,7 @@ camera_test_settings_rest_cmd() {
   # box whose relay is always on, the session stops the relay only for its own requests and the EXIT
   # trap starts it again whatever the session ends with, so its writes never race the relay's.
   if [ -n "${CTS_FOUND_LABEL:-}" ] && bkshading_relay_box_always_on "$CTS_FOUND_LABEL"; then
-    printf '_cts_hold=0; if systemctl is-active --quiet %s 2>/dev/null; then systemctl stop %s 2>/dev/null && _cts_hold=1; fi; ' "$unit" "$unit"
+    printf '_cts_hold=0; case "$(systemctl is-active %s 2>/dev/null)" in inactive|failed|unknown|"") ;; *) systemctl stop %s 2>/dev/null && _cts_hold=1;; esac; ' "$unit" "$unit"
     printf 'trap '"'"'[ "$_cts_hold" = 1 ] && systemctl start %s 2>/dev/null; echo "CTS_RELAY_HOLD $_cts_hold"'"'"' EXIT; ' "$unit"
   fi
   printf '_cts_rs="$(systemctl is-active %s 2>/dev/null)"; case "$_cts_rs" in inactive|failed|unknown|"") ;; *) echo "CTS_RELAY_ACTIVE $_cts_rs"; exit %s;; esac; ' \
