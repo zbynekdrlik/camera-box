@@ -235,11 +235,12 @@ def _av_offset_log_facets(log_text):
     }
 
 
-def _audio_log_facets(log_text, log_read_tod, ref_band_src):
+def _audio_log_facets(log_text, log_read_tod, ref_band_src, stamped_tail=None):
     """The OBS audio log facets (ts_lag #1226/#1231, ref band #1265, buffered_ms #1325, mixer + pacer
-    + buffering 1381, mix MIXED_LATE 1460, log-head age 1385) as `build_bundle_state` keywords."""
-    # issue 1381: the timestamped tail is parsed ONCE and shared by the mixer + pacer facets below.
-    stamped_tail = bsg.timestamped_tail_lines(log_text)
+    + buffering 1381, mix MIXED_LATE + session 1460, log-head age 1385) as `build_bundle_state`
+    keywords. issue 1381: the timestamped tail is parsed ONCE (`stamped_tail`) and shared."""
+    if stamped_tail is None:
+        stamped_tail = bsg.timestamped_tail_lines(log_text)
     ts_lag_ms, ts_lag_src, ts_lag_age_s = bsg.audio_telemetry_from_log(log_text)
     (ref_src, ref_base, ref_high, ref_low, ref_duty,
      ref_n) = bsg.audio_ref_band_from_log(log_text, ref_src=ref_band_src)
@@ -275,6 +276,7 @@ def _audio_log_facets(log_text, log_read_tod, ref_band_src):
         "audio_buffering_source": buffering_src,
         "audio_buffering_age_s": buffering_age_s,
         **dict(zip(bsg.AUDIO_MIX_LATE_KEYS, bsg.audio_mix_late_from_log(log_text, tail=stamped_tail))),
+        "audio_mix_session": bsg.audio_mix_session_from_log(log_text, tail=stamped_tail),
         "vban_pacer_loss_events": vban_events,
         "vban_pacer_loss_ms": vban_ms,
         "vban_pacer_loss_dest": vban_dest,
@@ -285,16 +287,19 @@ def _audio_log_facets(log_text, log_read_tod, ref_band_src):
 
 def _parse_log_facets(log_text, log_read_tod, ref_band_src):
     """Every log-derived facet from the SAME bounded log_text (no second read — one #1222
-    `obs_log_parse` timing): `(facets, genlock_lock)`, where `facets` is a dict of
-    `build_bundle_state` keywords and `genlock_lock` is the nested #1299 LOCK facet (None when the
-    log has no `genlock-lock-json:` line — a stock OBS / no line yet, never a false UNLOCKED).
+    `obs_log_parse` timing): `(facets, nested)`, where `facets` is a dict of `build_bundle_state`
+    keywords and `nested` the NESTED objects, each None when absent: the #1299 `genlock_lock` LOCK
+    facet (no `genlock-lock-json:` line — a stock OBS / no line yet, never a false UNLOCKED) and the
+    issue-1460 `audio_rx` program-audio receive facet (no receiver status line).
     Each key's purpose (and which dev1 watchdog reads it) is documented once, at its entry in
-    `bundle_state_gather.BUNDLE_STATE_KEYS`."""
+    `bundle_state_gather.BUNDLE_STATE_KEYS` / its parser."""
+    stamped_tail = bsg.timestamped_tail_lines(log_text)
     facets = {}
     facets.update(_genlock_log_facets(log_text))
-    facets.update(_audio_log_facets(log_text, log_read_tod, ref_band_src))
+    facets.update(_audio_log_facets(log_text, log_read_tod, ref_band_src, stamped_tail))
     facets.update(_av_offset_log_facets(log_text))
-    return facets, bsg.genlock_lock_facet_from_log(log_text)
+    return facets, {"genlock_lock": bsg.genlock_lock_facet_from_log(log_text),
+                    "audio_rx": bsg.audio_rx_from_log(log_text, tail=stamped_tail)}
 
 
 def _gather_ndi_inputs_or_empty(obs_host, password):
@@ -449,7 +454,7 @@ def gather_bundle_state(
     # > mbc). A box that has no such source (strih) reports the band facets empty -> omitted.
     ref_band_src = bsg.audio_ref_band_src(os.environ)  # issue 1460: the stream box's own program audio
 
-    log_facets, genlock_lock = _timed(
+    log_facets, nested = _timed(
         timings, "obs_log_parse", _parse_log_facets, log_text, log_read_tod, ref_band_src
     )
     ndi_inputs = _timed(timings, "ndi_inputs", _gather_ndi_inputs_or_empty, obs_host, password)
@@ -487,13 +492,14 @@ def gather_bundle_state(
         **obs_handles,
     )
 
-    # #1299 — the genlock_lock facet is a NESTED object, not a flat string, so it is attached here
-    # rather than through build_bundle_state (whose every-value-is-a-quoted-string contract the
-    # version-integrity gate's regex depends on; it simply ignores this extra key). Omit-when-absent:
-    # a stock OBS / no genlock-lock-json: line yields None -> the facet never appears (UNKNOWN
-    # downstream), never a false UNLOCKED.
-    if genlock_lock is not None:
-        result["genlock_lock"] = genlock_lock
+    # #1299 / issue 1460 — genlock_lock and audio_rx are NESTED objects, not flat strings, so they
+    # are attached here rather than through build_bundle_state (whose every-value-is-a-quoted-string
+    # contract the version-integrity gate's regex depends on; it simply ignores these extra keys).
+    # Omit-when-absent: None (no genlock-lock-json: line / no receiver status line) -> the facet never
+    # appears (UNKNOWN downstream), never a false UNLOCKED or a fake 0.
+    for key, value in nested.items():
+        if value is not None:
+            result[key] = value
 
     timings["total"] = time.perf_counter() - t_total0
     if os.environ.get("BUNDLE_STATE_TIMING") == "1":

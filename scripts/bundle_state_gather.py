@@ -36,6 +36,7 @@ builder -- `build_bundle_state` over the served key order `BUNDLE_STATE_KEYS` --
   bundle_state_genlock    OBS / DistroAV banner, fps, genlock markers, the genlock LOCK facet,
                           the PROGRAM-render freeze and relock-burst facets
   bundle_state_audio      audio telemetry / ts_lag, the reference band, buffered_ms, audio mixer
+  bundle_state_audio_rx   the program-audio RECEIVE loss facet (obs-vban source, Dante input)
   bundle_state_vban       the obs-vban pacer loss facet
   bundle_state_av_offset  the av-sync dock offset trend, live age, quality + quality age
   bundle_state_host       install scans, the NDI latency CSV, tasklist / VB-Matrix, the AHK
@@ -68,12 +69,22 @@ from bundle_state_audio import (  # noqa: E402 -- after the sibling path setup a
     BUFFERED_MS_DEFAULT_SRC,
     audio_buffering_from_log,
     audio_mix_late_from_log,
+    audio_mix_session_from_log,
     audio_mixer_from_log,
     audio_ref_band_from_log,
     audio_ref_band_src,
     audio_telemetry_from_log,
     audio_ts_lag_ms_from_log,
     buffered_ms_series_from_log,
+)
+from bundle_state_audio_rx import (  # noqa: E402 -- after the sibling path setup above
+    AUDIO_RX_WINDOW_S,
+    DANTE_RX_GATED,
+    DANTE_RX_KEY,
+    DANTE_RX_NAMED,
+    VBAN_RX_GATED,
+    VBAN_RX_NAMED,
+    audio_rx_from_log,
 )
 from bundle_state_av_offset import (  # noqa: E402 -- after the sibling path setup above
     AV_OFFSET_BASELINE_WINDOW_S,
@@ -163,12 +174,21 @@ __all__ = [
     "BUFFERED_MS_DEFAULT_SRC",
     "audio_buffering_from_log",
     "audio_mix_late_from_log",
+    "audio_mix_session_from_log",
     "audio_mixer_from_log",
     "audio_ref_band_from_log",
     "audio_ref_band_src",
     "audio_telemetry_from_log",
     "audio_ts_lag_ms_from_log",
     "buffered_ms_series_from_log",
+    # bundle_state_audio_rx
+    "AUDIO_RX_WINDOW_S",
+    "DANTE_RX_GATED",
+    "DANTE_RX_KEY",
+    "DANTE_RX_NAMED",
+    "VBAN_RX_GATED",
+    "VBAN_RX_NAMED",
+    "audio_rx_from_log",
     # bundle_state_av_offset
     "AV_OFFSET_BASELINE_WINDOW_S",
     "AV_OFFSET_RECENT_WINDOW_S",
@@ -366,6 +386,9 @@ BUNDLE_STATE_KEYS = (
     "audio_mix_mixed_late",
     "audio_mix_frozen",
     "audio_mix_age_s",
+    # issue 1460 -- the audio SESSION identity (`audio_mix_session_from_log`): the stamp of the
+    # newest audio-reset `buffering type:` line. The MIX-LATE arm grades a changed identity from 0.
+    "audio_mix_session",
     "vban_pacer_loss_events",
     "vban_pacer_loss_ms",
     "vban_pacer_loss_dest",
