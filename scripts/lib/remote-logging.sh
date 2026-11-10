@@ -103,7 +103,7 @@ REMOTE_LOG_JU_CONF_PATH="/etc/systemd/journal-upload.conf"
 REMOTE_LOG_JU_DROPIN_PATH="/etc/systemd/system/systemd-journal-upload.service.d/10-cambox-rostate.conf"
 # ro-root-safe cursor location (tmpfs). The default /var/lib/... is on the read-only root.
 REMOTE_LOG_JU_SAVE_STATE="/run/systemd/journal-upload/state"
-REMOTE_LOG_JU_BIN="${REMOTE_LOG_JU_BIN:-/usr/lib/systemd/systemd-journal-upload}" # env: a test seam only
+REMOTE_LOG_JU_BIN="/usr/lib/systemd/systemd-journal-upload"
 # The apt package that ships systemd-journal-upload on Ubuntu noble.
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (STEP 16 pkg) + create-usb-linux.sh (chroot apt)
 REMOTE_LOG_JU_PKG="systemd-journal-remote"
@@ -487,9 +487,12 @@ REMOTE_LOG_BOARD_DROPIN_NAME="10-bkshading-board-upload.conf"
 REMOTE_LOG_BOARD_CONNECT_TIMEOUT_S=3
 
 # remote_log_board_sink_ips BOARD -> the space-separated STRIH_IP of every strih-role fact file whose
-# STRIH_BKSHADING_RELAYS has an `sbc-relay@register:BOARD` entry, in the loader's file order. rc 1 + one
-# `remote-logging:` stderr line, nothing on stdout, for: a BOARD that is not a relay id (1-64 of
-# [A-Za-z0-9._-], starting with a letter or digit), a fact file that does not parse, no file naming it,
+# STRIH_BKSHADING_RELAYS has an `sbc-relay@register:BOARD` entry, in the loader's file order (the fact
+# file names, so strih-pp before strih-snv). Each venue is its own network with the same 10.77.8.0/23
+# numbering, so the other venue's strih address answers on the journal-remote port only if a host at
+# that address runs a receiver; the wrapper takes the first that answers. rc 1 + one `remote-logging:` stderr line,
+# nothing on stdout, for: a BOARD that is not a relay id (`_strih_box_relay_id`, the loader's own
+# grammar), a fact file that does not parse, no file naming it,
 # or a STRIH_IP that is not IPv4. Never a guessed or default address, never dev1. Runs in a subshell
 # like _remote_log_strih_row; STRIH_BOXES_DIR moves the fact dir.
 remote_log_board_sink_ips() {
@@ -498,14 +501,14 @@ remote_log_board_sink_ips() {
     shopt -u nullglob failglob nocaseglob nocasematch 2>/dev/null || true
     IFS=$' \t\n'
     board="${1-}"
-    lower='abcdefghijklmnopqrstuvwxyz' upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ' digit='0123456789'
-    if [ "${#board}" -gt 64 ] || ! [[ "$board" =~ ^[${lower}${upper}${digit}][${lower}${upper}${digit}._-]*$ ]]; then
-      echo "remote-logging: '${board}' is not a shading board name (its relay id) -- no log sink (issue 808)" >&2
-      exit 1
-    fi
     if ! declare -F strih_box_parse_file >/dev/null; then
       # shellcheck source=scripts/lib/strih-box-facts.sh
       . "${REMOTE_LOG_LIB_DIR}/strih-box-facts.sh" || exit 1
+    fi
+    # the ONE relay-id grammar, the one the fact loader accepts in `register:<id>`
+    if ! _strih_box_relay_id "$board"; then
+      echo "remote-logging: '${board}' is not a shading board name (its relay id) -- no log sink (issue 808)" >&2
+      exit 1
     fi
     dir="$(strih_box_dir)"
     sinks=""
@@ -545,6 +548,8 @@ remote_log_board_sink_ips() {
 # ${REMOTE_LOG_BOARD_CONNECT_TIMEOUT_S} s and execs the uploader against it with the /run cursor; none =
 # exit 1 (the drop-in's Restart=always tries again). rc 1 + a stderr line, no output, for no sink or a
 # non-IPv4 one. The exec keeps the PID, so systemd's watchdog and notify see the uploader itself.
+# REMOTE_LOG_BOARD_UPLOAD_BIN replaces the uploader path in the wrapper ONLY (a test seam; the cambox
+# drop-in keeps the fixed REMOTE_LOG_JU_BIN).
 remote_log_board_upload_script_content() {
   local s
   [ "$#" -gt 0 ] || { echo "remote-logging: the board upload wrapper needs at least one sink (issue 808)" >&2; return 1; }
@@ -566,7 +571,7 @@ for ip in \$SINKS; do
   # shellcheck disable=SC2016  # \$1/\$2 expand in the probe shell, not here
   if timeout "\$WAIT_S" bash -c ': >"/dev/tcp/\$1/\$2"' probe "\$ip" "\$PORT" 2>/dev/null; then
     echo "bkshading-journal-upload: uploading to \${ip}:\${PORT}"
-    exec ${REMOTE_LOG_JU_BIN} --save-state=${REMOTE_LOG_JU_SAVE_STATE} --url="http://\${ip}:\${PORT}"
+    exec ${REMOTE_LOG_BOARD_UPLOAD_BIN:-$REMOTE_LOG_JU_BIN} --save-state=${REMOTE_LOG_JU_SAVE_STATE} --url="http://\${ip}:\${PORT}"
   fi
 done
 echo "bkshading-journal-upload: no log sink answers on port \${PORT} (\${SINKS}) -- retrying" >&2

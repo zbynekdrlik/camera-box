@@ -38,21 +38,31 @@ bkshading_sbc_upload_dropin_text() {
   remote_log_journal_upload_dropin_content "$REMOTE_LOG_BOARD_UPLOAD_SCRIPT_PATH"
 }
 
-# bkshading_sbc_remote_log_install SINKS SCRIPT_DEST DROPIN_DEST JU_BIN APT_GET -> install the uploader
-# package when JU_BIN is missing, write the wrapper (0755) and the drop-in (0644), each through a temp
-# file + rename and only when it differs. Enable-only: the caller enables the unit after its
-# daemon-reload, nothing is started. rc 1 + a named stderr line on a failure.
+# bkshading_sbc_journal_upload_package JU_BIN APT_GET -> install the uploader package when JU_BIN is
+# missing (the caller runs it with its other packages, before any board file is written). rc 1 + a
+# named stderr line on a failure.
+bkshading_sbc_journal_upload_package() {
+  local ju_bin="$1" apt_get="$2"
+  if [ -x "$ju_bin" ]; then
+    echo "  journal uploader already present: $ju_bin"
+    return 0
+  fi
+  echo "  installing ${REMOTE_LOG_JU_PKG} (systemd-journal-upload, the board journal's way off-box) via apt ..."
+  "$apt_get" update -qq || { echo "ERROR: apt-get update failed -- the journal uploader is not installed" >&2; return 1; }
+  "$apt_get" install -y -qq "$REMOTE_LOG_JU_PKG" \
+    || { echo "ERROR: apt-get install ${REMOTE_LOG_JU_PKG} failed" >&2; return 1; }
+  [ -x "$ju_bin" ] || { echo "ERROR: ${ju_bin} still missing after installing ${REMOTE_LOG_JU_PKG}" >&2; return 1; }
+}
+
+# bkshading_sbc_remote_log_install SINKS SCRIPT_DEST DROPIN_DEST JU_BIN -> write the wrapper (0755) and
+# the drop-in (0644), each through a temp file + rename and only when it differs. Enable-only: the
+# caller enables the unit after its daemon-reload, nothing is started. rc 1 + a named stderr line on a
+# failure (also when the uploader package is missing: bkshading_sbc_journal_upload_package first).
 bkshading_sbc_remote_log_install() {
-  local sinks="$1" script_dest="$2" dropin_dest="$3" ju_bin="$4" apt_get="$5" text
+  local sinks="$1" script_dest="$2" dropin_dest="$3" ju_bin="$4" text
   local -a ips=()
   read -r -a ips <<<"$sinks"
-  if [ ! -x "$ju_bin" ]; then
-    echo "  installing ${REMOTE_LOG_JU_PKG} (systemd-journal-upload, the board journal's way off-box) via apt ..."
-    "$apt_get" update -qq || { echo "ERROR: apt-get update failed -- the journal uploader is not installed" >&2; return 1; }
-    "$apt_get" install -y -qq "$REMOTE_LOG_JU_PKG" \
-      || { echo "ERROR: apt-get install ${REMOTE_LOG_JU_PKG} failed" >&2; return 1; }
-    [ -x "$ju_bin" ] || { echo "ERROR: ${ju_bin} still missing after installing ${REMOTE_LOG_JU_PKG}" >&2; return 1; }
-  fi
+  [ -x "$ju_bin" ] || { echo "ERROR: ${ju_bin} missing -- the journal uploader is not installed" >&2; return 1; }
   text="$(remote_log_board_upload_script_content "${ips[@]}")" || return 1
   _bkshading_sbc_put "$script_dest" 0755 "$text" || return 1
   text="$(bkshading_sbc_upload_dropin_text)" || return 1
@@ -68,8 +78,12 @@ _bkshading_sbc_put() {
     return 0
   fi
   mkdir -p "$(dirname "$path")" || return 1
-  printf '%s\n' "$text" >"$path.new.$$" || { rm -f "$path.new.$$"; return 1; }
-  chmod "$mode" "$path.new.$$" && mv -f "$path.new.$$" "$path"
+  if printf '%s\n' "$text" >"$path.new.$$" && chmod "$mode" "$path.new.$$" && mv -f "$path.new.$$" "$path"; then
+    return 0
+  fi
+  rm -f "$path.new.$$"
+  echo "ERROR: could not write $path" >&2
+  return 1
 }
 
 # bkshading_sbc_remote_log_check BOARD SCRIPT_DEST DROPIN_DEST JU_BIN SYSTEMCTL -> one OK row, or a FAIL
@@ -105,6 +119,19 @@ bkshading_sbc_remote_log_check() {
   fi
   [ "$fail" = 0 ] || return 1
   echo "OK: the board journal ships off-box (systemd-journal-upload enabled, first answering of ${sinks} :${REMOTE_LOG_JOURNAL_PORT})"
+}
+
+# bkshading_sbc_clock_file_note FILE -> one informational line naming the boot clock file's date: it is
+# refreshed only by --install (fake-hwclock-save is masked on the ro root), so between installs every
+# boot starts at that date until timesyncd syncs. Never a FAIL: an old date is a limit, not a fault.
+bkshading_sbc_clock_file_note() {
+  local file="$1" when
+  if [ ! -f "$file" ]; then
+    echo "OK: no $file (no fake-hwclock) -- the boot clock starts at the kernel's own date until the time sync"
+    return 0
+  fi
+  when="$(head -n 1 "$file" 2>/dev/null || true)"
+  echo "OK: boot clock file $file = '${when:-<empty>}' (refreshed only by --install; each boot starts there until timesyncd syncs)"
 }
 
 # bkshading_sbc_clock_time_ok VALUE -> 0 iff VALUE is `YYYY-MM-DD HH:MM:SS` (fake-hwclock's own format).

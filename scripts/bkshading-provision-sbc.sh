@@ -523,6 +523,7 @@ do_install() {
   fi
 
   install_gphoto2
+  bkshading_sbc_journal_upload_package "$JU_BIN" "$APT_GET" || exit 1
 
   # An SBC writes NO CAMERA_BOX_CAPTURE_FPS env (no appliance to derive from; a handheld has no grab
   # comparison). The predicate is the single source of truth; if it ever flips, this branch is where
@@ -552,7 +553,7 @@ do_install() {
   echo "  camera link file $(bkshading_camera_link_network_path) in place (issue 1452)"
 
   apply_wifi
-  bkshading_sbc_remote_log_install "$LOG_SINKS" "$JU_SCRIPT" "$JU_DROPIN" "$JU_BIN" "$APT_GET" || exit 1
+  bkshading_sbc_remote_log_install "$LOG_SINKS" "$JU_SCRIPT" "$JU_DROPIN" "$JU_BIN" || exit 1
 
   # ENABLE-ONLY: never start/restart the relay here (provisioning-scripts.md) — reboot / the
   # post-reboot verify brings it live.
@@ -839,6 +840,7 @@ do_check() {
   fi
   # (7) issue 808: the RAM journal ships to the venue strih (every SBC, wired or WiFi)
   bkshading_sbc_remote_log_check "$(bkshading_sbc_board_name)" "$JU_SCRIPT" "$JU_DROPIN" "$JU_BIN" "$SYSTEMCTL" || rc=1
+  bkshading_sbc_clock_file_note "$FAKE_HWCLOCK"
 
   if [ "$rc" -ne 0 ]; then
     cat >&2 <<MSG

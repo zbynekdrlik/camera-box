@@ -404,6 +404,12 @@ The board's journal lives in RAM and its `/etc/fake-hwclock.data` stayed at 3.10
   `systemd-journal-upload.service.d/10-bkshading-board-upload.conf` is the cambox drop-in with
   ExecStart = the wrapper (`remote_log_journal_upload_dropin_content EXEC`; without the argument the
   cambox text is byte-identical). The exec keeps the PID, so the unit's watchdog sees the uploader.
+  The candidates are probed in fact-file order (strih-pp before strih-snv). Both venues number their
+  separate networks 10.77.8.0/23, so the other venue's strih address answers only if a host there runs
+  a journal-remote receiver; check that before adding one at either venue. `REMOTE_LOG_BOARD_UPLOAD_BIN`
+  replaces the uploader path in the wrapper only (a test seam; the cambox drop-in keeps the constant).
+  Not verified in the real unit's sandbox by a test (the Debian trixie unit: DynamicUser,
+  MemoryDenyWriteExecute, WatchdogSec=3min): the live runbook below is the proof.
 - **Journal-upload only, no netconsole.** Kernel lines ride the journal (journald reads /dev/kmsg);
   the WiFi driver is out-of-tree (`sprdwl_ng`, netpoll unknown); the board's failure class is a power
   or WiFi loss, not a root medium dropping off the bus. A WiFi drop is backfilled: the uploader resumes
@@ -414,8 +420,9 @@ The board's journal lives in RAM and its `/etc/fake-hwclock.data` stayed at 3.10
   (`camN-kernel.log`) is untouched; the board sends no UDP.
 - **`--install`** resolves the sinks from the board name (`BKSHADING_SBC_HOSTNAME`, else the kernel
   hostname = the relay id) right after the WiFi plan, BEFORE the rw remount: an unlisted board exits 1
-  naming the `N=sbc-relay@register:<board>` entry to add, nothing changed. Then it apt-installs
-  `systemd-journal-remote` when the uploader binary is missing, writes the wrapper (0755) + drop-in
+  naming the `N=sbc-relay@register:<board>` entry to add, nothing changed. Next to gphoto2 it
+  apt-installs `systemd-journal-remote` when the uploader binary is missing; later it writes the
+  wrapper (0755) + drop-in
   (temp + rename, only on a difference), enables `systemd-journal-upload.service` after the
   daemon-reload, never starts it. The copied `scripts/` dir must carry `strih-boxes/` (it does when
   the whole dir is copied): the sinks are read on the board.
@@ -424,7 +431,9 @@ The board's journal lives in RAM and its `/etc/fake-hwclock.data` stayed at 3.10
   NTPSynchronized --value` is `yes`, the time is `YYYY-MM-DD HH:MM:SS` and later than the file (byte
   compare under `LC_ALL=C`). Never an unsynchronized or older time; never a hard fail. Recorded limit:
   the seconds before timesyncd syncs remain (no RTC, ro root); those journal entries carry the
-  provisioning date but keep their boot id and monotonic time. Each later `--install` moves it again.
+  provisioning date but keep their boot id and monotonic time. The file is refreshed ONLY by
+  `--install`, so between installs every boot starts at that install's date (less stale than 3.10,
+  same limit); `--check` prints the file's date as an informational OK line, never a FAIL.
 - **`--check` row (7)** (`bkshading_sbc_remote_log_check`, every SBC): the board is named by a fact
   file, the uploader binary is there, the wrapper and the drop-in are byte-identical to this
   checkout's generators (a fact change shows here), the unit is enabled. Active is NOT graded (it
