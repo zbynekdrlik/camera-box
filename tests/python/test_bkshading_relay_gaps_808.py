@@ -34,6 +34,19 @@ REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from shading_release_fake_1487 import fake_release_env, pin_for_args  # noqa: E402
 
+# issue 1452 (owner 10.11.2026): a box on the REST relay pin runs its relay in every rig mode. The
+# rig-mode lifecycle cases below are about the gphoto2 relay, so they run against a pin map that
+# lists no box (every box takes the gphoto2 fleet pin); the REST case is pinned in
+# tests/python/test_bkshading_relay_always_on_1452.py.
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _gphoto2_only_pin_map(tmp_path, monkeypatch):
+    m = tmp_path / "shading-release-boxes.txt"
+    m.write_text("# no box listed: every box takes scripts/shading-release.pin\n")
+    monkeypatch.setenv("SHADING_RELEASE_BOXES_FILE", str(m))
+
 DEPLOY = os.path.join(REPO, "scripts", "bkshading-deploy-relay.sh")
 DEPLOY_FLEET = os.path.join(REPO, "scripts", "deploy-fleet.sh")
 PROVISION = os.path.join(REPO, "scripts", "bkshading-provision-relay.sh")
