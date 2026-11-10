@@ -63,6 +63,14 @@ SCREAMS the orphan (stdout row + `!! DANTESYNC-TRAY ALARM` stderr banner) withou
 gate exit. This is the SAME "verify the read path against the real target BEFORE designing around
 it" lesson below — a naive `--version`-based tray gate would have read every box UNKNOWN forever.
 
+## The nodes dsync upgrades itself: the same reader, a report-only verdict (issue 1487)
+
+`DSYNC_SELF_UPGRADED_NODES` are read by the SAME `read_dantesync_version_output` (never a `/status`
+field, never a second parser) and graded by `dantesync_self_upgraded_verdict` above the source guard,
+ordered by `release_version_order_word` (`scripts/lib/release-version.sh`, sourced by the gate) — a
+text compare would read 1.9.0 as newer than 1.28.0. Rows: OK (rc 0), SELF-BEHIND (40), SELF-UNKNOWN
+(41); none of them touches the gate exit (`dsync-rename.md`).
+
 ## `CAMBOX_OFFLINE_ACK` / `rig-fleet.txt` is generic over ANY node name, not just cams
 
 `scripts/lib/cambox-offline-ack.sh`'s `cambox_offline_ack_is_acked`/`_reason`/`_effective` match

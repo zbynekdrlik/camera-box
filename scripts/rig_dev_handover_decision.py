@@ -357,6 +357,27 @@ def classify_jxs(strih_text, stream_text, live_text):
             "message": "JPEG XS vstupy sedia s faktami boxov a každá linka prenáša snímky"}
 
 
+# --- issue 1487: the nodes dsync upgrades itself (report-only notes) ------------------------------
+# dantesync-version-gate.sh --fleet prints one row per DSYNC_SELF_UPGRADED_NODES node in its own
+# report-only section (`dantesync_self_upgraded_verdict`): SELF-BEHIND names the version and the pin,
+# SELF-UNKNOWN an unread node. The gate decides the order (release_version_order_word); this only
+# reads the gate's own row, never compares versions itself. The notes never change the item status:
+# the owner forgot nothing, and dsync (not camera-box) upgrades these nodes.
+_SELF_BEHIND_RE = re.compile(
+    r"^\s+(\S+)\s+\S+\s+SELF-BEHIND \(version=(\S+) pin=([^;\s)]+)[;)]", re.M)
+_SELF_UNKNOWN_RE = re.compile(r"^\s+(\S+)\s+\S+\s+SELF-UNKNOWN\b", re.M)
+
+
+def dsync_self_upgraded_notes(text):
+    """Slovak notes for the gate's SELF-BEHIND / SELF-UNKNOWN rows, in row order."""
+    notes = ["%s beží dsync %s pod pinom %s — dsync ho aktualizuje sám, nahlás to dsync/dstack "
+             "session" % m.groups() for m in _SELF_BEHIND_RE.finditer(text or "")]
+    unread = [m.group(1) for m in _SELF_UNKNOWN_RE.finditer(text or "")]
+    if unread:
+        notes.append("verziu dsync na %s sa nepodarilo prečítať" % ", ".join(unread))
+    return notes
+
+
 # --- item specifications ------------------------------------------------------------------------
 class Item(object):
     """One checklist item. `captures` are the <name> keys the orchestrator wrote (.out/.rc). `kind`
@@ -365,7 +386,7 @@ class Item(object):
     def __init__(self, key, label, captures, kind, ok_msg, forgot_msg, unknown_msg,
                  good=None, forgot=None, good_prefixes=(), forgot_prefixes=(),
                  ok_codes=None, forgot_codes=None, capture_kinds=None, forgot_msgs=None,
-                 forgot_token_msgs=None):
+                 forgot_token_msgs=None, note_fn=None):
         self.key = key
         self.label = label
         self.captures = captures
@@ -389,6 +410,9 @@ class Item(object):
         # relay SHADING-DEAD and its old relay RELAY-STALE). `forgot_token_msgs` names the owner's
         # fix per forgot TOKEN seen (joined in first-seen order), falling back to `forgot_msg`.
         self.forgot_token_msgs = dict(forgot_token_msgs or {})
+        # issue 1487: report-only notes read from the captures (text -> [Slovak note]); they ride on
+        # the item's line and the summary, never on its status.
+        self.note_fn = note_fn
 
     def _status_for_capture(self, text, rc, kind=None):
         """Status contribution of ONE captured (text, rc) pair, per this item's (or the capture's)
@@ -461,7 +485,15 @@ class Item(object):
                     if m and m not in seen:
                         seen.append(m)
             msg = "; ".join(seen) or self.forgot_msg
-        return {"key": self.key, "label": self.label, "status": status, "message": msg}
+        entry = {"key": self.key, "label": self.label, "status": status, "message": msg}
+        if self.note_fn:
+            notes = []
+            for name in self.captures:
+                notes.extend(self.note_fn(captures_data.get(name, ("", RC_MISSING))[0]))
+            if notes:
+                entry["notes"] = notes
+                entry["message"] = msg + " (pozor: " + "; ".join(notes) + ")"
+        return entry
 
 
 def combine_statuses(statuses):
@@ -562,7 +594,8 @@ ITEMS = [
          ok_msg="všetky uzly sú na pripnutej dantesync verzii",
          forgot_msg="dantesync verzia je rozhodená — nie všetky uzly na pine",
          unknown_msg="dantesync verzie sa nepodarilo prečítať (uzly nedostupné)",
-         ok_codes={0}, forgot_codes={20}),  # gate exit 0=pass, 20=drift, 11=unknown/incomplete
+         ok_codes={0}, forgot_codes={20},  # gate exit 0=pass, 20=drift, 11=unknown/incomplete
+         note_fn=dsync_self_upgraded_notes),  # issue 1487: a self-upgraded node below the pin
     Item("cambox", "camera-box build (jednotný)", ["cambox"], "exit",
          ok_msg="camera-box build je jednotný naprieč aktívnymi boxmi (na pine)",
          forgot_msg="camera-box build nie je jednotný — nasaď rovnakú verziu (scripts/deploy-fleet.sh)",
@@ -650,7 +683,9 @@ def build_checklist(entries):
     unknown = []
     supervisor = []  # #1319: timer names the supervisor must (re-)enable; owner is not blamed
     supervisor_other = []  # issue 1371: a non-watchdog supervisor problem (the item label)
+    notes = []  # issue 1487: report-only notes, shown on the summary whatever the verdict
     for e in entries:
+        notes.extend(e.get("notes") or [])
         lines.append("%s %s: %s" % (GLYPH[e["status"]], e["label"], e["message"]))
         if e["status"] == FORGOT:
             forgot.append(e["label"])
@@ -686,6 +721,8 @@ def build_checklist(entries):
     else:
         summary = "✅ všetko je v development stave, nič si nezabudol"
         exit_code = 0
+    if notes:
+        summary += " (pozor: " + "; ".join(notes) + ")"
     return lines, summary, exit_code
 
 

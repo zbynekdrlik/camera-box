@@ -168,7 +168,9 @@ The E2E `[0/8]` version gate is NOT switched to `--fleet`: it gates the run's AC
 powered-off FOH PC would refuse every E2E. It stays per-run (camera_active_excluding + imag ack).
 
 **The nodes dsync upgrades itself (issue 1487):** `DSYNC_SELF_UPGRADED_NODES` stay rows here, graded by
-the watchdog and the drift check, but out of the upgrader and the version pin (`dsync-rename.md`).
+the watchdog and the drift check, but out of the upgrader and the version pin (`dsync-rename.md`). The
+version gate `--fleet` still reads their version into a report-only section (`SELF-BEHIND` below the
+pin, never a gate failure, never a roll), and the handover relays it.
 
 ## Config drift (report-only)
 
