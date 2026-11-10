@@ -68,7 +68,13 @@ def test_the_tree_puts_cam3_and_cam5_on_the_rest_pin_and_every_other_box_on_the_
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == os.path.join(REPO, "scripts", want), (box, r.stdout)
     r = _bash('. "$1"; shading_pin_version_for_box "$2" cam3; shading_pin_version_for_box "$2" cam7', LIB, REPO)
-    assert r.stdout.split() == ["0.2.2", "0.1.2"], r.stdout
+    def _tag(pin):
+        line = [x for x in open(os.path.join(REPO, "scripts", pin)).read().splitlines()
+                if x.startswith("SHADING_RELEASE_TAG=v")][0]
+        return line.split("=v", 1)[1]
+    # the versions each box's own pin file names, so a pin bump needs no edit here
+    assert r.stdout.split() == [_tag("shading-release-rest.pin"), _tag("shading-release.pin")], r.stdout
+    assert _tag("shading-release-rest.pin").startswith("0.2."), r.stdout
 
 
 def test_a_pin_file_seam_alone_pins_every_box_and_a_map_seam_still_maps(tmp_path):
