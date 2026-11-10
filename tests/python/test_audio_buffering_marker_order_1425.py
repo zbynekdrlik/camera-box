@@ -261,5 +261,30 @@ def test_the_read_back_runs_on_the_box_and_prints_the_started_obs_value(tmp_path
 
 def test_the_verify_poll_passes_the_fact_and_the_field():
     s = DEPLOY.read_text()
-    assert '"${STRIH_LX_PREP_ABUF:-}" "$(_strih_lx_field abuf "$line")"' in s
+    assert '"$STRIH_LX_PREP_ABUF" "$(_strih_lx_field abuf "$line")"' in s
     assert "STRIH_AUDIO_BUFFERING_MS" in s
+
+
+def test_the_note_without_pgrep_warns_instead_of_claiming_obs_is_down(tmp_path):
+    """Review finding: a box without pgrep must never read as "OBS is not running"."""
+    home, _, _ = _box(tmp_path, "0", [ab.notdet()], T0, T0 + 11)
+    empty = tmp_path / "nobin"
+    empty.mkdir()
+    body = f'set -euo pipefail\n. "{LIB}"\nobs_audio_buffering_running_note "$1" "$2" "$3"; echo "RC=$?"'
+    r = subprocess.run(["/bin/bash", "-c", body, "harness", str(home), "nobody", "0"], capture_output=True,
+                       text=True, env={"PATH": str(empty), "HOME": str(home)}, timeout=30)
+    assert r.stdout.strip().endswith("RC=0"), r.stdout + r.stderr
+    assert "WARNING: cannot tell whether OBS runs (no pgrep" in r.stdout and "not running" not in r.stdout
+
+
+def test_a_marker_reason_never_points_at_step_5():
+    # the marker is written before step 1 now; a FAIL that sends the operator to "step 5" is stale advice
+    assert "re-run setup-strih step 5" not in LIB.read_text()
+
+
+def test_a_tree_without_the_fact_is_not_graded_but_named():
+    # a historical build (before issue 1425) declares no STRIH_AUDIO_BUFFERING_MS: one NOTE, no args 13/14
+    s = DEPLOY.read_text()
+    assert 'ab=("$STRIH_LX_PREP_ABUF" "$(_strih_lx_field abuf "$line")"); else ab=(); fi' in s
+    assert '"$(_strih_lx_field jxs "$line")" "${ab[@]}")"' in s
+    assert "declares no STRIH_AUDIO_BUFFERING_MS (a build before issue 1425)" in s
