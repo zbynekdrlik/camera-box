@@ -160,7 +160,8 @@ def test_a_running_obs_that_predates_the_marker_fails_by_that_name(fact, lines, 
     # not later (or unknown): the reasons stay what they were
     for later in ("0", ""):
         line, rc = _verdict(fact, fact, lines, later)
-        assert rc == "RC=1" and "started before" not in line, line
+        # (the pre-existing NOT-deterministic reason already says "started before the marker was right")
+        assert rc == "RC=1" and "started before ~/" not in line, line
 
 
 def test_later_never_fails_a_box_held_at_its_fact():
