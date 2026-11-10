@@ -560,14 +560,35 @@ def _sbc_paths(root):
         "unit_dir": os.path.join(root, "systemd-system"),
         "tool_log": os.path.join(root, "tool-calls.log"),
         "net_state": os.path.join(root, "fake-net.json"),
+        # the off-box journal (the board ships its RAM journal to its venue strih)
+        "ju_bin": os.path.join(root, "usr", "lib", "systemd", "systemd-journal-upload"),
+        "ju_script": os.path.join(root, "usr", "local", "sbin", "bkshading-journal-upload.sh"),
+        "fake_hwclock": os.path.join(root, "etc", "fake-hwclock.data"),
+        "apt_log": os.path.join(root, "apt-calls.log"),
     }
+
+
+def _fake_board_tools(dirpath, apt_log, ju_bin):
+    """timedatectl answers NTPSynchronized from FAKE_NTP_SYNC (default no); apt-get logs its argv and
+    creates the uploader binary, like the systemd-journal-remote package does."""
+    td = os.path.join(dirpath, "timedatectl")
+    with open(td, "w", encoding="utf-8") as f:
+        f.write('#!/usr/bin/env bash\nprintf "%s\\n" "${FAKE_NTP_SYNC:-no}"\n')
+    os.chmod(td, 0o755)
+    apt = os.path.join(dirpath, "apt-get")
+    with open(apt, "w", encoding="utf-8") as f:
+        f.write('#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\n'
+                'case "$*" in *install*) mkdir -p "%s"; : > "%s"; chmod 0755 "%s" ;; esac\n'
+                % (apt_log, os.path.dirname(ju_bin), ju_bin, ju_bin))
+    os.chmod(apt, 0o755)
+    return td, apt
 
 
 def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=None,
                    root_opts=None, root_uuid=ROOT_UUID, fstab_text=ARMBIAN_FSTAB,
                    persistent_dropin=True, cambox=False, systemctl_fail_on=None,
                    netplan_files=None, net_state=None, disabled_units=(), netplan_other=None,
-                   env_extra=None):
+                   env_extra=None, hostname="cam2-shading", ju_present=True):
     sysd = os.path.join(root, "systemd-system")
     binp = os.path.join(root, "bin", "bkshading-relay")
     calls = os.path.join(root, "systemctl-calls.log")
@@ -618,6 +639,13 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=No
         _fake_elf(paths["cambox_marker"], X86_64)
     tools = os.path.join(root, "fake-tools")
     os.makedirs(tools, exist_ok=True)
+    # the board's uploader is present unless a test removes it (a fresh image may lack the package)
+    if ju_present and not os.path.exists(paths["ju_bin"]):
+        os.makedirs(os.path.dirname(paths["ju_bin"]), exist_ok=True)
+        with open(paths["ju_bin"], "w") as f:
+            f.write("")
+        os.chmod(paths["ju_bin"], 0o755)
+    timedatectl, apt_get = _fake_board_tools(tools, paths["apt_log"], paths["ju_bin"])
     env = dict(
         os.environ,
         BKSHADING_SBC_UNIT_DEST=os.path.join(sysd, UNIT_NAME),
@@ -646,7 +674,15 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=No
         FAKE_ROOT_OPTS=root_opts,
         FAKE_ROOT_UUID=root_uuid,
         FAKE_ROOT_FSTYPE="ext4",
+        # the board's name = its relay id; strih-snv's STRIH_BKSHADING_RELAYS lists cam2-shading
+        BKSHADING_SBC_HOSTNAME=hostname,
+        BKSHADING_SBC_JU_BIN=paths["ju_bin"],
+        BKSHADING_SBC_JU_SCRIPT=paths["ju_script"],
+        BKSHADING_SBC_FAKE_HWCLOCK=paths["fake_hwclock"],
+        BKSHADING_SBC_TIMEDATECTL=timedatectl,
+        BKSHADING_SBC_APT_GET=apt_get,
     )
+    env.pop("STRIH_BOXES_DIR", None)
     env.update(env_extra or {})
     r = subprocess.run(["bash", SCRIPT, mode], capture_output=True, text=True, env=env)
     return r, calls, binp
