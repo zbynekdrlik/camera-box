@@ -531,3 +531,28 @@ def test_an_error_only_dante_receiver_never_reads_healthy():
     assert e["events"] == 0 and e["age_s"] is None
     assert amd.classify_program_rx(e, "dante", 1, 2) == "SILENT"
     assert amd.classify_program_rx(e, "dante", 1, None) == "UNKNOWN"
+
+
+
+# --- review round 3 --------------------------------------------------------------------------
+def test_a_dante_device_that_keeps_restarting_never_reads_healthy():
+    lines = []
+    for k in range(20):
+        lines += [f"{_t(30 * k)}: {START_LINE}",
+                  _dante(_t(30 * k + 10), clock="free", holdover="1", delivered_frames=10)]
+    lines.append(f"{_t(600)}: x")
+    e = bsg.audio_rx_from_log(_text(lines))[bsg.DANTE_RX_KEY]
+    assert e["pairs"] == 0 and e["rebases"] > 0 and e["events"] == 0, e
+    assert amd.classify_program_rx(e, "dante", 1, 2) == "SILENT"
+    assert amd.classify_program_rx(e, "dante", 1, None) == "UNKNOWN"
+
+
+def test_an_obs_vban_source_that_keeps_being_recreated_never_reads_healthy():
+    lines = []
+    for k in range(10):
+        lines += [_vban(_t(30 * k), received=50), f"{_t(30 * k + 5)}: [obs-vban] obs-vban receive worker: "
+                  "source 'Zvuk z mixu' stopped (update)"]
+    lines.append(f"{_t(300)}: x")
+    e = bsg.audio_rx_from_log(_text(lines))["obs-vban:Zvuk z mixu"]
+    assert e["pairs"] == 0 and e["rebases"] > 0, e
+    assert amd.classify_program_rx(e, "obs-vban:Zvuk z mixu", 1, 2) == "SILENT"
