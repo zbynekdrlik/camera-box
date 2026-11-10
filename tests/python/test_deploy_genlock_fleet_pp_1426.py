@@ -169,7 +169,7 @@ case "$cmd" in
   *setup-strih.log*) echo "setup log tail"; exit 0 ;;
   *strih-obs-stop.sh*) exit 0 ;;
   *GENLOCK_BUILD_SHA.txt*)
-    printf 'installed=%s obs_tag=v9.9.5 active=active pid=4242 restarts=0 lib=%s tick=1 hub=9.9.3 jxs=off\n' "$STUB_SHA" "$STUB_LIBSHA"; exit 0 ;;
+    printf 'installed=%s obs_tag=v9.9.5 active=active pid=4242 restarts=0 lib=%s tick=1 hub=9.9.3 abuf=0 jxs=off\n' "$STUB_SHA" "$STUB_LIBSHA"; exit 0 ;;
   *"--user start"*) exit 0 ;;
   *) exit 0 ;;
 esac
