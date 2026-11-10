@@ -113,7 +113,7 @@ def test_a_concealed_only_loss_is_still_an_event():
 
 def test_only_pairs_with_both_lines_inside_the_window_count():
     # a loss between 11:40 and 11:50, both lines older than the window behind the head at 12:00:00
-    lines = [f"11:40:00.000: [obs-vban] " + _vban("x")[len("x: [obs-vban] "):],
+    lines = ["11:40:00.000: [obs-vban] " + _vban("x")[len("x: [obs-vban] "):],
              "11:48:00.000: [obs-vban] " + _vban("x", lost=9)[len("x: [obs-vban] "):],
              "11:50:00.000: [obs-vban] " + _vban("x", lost=9)[len("x: [obs-vban] "):],
              _vban(_t(0), lost=9)]
