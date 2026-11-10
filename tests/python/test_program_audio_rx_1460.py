@@ -484,3 +484,50 @@ def test_dante_frames_that_do_not_advance_are_silent_pairs_never_an_event():
 ])
 def test_silent_is_a_live_log_whose_program_stopped(entry, head, verdict):
     assert amd.classify_program_rx(entry, "dante", 1, head) == verdict
+
+
+# --- review round 2 --------------------------------------------------------------------------
+START_LINE = "dante-input start: config=/home/x/.camera-box/dante-input.toml name=strih-obs"
+
+
+def test_a_clock_fault_while_the_device_starts_is_not_an_event():
+    # the in-process PTP follower may lock a few status lines after a start: an OBS restart / deploy
+    # must not page a LOSS on every Dante box
+    lines = [f"{_t(0)}: {START_LINE}", _dante(_t(10), clock="free", holdover="1", delivered_frames=0),
+             _dante(_t(20), delivered_frames=480), _dante(_t(30), delivered_frames=960)]
+    e = bsg.audio_rx_from_log(_text(lines))[bsg.DANTE_RX_KEY]
+    assert e["deltas"]["clock_faults"] == 0 and e["events"] == 0, e
+
+
+def test_a_clock_fault_after_the_device_reached_the_media_clock_is_an_event():
+    lines = [f"{_t(0)}: {START_LINE}", _dante(_t(10), delivered_frames=480),
+             _dante(_t(20), clock="free", delivered_frames=960), _dante(_t(30), delivered_frames=1440)]
+    assert bsg.audio_rx_from_log(_text(lines))[bsg.DANTE_RX_KEY]["deltas"]["clock_faults"] == 1
+
+
+def test_a_start_that_never_reaches_the_media_clock_counts_after_the_grace():
+    lines = [f"{_t(0)}: {START_LINE}"] + [
+        _dante(_t(s), clock="free", delivered_frames=480 * s) for s in range(10, 241, 10)]
+    e = bsg.audio_rx_from_log(_text(lines))[bsg.DANTE_RX_KEY]
+    grace = bsg.DANTE_RX_START_GRACE_S
+    assert e["deltas"]["clock_faults"] == len([s for s in range(10, 241, 10) if s >= grace]) > 0, e
+
+
+def test_an_error_line_while_the_device_starts_is_not_an_event():
+    lines = [f"{_t(0)}: {START_LINE}", f"{_t(1)}: dante-input error: first subscription pending",
+             _dante(_t(10), delivered_frames=480), _dante(_t(20), delivered_frames=960)]
+    assert bsg.audio_rx_from_log(_text(lines))[bsg.DANTE_RX_KEY]["events"] == 0
+
+
+def test_an_error_only_dante_receiver_never_reads_healthy():
+    # the device errored and never wrote a status line: LOSS while the error is in the window, then
+    # never HEALTHY (no status line ever = SILENT on a live log, UNKNOWN without that proof)
+    inside = _text([f"{_t(0)}: dante-input error: bind failed", f"{_t(30)}: x"])
+    e = bsg.audio_rx_from_log(inside)[bsg.DANTE_RX_KEY]
+    assert e["events"] == 1 and e["age_s"] is None
+    assert amd.classify_program_rx(e, "dante", 1, 2) == "LOSS"
+    after = _text(["11:40:00.000: dante-input error: bind failed", f"{_t(0)}: x"])
+    e = bsg.audio_rx_from_log(after)[bsg.DANTE_RX_KEY]
+    assert e["events"] == 0 and e["age_s"] is None
+    assert amd.classify_program_rx(e, "dante", 1, 2) == "SILENT"
+    assert amd.classify_program_rx(e, "dante", 1, None) == "UNKNOWN"
