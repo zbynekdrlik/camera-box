@@ -180,8 +180,8 @@ maybe_remount_rw() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remo
 # then runs in its own session, so a second Ctrl-C from the terminal cannot reach it (sshpass forwards
 # SIGINT to its ssh child even when this shell ignores it).
 RESTORE_SESSION=()
-ssh_box() { "${RESTORE_SESSION[@]}" "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "root@$1" "$2"; }
-scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$2" "root@$1:$3"; }
+ssh_box() { "${RESTORE_SESSION[@]}" "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "root@$1" "$2"; }
+scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$2" "root@$1:$3"; }
 
 # issue 808 (cam6/cam7, 25.9.2026): the ro remount used to be swallowed (`2>/dev/null; true`), the
 # script printed OK and the box root stayed read-WRITE. issue 1407: the close is now the ONE shared
