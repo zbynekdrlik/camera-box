@@ -312,7 +312,7 @@ def _body(events, age=4, head=2, key="obs-vban:Zvuk z mixu", gap=10):
         "gap_max_s": gap, "age_s": age}}})
 
 
-def _run(tmp_path, body, state, box="stream-pp|stream-pp.lan", dry_run=True, notify=None):
+def _run(tmp_path, body, state, box="stream-pp|stream-pp.lan", dry_run=True, notify=None, page="1"):
     body_file = tmp_path / "body.json"
     body_file.write_text(body, encoding="utf-8")
     fetch = tmp_path / "fetch.sh"
@@ -323,6 +323,9 @@ def _run(tmp_path, body, state, box="stream-pp|stream-pp.lan", dry_run=True, not
                 "OBS_FLEET_HOME": "stream-pp strih-pp resolume-snv",
                 "AUDIO_MIXER_ALERT_STATE_FILE": str(state),
                 "AIRULESET_NOTIFY": notify or "/nonexistent/airuleset.py"})
+    env.pop("AUDIO_MIXER_PROGRAM_RX_PAGE", None)
+    if page is not None:
+        env["AUDIO_MIXER_PROGRAM_RX_PAGE"] = page
     args = ["bash", str(_SCRIPTS / "audio-mixer-alert-watchdog.sh")] + (["--dry-run"] if dry_run else [])
     r = subprocess.run(args, capture_output=True, text=True, env=env, timeout=120)
     assert r.returncode == 0, r.stderr
@@ -404,3 +407,16 @@ def test_watchdog_sends_a_time_bucketed_key(tmp_path):
     assert len(sent) == 1, sent
     assert re.search(r"--dedup-key program-rx-stream-pp-\d+$", sent[0]), sent[0]
     assert "✅" not in sent[0]
+
+
+def test_watchdog_the_arm_ships_disabled_it_logs_a_loss_but_never_pages(tmp_path):
+    calls = tmp_path / "notify-calls.txt"
+    notify = tmp_path / "notify.py"
+    notify.write_text("import sys\n"
+                      f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n",
+                      encoding="utf-8")
+    state = tmp_path / "state"
+    for _ in range(3):
+        log = _run(tmp_path, _body(4), state, dry_run=False, notify=str(notify), page=None)
+        assert "program_rx=LOSS" in log and "paging is DISABLED" in log, log
+    assert not calls.exists()
