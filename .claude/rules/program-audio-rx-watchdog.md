@@ -66,7 +66,9 @@ a loss during a production was invisible until someone heard it (owner: zero aud
   old with no proof the log is live) / HEALTHY. A receiver that never wrote a status line (only an
   error line) is never HEALTHY: LOSS while the error is in the window, then SILENT / UNKNOWN. Nor is
   a receiver whose every pair in the window was a rebase (a device or source re-created over and
-  over: `pairs == 0`, `rebases > 0`), review round 3. `analyze(..., rx_key=)`, CLI `--rx-key`, prints `rx_*`.
+  over: `pairs == 0`, `rebases > 0`), review round 3. Residual (review round 4): a slower restart
+  loop that still writes two or more status lines per start, with audio flowing and no fault outside
+  the start grace, reads HEALTHY; its `rebases=` count is on every machine-channel `program_rx` line. `analyze(..., rx_key=)`, CLI `--rx-key`, prints `rx_*`.
 - **SILENT is never paged (a stated residual, review round 1):** a dead sender, a dropped NIC or a down
   leg (the 8.11.2026 stream-snv USB NIC class) reads SILENT on the machine channel only, because a
   console switched off overnight reads exactly the same; paging silence needs a production gate (the
