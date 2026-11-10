@@ -192,7 +192,7 @@ def test_a_failed_read_in_the_section_is_unknown_never_drift(tmp_path):
 
 def test_gather_reads_active_store_and_stops_on_a_missing_ndi_config():
     r = _bash(f'set -euo pipefail; . "{LIB}"; win_net_layout_gather_ps')
-    assert "Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore" in r.stdout
+    assert "Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop" in r.stdout
     assert "Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore" in r.stdout
     assert "-Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop" in r.stdout
 
@@ -204,3 +204,12 @@ def test_gate_report_rows_skip_net_layout_for_an_undeclared_or_unread_host(tmp_p
     assert r.returncode == 0, r.stderr
     assert "net_layout" not in r.stdout, r.stdout
     assert "wer_dontshowui" in r.stdout, r.stdout
+
+
+def test_every_layout_read_reports_its_own_failure():
+    # re-review: the Dante adapter's reads (vlan, dnsreg, netbios, binding) and the route read
+    # print err=<key> when they fail, so a cmdlet error is UNKNOWN, never a false DRIFT
+    r = _bash(f'set -euo pipefail; . "{LIB}"; win_net_layout_gather_ps')
+    for key in ("phys", "ip", "defroute", "ifmetric", "virt", "vlan", "dnsreg", "netbios", "binding"):
+        assert f'"err={key}|' in r.stdout, key
+    assert "SilentlyContinue)) {" not in r.stdout, r.stdout

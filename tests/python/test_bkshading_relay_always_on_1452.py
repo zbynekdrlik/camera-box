@@ -189,3 +189,11 @@ def test_expected_enable_state_is_enabled_for_a_rest_box_in_test_mode():
               'echo "cam3-empty-src $(bkshading_relay_expected_enable_state cam3 test "" cam2)"')
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == ["cam3 enabled", "cam5 enabled", "cam2 disabled", "cam3-empty-src enabled"], r.stdout
+
+
+def test_rest_session_holds_a_relay_caught_in_its_restart_window(tmp_path):
+    # re-review: a relay in `activating` (its Restart= window) is stopped and started again too,
+    # never left to fail the session with exit 97
+    run, state, calls = _rest_session(tmp_path, "cam3", "activating")
+    assert run.returncode != 97 and "CTS_RELAY_HOLD 1" in run.stdout, run.stdout
+    assert state == "active", (state, calls)
