@@ -261,6 +261,10 @@ def classify_program_rx(entry, rx_key, box_reachable, log_head_age_s=None,
     pairs, silent = _int_or_none(entry.get("pairs")), _int_or_none(entry.get("silent_pairs"))
     if pairs and silent == pairs:
         return "SILENT"
+    if pairs == 0 and (_int_or_none(entry.get("rebases")) or 0) > 0:
+        # review round 3: every pair in the window was a restart (a device / source re-created over
+        # and over): nothing was graded, so never HEALTHY
+        return "SILENT" if live else "UNKNOWN"
     return "HEALTHY"
 
 
