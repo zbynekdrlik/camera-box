@@ -128,6 +128,11 @@ Full-path E2E at the `genlock_parity` preflight (the recurring #923/#932 pain).
 
 ## The shape (a PLANNER + bounded ssh-executor, same as `launch-obs-genlock.sh`)
 
+- **No `--plan` = EXECUTE, on every arm.** `--yes` only confirms the box-backup RETENTION deletions;
+  leaving it out never makes a dry run. `deploy-genlock-fleet.sh --boxes strih-pp` (no `--plan`)
+  stopped strih-pp's OBS, ran setup-strih and restarted OBS on 11.11.2026 00:14 when a plan was
+  intended. To read the plan, pass `--plan --run-id ... --sha ... --stage ...` explicitly.
+
 - Pure builder functions emit each box's program; unit-tested by sourcing (`tests/deploy_genlock_fleet.rs`).
 - **Windows (strih/stream) is EMIT-ONLY** — a bash script cannot drive the `win-*` MCP
   (`win-ssh-vs-mcp` HARD rule), so it PRINTS the PowerShell program the agent pastes into the box's
