@@ -95,6 +95,25 @@ stray_session_check_assert() {
   exit 1
 }
 
+# stray_session_hosts_for_camera CAM -> "<strih host> <stream host>" of the venue CAM belongs to
+# (issue 1506): the venue from the strih fact files (remote_log_camera_venue, remote-logging.sh), the
+# boxes from the obs fleet list (obs_fleet_host strih-/stream-<venue>, obs-fleet.sh). The caller sources
+# both libs. A camera with no venue, or a venue without both boxes in the list, returns 1 with nothing
+# printed: the caller refuses that box, never guards it with another venue's boxes.
+stray_session_hosts_for_camera() {
+  local venue strih stream
+  declare -F remote_log_camera_venue >/dev/null && declare -F obs_fleet_host >/dev/null || {
+    echo "stray-session-check: remote-logging.sh + obs-fleet.sh must be sourced for the venue hosts (issue 1506)" >&2
+    return 1
+  }
+  venue="$(remote_log_camera_venue "${1-}")" || return 1
+  strih="$(obs_fleet_host "strih-${venue}")" && [ -n "$strih" ] \
+    || { echo "stray-session-check: no strih-${venue} in the obs fleet list (issue 1506)" >&2; return 1; }
+  stream="$(obs_fleet_host "stream-${venue}")" && [ -n "$stream" ] \
+    || { echo "stray-session-check: no stream-${venue} in the obs fleet list (issue 1506)" >&2; return 1; }
+  printf '%s %s\n' "$strih" "$stream"
+}
+
 # stray_session_busy_summary GUARD_STDERR -> one line naming what is live, parsed from
 # stray_session_check_assert's OWN refusal output above (its `    rig-busy-check: <json>` line and
 # the key-free `    <label> streaming: <detail>` lines) -- e.g. `stream streaming

@@ -80,6 +80,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/shading-release.sh" # the pinned shading release (issue 1487)
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh" # stray_session_check_assert() — the ONE shared rig-busy guard
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh" # obs_fleet_host: the --box venue's strih/stream for the guard (issue 1506)
+# shellcheck source=scripts/lib/remote-logging.sh
+. "$HERE/lib/remote-logging.sh" # remote_log_camera_venue: the venue of --box (issue 1506)
 # shellcheck source=scripts/lib/rig-lease.sh
 . "$HERE/lib/rig-lease.sh"  # issue 1371: the rig lease an E2E holds while it owns the camboxes
 # shellcheck source=scripts/lib/ro-window.sh
@@ -98,8 +102,10 @@ RELAY_STAGE="${RELAY_DEST}.deploy.$$"
 # Rig-busy guard inputs (mirror scripts/rig-busy-gate.sh's own defaults). The guard reuses the
 # shared obs_phase2.py rig-busy-check; RIG_BUSY_HERE names the dir holding obs_phase2.py (this
 # script's own scripts/ dir), overridable so a Tier-0 test can point it at a fake.
-STRIH_HOST="${STRIH_HOST:-10.77.9.202}"
-STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
+# issue 1506: unset = the guard reads the strih/stream of the --box camera's own venue (resolved at the
+# preflight); with no --box (an SBC/handheld relay) the home venue's pair. A caller-set pair wins.
+STRIH_HOST="${STRIH_HOST:-}"
+STREAM_HOST="${STREAM_HOST:-}"
 OBS_PASSWORD="${OBS_PASSWORD:-}"
 RIG_BUSY_HERE="${BKSHADING_DEPLOY_OBS_PHASE2_DIR:-$HERE}"
 SSH_PASS="${SSH_PASS:-newlevel}"
@@ -347,6 +353,17 @@ if [ "$FORCE_LIVE" = 1 ]; then
   echo "WARNING: --force-live — BYPASSING the rig-busy guard for the bkshading relay deploy to $HOST." >&2
   echo "         A relay deploy/restart during a LIVE broadcast can fork-wedge the cambox (2026-09-13 escalation); supervisor override only." >&2
 else
+  if [ -z "$STRIH_HOST" ] || [ -z "$STREAM_HOST" ]; then
+    if [ -n "$BOX" ]; then
+      _guard_hosts="$(stray_session_hosts_for_camera "$BOX")" || {
+        echo "ERROR: [preflight] the strih/stream of ${BOX}'s venue cannot be resolved -- refusing the relay deploy to $HOST (issue 1506)" >&2
+        exit 1
+      }
+    else
+      _guard_hosts="$(obs_fleet_host strih-snv) $(obs_fleet_host stream-snv)"
+    fi
+    STRIH_HOST="${_guard_hosts%% *}" STREAM_HOST="${_guard_hosts##* }"
+  fi
   stray_session_check_assert "$RIG_BUSY_HERE" "$STRIH_HOST" "$STREAM_HOST" "the bkshading relay deploy to $HOST"
 fi
 

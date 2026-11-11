@@ -66,11 +66,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/rig-heartbeat.sh"     # rig_held_reason: the issue-281 heartbeat + the rig lease (rig-lease.sh)
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh"  # stray_session_check_assert -- the ONE shared rig-busy guard
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"  # obs_fleet_host: a venue's strih/stream for the guard (issue 1506)
 
 CAM_PW="${CAM_PW:-newlevel}"
 SSH_TIMEOUT="${SSH_TIMEOUT:-10}"
-STRIH_HOST="${STRIH_HOST:-10.77.9.202}"
-STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
+# issue 1506: the guard reads the strih/stream of EACH box's own venue (rig_refused); a caller-set
+# STRIH_HOST/STREAM_HOST pair still wins for every box.
+STRIH_HOST="${STRIH_HOST:-}"
+STREAM_HOST="${STREAM_HOST:-}"
 RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
 RIG_BUSY_HERE="${CAMBOX_RO_UNITS_OBS_PHASE2_DIR:-$HERE}"
 
@@ -237,7 +241,15 @@ rig_refused() {
     return 0
   fi
   RIG_REFUSAL=""
-  if ! (stray_session_check_assert "$RIG_BUSY_HERE" "$STRIH_HOST" "$STREAM_HOST" "the issue-1394 read-only-root apply on $1"); then
+  local _strih="$STRIH_HOST" _stream="$STREAM_HOST" _hosts
+  if [ -z "$_strih" ] || [ -z "$_stream" ]; then
+    if ! _hosts="$(stray_session_hosts_for_camera "$1")"; then
+      RIG_REFUSAL="the strih/stream of $1's venue cannot be resolved, so the rig-busy guard cannot read them (issue 1506)"
+      return 0
+    fi
+    _strih="${_hosts%% *}" _stream="${_hosts##* }"
+  fi
+  if ! (stray_session_check_assert "$RIG_BUSY_HERE" "$_strih" "$_stream" "the issue-1394 read-only-root apply on $1"); then
     RIG_REFUSAL="strih or stream records or streams (the rig-busy guard above)"
     return 0
   fi
