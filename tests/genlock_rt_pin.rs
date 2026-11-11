@@ -32,7 +32,7 @@ fn vendor_file(rel: &str) -> String {
 }
 
 /// Collapse every run of ASCII whitespace to a single space so the assertions survive reformatting
-/// (e.g. an upstream merge re-indenting a line). Mirrors `obs_updater_disabled.rs::squish`.
+/// (e.g. an upstream merge re-indenting a line). Mirrors `tests/obs_updater_disabled.rs::squish`.
 fn squish(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }

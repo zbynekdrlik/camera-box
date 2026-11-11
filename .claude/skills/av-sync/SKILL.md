@@ -242,7 +242,7 @@ authoritative format — verified against the live `sync-test-output-audio.cpp` 
 owns the transition classification (Locked/Updated/Unlocked, with an "Updated" only firing when
 the offset moves beyond a stable tolerance so a healthy lock doesn't spam a line every marker);
 `sync-test-output-audio.cpp`'s glue is a thin `push()` + `blog()` switch. TDD'd the SAME twin-harness way
-as the cluster estimator itself: `tests/av_sync_dock_audit_log.rs` compiles+runs a tiny
+as the cluster estimator itself: `obs:tests/vendored/tests/av_sync_dock_audit_log.rs` compiles+runs a tiny
 `c++ -std=c++17` program against the real header — reuse this pattern for any FUTURE dock logic
 that needs RED→GREEN proof without a rig.
 

@@ -136,8 +136,8 @@ to read) — a session-agnostic file read, so it is allowed even in an agent ses
 ## Testing a frontend fix — same std-only Facet A + Facet B, but NO pwsh mirror
 
 The vendored frontend `.cpp` compiles ONLY on CI. Reuse the
-`vendored-libobs-change-safety.md` #793/#1026 pattern exactly (see `tests/video_io_null_guard.rs` /
-`tests/prop_dialog_checksettings_null_guard_773.rs`):
+`vendored-libobs-change-safety.md` #793/#1026 pattern exactly (see `obs:tests/vendored/tests/video_io_null_guard.rs` /
+`obs:tests/vendored/tests/prop_dialog_checksettings_null_guard_773.rs`):
 
 - **Facet A** — std-only `fs::read_to_string` source anchors (helper present, guard-before-deref,
   old unguarded form absent), run with `cargo test --test <file>`.

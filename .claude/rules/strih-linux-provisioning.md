@@ -770,7 +770,7 @@ lease; strih-snv has run Xorg + openbox since 23.9.
 - **Tests:** `tests/strih_drm_output_provision_1346.rs` (the lib helpers + the wiring anchors),
   `tests/python/test_strih_drm_output_1346.py` (the Python grammar, the shared
   `tests/fixtures/drm_output_view_parity.tsv` with the C lift, read/write, the CLI) and
-  `tests/drm_output_view_1346.rs` (the vendored side).
+  `obs:tests/vendored/tests/drm_output_view_1346.rs` (the vendored side).
 - **Live acceptance (supervisor/owner, needs an HDMI monitor on strih-snv):** FULL-bundle deploy (a
   frontend + libobs change) → plug the monitor → re-run setup-strih step 6 → restart
   `strih-obs.service` → both views scan out (switch in Tools), the choice survives an OBS restart,

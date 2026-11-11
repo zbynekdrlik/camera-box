@@ -7,9 +7,7 @@ paths:
   - "tests/distroav_by_url_identity_verify_1180.rs"
   - "tests/distroav_frameless_by_url_escape_1287.rs"
   - "tests/distroav_stale_duplicate_retarget_1367.rs"
-  - "tests/distroav_stale_duplicate_replay_1367.rs"
   - "tests/support/ndi_source_lift_1367.rs"
-  - "tests/c/distroav_stale_duplicate_model_1367.c"
 ---
 
 # DistroAV NDI receiver-thread lifecycle — a `break` is a PERMANENT, reattach-proof death (#1080)
@@ -409,7 +407,7 @@ name per URL, so the old port's new owner advertises it). A nameless record is n
   - the verdict;
   - a scripted run of every state helper;
   - the expiry.
-- A SEQUENCE REPLAY, `tests/c/distroav_stale_duplicate_model_1367.c`: a phase-based model (what each
+- A SEQUENCE REPLAY, `obs:tests/c/distroav_stale_duplicate_model_1367.c`: a phase-based model (what each
   finder lists, which URL our sender delivers on and from when, a dead port; any other URL is another
   live sender) whose every decision is a shipped helper. The five decided scenarios:
   - incident ordering: attach on reset 1, zero wrong frames;

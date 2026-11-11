@@ -7,7 +7,7 @@ paths:
 
 Two gotchas hit writing two new twin-harness files (`av_sync_dock_lock_churn_999.rs`,
 `av_sync_dock_video_ts_valid_1005.rs`) in the same session, following the established pattern
-(`tests/av_sync_dock_audit_log.rs` etc. — a `const HARNESS_CPP: &str = r#"..."#;` raw string
+(`obs:tests/vendored/tests/av_sync_dock_audit_log.rs` etc. — a `const HARNESS_CPP: &str = r#"..."#;` raw string
 containing a tiny C++ program compiled+run against the real vendored header).
 
 ## 1. A CHECK message starting `"#<issue-number>:` inside `r#"..."#` truncates the raw string early

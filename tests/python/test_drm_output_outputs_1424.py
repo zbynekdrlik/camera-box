@@ -2,9 +2,9 @@
 design comment 6150029770): strih-pp drives HDMI-0 = the cutter's Multiview AND HDMI-1 = the vestibule
 Program + its audio. The box side:
 
-- the Python mirror of the config grammar (strih_scenes.drm_output_instances) against the SAME table
-  the vendored C is lift-tested on (tests/fixtures/drm_output_outputs_parity.tsv, tests/
-  drm_output_outputs_1424.rs); imag's classifier agrees on every row;
+- the Python mirror of the config grammar (strih_scenes.drm_output_instances) against a copy of the
+  table the vendored C is lift-tested on in the obs repo (tests/fixtures/drm_output_outputs_parity.tsv;
+  obs:tests/vendored/tests/drm_output_outputs_1424.rs, issue 1504); imag's classifier agrees on every row;
 - the launcher takes EVERY armed connector out of X;
 - the box fact STRIH_HDMI_OUTPUTS (strih-pp `HDMI-0:multiview HDMI-1:program`, strih-snv `auto`,
   stream-pp `none`) and setup-strih step 6 writing / migrating the "outputs" array without breaking the

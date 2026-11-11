@@ -60,7 +60,7 @@ repro of the ORIGINAL live crash remains the separate, un-done item the ticket d
 **Reusable pattern — asserting a leak-free on a vendored-C ORCHESTRATOR's early-returns.** A function
 like `ffmpeg_mpegts_finalize` calls ~8 helpers + macros, so it can't be feasibly lift-compiled (a
 partial lift is a retyped fragment, which `vendored-libobs-change-safety.md` cautions against). The
-proof is a static anchor gate (`tests/mpegts_finalize_frees_ff_data_1104.rs`, the
+proof is a static anchor gate (`obs:tests/vendored/tests/mpegts_finalize_frees_ff_data_1104.rs`, the
 `aux_sender_teardown_ordering_877` idiom): slice the function body (sig → first column-0 `}`), and for
 each failure-branch anchor assert the window [anchor → its FIRST `return false;`] contains the cleanup
 call — window-to-first-return scoping stops a LATER branch's free from satisfying an EARLIER branch.

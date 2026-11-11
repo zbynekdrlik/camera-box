@@ -13,7 +13,7 @@
 //! build. It now reads the deployed commit SHA from `GENLOCK_BUILD_SHA.txt` (the marker
 //! every deploy writes at the install root) — resolved from obs64.exe's own directory via
 //! `os_get_executable_path_ptr`, never the process cwd — and shows the short SHA. The pure
-//! formatting is in NewlevelBuildSha.hpp (unit-tested by tests/obs_titlebar_newlevel_sha_parse.rs).
+//! formatting is in NewlevelBuildSha.hpp (unit-tested by obs:tests/vendored/tests/obs_titlebar_newlevel_sha_parse.rs).
 //!
 //! This is a SOURCE-level guard, not a runtime test: the genlock patches live in the
 //! vendored C++ (`git log -- vendor/` is the patch series, per vendor/README.md). The

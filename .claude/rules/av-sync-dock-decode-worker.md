@@ -11,15 +11,12 @@ paths:
   - "vendor/av-sync-dock/src/camera-box-audio-worker.hpp"
   - "vendor/av-sync-dock/test/audio-worker-selftest.cpp"
   - "tests/av_sync_dock_audio_worker_1381.rs"
-  - "tests/c/av_sync_dock_demod_bench_1381.cpp"
   - "vendor/av-sync-dock/test/cb-thread-faults.hpp"
   - "vendor/av-sync-dock/src/sync-test-dock.cpp"
   - "vendor/av-sync-dock/src/sync-test-output-measure.cpp"
   - "vendor/av-sync-dock/src/camera-box-measure-share.hpp"
   - "vendor/av-sync-dock/test/measure-share-selftest.cpp"
   - "tests/av_sync_dock_measure_share_1470.rs"
-  - "tests/av_sync_dock_measure_share_lift_1470.rs"
-  - "tests/c/measure_share_lift_1470_harness.cpp"
 ---
 
 # No analysis on libobs's video-output thread (issue 1367)
@@ -237,7 +234,7 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
 - Shared dock constants go in `camera-box-audio.hpp` (both TUs include it). Do not include
   `camera-box-audio-worker.hpp` in the Qt TU `sync-test-dock.cpp` just for a name: it uses
   `std::min`, which a stray Windows `min` macro would break there.
-- The bench `tests/c/av_sync_dock_demod_bench_1381.cpp` (`-Ivendor/av-sync-dock/src
+- The bench `obs:tests/c/av_sync_dock_demod_bench_1381.cpp` (`-Ivendor/av-sync-dock/src
   -Ivendor/av-sync-dock/test`, arg: the stereo mbc fixture) measures the worker decode and the
   audio-thread share in THREAD CPU time (wall time is scheduler noise)
   and checks the decoder against a frozen copy of the pre-1381 kernel. Measured on the N100 (thread
@@ -322,8 +319,8 @@ audio TU was at 1023 lines):
   on the clip at +900 ms (the bug, kept as the premise), the share at -49.4 ms raw (the room marker,
   the same offset as the room marker alone in the mix), a clip-only program reads `absent_long` and
   never locks. 18/18 tracker + fill mutants killed (the two compile-only kills have compiling twins).
-- `tests/av_sync_dock_measure_share_lift_1470.rs` lifts `convert_time_to_frames` + `mix_audio` and
-  `discard_if_stopped` + `discard_audio` VERBATIM into `tests/c/measure_share_lift_1470_harness.cpp`
+- `obs:tests/vendored/tests/av_sync_dock_measure_share_lift_1470.rs` lifts `convert_time_to_frames` + `mix_audio` and
+  `discard_if_stopped` + `discard_audio` VERBATIM into `obs:tests/c/measure_share_lift_1470_harness.cpp`
   (g++ C++11, `-Wno-register` for upstream's `register`) and drives the REAL tracker: every taken
   tick is byte-identical to what the mix carried (steady, a mid-tick start, a stall, out of the
   program, lagging, a growth of the mix's buffering, a restart past the tick end); the residual rows
@@ -423,7 +420,7 @@ on those threads.
   guard. Killed in both languages: the call dropped, the band fill with its own formula, the grid
   not prepared, a fill copying with its own (swapped) plan, a bytes helper with its own plan, the
   decoder reading its own plan, the band guard dropped, the row helper with swapped geometry.
-- **The bench reports, it does not gate.** `tests/c/av_sync_dock_demod_bench_1381.cpp` keeps the
+- **The bench reports, it does not gate.** `obs:tests/c/av_sync_dock_demod_bench_1381.cpp` keeps the
   mean / p99 audio-thread budget as CHECKs and REPORTS the worst single push against
   `CB_BENCH_AUDIO_THREAD_MAX_MS` with the producer's faults beside it (`faults=<first pass over
   the slots>/<every push>`). Thread CPU time still carries what a shared CI runner charges to the

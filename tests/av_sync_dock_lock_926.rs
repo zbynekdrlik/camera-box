@@ -5,7 +5,7 @@
 //! -form proof (`new_delay = current_delay + floor(ts_ms)` always lands the resulting offset in
 //! `[0, 1)`, i.e. 0ms or audio late by under 1ms, never negative/"audio early"). This harness
 //! cross-checks the C++ port against the SAME scenarios the Rust unit tests already pin, via the
-//! same twin-harness pattern `tests/av_sync_dock_audit_log.rs` (#634) established: compile+run a
+//! same twin-harness pattern `obs:tests/vendored/tests/av_sync_dock_audit_log.rs` (#634) established: compile+run a
 //! tiny real C++ program against the real production header, off-rig, no vendored-OBS build
 //! needed (the dock's own frontend build is CI-only, invisible to a normal PR — see this repo's
 //! CLAUDE.md genlock GOTCHA).

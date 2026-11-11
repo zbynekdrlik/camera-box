@@ -5,8 +5,6 @@ paths:
   - "vendor/obs-studio/libobs/obs.c"
   - "tests/genlock_audio_buffering_parity_1367.rs"
   - "tests/genlock_audio_buffering_wiring_1367.rs"
-  - "tests/genlock_audio_mix_guard_1381.rs"
-  - "tests/c/genlock_audio_mix_guard_1381_harness.c"
   - "vendor/obs-studio/libobs/obs-genlock-mix-guard.h"
   - "vendor/obs-studio/libobs/obs-output.c"
   - "tests/genlock_audio_buffering_freeze_wiring_1425.rs"
@@ -15,7 +13,6 @@ paths:
   - "scripts/rig-health-audit.py"
   - "scripts/launch-obs-genlock.sh"
   - "scripts/lib/obs-audio-buffering.sh"
-  - "tests/genlock_audio_buffering_box_1425.rs"
   - "tests/python/test_obs_audio_buffering_1425.py"
 ---
 
@@ -95,7 +92,7 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
   0 ms box is never mixed (`mic_missed=300`). Live, a growing `#800 mix: mixed_late=` is that case; the
   cure is a larger box value, never growth.
 - **Tests:** the parity gate (`planb` / `frozenp` / `parse` lines + `a_fixed_plan_never_grows_from_its_first_tick_1425`);
-  `tests/genlock_audio_buffering_box_1425.rs` (the reader lifted verbatim, run against a tempfile HOME, +
+  `obs:tests/vendored/tests/genlock_audio_buffering_box_1425.rs` (the reader lifted verbatim, run against a tempfile HOME, +
   the wiring); the 1381 lift's `box-fixed-0` / `box-fixed-85` scenarios
   (`a_box_fixed_plan_never_grows_the_mix_1425`); `tests/python/test_obs_audio_buffering_1425.py` (the
   grade over log lines rendered from the shipped C format strings, the install, item 48, the fact, the E2E
@@ -265,7 +262,7 @@ hears from causing it.
   late stamp is re-anchored on nearly every tick). It never carries the #786 `is now` text, so no
   launch gate reads it as a buffering draw; the marker is not a substring of `audio-stall #1367:` /
   `audio-telemetry #800` / `genlock audio buffering`. Both 60 s bounds are spelled
-  `(60ULL * 1000000000ULL)`: `tests/audio_telemetry_800.rs` pins the #800 rate limit by the literal
+  `(60ULL * 1000000000ULL)`: `obs:tests/vendored/tests/audio_telemetry_800.rs` pins the #800 rate limit by the literal
   `60000000000ULL`, which obs-audio.c must keep exactly once.
 
 **Known limit (reported to the supervisor, not a different shape).** The entry re-anchor's timing
@@ -280,14 +277,14 @@ call. `cut-in-kept-stamp-limit` pins the limit so a change to it is visible. A l
 shape: a direct source late when it joins (the stream ASIO startup race) is re-anchored once and
 then reaches the same upstream increase as before (`launch-late`: 128 ms).
 
-**Tests** (`tests/genlock_audio_mix_guard_1381.rs`, std-only):
+**Tests** (`obs:tests/vendored/tests/genlock_audio_mix_guard_1381.rs`, std-only):
 - Wiring anchors (8, `WIRING`: obs-audio.c, obs-internal.h, obs-genlock-mix-guard.h) + the SAME
   list in a pwsh step of both `windows-genlock*.yml`.
 - A C LIFT of the shipped `audio_callback` path, verbatim: the render-order tail (mark + catch-all
   loop), the render loop, `calc_min_ts`, the 1367 tick decision, mix + discard, and every function
   they call (`push_audio_tree`, `convert_time_to_frames`, `ignore_audio` .. `calc_min_ts` incl. the
   guard, `audio_frames_to_ns` / `ns_to_audio_frames` from audio-io.h), each lift anchor unique. They
-  are substituted into `tests/c/genlock_audio_mix_guard_1381_harness.c` (six at-sign markers, each
+  are substituted into `obs:tests/c/genlock_audio_mix_guard_1381_harness.c` (six at-sign markers, each
   checked to occur once), which `#include`s the header: a stub libobs with a real timestamp deque,
   byte-only input buffers, a render stub with process_audio_source_tick's pending rule, a mix stub
   with mix_audio's window test plus a stale-output check, and a model of source_output_audio_place
@@ -385,7 +382,7 @@ so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
 **Tests.**
 - `vstack:rig/core/src/genlock_audio_buffering.rs` unit tests + the 1367 parity gate (the action's `frozen`, the
   decision over its one input).
-- The 1381 lift (`tests/genlock_audio_mix_guard_1381.rs`; the harness stub has an encoder count
+- The 1381 lift (`obs:tests/vendored/tests/genlock_audio_mix_guard_1381.rs`; the harness stub has an encoder count
   `h_encoders`):
   - the three E1 replays with the stream's audio encoder running (a member that keeps its stamp
     delivers a backlog stamped at capture; stock libobs reproduces exactly the logged +128 / +192 /

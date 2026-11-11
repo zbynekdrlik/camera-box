@@ -1,6 +1,6 @@
-# issue 1424 part 2 -- the drm-output config grammar, ONE table for the vendored C
+# issue 1424 part 2 -- the drm-output config grammar, a copy of the table the vendored C uses in obs (issue 1504)
 # (obs-drm-output-outputs.c drm_output_config_classify, lift-compiled against real jansson by
-# tests/drm_output_outputs_1424.rs) and the Python mirror (strih_scenes.drm_output_instances,
+# obs:tests/vendored/tests/drm_output_outputs_1424.rs) and the Python mirror (strih_scenes.drm_output_instances,
 # tests/python/test_drm_output_outputs_1424.py).
 # Columns (TAB-separated): name, the config text (<empty> = an empty file), the verdict, the
 # offending "outputs" position the C names (- = not checked), the outputs on "ok"

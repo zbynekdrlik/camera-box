@@ -277,7 +277,7 @@ lowest)**; else LOCKED (green).
   `genlockQpcHistory` ring spans ≥ 90 % of `GENLOCK_QPC_WINDOW_S` = 300 s) and `qpc_expected_ppm`
   (`f_ptp + f_phase` from `:8898/status`) stay in the JSON as REPORT-ONLY telemetry, beside the raw
   cumulative `qpc_drift_ms`; the v5 JSON schema is unchanged. **Never re-introduce a rate or offset
-  bound on the `qpc_drift` STEP verdict** — `tests/genlock_lock_json_guards.rs::genlock_lock_qpc_drift_is_the_step_only_1357`
+  bound on the `qpc_drift` STEP verdict** — `obs:tests/vendored/tests/genlock_lock_json_guards.rs::genlock_lock_qpc_drift_is_the_step_only_1357`
   and both `windows-genlock*.yml` pwsh anchors forbid `GENLOCK_QPC_DRIFT_PPM_BOUND` in the widget. The
   separate media-clock term (issue 1372 part D, above) grades the drift GROWTH against 0, with its own
   constants and reason, and never touches the step verdict.
@@ -295,14 +295,14 @@ lowest)**; else LOCKED (green).
   so a date step is no longer the genlock hazard this term was guarding. Anchors:
   `tests/genlock_lock_indicator_guards.rs::qpc_drift_books_a_fleet_date_step_1372` + the issue-1372
   pwsh block in both `windows-genlock*.yml`.
-- **A `tests/genlock_lock_json_guards.rs` needle for a REAL C++ quote uses Rust `\"`, not the
+- **A `obs:tests/vendored/tests/genlock_lock_json_guards.rs` needle for a REAL C++ quote uses Rust `\"`, not the
   escaped-JSON `\\\"` (#1299 Part 4).** The guards `squish()` the source then `.contains(needle)`.
   A JSON KEY in the builder is an escaped-quote C string literal (`,\"qpc_drift_ppm\":`), so its
   needle is `"\\\"qpc_drift_ppm\\\":"` (→ literal `\"qpc_drift_ppm\":`). But a plain call like
   `obs_data_get_double(d, "f_ptp_ppm")` uses REAL C++ quotes, so its needle is
   `"obs_data_get_double(d, \"f_ptp_ppm\")"` (Rust `\"` → literal `"`). Using the `\\\"` form for a
   real-quote anchor fails the guard ("anchor GONE") even though the source is correct — distinguish
-  the two when adding an anchor, and run `cargo test --test genlock_lock_json_guards` to confirm it
+  the two when adding an anchor, and run that test in the obs repo (`tests/vendored`, issue 1504) to confirm it
   actually matches before trusting green.
 - **`genlock-lock:` is a new OBS-log family** (emitted on state/reason CHANGE, not every tick) —
   mutually non-substring with `genlock-fifo audit '`, `genlock-ndi-output audit '`,

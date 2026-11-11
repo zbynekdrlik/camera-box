@@ -120,7 +120,7 @@ is not a complete bump:
    small (an `#include` + a few `obs_data_get_json`→`OBSDataGetJsonSafe` swaps / the #773
    NULL-guards). Take upstream's WHOLE new version (`git show <newtag>:<path>`) and surgically
    re-apply our hunks, then PROVE it: `diff <(git show <newtag>:<path>) <resolved>` must show
-   EXACTLY our patch hunks and nothing else. The `frontend_obs_data_json_null_guard_1106.rs` anchor
+   EXACTLY our patch hunks and nothing else. The obs repo's `frontend_obs_data_json_null_guard_1106.rs` anchor (issue 1504: vendored-only tests and vendor changes live in the obs repo now)
    test is the completeness proof the guards survived.
 
 7. **The genlock C auto-merges clean on a minor bump** (its regions don't overlap upstream's

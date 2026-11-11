@@ -86,7 +86,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson; libsimde-dev: issue 1439, the obs-vban source lift includes libobs's util/sse-intrin.h
+          sudo apt-get install -y libv4l-dev libasound2-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libsimde-dev: issue 1439, the obs-vban source lift includes libobs's util/sse-intrin.h
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
@@ -152,7 +152,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
+          sudo apt-get install -y libv4l-dev libasound2-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       # ffmpeg/ffprobe for the #106 recorded-file analysis path covered by the
       # recording_decode integration test (run under llvm-cov here too).
@@ -214,7 +214,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
+          sudo apt-get install -y libv4l-dev libasound2-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@cargo-mutants
