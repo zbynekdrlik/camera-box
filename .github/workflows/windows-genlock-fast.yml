@@ -742,8 +742,8 @@ jobs:
 
       # issue 1381 (design 5862336131): only a MIXED source can move the mix's audio buffering -- a hidden source
       # whose audio runs late is re-anchored to the mix window instead of growing the whole mix (one hole in every
-      # output per step, 27.9.2026 on resolume). Mirror of obs:tests/vendored/tests/genlock_audio_mix_guard_1381.rs (WIRING); keep both
-      # in lock-step.
+      # output per step, 27.9.2026 on resolume). Mirror of obs:tests/vendored/tests/genlock_audio_mix_guard_1381.rs (WIRING); that twin
+      # pins obs's copy of this step (issue 1504), not this one.
       - name: Assert the mix buffering guard is present (issue 1381)
         shell: pwsh
         run: |
