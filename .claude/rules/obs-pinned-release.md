@@ -59,6 +59,6 @@ runs every test that reads only the vendored OBS/DistroAV/plugin sources, plus t
 (`tests/c`). camera-box dropped its copies; a reference written `obs:tests/vendored/tests/<name>.rs`
 or `obs:tests/c/<file>` in these rules points there. A vendored-source change belongs in the obs
 repo with its test. camera-box keeps the tests whose subject it owns: anything that also reads
-`scripts/**` or `src/**` or calls `camera_box::` (the `genlock_audio_pairing_lift` / `genlock_n1_lift`
+`scripts/**`, `src/**` or camera-box's own build workflows (the pwsh lock-step mirrors), or calls `camera_box::` (the `genlock_audio_pairing_lift` / `genlock_n1_lift`
 parity users, the av-sync dock twins), and the consumer side of an OBS log contract, such as
 `tests/verify_strih_drm_scanout_marker_1504.rs` (verify-strih greps `drm-output: program scanout LIVE`).

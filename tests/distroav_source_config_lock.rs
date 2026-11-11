@@ -31,7 +31,7 @@
 //!
 //! This is a SOURCE-level guard, not a runtime test (same convention as
 //! tests/distroav_timecode_patch.rs, tests/genlock_preload.rs and
-//! obs:tests/vendored/tests/obs_updater_disabled.rs): the genlock patch lives in the vendored C++
+//! tests/obs_updater_disabled.rs): the genlock patch lives in the vendored C++
 //! (`git log -- vendor/` is the patch series, per vendor/README.md). The risk it
 //! defends against is a future `git subtree pull` upstream release-bump (the
 //! `/update-av-stack` flow, #44) silently restoring the unsynchronised

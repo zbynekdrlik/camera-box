@@ -1,5 +1,9 @@
 name: Windows genlock FAST (libobs hot-swap + vendored C++ compile gate)
 
+# Issue 1504: a pwsh gate below that says it mirrors `obs:tests/vendored/tests/<name>.rs` has its
+# Rust twin in the obs repo, which pins obs's own copy of this workflow, not this one. Only the
+# gates whose comment names a camera-box `tests/<name>.rs` are kept in lock-step here.
+
 # camera-box #136: a FAST build of ONLY the libobs target (obs.dll) from the
 # vendored, genlock-patched tree — for iterating the genlock core DURING an event.
 # The full Windows artifact (browser/CEF + DistroAV + installer layout) is
@@ -259,7 +263,7 @@ jobs:
 
       # issue 1372 part B: the receive FIFO relabels its old-epoch frames by a booked fleet date step
       # (queued at the booking, late arrivals until the sender steps). Mirrors
-      # obs:tests/vendored/tests/genlock_fifo_relabel_wiring_1372.rs (RELABEL_WIRING / RELABEL_INTERNAL). Pure source-text
+      # tests/genlock_fifo_relabel_wiring_1372.rs (RELABEL_WIRING / RELABEL_INTERNAL). Pure source-text
       # guard (no build).
       - name: Assert the receive-FIFO date-step relabel (issue 1372)
         shell: pwsh
@@ -759,7 +763,7 @@ jobs:
       # issue 1425 (E2 slice 2, design 6216736061 + ROZHODNUTE 6217557472): the audio-buffering FREEZE --
       # while an output with an audio encoder runs (and only then) the dynamic increase is off and a mixed
       # source that falls behind is re-anchored (MIXED_LATE) instead of growing the whole mix. Mirror of
-      # obs:tests/vendored/tests/genlock_audio_buffering_freeze_wiring_1425.rs (FREEZE_WIRING / FREEZE_ABSENT); keep both in
+      # tests/genlock_audio_buffering_freeze_wiring_1425.rs (FREEZE_WIRING / FREEZE_ABSENT); keep both in
       # lock-step.
       - name: Assert the audio buffering freeze is present (issue 1425)
         shell: pwsh
@@ -1305,7 +1309,7 @@ jobs:
       # #152 (the #269 YAML lock-step): OBSBasic.cpp (UpdateTitleBar) is frontend-only — the
       # FAST path does NOT build the frontend — but the source-text check still catches a
       # `git subtree pull` (#44) that restores the stock OBS title and drops the
-      # newlevel.media build identity. Mirrors obs:tests/vendored/tests/obs_titlebar_newlevel.rs (Linux-only,
+      # newlevel.media build identity. Mirrors tests/obs_titlebar_newlevel.rs (Linux-only,
       # can't compile on this runner) AND the full windows-genlock.yml #152 gate; keep all
       # three in lock-step.
       - name: Assert newlevel.media build identity + deployed SHA in OBS title (#152/#1018)
@@ -1348,7 +1352,7 @@ jobs:
       # does NOT build the frontend -- but the source-text check still catches a `git subtree
       # pull` (#44) that re-imports upstream's task-modal "OBS has crashed!" dialog (which keeps
       # a crashed obs64 alive on an unattended box, so no launcher restarts OBS). Mirrors
-      # obs:tests/vendored/tests/obs_crash_handler_no_modal_1378.rs (Linux-only, can't compile on this runner) AND
+      # tests/obs_crash_handler_no_modal_1378.rs (Linux-only, can't compile on this runner) AND
       # the full windows-genlock.yml #1378 gate; keep all three in lock-step.
       - name: Assert the OBS crash handler exits without a dialog (#1378)
         shell: pwsh

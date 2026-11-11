@@ -32,7 +32,7 @@
 # version compare — unit-tested from tests/drift_guard.rs by sourcing this file) and a flow that
 # runs only when executed directly. The source-guard below (BASH_SOURCE != $0) lets the tests
 # exercise the pure functions in isolation. The OBS auto-update dialog is a BUILD property guarded
-# at the source by obs:tests/vendored/tests/obs_updater_disabled.rs (#43) — it is not runtime-readable off a running
+# at the source by tests/obs_updater_disabled.rs (#43) — it is not runtime-readable off a running
 # box, so it is intentionally checked at that layer, not here.
 #
 # Usage:

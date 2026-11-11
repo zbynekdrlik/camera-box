@@ -4,6 +4,7 @@ paths:
   - "vendor/distroav/src/jxs-source-decide.h"
   - "tests/jxs_receiver_1387.rs"
   - "tests/distroav_jxs_source_1387.rs"
+  - "tests/jxs_strih_build_1387.rs"
   - "src/bin/jxs-recv-probe.rs"
   - "src/bin/jxs-encode-bench.rs"
   - "tests/jxs_loopback_1387.rs"
@@ -488,7 +489,7 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   (the ABI pins; the real encoder -> the C ABI, timecode + PSNR + the report reaching the sender),
   `tests/distroav_jxs_source_1387.rs` (the decide header's truth table compiled as shipped, a g++
   `-fsyntax-only -Werror` of the whole source against the vendored libobs headers + a stub
-  `obsconfig.h`, the anchors), `obs:tests/vendored/tests/jxs_strih_build_1387.rs` (the CI wiring).
+  `obsconfig.h`, the anchors), `tests/jxs_strih_build_1387.rs` (the CI wiring).
 
 ### Live acceptance (supervisor runbook; strih-snv, cam5, rig TEST mode)
 

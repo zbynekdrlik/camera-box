@@ -272,7 +272,7 @@ deploy where even one non-DLL file is stale must never pass — deploy-from-clea
   auto-redeploy — genlock deploys are user-timed). Run it read-only any time:
   `./scripts/drift-guard.sh --check-imag`.
 - The OBS **auto-update dialog disabled** (#43) is a *build* property, not runtime-readable off a
-  running box, so it is guarded against the vendored source by `obs:tests/vendored/tests/obs_updater_disabled.rs`, not
+  running box, so it is guarded against the vendored source by `tests/obs_updater_disabled.rs`, not
   here. A box running stock OBS 32.2.0 instead of our genlock build USED to be indistinguishable by
   version alone — **#122 closes that**: step 1d reads each component's live BUILD SHA (obs.dll /
   distroav.dll Get-FileHash) + the genlock capability markers and step 2 fails on any mismatch vs the

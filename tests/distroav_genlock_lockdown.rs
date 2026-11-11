@@ -28,7 +28,7 @@
 //!
 //! This is a SOURCE-presence guard (same convention as
 //! tests/distroav_source_config_lock.rs, tests/genlock_preload.rs,
-//! obs:tests/vendored/tests/obs_updater_disabled.rs): the lockdown lives in the vendored C++
+//! tests/obs_updater_disabled.rs): the lockdown lives in the vendored C++
 //! (`git log -- vendor/` is the patch series, per vendor/README.md). It defends
 //! against a future `git subtree pull` upstream bump (#44) silently dropping the
 //! lockdown and reintroducing the #150 misconfig class — which

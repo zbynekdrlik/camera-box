@@ -16,7 +16,7 @@
 //! is what the QR latency instrument depends on.
 //!
 //! This is a SOURCE-level guard, not a runtime test (same convention as
-//! tests/genlock_preload.rs and obs:tests/vendored/tests/obs_updater_disabled.rs): the genlock patch
+//! tests/genlock_preload.rs and tests/obs_updater_disabled.rs): the genlock patch
 //! lives in the vendored C++ (`git log -- vendor/` is the patch series, per
 //! vendor/README.md). The risk it defends against is a future `git subtree pull`
 //! upstream release-bump (the `/update-av-stack` flow, #44) silently restoring the
@@ -123,7 +123,7 @@ fn windows_genlock_workflow_gates_on_the_timecode_patch() {
     // the windows-2022 runner, so the workflow re-asserts the same source tokens in
     // pwsh. This test keeps that pwsh gate in lock-step with the canonical assertion:
     // drop the source check from the workflow and CI fails here. (Same lock-step
-    // convention as obs:tests/vendored/tests/obs_updater_disabled.rs and tests/genlock_preload.rs.)
+    // convention as tests/obs_updater_disabled.rs and tests/genlock_preload.rs.)
     let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
 
     assert!(

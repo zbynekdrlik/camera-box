@@ -470,7 +470,7 @@ std::string + std::ostringstream — the SAME `<string>`/`<sstream>` dependency 
 risk; note `<sstream>` is `#ifdef _WIN32` in OBSBasic.cpp but the genlock build target is
 Windows-only; prefer `__DATE__`
 over CMake/config-header date plumbing since the full frontend build is 150-min and not
-locally compilable). Guard = `obs:tests/vendored/tests/obs_titlebar_newlevel.rs` (NON-probe, default-feature
+locally compilable). Guard = `tests/obs_titlebar_newlevel.rs` (NON-probe, default-feature
 Linux test) + the lock-step pwsh
 source-anchor gate in BOTH `windows-genlock{,-fast}.yml` (the FAST path doesn't build the
 frontend but still source-text-gates the token, same as the #276/#278 OBSProjector gate).
@@ -484,13 +484,13 @@ in `vendor/obs-studio/frontend/widgets/NewlevelBuildDate.hpp`, guarded
 `if (compileDate.size() < 11) return "unknown";` before any indexing/`substr`.
 `NewlevelBuildDate()` keeps the pinned anchor line `const std::string d = __DATE__;` then
 `return newlevel_iso_date(d);` — so the two `windows-genlock{,-fast}.yml` source gates +
-`obs:tests/vendored/tests/obs_titlebar_newlevel.rs` stay GREEN with NO lock-step change.
+`tests/obs_titlebar_newlevel.rs` stay GREEN with NO lock-step change.
 **THE LESSON — the OBS FRONTEND (`OBSBasic.cpp` + all of `frontend/`) compiles ONLY on the
 150-min `windows-genlock.yml`; neither the fast build nor normal PR CI compiles it.** A frontend
 C++ bug is therefore INVISIBLE to PR CI until the supervisor's full rebuild. Extract ANY
 non-trivial frontend logic into a pure header and behaviorally unit-test it off-rig with the #293
 harness pattern — **which now covers C++ too**: `tests/obs_titlebar_newlevel_parse.rs`
-compiles+runs `NewlevelBuildDate.hpp` via `c++ -std=c++17` (the `obs_display_budget.rs` twin uses
+compiles+runs `NewlevelBuildDate.hpp` via `c++ -std=c++17` (the obs repo's `obs_display_budget.rs` twin uses
 `cc -std=c11`). Run it with `cargo test --test obs_titlebar_newlevel_parse` (no probe).
 
 Two LAYERS guard "the deployed stack is the build we think it is":

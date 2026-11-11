@@ -255,7 +255,7 @@ mv_top1=<sanitized-name>:<ms> mv_top2=<sanitized-name>:<ms>`.
   bounds the upload cost, so it was left as a follow-up candidate.
 - **Verify a further token/field the same way:** the pure parser add is in `src/mv_audit.rs`
   (optional `Option<>` fields, unknown-key tolerant); the FRONTEND↔libobs chain is guarded by
-  `mv_audit_emit.rs`'s `render_display_and_frontend_carry_the_per_cell_instrumentation_1260` test
+  the obs repo's `mv_audit_emit.rs`'s `render_display_and_frontend_carry_the_per_cell_instrumentation_1260` test
   (std-only, reads the vendored source files — it also guards that preview + program
   are timed, per the review fix); the pure name sanitizer (`obs_audit_copy_cell_name`) has a
   COMMITTED lift-test `tests/mv_audit_cell_name_sanitizer_1260.rs` (extracts the real static from

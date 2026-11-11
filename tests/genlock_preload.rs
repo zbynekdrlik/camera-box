@@ -10,7 +10,7 @@
 //!  1. The PURE decision logic (preload parse/clamp + consume decision) is mirrored
 //!     in `camera_box::probe::genlock` and unit-tested — the testable core of the
 //!     fix, independent of OBS.
-//!  2. A vendored-source guard (same convention as obs:tests/vendored/tests/obs_updater_disabled.rs)
+//!  2. A vendored-source guard (same convention as tests/obs_updater_disabled.rs)
 //!     asserts the C patch is present in vendor/obs-studio so a future
 //!     `git subtree pull` (#44) can't silently revert it.
 

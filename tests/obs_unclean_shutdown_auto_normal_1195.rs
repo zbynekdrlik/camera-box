@@ -15,8 +15,8 @@
 //! per the project's Tier-0 policy). The risk it defends against is a future
 //! `git subtree pull --squash` upstream release-bump (`/update-av-stack`, #44) silently
 //! re-importing upstream's blocking modal. If that happens, CI fails loudly here. Same
-//! vendored-source-assertion convention as obs:tests/vendored/tests/obs_updater_disabled.rs /
-//! obs:tests/vendored/tests/obs_titlebar_newlevel.rs — and, because this is a rig-critical BEHAVIORAL
+//! vendored-source-assertion convention as tests/obs_updater_disabled.rs /
+//! tests/obs_titlebar_newlevel.rs — and, because this is a rig-critical BEHAVIORAL
 //! divergence from upstream (the #152/#43 frontend-anchor class, not the #773 NULL-guard
 //! class), it carries a pwsh source-text mirror in BOTH windows-genlock workflows too, kept
 //! in lock-step by the last test below.

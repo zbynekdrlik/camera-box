@@ -3,6 +3,7 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output.c"
   - "vendor/obs-studio/libobs/obs-drm-output.h"
   - "vendor/obs-studio/libobs/cmake/os-linux.cmake"
+  - "tests/drm_output_program_1152.rs"
   - "tests/drm_lease_tolerance_1152.rs"
   - "scripts/imag-obs-start.sh"
   - "scripts/obs_phase2.py"
@@ -154,7 +155,7 @@ the zero-copy mandate; ~0.5 GB/s + a GPU stall on the 25W box):
   = graphics thread (~60 fps DanteSync-locked), consumer = the M1 flip thread (HDMI vblank) — two
   INDEPENDENT clock domains, so an occasional repeated/overwritten frame is inherent and correct.
   The pure helpers `drm_output_pick_render_buf` + `drm_output_fit_rect` are truth-tabled in
-  `obs:tests/vendored/tests/drm_output_program_1152.rs` (std-only, the same lift-compile model as M1).
+  `tests/drm_output_program_1152.rs` (std-only, the same lift-compile model as M1).
 - The first Program frame does a one-shot `drmModeSetCrtc` onto the GBM FB (a legacy page-flip
   across a modifier change is unreliable — the dumb solid FB and the GBM FB differ), then
   page-flips run among the identical GBM FBs; when the mailbox is empty the flip thread RE-FLIPS
@@ -641,8 +642,8 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   re-exports every name; setup-strih step 6 installs it beside strih_scenes.py) reads the file the C's
   way: a BOM dropped, and a NaN / Infinity literal, an integer outside 64 bits or an overflowing real
   makes the WHOLE file unreadable, as jansson does. imag_scenes' classifier agrees on every row except
-  those strict-JSON ones (imag reads a machine-written single object). CI's test / coverage / mutants
-  jobs install `libjansson-dev` for the lift.
+  those strict-JSON ones (imag reads a machine-written single object). The C lift runs in the obs repo since issue 1504
+  (its `vendored-tests` job installs `libjansson-dev`).
 - **Per-instance state** (`struct drm_output_inst`, `obs-drm-output-internal.h`): connector, backend
   ops, view, present clock, audio leg. The lease backend keeps `g_lease[inst->index]`, the vk-direct
   OBS side `g_vkd[inst->index]` and the vk core display slot `inst->index` (`drm_output_vk_open(slot,

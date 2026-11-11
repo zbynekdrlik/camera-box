@@ -4,8 +4,9 @@ window and never the desktop. This file replaces the 19.9. projector-window test
 seed_projector / strih-lx-projector.json path is removed.
 
 Tier-0 runnable (pytest on the pure helpers + script-text anchors; no cargo, no rig, no OBS). The view
-grammar table is SHARED with the vendored C lift (tests/fixtures/drm_output_view_parity.tsv, read by
-obs:tests/vendored/tests/drm_output_view_1346.rs), so the Python mirror and the C module can never drift apart.
+grammar table (tests/fixtures/drm_output_view_parity.tsv) is a copy of the one the vendored C lift reads
+in the obs repo (obs:tests/vendored/tests/drm_output_view_1346.rs, issue 1504); the Python mirror is
+pinned to this copy, the C to obs's.
 """
 import importlib.util
 import json

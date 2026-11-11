@@ -21,7 +21,7 @@
 //! to nullptr, keeps stock DistroAV's original behavior unchanged.
 //!
 //! This is a SOURCE-level guard, not a runtime test (same convention as
-//! obs:tests/vendored/tests/obs_updater_disabled.rs / tests/genlock_preload.rs's vendored-source facet): the
+//! tests/obs_updater_disabled.rs / tests/genlock_preload.rs's vendored-source facet): the
 //! patch lives in vendored C++ (`vendor/distroav/src/ndi-source.cpp`), and a future
 //! `git subtree pull` upstream bump (the `/update-av-stack` flow) could silently re-import
 //! stock DistroAV's original hide/deactivate handlers. If that happens, CI fails loudly here.

@@ -1,4 +1,4 @@
-# issue 1346: the drm-output.json "backend" grammar -- ONE table, read by BOTH the vendored C lift
+# issue 1346: the drm-output.json "backend" grammar -- a copy of the table the vendored C lift reads in obs (issue 1504)
 # (obs:tests/vendored/tests/drm_output_vk_direct_1346.rs -> drm_output_parse_backend) and the Python mirror
 # (tests/python/test_strih_drm_output_1346.py -> strih_scenes.drm_output_backend_of).
 # Columns: <value><TAB><expected>. <absent> = no "backend" key, <empty> = "".
