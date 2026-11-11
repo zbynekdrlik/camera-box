@@ -121,7 +121,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # Bumped 2026-11-05: v1.28.0 (dsync) -- at a grandmaster change within 1 ms (each FOH reboot) the
 # ~110 us residual after relock is slewed (tau 20 s), no longer stepped; the step had re-anchored
 # SongPlayer's Dante output on resolume-snv (one lost pump block, 5.11.2026 07:35:47 UTC).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.28.0}"
+# Bumped 2026-11-11: v1.29.0 (dsync) -- PTP phase measured on the delay floor (Theil-Sen through the last
+# 10 window minima), so one-sided late receive stamps under OBS load no longer move it; strih-snv lost its
+# phase lock every 2-15 min on 1.28.0 and none in its 1.29.0 canary hour (camera-box issue 1498).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.29.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

@@ -7,15 +7,15 @@
 # DANTESYNC_VERSION_PIN in scripts/dantesync-version-gate.sh; a pin bump edits that line and the shas
 # below together, and tests/python/test_dsync_swap_1487.py fails when they disagree.
 #
-# The shas are the release's own, read from `gh release view v1.28.0 -R zbynekdrlik/dsync`, so a release
+# The shas are the release's own, read from `gh release view v1.29.0 -R zbynekdrlik/dsync`, so a release
 # asset replaced after the pin is refused even with a matching `.sha256` beside it.
 
 # Empty (a fixture release of its own) = no pinned sha.
-DSYNC_PINNED_SHA_VERSION="${DSYNC_PINNED_SHA_VERSION-1.28.0}"
-DSYNC_SHA256_LINUX="65ed62dda6fa1f5ba29d6eba7f0103ada1a078462991c05bc08283687e656329"
-DSYNC_SHA256_WINDOWS="dda8a75710ddbf9e873d537c8eb3c158012e04c159c43b967d2fc3b39fcf7069"
-DSYNC_SHA256_TRAY_LINUX="30f36e0b3533d271eb15bf15937716fcc5aad49f50ea59450203e642db9d13e6"
-DSYNC_SHA256_TRAY_WINDOWS="0694a65ee74b33c8945831ecd13e05f7e25260630a50e22ac5fba5c7114139ef"
+DSYNC_PINNED_SHA_VERSION="${DSYNC_PINNED_SHA_VERSION-1.29.0}"
+DSYNC_SHA256_LINUX="b07ac1dec7ad516fe74639a271cda8e5161febe76a02a1e6ccaeff6a46b8b6a7"
+DSYNC_SHA256_WINDOWS="01285d593684b744cbc0b6439074dada32f180a66dbf55ce8aa47041a174d77d"
+DSYNC_SHA256_TRAY_LINUX="c76a0cf9e571e7c1804b23e6d072d6c75e5c1c39f732a15b31d660b67b05f820"
+DSYNC_SHA256_TRAY_WINDOWS="b61b9109997dbf9e5260d3b42d87c32a61217b2b05e67771251196b8f3ac4362"
 
 # dsync_release_pinned_sha ASSET VERSION -> the pinned sha256 of ASSET (dsync-linux-amd64,
 # dsync-windows-amd64.exe, dsync-tray-linux-amd64, dsync-tray-windows-amd64.exe) when VERSION is the
