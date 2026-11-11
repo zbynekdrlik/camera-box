@@ -384,7 +384,11 @@ def test_the_ro_units_apply_claims_all_when_a_venue_has_no_atom(tmp_path):
     sys.path.insert(0, str(HERE))
     import test_cambox_ro_units_1394 as ro  # noqa: E402
     r, sshdir = ro._cli(run, "--apply", "--box", "cam3",
-                        env={"FAKE_RECORD_LEASE": "1", "STRIH_BOXES_DIR": str(facts)})
+                        env={"FAKE_RECORD_LEASE": "1", "STRIH_BOXES_DIR": str(facts),
+                             # issue 1506: a venue with no strih/stream in the obs fleet list
+                             # refuses unless the caller names the guard's boxes; this test is
+                             # about the lease claim, so it names them.
+                             "STRIH_HOST": "10.77.9.202", "STREAM_HOST": "10.77.9.204"})
     assert r.returncode == 0, r.stdout + r.stderr
     declared = json.loads((sshdir / "lease-0").read_text())["resources"]
     assert declared == ATOMS
