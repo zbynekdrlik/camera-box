@@ -899,7 +899,7 @@ def projector(obs: Obs, host: str) -> None:
 
 # #791: PURE comparison helpers (no OBS/network) -- unit-tested directly (tests/python), mirrors
 # this repo's own "extract the pure decision, keep the WS glue thin" convention (src/reannounce.rs,
-# src/colour_scale.rs). Kept separate from verify_parity() below so a fresh notebook's parity can
+# vstack:av/burn/src/colour_scale.rs). Kept separate from verify_parity() below so a fresh notebook's parity can
 # be proven offline against a captured GetSceneList/GetInputSettings fixture, no rig required.
 
 def scene_order_mismatch(actual_order: list, expected_order: list = None) -> str:

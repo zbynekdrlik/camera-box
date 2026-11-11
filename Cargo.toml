@@ -32,13 +32,16 @@ path = "src/main.rs"
 # Pure (only `anyhow`, already a root dep), cross-platform.
 intercom-vban = { git = "https://github.com/zbynekdrlik/intercom", tag = "v1.9.21" }
 
-# Issue 1487: the JPEG XS link, the rig primitives and the QPSK marker protocol live in vstack; a
+# Issue 1487: the JPEG XS link, the rig primitives, the QPSK marker protocol and the burn geometry live in vstack; a
 # tag names one version of all of them. src/lib.rs re-exports them at their old paths. The tag must
 # equal scripts/vstack-release.pin (tests/vstack_pin_1487.rs). jxs-recv-ffi and jxs-send-ffi are not
 # dependencies here: they pull the codec in unconditionally, and a default build needs no cmake.
-camera-box-jxs = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.6" }
-rig-core = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.6" }
-qpsk-marker = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.6" }
+camera-box-jxs = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.7" }
+rig-core = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.7" }
+qpsk-marker = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.7" }
+# vstack#8 (v0.1.7): the test-burn geometry (burn_regions, burn_quiet_zone, burn_tick_cache,
+# colour_scale), re-exported at the old paths in src/lib.rs.
+burn-geom = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.7" }
 
 # Dynamic library loading (for NDI SDK at runtime)
 libloading = "0.8"
@@ -96,7 +99,7 @@ drm = { version = "0.15", optional = true }
 # Issue 1387: the JPEG XS link's codec (SVT-JPEG-XS, vendored in vstack and built statically by its
 # jxs/sys/build.rs: cmake + nasm). Behind the `jxs` feature so a default build needs neither; CI's
 # deployed camera-box-linux-amd64 is built WITH it (ci.yml `build`).
-svt-jpegxs-sys = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.6", optional = true }
+svt-jpegxs-sys = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.7", optional = true }
 
 [dev-dependencies]
 # Property-based testing for format conversions

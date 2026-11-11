@@ -74,7 +74,7 @@ SECONDS = 128  # issue 1404 ROZHODNUTE 6048179415: 7680 ticks = 30 index wraps, 
 TICK_HZ = int(pa.MARKER_INDEX_RATE_HZ)    # 60: the painter's tick rate = the guard's index rate
 TICKS_PER_FRAME = TICK_HZ // FPS          # 2: a 30 fps recording of the painter sees every 2nd tick
 QR_SIZE = 700                             # cam2-painter.service --qr-size
-TOP_MARGIN_PX = 24                        # src/colour_scale.rs TOP_MARGIN_PX
+TOP_MARGIN_PX = 24                        # vstack:av/burn/src/colour_scale.rs TOP_MARGIN_PX
 QR_BORDER_MODULES = 4                     # the qrcode crate's quiet zone (render().quiet_zone(true))
 MARKER_EVERY_TICKS = 30                   # frame-probe --audio-marker-cadence-ticks default (0.5 s)
 INDEX_MODULUS = pa.MARKER_INDEX_MODULUS   # 256: the 8-bit index = tick & 0xFF

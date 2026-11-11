@@ -6,11 +6,12 @@ mod vstack;
 
 use std::path::PathBuf;
 
-const CRATES: [&str; 4] = [
+const CRATES: [&str; 5] = [
     "camera-box-jxs",
     "rig-core",
     "qpsk-marker",
     "svt-jpegxs-sys",
+    "burn-geom",
 ];
 
 fn root() -> PathBuf {
@@ -93,6 +94,10 @@ fn the_moved_code_left_this_repo() {
         "src/genlock_n1_depth.rs",
         "src/genlock_n2_grid.rs",
         "src/genlock_wall_step.rs",
+        "src/burn_regions.rs",
+        "src/burn_quiet_zone.rs",
+        "src/burn_tick_cache.rs",
+        "src/colour_scale.rs",
         "src/qpsk_marker.rs",
         "src/qpsk_marker_scan.rs",
         "tests/fixtures/genlock_n2_present_age_1367.tsv",
@@ -108,6 +113,10 @@ fn the_old_paths_stay_as_reexports() {
     let lib = read("src/lib.rs");
     for line in [
         "pub use ::qpsk_marker::qpsk_marker;",
+        "pub use burn_geom::burn_regions;",
+        "pub use burn_geom::burn_quiet_zone;",
+        "pub use burn_geom::burn_tick_cache;",
+        "pub use burn_geom::colour_scale;",
         "pub use ::qpsk_marker::qpsk_marker_scan;",
         "pub use rig_core::genlock_audio_buffering;",
         "pub use rig_core::genlock_audio_pairing::*;",
