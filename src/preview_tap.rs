@@ -176,7 +176,7 @@ impl PreviewTap {
 /// odd byte is dropped.
 pub fn yuyv_to_uyvy(src: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(src.len() & !1);
-    for pair in src.chunks_exact(2) {
+    for pair in src.as_chunks::<2>().0 {
         out.push(pair[1]);
         out.push(pair[0]);
     }
