@@ -751,6 +751,7 @@ if [ -d /etc/janus ] || command -v janus >/dev/null 2>&1; then
   strih_janus_http_jcfg_text > /etc/janus/janus.transport.http.jcfg
   chmod 644 /etc/janus/janus.transport.http.jcfg
   echo "  wrote /etc/janus/janus.plugin.audiobridge.jcfg (room ${JANUS_ROOM} 'interkom') + janus.transport.websockets.jcfg (ws :8188 loopback-only, no wss) + janus.transport.http.jcfg (loopback 127.0.0.1:8088)"
+  strih_janus_ice_apply || fail "issue 1499: janus.jcfg ICE enforce list (Janus must not offer the audio-VLAN address) -- above"
   systemctl enable janus 2>/dev/null || warn "  could not enable janus.service (install janus first)"
   # Ubuntu's janus package auto-STARTS the service on install (before these jcfg existed). If it is
   # already running, restart it to load the freshly written room/ws/http jcfg; otherwise leave it

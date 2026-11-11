@@ -1,6 +1,8 @@
 ---
 paths:
   - "scripts/lib/strih-dante-leg.sh"
+  - "scripts/lib/strih-janus-ice.sh"
+  - "scripts/janus_ice_cfg.py"
   - "tests/python/test_vban_leg_nic_to_vlan_1495.py"
   - "tests/python/test_vban_leg_move_1495.py"
   - "scripts/lib/strih-vban-leg-move.sh"
@@ -809,6 +811,13 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   can lose packets.
 - **Known limit, unmeasured:** libndi sends its own mDNS from every interface; with 5353 open it can reach
   the audio VLAN from the leg address (read with tcpdump on the leg). Its NDI TCP stays dropped.
+
+- **Janus offers the LAN address only (issue 1499, dstack two-networks section 4).** A box with a leg gets
+  janus.jcfg's managed `ice_enforce_list = "<STRIH_IP>"` block (`scripts/janus_ice_cfg.py`, through
+  `scripts/lib/strih-janus-ice.sh`, setup step 14 before its Janus restart); no leg = the block removed, so
+  strih-pp / stream-pp stay untouched. An enforce list makes Janus ignore the package's `ice_ignore_list =
+  "vmnet"` line, which stays as is. The grade (`(janus-ice)`, from verify item 9 for a declared leg only)
+  also FAILs a running Janus that started before the jcfg changed: it still gathers on every interface.
 
 ## Verify
 

@@ -382,7 +382,7 @@ if WHY="$(obs_box_step_applies 13)"; then
   strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs
   strih_intercom_hub_alsa_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1438: the cutters' card, opened through ALSA
 fi
-strih_vban_leg_grade   # the VBAN-only leg, every role (issue 1439, scripts/lib/strih-vban-leg.sh)
+strih_vban_leg_grade; [ "$(strih_vban_leg_kind)" = none ] || strih_janus_ice_grade   # the leg (issue 1439) + Janus ICE on LAN only (issue 1499)
 # 9b) MiniFuse period + quantum drop-ins (issue 1345, FAIL) + the live quantum (a NOTE); stream role: the locked PipeWire (1465).
 strih_pipewire_purge_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(pipewire-purge) the grader did not print all of its rows"   # issue 1440: a box with no PipeWire
 if ! WHY="$(obs_box_step_applies 12-strih-audio)"; then

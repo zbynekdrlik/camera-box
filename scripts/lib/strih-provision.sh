@@ -148,6 +148,11 @@ if ! declare -F strih_vban_leg_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-vban-leg.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-vban-leg.sh"
 fi
+# issue 1499: Janus gathers ICE candidates on the LAN address only on a box with that leg (step 14, item 9).
+if ! declare -F strih_janus_ice_apply >/dev/null; then
+  # shellcheck source=scripts/lib/strih-janus-ice.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-janus-ice.sh"
+fi
 # issue 1465 item 3: the stream role's locked operator PipeWire (setup step 12 on the stream role, item 9b).
 if ! declare -F stream_operator_audio_install >/dev/null; then
   # shellcheck source=scripts/lib/stream-operator-audio.sh
