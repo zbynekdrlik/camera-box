@@ -224,6 +224,8 @@ impl FramebufferDisplay {
 
         match fourcc_str {
             "UYVY" => Ok(self.uyvy_to_bgra(data, width, height)),
+            // issue 1501: the local camera preview hands the capture's YUYV frames.
+            "YUYV" => Ok(self.uyvy_to_bgra(&crate::preview_tap::yuyv_to_uyvy(data), width, height)),
             "BGRA" | "BGRX" => Ok(data.to_vec()),
             "RGBA" => Ok(self.rgba_to_bgra(data)),
             _ => {

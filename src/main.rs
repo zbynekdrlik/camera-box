@@ -416,16 +416,32 @@ async fn run_capture_loop(
     // Shared flag for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
 
+    // Issue 1501: the power button. Single press = the microphone (shared with the intercom
+    // thread, starts MUTED), double press = the cameraman preview's source (strih NDI feed after
+    // every start, the local camera on a double press). Its own thread on every box.
+    let muted = Arc::new(AtomicBool::new(true));
+    let preview_switch = camera_box::preview_tap::PreviewSwitch::new();
+    let preview_tap = camera_box::preview_tap::PreviewTap::new(Arc::clone(&preview_switch));
+    {
+        let (m, p, r) = (
+            Arc::clone(&muted),
+            Arc::clone(&preview_switch),
+            Arc::clone(&running),
+        );
+        std::thread::spawn(move || intercom::run_power_button_monitor(m, p, r));
+    }
+
     // Start display thread if configured (LOW PRIORITY - different core)
     let display_handle = if let Some(config) = display_config {
         let running_clone = Arc::clone(&running);
+        let tap = Arc::clone(&preview_tap);
         tracing::info!("Starting NDI display for source: {}", config.source_name);
 
         Some(std::thread::spawn(move || {
             // Apply low priority settings BEFORE doing anything
             ndi_display::apply_low_priority();
 
-            if let Err(e) = ndi_display::run_display_loop(config, running_clone) {
+            if let Err(e) = ndi_display::run_display_loop(config, running_clone, tap) {
                 tracing::error!("NDI display error: {}", e);
             }
         }))
@@ -443,7 +459,7 @@ async fn run_capture_loop(
         );
 
         Some(std::thread::spawn(move || {
-            if let Err(e) = intercom::run_intercom(config, running_clone) {
+            if let Err(e) = intercom::run_intercom(config, running_clone, muted) {
                 tracing::error!("Intercom error: {}", e);
             }
         }))
@@ -771,6 +787,7 @@ async fn run_capture_loop(
     // #944 — the capture loop stamps this on every actual emit; `wedge_watchdog_epoch` (Copy)
     // moves into the closure so both the stamp here and the watchdog poll share one epoch.
     let emit_heartbeat_capture = Arc::clone(&emit_heartbeat_ns);
+    let preview_tap_capture = Arc::clone(&preview_tap);
     let capture_handle = tokio::task::spawn_blocking(move || {
         // Apply real-time optimizations BEFORE entering the capture loop
         apply_realtime_optimizations();
@@ -1493,6 +1510,18 @@ async fn run_capture_loop(
                         ),
                     });
                 }
+                // Issue 1501 -- the cameraman's local preview: while the power-button switch says
+                // local, every second emitted frame is copied into the display's tap (one row
+                // memcpy under try_lock, a busy slot is a counted skip, never a wait); otherwise
+                // one atomic load. Its cost, like the JPEG XS offer above, lands inside the
+                // stagger offset below.
+                preview_tap_capture.offer(
+                    data,
+                    info.width,
+                    info.height,
+                    info.stride,
+                    u32::from_le_bytes(info.fourcc.repr),
+                );
                 // #1242 — the per-camera NDI send stagger, ONCE per emitted iteration: after the
                 // genlock timecode above is fixed (it never moves) and before the first send (the
                 // starvation repeats and the current frame leave back-to-back behind one delay).

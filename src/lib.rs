@@ -74,6 +74,10 @@ pub mod reannounce;
 // `STRIH-<box> (interkom)` output). Pure + cross-platform so it unit-tests Tier-0; the NDI finder
 // loop that feeds it lives in `ndi` and the display loop that drives it in `ndi_display`.
 pub mod preview_source;
+// Issue 1501: the power button single/double press classifier and the cameraman preview's
+// source switch + local-camera frame tap. Pure std, Tier-0.
+pub mod button_press;
+pub mod preview_tap;
 
 // #367 — colour-scale reference layout (pure geometry + colour table). Cross-platform, no
 // probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
