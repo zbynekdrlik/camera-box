@@ -4,8 +4,6 @@ paths:
   - "vendor/obs-studio/libobs-opengl/gl-x11-egl.c"
   - "vendor/obs-studio/libobs-opengl/gl-wayland-egl.c"
   - "vendor/obs-studio/frontend/widgets/OBSProjector.cpp"
-  - "tests/gl_egl_present_vsync_1107.rs"
-  - "tests/gl_egl_present_vsync_observability_1146.rs"
   - "scripts/lib/obs-projector-vsync.sh"
   - "tests/harness_obs_projector_vsync_1151.rs"
 ---
@@ -77,8 +75,8 @@ Objective SCANOUT tear-measurement still needs the physical HDMI tap (issue-781,
 reader only proves the mechanism is ENGAGED, never that tearing is gone.
 
 **Anchor tests (vendored-source, `squish()` + `contains()`, no probe/GPU).**
-`tests/gl_egl_present_vsync_1107.rs` pins the whole EGL vsync chain; the sibling
-`tests/gl_egl_present_vsync_observability_1146.rs` pins the marker AND (belt-and-suspenders) the
+`obs:tests/vendored/tests/gl_egl_present_vsync_1107.rs` pins the whole EGL vsync chain; the sibling
+`obs:tests/vendored/tests/gl_egl_present_vsync_observability_1146.rs` pins the marker AND (belt-and-suspenders) the
 issue-1107 EGL read, so a vendored `git subtree pull` can't silently drop either the fix or its
 observability. Edit obs-display.c's `obs_display_set_vsync()` carefully: keep the substring
 `display->vsync = vsync;` intact (the 1107 test asserts it).

@@ -3,7 +3,6 @@ paths:
   - "src/genlock_n2_grid_bench.rs"
   - "src/probe/genlock_n2_tests.rs"
   - "tests/genlock_n2_grid_parity_1367.rs"
-  - "tests/genlock_n2_grid_wiring_1367.rs"
   - "vendor/obs-studio/libobs/obs-source.c"
   - "scripts/genlock_n2_grid.py"
   - "tests/python/test_genlock_n2_grid_twin_1367.py"

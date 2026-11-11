@@ -3,8 +3,6 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output.c"
   - "vendor/obs-studio/libobs/obs-drm-output.h"
   - "vendor/obs-studio/libobs/cmake/os-linux.cmake"
-  - "tests/drm_output_lease_1152.rs"
-  - "tests/drm_output_program_1152.rs"
   - "tests/drm_lease_tolerance_1152.rs"
   - "scripts/imag-obs-start.sh"
   - "scripts/obs_phase2.py"
@@ -18,7 +16,6 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output-internal.h"
   - "vendor/obs-studio/frontend/components/DrmOutputView.cpp"
   - "vendor/obs-studio/frontend/components/DrmOutputView.hpp"
-  - "tests/drm_output_view_1346.rs"
   - "tests/drm_output_view_mv_budget_1346.rs"
   - "vendor/obs-studio/libobs/obs-drm-output-backend.c"
   - "vendor/obs-studio/libobs/obs-drm-output-vk.c"
@@ -26,19 +23,14 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output-vk-internal.h"
   - "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c"
   - "vendor/obs-studio/libobs/obs-drm-output-vk-remode.c"
-  - "tests/drm_output_vk_direct_1346.rs"
-  - "tests/c/drm_output_vk_rig_harness.c"
   - "vendor/obs-studio/libobs/obs-drm-output-audio.c"
   - "vendor/obs-studio/libobs/obs-drm-output-audio.h"
   - "vendor/obs-studio/libobs/obs-drm-output-audio-match.h"
   - "src/drm_output_audio_match.rs"
   - "tests/drm_output_audio_1424.rs"
-  - "tests/drm_output_vk_program_mode_1424.rs"
-  - "tests/drm_output_vk_two_displays_1424.rs"
   - "scripts/lib/drm-output-audio.sh"
   - "tests/python/test_drm_output_audio_1424.py"
   - "vendor/obs-studio/libobs/obs-drm-output-outputs.c"
-  - "tests/drm_output_outputs_1424.rs"
   - "tests/fixtures/drm_output_outputs_parity.tsv"
   - "tests/python/test_drm_output_outputs_1424.py"
   - "scripts/lib/strih-drm-output.sh"
@@ -90,7 +82,7 @@ so there is **no `windows-genlock*.yml` pwsh mirror** (nothing to assert on Wind
 
 ## Local verification
 
-- **Anchor + lift-compile gate** `tests/drm_output_lease_1152.rs` (std-only).
+- **Anchor + lift-compile gate** `obs:tests/vendored/tests/drm_output_lease_1152.rs` (std-only).
   Facet A source-anchors the mechanism (lease/free_lease/pageflip/`drm-output:`/pick-helper, the
   os-linux.cmake link, the `__linux__`-guarded obs.c autostart + obs_shutdown stop). Facet B lifts
   `drm_output_pick_free_crtc` and cc-compiles it under `-Werror -Wconversion` over a truth table —
@@ -162,7 +154,7 @@ the zero-copy mandate; ~0.5 GB/s + a GPU stall on the 25W box):
   = graphics thread (~60 fps DanteSync-locked), consumer = the M1 flip thread (HDMI vblank) — two
   INDEPENDENT clock domains, so an occasional repeated/overwritten frame is inherent and correct.
   The pure helpers `drm_output_pick_render_buf` + `drm_output_fit_rect` are truth-tabled in
-  `tests/drm_output_program_1152.rs` (std-only, the same lift-compile model as M1).
+  `obs:tests/vendored/tests/drm_output_program_1152.rs` (std-only, the same lift-compile model as M1).
 - The first Program frame does a one-shot `drmModeSetCrtc` onto the GBM FB (a legacy page-flip
   across a modifier change is unreliable — the dumb solid FB and the GBM FB differ), then
   page-flips run among the identical GBM FBs; when the mailbox is empty the flip thread RE-FLIPS
@@ -327,7 +319,7 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   previous render from the previous tick's total, saturating. `obs_aux_sender_should_skip()` is its
   `self_last_ns = 0` case, so the ndi_filter aux senders are unchanged.
   - The view leaves its render out ONLY when that render ran in the immediately previous graphics
-    tick (the pure `drm_output_view_self_last_ns`, lift-tested in `tests/drm_output_view_1346.rs`).
+    tick (the pure `drm_output_view_self_last_ns`, lift-tested in `obs:tests/vendored/tests/drm_output_view_1346.rs`).
     The render records its cost and `obs_get_total_frames()` right after `gs_texrender_end()`,
     BEFORE the scanout-buffer claim, because a failed claim or blit still spent that time in the
     tick. `total_frames` advances once per processed tick (by the lag count on a lagged one), so the
@@ -356,7 +348,7 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   `obs_drm_output_set_view`, which rewrites ONLY `"view"` into the config the autostart read (obs_data
   round-trip, one compact line, `os_quick_write_utf8_file_safe`). The pure helpers
   `drm_output_parse_view` + `drm_output_view_tick_action` are lift-tested in
-  `tests/drm_output_view_1346.rs`; the view grammar is ONE table
+  `obs:tests/vendored/tests/drm_output_view_1346.rs`; the view grammar is ONE table
   (`tests/fixtures/drm_output_view_parity.tsv`) shared with the Python mirror in
   `scripts/strih_scenes.py`.
 - **NVIDIA:** the LEASE path is Intel-only in practice. The NVIDIA X driver refuses the RandR lease
@@ -432,7 +424,7 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   consume wait. A skipped claim drops the NEWER frame (the lease drops the older one): one frame either
   way, and a burst self-paces to the display rate. The bookkeeping is three pure helpers
   (`drm_output_vk_pick_claim` / `_present_pick` / `_present_done`), model-checked over 200000 random
-  interleavings in `tests/drm_output_vk_direct_1346.rs` (a mutant restoring the overwrite fails it with
+  interleavings in `obs:tests/vendored/tests/drm_output_vk_direct_1346.rs` (a mutant restoring the overwrite fails it with
   ~180000 violations); with no READY frame the claim is exactly the lease mailbox rule.
 - **The deadline pick (issue 1424, design 6164790116):** the acquire returns at the vblank that freed
   an image (FIFO, images=2 on NVIDIA), and a present queued now is shown at the NEXT vblank. The present
@@ -444,7 +436,7 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   #N (...) pick margin X ms, N missed vblanks`, each raise logs `vk-direct pick margin on '<c>' -> X ms`,
   and the swapchain setup logs `vk-direct present modes offered on '<c>': 2,...` (0 immediate, 1
   mailbox, 2 fifo, 3 fifo-relaxed) for a later MAILBOX decision. Pure helpers + anchors:
-  `tests/drm_output_vk_deadline_1424.rs`. NOT a backlog fix: the READY image is never overwritten, so
+  `obs:tests/vendored/tests/drm_output_vk_deadline_1424.rs`. NOT a backlog fix: the READY image is never overwritten, so
   the queue never grows; before this the GPU side was 1.5..2.5 refreshes, after it ~0.5..1.5.
   **Reading the 171 ms (14.10.2026, strih-pp HDMI-1 @29.970 -> Blackmagic HDMI->SDI -> SDI->HDMI ->
   cam1 Cam Link, `drm_latency_report.py`):** min 144 / median 171 / max 197 ms; only ~50-85 ms of it is
@@ -484,7 +476,7 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   LIVE (vk-direct: ...)`** (the SAME marker verify-strih greps), `program-present #N`, `vk-direct
   present loop exited`, `vk-direct display released`, `stopped (vk-direct, ...)`. `program-present #`
   / `solid-present #` are mutually non-substring with the lease `program-flip #` / `page-flip #`.
-- **Proof without OBS:** `tests/c/drm_output_vk_rig_harness.c` compiles the REAL core (gcc ON the box
+- **Proof without OBS:** `obs:tests/c/drm_output_vk_rig_harness.c` compiles the REAL core (gcc ON the box
   with staged headers — never on dev1) with its own EGL/GL 3.3 core context and publishes red, green,
   blue and 50 % grey phases, then a 2 s BURST that claims with no pause (claim FIRST, render only when
   claimed — like the OBS hook) and requires `gl_skips > 0`, a present loop still alive after a GL drain,
@@ -643,7 +635,7 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   duplicate connector starts NO output and logs one `"outputs" is malformed (<verdict> at entry N)`
   line. jansson, not obs_data: obs_data's JSON loader drops a non-object array member silently and
   would start half a pair. The pure grammar is the marked `BEGIN/END pure config grammar` block, lifted
-  verbatim and compiled against real jansson by `tests/drm_output_outputs_1424.rs` over
+  verbatim and compiled against real jansson by `obs:tests/vendored/tests/drm_output_outputs_1424.rs` over
   `tests/fixtures/drm_output_outputs_parity.tsv`, the table the Python twin
   `scripts/drm_output_config.py` is pinned to. That module (split out of strih_scenes.py, which
   re-exports every name; setup-strih step 6 installs it beside strih_scenes.py) reads the file the C's
@@ -678,7 +670,7 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   died on its own never blocks) has presented N+1 times on its CURRENT surface, N = its swapchain's
   image count (`settle_images`; never below `DRM_OUTPUT_VK_SETTLE_PRESENTS` = 3, a 2-image FIFO;
   `presents_since_surface` is reset by every new surface; the pure `drm_output_vk_settle_need` +
-  `drm_output_vk_first_unsettled`, truth-tabled in `tests/drm_output_vk_two_displays_1424.rs`), then
+  `drm_output_vk_first_unsettled`, truth-tabled in `obs:tests/vendored/tests/drm_output_vk_two_displays_1424.rs`), then
   acquires. Rejected alternative (review): acquire EVERY display before any presents (no overlap by
   construction) -- it needs a two-phase open across the outputs layer and the vk core API; the settle
   wait is causal (presents, not a sleep) and also covers a re-mode on the other display. A REPLUG rebuild

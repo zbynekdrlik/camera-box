@@ -208,9 +208,9 @@ decision (`obs_display_should_skip`) is untouched; accumulated in the audit bloc
 `obs_display` fields (`render_audit_pre_mv_sum_ns`/`_max_ns`/`render_audit_tick_count`), reset per
 window. `mv_audit.rs` ignores unknown keys so every consumer is unaffected (proven by
 `parse_tolerates_appended_1260_budget_fields`). Lock-step anchors updated: `tests/genlock_preload.rs`
-+ `tests/mv_audit_emit.rs` + BOTH `windows-genlock*.yml` (the format string) — verify a further field
++ `obs:tests/vendored/tests/mv_audit_emit.rs` + BOTH `windows-genlock*.yml` (the format string) — verify a further field
 add the same way (lift-compile the `blog` under `-Wformat=2`, offline `re.sub`-squish pwsh check,
-`cargo test --test mv_audit_emit` + `--lib mv_audit`).
+the obs repo's `mv_audit_emit` test (issue 1504) + `cargo test --lib mv_audit`).
 
 ### Per-cell MV instrumentation (issue 1260 lever (1), LANDED — CI-compile + supervisor deploy pending)
 

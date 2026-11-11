@@ -1,5 +1,5 @@
 //! Shared helpers of the issue-1367 stale-duplicate gate (`tests/distroav_stale_duplicate_retarget_1367.rs`
-//! and `tests/distroav_stale_duplicate_replay_1367.rs`): read `vendor/distroav/src/ndi-source.cpp`, lift
+//! and `obs:tests/vendored/tests/distroav_stale_duplicate_replay_1367.rs`): read `vendor/distroav/src/ndi-source.cpp`, lift
 //! its helper blocks VERBATIM, and compile + run a C harness built from them. Include with
 //! `#[allow(dead_code)] #[path = "support/ndi_source_lift_1367.rs"] mod lift;` -- files under
 //! `tests/support/` are not test crates of their own.

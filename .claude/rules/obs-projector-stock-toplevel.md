@@ -5,9 +5,7 @@ paths:
   - "vendor/obs-studio/frontend/widgets/OBSBasic_Projectors.cpp"
   - "vendor/obs-studio/frontend/widgets/OBSBasic_Preview.cpp"
   - "vendor/obs-studio/frontend/widgets/OBSQTDisplay.cpp"
-  - "tests/obs_projector_stock_toplevel_1357.rs"
   - "vendor/obs-studio/frontend/widgets/OBSQTDisplay.hpp"
-  - "tests/obs_display_resize_debounce_1358.rs"
 ---
 
 # OBS projector window path: the stock toplevel on every OS (the Linux child-host from #1352 is RETIRED, #1357)
@@ -46,7 +44,7 @@ This is the same upstream code on Linux and Windows. The runtime `strih-mv-host`
 helper (the other issue-1352 workaround) is retired too: setup-strih step 8b only removes a leftover
 install, and verify-strih item 22 grades it absent.
 
-**Guard:** `tests/obs_projector_stock_toplevel_1357.rs`, a pure-std source anchor. It pins:
+**Guard:** `obs:tests/vendored/tests/obs_projector_stock_toplevel_1357.rs`, a pure-std source anchor. It pins:
 
 - the stock ctor, and no `projectorWindowFlags` / `Toplevel()` / host teardown plumbing;
 - a creation site with no `__linux__` branch, no `QVBoxLayout`, and no `new OBSProjector(host`;
@@ -82,7 +80,7 @@ stops a pending apply (hence the header `#include <QTimer>` — a forward declar
 there). `resizeImmediate` stays set when the display was created from `paintEvent`/`visibleChanged`
 with no resize after it, so the FIRST step of the first drag is applied at once — one extra
 swap-chain reallocation per window lifetime, by design; do not "optimise" it into a per-drag one.
-Guard: `tests/obs_display_resize_debounce_1358.rs` (incl. the invariant "exactly
+Guard: `obs:tests/vendored/tests/obs_display_resize_debounce_1358.rs` (incl. the invariant "exactly
 3 `obs_display_resize(` call sites in the file" — keep the token out of comment prose there).
 
 ## Local type-check of a vendored frontend `.cpp` against the REAL Qt6 headers (no cmake)

@@ -5,7 +5,7 @@ seed_projector / strih-lx-projector.json path is removed.
 
 Tier-0 runnable (pytest on the pure helpers + script-text anchors; no cargo, no rig, no OBS). The view
 grammar table is SHARED with the vendored C lift (tests/fixtures/drm_output_view_parity.tsv, read by
-tests/drm_output_view_1346.rs), so the Python mirror and the C module can never drift apart.
+obs:tests/vendored/tests/drm_output_view_1346.rs), so the Python mirror and the C module can never drift apart.
 """
 import importlib.util
 import json

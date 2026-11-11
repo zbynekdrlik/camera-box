@@ -470,7 +470,7 @@ std::string + std::ostringstream — the SAME `<string>`/`<sstream>` dependency 
 risk; note `<sstream>` is `#ifdef _WIN32` in OBSBasic.cpp but the genlock build target is
 Windows-only; prefer `__DATE__`
 over CMake/config-header date plumbing since the full frontend build is 150-min and not
-locally compilable). Guard = `tests/obs_titlebar_newlevel.rs` (NON-probe, default-feature
+locally compilable). Guard = `obs:tests/vendored/tests/obs_titlebar_newlevel.rs` (NON-probe, default-feature
 Linux test) + the lock-step pwsh
 source-anchor gate in BOTH `windows-genlock{,-fast}.yml` (the FAST path doesn't build the
 frontend but still source-text-gates the token, same as the #276/#278 OBSProjector gate).
@@ -484,7 +484,7 @@ in `vendor/obs-studio/frontend/widgets/NewlevelBuildDate.hpp`, guarded
 `if (compileDate.size() < 11) return "unknown";` before any indexing/`substr`.
 `NewlevelBuildDate()` keeps the pinned anchor line `const std::string d = __DATE__;` then
 `return newlevel_iso_date(d);` — so the two `windows-genlock{,-fast}.yml` source gates +
-`tests/obs_titlebar_newlevel.rs` stay GREEN with NO lock-step change.
+`obs:tests/vendored/tests/obs_titlebar_newlevel.rs` stay GREEN with NO lock-step change.
 **THE LESSON — the OBS FRONTEND (`OBSBasic.cpp` + all of `frontend/`) compiles ONLY on the
 150-min `windows-genlock.yml`; neither the fast build nor normal PR CI compiles it.** A frontend
 C++ bug is therefore INVISIBLE to PR CI until the supervisor's full rebuild. Extract ANY
@@ -980,7 +980,7 @@ budget on EVERY tick → skipped forever → the strih Multiview FROZE solid for
 - **TESTABILITY PATTERN (reusable for ANY vendored-C decision):** extract the decision into a pure
   header (only `<stdbool.h>`/`<stdint.h>`, a `static inline`) and unit-test it from a DEFAULT-features
   Rust integration test that compiles+runs a tiny `cc -std=c11` harness over the real header
-  (`tests/obs_display_budget.rs`). This sidesteps "Linux can't build libobs" — the test
+  (`obs:tests/vendored/tests/obs_display_budget.rs`). This sidesteps "Linux can't build libobs" — the test
   exercises the EXACT production code, no probe.
 - **Pinned source anchors changed (the #269 lock-step — update ALL of `tests/genlock_preload.rs`
   (probe-gated) + BOTH `windows-genlock{,-fast}.yml` pwsh gates together):** the OLD

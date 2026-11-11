@@ -5,7 +5,7 @@ chosen by the per-box fact STRIH_HDMI_OUTPUT_BACKEND (owner rulings 5838578002 +
 
 Tier-0 runnable (pytest on the pure helpers; no cargo, no rig, no OBS). The backend grammar table is SHARED
 with the vendored C lift (tests/fixtures/drm_output_backend_parity.tsv, read by
-tests/drm_output_vk_direct_1346.rs), so the Python mirror and the C module can never drift apart.
+obs:tests/vendored/tests/drm_output_vk_direct_1346.rs), so the Python mirror and the C module can never drift apart.
 """
 import importlib.util
 import json

@@ -15,7 +15,7 @@
 //! CRITICAL SAFETY (unchanged): the priority is LOW (~10) and every syscall failure is logged loud
 //! and the thread keeps running SCHED_OTHER — never abort, never retry-loop, never hang.
 //!
-//! This is a SOURCE-level guard (same convention as `tests/obs_updater_disabled.rs`): a future
+//! This is a SOURCE-level guard (same convention as `obs:tests/vendored/tests/obs_updater_disabled.rs`): a future
 //! `/update-av-stack` `git subtree pull` that silently drops the rework fails CI here. The behaviour
 //! itself is executed by `tests/genlock_render_tick_pin_1357.rs` (the block lifted and compiled:
 //! parity, a syscall trace, and real-thread inheritance).

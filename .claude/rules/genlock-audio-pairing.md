@@ -1,9 +1,7 @@
 ---
 paths:
   - "vendor/obs-studio/libobs/obs-audio.c"
-  - "tests/audio_telemetry_800.rs"
   - "vendor/obs-studio/libobs/media-io/audio-io.c"
-  - "tests/audio_stall_out_1381.rs"
   - "src/genlock_audio_pairing_bench.rs"
   - "tests/genlock_audio_pairing_parity.rs"
   - "tests/genlock_audio_timecode_placement_1367.rs"
@@ -14,8 +12,6 @@ paths:
   - "tests/genlock_audio_step_hold_parity_1381.rs"
   - "tests/genlock_audio_step_hold_wiring_1381.rs"
   - "tests/genlock_audio_pairing_lift/mod.rs"
-  - "tests/genlock_audio_relabel_ingest_1381.rs"
-  - "tests/c/genlock_audio_relabel_ingest_1381_harness.c"
   - "src/asrc_timecode_pending_bench.rs"
   - "tests/genlock_audio_relabel_pending_parity_1381.rs"
   - "src/asrc_stamp_bench.rs"
@@ -273,7 +269,7 @@ callback, obs-vban included — on the SAME thread, so a blocking output callbac
   stalled — NOT the mixer;
 - a clean probe (`ticks_over=0`) while VBAN still gaps → obs-vban's own send path (its socket /
   sender thread), outside this thread.
-Anchored by `tests/audio_telemetry_800.rs` (both `audio_callback` returns close the probe's tick).
+Anchored by `obs:tests/vendored/tests/audio_telemetry_800.rs` (both `audio_callback` returns close the probe's tick).
 
 **Issue 1381 -- the same line names WHAT took the time** (design 6191167734). `media-io/audio-io.c`
 keeps window maxima on `struct audio_output` (`audio_output_stall_stats`, taken and reset by the
@@ -303,9 +299,9 @@ out_cb_fn=0x.. out_cb_param=0x.. out_cb_name='..'`. Reading it:
 The fields stay at the END of the line, the free-text name last, so `scripts/bundle_state_audio.py`
 keeps parsing it (`tests/python/test_audio_stall_out_parse_1381.py` renders the real C format).
 The stall line lives in `audio_stall_dump`, not inline in the #800 block:
-`tests/audio_telemetry_800.rs` reads the per-source walk's lock within 2500 bytes of the #800
-header, and the inline line pushed it past. Test: `tests/audio_stall_out_1381.rs` compiles the
-REAL audio-io.c into `tests/c/audio_stall_out_1381_harness.c` (fake clock: a sleep overshoot, ticks
+`obs:tests/vendored/tests/audio_telemetry_800.rs` reads the per-source walk's lock within 2500 bytes of the #800
+header, and the inline line pushed it past. Test: `obs:tests/vendored/tests/audio_stall_out_1381.rs` compiles the
+REAL audio-io.c into `obs:tests/c/audio_stall_out_1381_harness.c` (fake clock: a sleep overshoot, ticks
 that start behind, scripted input-mutex waits, a profiler tail, scripted callback durations, a
 callback that disconnects itself) and lifts the dump's name resolver and its `blog()` verbatim;
 42/42 scratch mutants killed (a blocking lock in the resolver is counted as `blocked=`, never a
@@ -550,9 +546,9 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
     (step, held, released, residual, holds, relabels); a sign flip or a zero residual fails.
   - `tests/genlock_audio_step_hold_parity_1381.rs::c_audio_relabel_matches_the_rust_authority_1381`:
     the scalar vectors, plus relabels in both shapes on top of the hold script.
-  - `tests/genlock_audio_relabel_ingest_1381.rs`: a lift-and-compile of the shipped place-vs-append
+  - `obs:tests/vendored/tests/genlock_audio_relabel_ingest_1381.rs`: a lift-and-compile of the shipped place-vs-append
     branch (relabel, smoothing, `handle_ts_jump`, the system check) through
-    `tests/c/genlock_audio_relabel_ingest_1381_harness.c`, against a truth table: joint 40 ms /
+    `obs:tests/c/genlock_audio_relabel_ingest_1381_harness.c`, against a truth table: joint 40 ms /
     260 ms / 682 ms / −1.5 s / 2.5 s, split 682 ms, catch-up, stamp leap and restart, plus a count of
     the stock debug lines.
   - The `RELABEL_WIRING` needles in the wiring test and both pwsh gates.
@@ -998,9 +994,9 @@ moves a placement at runtime.
   land on the continuation) is a change of the decided mechanism, so it was not made here.
 - **Tests:** unit `vstack:rig/core/src/genlock_audio_pairing_arrival_tests.rs`; parity
   `tests/genlock_audio_asrc_basis_parity_1425.rs` (`c_arrival_rebase_matches_the_rust_authority_1425`,
-  70 ms −1/0/+1); the ingest lift `tests/genlock_audio_arrival_rebase_1425.rs` (the issue-1381 harness,
-  built by the shared `tests/genlock_audio_ingest_lift/mod.rs`, its `main` replaced by
-  `tests/c/genlock_audio_arrival_rebase_1425_scenarios.c`; the log helper lifted with a no-op stand-in
+  70 ms −1/0/+1); the ingest lift `obs:tests/vendored/tests/genlock_audio_arrival_rebase_1425.rs` (the issue-1381 harness,
+  built by the shared `obs:tests/vendored/tests/genlock_audio_ingest_lift/mod.rs`, its `main` replaced by
+  `obs:tests/c/genlock_audio_arrival_rebase_1425_scenarios.c`; the log helper lifted with a no-op stand-in
   before it shipped, so the RED failed on behaviour); the bench (VLC model RED 62 placements → GREEN 0
   and 8 rebases, the depth as close to the lock as the NDI wall-clock twin, which reads 0 / 0 both
   ways); the wiring `tests/genlock_audio_arrival_rebase_wiring_1425.rs` (`ARRIVAL_REBASE_WIRING`, also

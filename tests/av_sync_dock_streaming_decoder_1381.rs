@@ -6,7 +6,7 @@
 //! position about twice. Every screen that passed re-computed ~223 preamble magnitudes. A 442 Hz
 //! tone passes the screen at every position: 35 ms of CPU per stereo push on an N100, against a
 //! 21.3 ms audio tick. The C++ twin (`camera-box-marker-scan.hpp`) is checked against a frozen copy
-//! of the old C++ kernel by `tests/c/av_sync_dock_demod_bench_1381.cpp`, and against this Rust push
+//! of the old C++ kernel by `obs:tests/c/av_sync_dock_demod_bench_1381.cpp`, and against this Rust push
 //! by push by `tests/qpsk_channel_pick_parity_1367.rs`.
 //!
 //! Default features, std only.

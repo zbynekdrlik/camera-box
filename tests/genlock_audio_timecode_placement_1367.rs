@@ -60,7 +60,7 @@ fn render_thread_tracks_the_presented_frame_at_the_scheduled_tick_1367() {
     // The sample is taken at the PRESENT TAIL of genlock_release_tick, on the frame this tick
     // actually presents (after every erase / drain / converge shed). An N >= 2 source samples its
     // grid target in genlock_release_tick_n2_grid instead (issue 1367 D1; its call is pinned by
-    // tests/genlock_n2_grid_wiring_1367.rs).
+    // obs:tests/vendored/tests/genlock_n2_grid_wiring_1367.rs).
     let tick = src
         .find("static bool genlock_release_tick(")
         .expect("issue 1367: genlock_release_tick is gone");

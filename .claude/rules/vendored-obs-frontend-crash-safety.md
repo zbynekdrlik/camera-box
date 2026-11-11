@@ -88,7 +88,7 @@ WS limping. Now the process exits at once, and the output is dark until the resp
 stream at least one self-heal pass plus its confirm, when the task is enabled). That is upstream's
 intended end state too.
 
-Guards: `tests/obs_crash_handler_no_modal_1378.rs`.
+Guards: `obs:tests/vendored/tests/obs_crash_handler_no_modal_1378.rs`.
 
 - **Facet A: source anchors** on the comment-stripped handler body (`tests/support/cpp_source.rs`).
   No `MessageBox`/`MB_TASKMODAL`/clipboard call; the crash-file write, the recorded write result,
@@ -136,8 +136,8 @@ to read) — a session-agnostic file read, so it is allowed even in an agent ses
 ## Testing a frontend fix — same std-only Facet A + Facet B, but NO pwsh mirror
 
 The vendored frontend `.cpp` compiles ONLY on CI. Reuse the
-`vendored-libobs-change-safety.md` #793/#1026 pattern exactly (see `tests/video_io_null_guard.rs` /
-`tests/prop_dialog_checksettings_null_guard_773.rs`):
+`vendored-libobs-change-safety.md` #793/#1026 pattern exactly (see `obs:tests/vendored/tests/video_io_null_guard.rs` /
+`obs:tests/vendored/tests/prop_dialog_checksettings_null_guard_773.rs`):
 
 - **Facet A** — std-only `fs::read_to_string` source anchors (helper present, guard-before-deref,
   old unguarded form absent), run with `cargo test --test <file>`.
@@ -159,7 +159,7 @@ Two frontend-specific differences from the libobs rule:
   never given one), but a rig-critical BEHAVIORAL divergence from upstream that STILL COMPILES
   either way and that a `git subtree pull` would silently revert (the #43/#152 class, and #1195's
   auto-normal unclean-shutdown launch — `tests/obs_unclean_shutdown_auto_normal_1195.rs` — and
-  issue 1378's no-dialog crash handler, `tests/obs_crash_handler_no_modal_1378.rs`) gets a
+  issue 1378's no-dialog crash handler, `obs:tests/vendored/tests/obs_crash_handler_no_modal_1378.rs`) gets a
   pwsh source-text anchor in BOTH ymls, mirroring the Rust guard — exactly as
   `vendored-libobs-change-safety.md` + `av-sync-dock-anchor-refactor-safety.md` mandate for any
   vendored guard. Decide by: "would a subtree pull silently revert a behavior we depend on, while

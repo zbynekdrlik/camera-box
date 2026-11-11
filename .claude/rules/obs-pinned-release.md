@@ -8,6 +8,7 @@ paths:
   - "scripts/lib/version-integrity-vendor-pin.sh"
   - "tests/obs_pin_1487.rs"
   - "tests/python/test_obs_release_1487.py"
+  - "tests/verify_strih_drm_scanout_marker_1504.rs"
 ---
 
 # The Linux OBS boxes run a pinned release of the forked OBS (issue 1487)
@@ -50,3 +51,14 @@ obs project; camera-box moves the pin.
    `scripts/lib/dtray.sh`).
 2. `cargo test --test obs_pin_1487` reads the release over HTTPS and fails until every value holds.
 3. Deploy: `scripts/deploy-genlock-fleet.sh --boxes strih-snv` (then stream-snv, the PP boxes when home).
+
+## Vendored-only tests live in the obs repo (issue 1504)
+
+Since obs v0.4.25 the obs repo's CI job `vendored-tests` (`tests/vendored`, its release gated on it)
+runs every test that reads only the vendored OBS/DistroAV/plugin sources, plus their C harnesses
+(`tests/c`). camera-box dropped its copies; a reference written `obs:tests/vendored/tests/<name>.rs`
+or `obs:tests/c/<file>` in these rules points there. A vendored-source change belongs in the obs
+repo with its test. camera-box keeps the tests whose subject it owns: anything that also reads
+`scripts/**` or `src/**` or calls `camera_box::` (the `genlock_audio_pairing_lift` / `genlock_n1_lift`
+parity users, the av-sync dock twins), and the consumer side of an OBS log contract, such as
+`tests/verify_strih_drm_scanout_marker_1504.rs` (verify-strih greps `drm-output: program scanout LIVE`).
