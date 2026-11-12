@@ -3,7 +3,6 @@
 Both are timing signals: a pump WARN that lost blocks also raises `rebootstraps` (gated), a missed=0 WARN
 loses nothing (dstack 4.11.2026). So the E2E window grade and verify item 9 count them and never fail on them.
 """
-import os
 import sys
 from pathlib import Path
 
