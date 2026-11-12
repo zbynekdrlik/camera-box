@@ -460,8 +460,9 @@ dantesync_fleet_graded_here() {
   printf '%s' "$out"
 }
 
-# dantesync_fleet_handed_over HOST -> 0 iff HOST is a DSYNC_FLEET_HANDED_OVER host: the same name, or
-# the same first label, case-insensitively, a trailing dot ignored (a PTR answer) (issue 1487).
+# dantesync_fleet_handed_over HOST -> 0 iff HOST is a DSYNC_FLEET_HANDED_OVER host, case-insensitively,
+# a trailing dot ignored (a PTR answer): the same full name, or a bare name (no dot) on either side
+# equal to the other's first label. iem-snv.pp.lan is NOT iem-snv.lan (another machine) (issue 1487).
 dantesync_fleet_handed_over() {
   local host h
   host="${1:-}"
@@ -471,7 +472,8 @@ dantesync_fleet_handed_over() {
   for h in $DSYNC_FLEET_HANDED_OVER; do
     h="${h%.}"
     h="${h,,}"
-    if [ "$host" = "$h" ] || [ "${host%%.*}" = "${h%%.*}" ]; then
+    if [ "$host" = "$h" ] || { [ "$host" = "${host%%.*}" ] && [ "$host" = "${h%%.*}" ]; } ||
+      { [ "$h" = "${h%%.*}" ] && [ "${host%%.*}" = "$h" ]; }; then
       return 0
     fi
   done
