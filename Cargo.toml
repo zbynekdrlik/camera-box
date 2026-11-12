@@ -16,7 +16,7 @@ repository = "https://github.com/zbynekdrlik/camera-box"
 resolver = "2"
 
 [workspace.package]
-version = "1.8.10"
+version = "1.8.11"
 
 [lib]
 name = "camera_box"
