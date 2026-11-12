@@ -88,7 +88,7 @@ win-resolume: the lease was one rig-wide mutex. Since issue 1450:
 
 | Holder | Declares |
 |---|---|
-| full-path E2E gate step (`full-path-e2e.yml`) | `snv-video`, + `resolume-snv` when the recording step's CG_CHAIN is `1` (the same `vars.CG_CHAIN == '1'` on a pull_request). Accepted exception: the cg OBS burn backstop (`cg_chain_backstop_sweep_off`) may remove a leftover burn on the cg OBS on any run |
+| full-path E2E gate step (`full-path-e2e.yml`) | `snv-video,resolume-snv` on every pull_request (recording) run, `snv-video` on a workflow_dispatch: issue 1509, the run's program-audio guard (issue 1421) fails it on SP-program audio, so SongPlayer must stay silent (12.11.2026 a songplayer deploy read the old CG-chain-only claim as free and played into run 43165398426). The cg OBS burn backstop (`cg_chain_backstop_sweep_off`) may remove a leftover burn on the cg OBS on any run |
 | ci.yml "Take the shared rig lease" (SNV fleet deploy) | `snv-cams` (the other venues' deploy takes no lease) |
 | `scripts/av-soak.sh`, `scripts/av-restart-matrix.sh` | `snv-video` (`RIG_LEASE_DECLARED`; the matrix's windows run under its lease) |
 | `scripts/cambox-ro-units-apply.sh` | the `<venue>-cams` atom of each box it is given (`ro_units_lease_resources`, the venue via `remote_log_camera_venue` = the strih fact file of its log sink): `snv-cams`, `pp-cams` or both; `all` when a venue cannot be read |
