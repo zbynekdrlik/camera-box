@@ -33,6 +33,14 @@ RIG_TEST_FEED_INTERCOM_DROPIN="${RIG_TEST_FEED_INTERCOM_DROPIN:-/etc/systemd/sys
 RIG_TEST_FEED_PAINTER_DROPIN_LEGACY="${RIG_TEST_FEED_PAINTER_DROPIN_LEGACY:-/run/systemd/system/cam2-painter.service.d/zz-rig-direct-marker.conf}"
 RIG_TEST_FEED_INTERCOM_DROPIN_LEGACY="${RIG_TEST_FEED_INTERCOM_DROPIN_LEGACY:-/run/systemd/system/camera-box.service.d/zz-rig-direct-intercom-off.conf}"
 
+# rig_test_feed_dropin_paths -> every direct-feed drop-in path, one per line (the /etc pair, then the legacy /run
+# pair): the EVENT contract's item 8 lists them as cam2 test artifacts, so a drop-in a failed EVENT removal left
+# behind (cam2's intercom kept OFF on air) fails the contract by name.
+rig_test_feed_dropin_paths() {
+  printf '%s\n' "$RIG_TEST_FEED_PAINTER_DROPIN" "$RIG_TEST_FEED_INTERCOM_DROPIN" \
+    "$RIG_TEST_FEED_PAINTER_DROPIN_LEGACY" "$RIG_TEST_FEED_INTERCOM_DROPIN_LEGACY"
+}
+
 # The verified close of an rw window (issue 1407). Lazy-sourced, the cam2-painter-ro-persist.sh pattern.
 command -v ro_window_close_cmds >/dev/null 2>&1 \
   || . "${BASH_SOURCE[0]%/*}/ro-window.sh"

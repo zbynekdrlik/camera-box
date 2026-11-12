@@ -1717,9 +1717,11 @@ event_mode_assert() {
   [ "$ndi_ok" -eq 0 ] || ndi_mismatches='["drift"]'
   echo "    [ndi-mapping] verify-only exit=$ndi_ok"
 
-  # --- item 8: test artifacts cleared (cam2 pidfile/marker log + dev1 heartbeat) --------------
+  # --- item 8: test artifacts cleared (cam2 pidfile/marker log + the issue-1482 direct-feed drop-ins + dev1 heartbeat)
   local artifacts_remote artifacts_local artifacts_json
-  artifacts_remote="$(cam_ssh "$(event_assert_artifacts_check_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")" 2>/dev/null || true)"
+  # The drop-in paths carry no whitespace (rig-test-feed.sh declares them), so word-splitting is the intent.
+  # shellcheck disable=SC2046
+  artifacts_remote="$(cam_ssh "$(event_assert_artifacts_check_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG" $(rig_test_feed_dropin_paths))" 2>/dev/null || true)"
   artifacts_local="$(bash -c "$(event_assert_artifacts_check_cmds "$(rig_heartbeat_path)")" 2>/dev/null || true)"
   artifacts_json="$(printf '%s\n%s\n' "$artifacts_remote" "$artifacts_local" | jq -R -s 'split("\n") | map(select(length>0))')"
   echo "    [artifacts] $artifacts_json"
@@ -1844,7 +1846,10 @@ do_event() {
   # line. Best-effort: a purge failure must never abort the EVENT flow; item 8 still flags anything
   # that genuinely survives.
   echo "[#721] purge leftover cam2 test artifacts (marker CSV + pidfile) so the item-8 assert can pass on a clean rig:"
-  cam_ssh "$(event_artifact_purge_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")" 2>/dev/null || true
+  # issue 1482: the direct-feed drop-ins too (lock-step with item 8). The /etc pair sits on the read-only root, so
+  # a plain rm fails there; the drop-in clear with its rw window above is their real remover, this is the net for /run.
+  # shellcheck disable=SC2046
+  cam_ssh "$(event_artifact_purge_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG" $(rig_test_feed_dropin_paths))" 2>/dev/null || true
   echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
   # issue 1410: the burn clear and the mapping enforce reach strih too, so an unreachable strih made
