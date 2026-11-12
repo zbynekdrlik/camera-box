@@ -224,9 +224,25 @@ def test_the_panel_carries_the_tint2_launchers_in_order_and_the_standard_plugins
     r = _bash('obs_box_xfce_panel_plugins "$1"', str(home), env=_seams(tmp_path))
     rows = [ln.split("|") for ln in r.stdout.splitlines()]
     assert [x[1] for x in rows] == ["applicationsmenu", "launcher", "launcher", "tasklist", "separator",
-                                    "systray", "pulseaudio", "clock", "actions"], r.stdout + r.stderr
+                                    "xkb", "systray", "pulseaudio", "clock", "actions"], r.stdout + r.stderr
     assert [x[2] for x in rows if x[1] == "launcher"] == ["power", "obs"]
-    assert [int(x[0]) for x in rows] == list(range(1, 10))
+    assert [int(x[0]) for x in rows] == list(range(1, 11))
+
+
+def test_every_role_shows_the_keyboard_layout_on_the_panel_1466(tmp_path):
+    """Owner 12.11.2026 on stream-snv: no layout switcher on the panel, nobody remembers Alt+Shift. The
+    tint2 panel had one (issue 1441); the xfce panel carries XFCE's xkb plugin as text, click switches."""
+    home = _home_with_obs(tmp_path)
+    for box in ("stream-snv", "strih-snv"):
+        r = _bash('obs_box_xfce_panel_plugins "$1"; obs_box_xfce_panel_spec "$1"', str(home), box=box,
+                  env=_seams(tmp_path))
+        kinds = [ln.split("|")[1] for ln in r.stdout.splitlines() if ln.count("|") == 2]
+        assert "xkb" in kinds and kinds.index("xkb") < kinds.index("systray"), (box, r.stdout + r.stderr)
+        pid = next(ln.split("|")[0] for ln in r.stdout.splitlines() if ln.endswith("|xkb|"))
+        assert f"/plugins/plugin-{pid}\tstring\txkb" in r.stdout, r.stdout
+        assert f"/plugins/plugin-{pid}/display-type\tuint\t1" in r.stdout, r.stdout
+        assert f"/plugins/plugin-{pid}/display-name\tuint\t0" in r.stdout, r.stdout
+        assert f"/plugins/plugin-{pid}/group-policy\tuint\t0" in r.stdout, r.stdout
 
 
 def test_the_strih_role_gets_no_pulseaudio_plugin_and_no_headphone_keys(tmp_path):
