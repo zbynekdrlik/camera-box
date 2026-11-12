@@ -42,3 +42,24 @@ program_audio_rx_key() {
     exit 0
   )
 }
+
+# program_audio_rx_stream_box NAME -> stdout: the STREAM-role box of NAME's venue (issue 1460, the
+# SILENT page's production read: the owner's ruling 12.11.2026, a production = that box's OBS programs
+# PRO and streams), from the box facts; nothing when NAME has no fact file, its facts do not load, or
+# its venue has no stream box. rc 0 always.
+program_audio_rx_stream_box() {
+  local name="${1-}" dir="${BASH_SOURCE[0]%/*}"
+  (
+    command -v strih_box_load >/dev/null 2>&1 || . "${dir}/strih-box-facts.sh"
+    strih_box_load "$name" >/dev/null 2>&1 || exit 0
+    venue="$(strih_box_venue 2>/dev/null)" || exit 0
+    for b in $(strih_box_known 2>/dev/null); do
+      if ( strih_box_load "$b" >/dev/null 2>&1 && [ "$(strih_box_role)" = stream ] \
+           && [ "$(strih_box_venue)" = "$venue" ] ); then
+        printf '%s\n' "$b"
+        exit 0
+      fi
+    done
+    exit 0
+  )
+}
