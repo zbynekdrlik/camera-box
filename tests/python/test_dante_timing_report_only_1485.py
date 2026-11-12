@@ -18,7 +18,8 @@ PUMP = ("12:00:16.000: dante-input dlink:  WARN strih-obs: engine pump lost or o
 
 
 def test_the_window_counts_timing_and_pump_warn_lines_report_only():
-    w = [base._status("12:00:00.000", 100), TIMING, "mark", base._status("12:00:10.000", 200),
+    # the counter window opens at the last status line before the START mark, so a line before THAT is outside
+    w = [TIMING, base._status("12:00:00.000", 100), "mark", base._status("12:00:10.000", 200),
          TIMING, PUMP, PUMP, "stop", base._status("12:00:20.000", 300), base._status("12:00:30.000", 400),
          TIMING, PUMP]
     r = CONT.decide(w, 2, 7)
