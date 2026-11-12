@@ -320,6 +320,18 @@ def test_a_probe_killed_by_its_bound_counts_as_hung(tmp_path):
     assert "WOULD page" in outs[2], outs[2]
 
 
+def test_a_probe_killed_by_something_else_is_not_hang_evidence(tmp_path):
+    # rc 137 = a SIGKILL from elsewhere (e.g. the OOM killer), never `timeout 45` (124)
+    outs = _passes(tmp_path, [_body(), "", "", ""], rc=[0, 137, 137, 137])
+    assert not any("WOULD page" in o for o in outs), outs
+
+
+def test_a_hang_long_after_the_last_proven_production_never_pages(tmp_path):
+    # the default carry is ~3 passes (180 s): passes 4+ minutes after the proof are not carried
+    outs = _passes(tmp_path, [_body(), "", "", "", "", ""], rc=[0, 1, 1, 1, 2, 2])
+    assert not any("WOULD page" in o for o in outs), outs
+
+
 def test_closing_obs_after_a_normal_end_of_show_never_pages(tmp_path):
     # review round 2: production proven, then the operator stops + closes OBS (refused = rc 1)
     outs = _passes(tmp_path, [_body(), "", "", ""], rc=[0, 1, 1, 1])

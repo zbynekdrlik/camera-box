@@ -29,12 +29,15 @@ vtedy má prísť správa do discordu, že sa zasekol výstup". Page ONLY in tha
   plain TCP connect (5 s): refused / no route / timeout = exit 1 ABSENT; TCP up but the obs-websocket
   handshake times out = exit 2 HUNG; after the handshake the socket timeout is 3 s and every request
   that times out (`TimeoutError` / `WebSocketTimeoutException`, never a closed connection or an error
-  reply) counts in `timeouts=`. `carry_unresponsive` turns SKIP (exit 2, or 124/137 = killed by the
-  45 s bound) / UNKNOWN with `timeouts>0` into STUCK `unresponsive` ONLY within `--carry-s` (600 s) of
+  reply) counts in `timeouts=`. `carry_unresponsive` turns SKIP (exit 2, or 124 = killed by the
+  45 s bound) / UNKNOWN with `timeouts>0` into STUCK `unresponsive` ONLY within `--carry-s` (180 s) of
   a pass that PROVED production + streaming; the watchdog stores that proof as `last_production_<box>`
   (set by OK and counter-STUCK, cleared by NOT_PRODUCTION, never refreshed by a carried pass).
   A first cut carried a refused connection too and paged after an ordinary "stop stream, close OBS"
-  end of show -- never carry an absence. Accepted gap: an OBS crash (port refused) is not this page.
+  end of show -- never carry an absence. Accepted gaps: an OBS crash (port refused) is not this page;
+  an OBS that hangs while QUITTING right after a show reads hung and can page once (truthfully,
+  "neodpovedá") -- the carry is 180 s (~3 passes) to keep that window short. rc 137 (a SIGKILL from
+  elsewhere, e.g. the OOM killer) is never hang evidence.
 - Live read 12.11.2026 (stream-snv not streaming): `render+90 frames+0 bytes+0` over 3 s: an idle
   stream's counters stand still, which is why the gate on `outputActive` in both snapshots matters.
 

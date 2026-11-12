@@ -35,8 +35,10 @@ import obs_phase2  # noqa: E402  (the sibling WS client; websocket-client is its
 DEFAULT_PORT = 4455
 DEFAULT_WINDOW_S = float(os.environ.get("STREAM_OUTPUT_STUCK_WINDOW_S", "3.0"))
 # The socket timeout is set to this right after the handshake, so every recv (and _rpc's own
-# deadline) is bounded by it: 7 requests x 3 s + the 3 s window + a 5 s TCP probe + the 10 s
-# obs_phase2 handshake stay inside the watchdog's 45 s bound.
+# deadline) is bounded by it. A healthy pass takes ~3 s. The worst case does NOT fit the watchdog's
+# 45 s bound: obs_phase2._conn's 10 s socket timeout applies per read (upgrade reply, hello,
+# identified), so a silent handshake alone can last ~30 s; 5 + 30 + 7 x 3 + 3 = 59 s. A run killed by
+# the bound exits 124, which the watchdog reads as HUNG -- the right verdict for exactly that case.
 REQUEST_TIMEOUT_S = float(os.environ.get("STREAM_OUTPUT_STUCK_REQUEST_TIMEOUT_S", "3"))
 TCP_CONNECT_TIMEOUT_S = float(os.environ.get("STREAM_OUTPUT_STUCK_TCP_TIMEOUT_S", "5"))
 _TIMEOUTS = [0]

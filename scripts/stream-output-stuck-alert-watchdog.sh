@@ -19,7 +19,7 @@ set -euo pipefail
 #     reconnecting -- confirmed over 2 consecutive passes.
 # Outside that state it never pages. An unreachable box (SKIP) or an unread fact (UNKNOWN) is never a
 # guessed production -- EXCEPT a HUNG OBS (the port takes the TCP connect but the handshake or a
-# request times out, or the probe is killed by its bound) within STREAM_OUTPUT_STUCK_CARRY_S (600 s)
+# request times out, or the probe is killed by its bound) within STREAM_OUTPUT_STUCK_CARRY_S (180 s)
 # of a pass that PROVED production + streaming: a frozen OBS answers nothing and network-reach sees a
 # box that still pings, so that is a stuck output, reason `unresponsive`. A REFUSED connection (OBS
 # closed, box off -- a normal end of show, or a crash) is never carried: not this watchdog's page.
@@ -74,7 +74,9 @@ WINDOW_S="${STREAM_OUTPUT_STUCK_WINDOW_S:-3}"
 PRODUCTION_SCENE="${STREAM_OUTPUT_STUCK_PRODUCTION_SCENE:-$STREAM_PRODUCTION_SCENE_DEFAULT}"
 CONFIRM_THRESHOLD="${STREAM_OUTPUT_STUCK_CONFIRM_THRESHOLD:-2}"
 REPING_INTERVAL_S="${STREAM_OUTPUT_STUCK_REPING_INTERVAL_S:-600}"
-CARRY_S="${STREAM_OUTPUT_STUCK_CARRY_S:-600}"
+# ~3 passes: only a hang close to a live, MOVING production is carried (review round 3: an OBS that
+# hangs while QUITTING right after a show is indistinguishable from a hang mid-show).
+CARRY_S="${STREAM_OUTPUT_STUCK_CARRY_S:-180}"
 
 DECIDE="${STREAM_OUTPUT_STUCK_DECIDE:-$HERE/stream_output_stuck_decision.py}"
 PROBE="${STREAM_OUTPUT_STUCK_PROBE:-$HERE/stream_output_stuck_probe.py}"
@@ -92,7 +94,8 @@ log() { printf '%s [stream-output-stuck-alert-watchdog] %s\n' "$(date '+%Y-%m-%d
 now_epoch() { printf '%s' "${STREAM_OUTPUT_STUCK_NOW:-$(date +%s)}"; }
 
 # fetch_probe -> the probe's key=value stdout; rc 0 = WS answered, 1 = absent (refused / no route),
-# 2 = hung (TCP connected, no handshake), 124/137 = killed by the bound (hung).
+# 2 = hung (TCP connected, no handshake), 124 = killed by `timeout 45` (hung). Any other rc (e.g. 137,
+# a SIGKILL from elsewhere such as the OOM killer) is NOT hang evidence and is never carried.
 # STREAM_OUTPUT_STUCK_FETCH_CMD (test seam): an executable run as `<cmd> <host> <port>` in place of
 # the real probe, so a --dry-run replays a fixture with no live box.
 fetch_probe() {
@@ -176,7 +179,7 @@ main() {
   rc=$?
   case "$rc" in
     0) reachable=1 ;;
-    2 | 124 | 137) hung=1; body="" ;;   # TCP took the connect but no answer / killed by the bound
+    2 | 124) hung=1; body="" ;;   # TCP took the connect but no answer / killed by `timeout 45`
     *) body="" ;;                        # refused / no route: OBS absent
   esac
   now="$(now_epoch)"
