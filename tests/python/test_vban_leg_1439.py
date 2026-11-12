@@ -565,8 +565,17 @@ def test_the_dante_rules_admit_both_devices_and_keep_the_vban_and_ping():
 
 def test_a_peers_reply_to_an_ephemeral_client_socket_is_admitted_by_its_source_port():
     """dstack's ARC, flow and mDNS instance clients bind port 0: a dport list alone would drop every reply."""
-    assert re.search(r"ip saddr 10\.77\.7\.0/24 udp sport \{ 4440, 4441, 4455, 4456, 5353, 8700, 8800, 8801 \} "
+    assert re.search(r"ip saddr 10\.77\.7\.0/24 udp sport \{ 4440-4486, 5353, 8700, 8800-8831 \} "
                      r"udp dport 32768-60999 counter accept", _dante_text())
+
+
+def test_a_peer_device_in_a_higher_slot_is_admitted_1508():
+    """Issue 1508 (12.11.2026): a dstack device on a peer PC sits in slot k above the base (ARC 4440+k,
+    flows 4455+k, CMC 8800+k, k = 0..31). mbc-snv answered from 4456 after mbc's restart and the base-only
+    set dropped it: stream-snv's program audio had ~2 % holes for 18 h. Every slot port must pass, on a
+    box whose own devices sit only in slot 0 too."""
+    one = _bash('. "%s"\nstrih_dante_peer_ports "$1"' % LEG_LIB, "stream-obs=4440:8800:4455:30000-30031")
+    assert one.stdout.strip() == "4440-4486, 5353, 8700, 8800-8831", one.stdout
 
 
 def test_a_peers_source_port_opens_only_the_ephemeral_range():
