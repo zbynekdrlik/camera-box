@@ -81,3 +81,60 @@ def test_the_leg_install_removes_wsdd_on_a_dante_leg_1507():
     body = body[:body.index("\n}\n")]
     assert "strih_vban_leg_wsdd_remove" in body
     assert body.index("strih_vban_leg_wsdd_remove") < body.index("_strih_vban_leg_nm_apply")
+
+
+def _proc_stubs(tmp_path, pids):
+    """A pgrep that lists `pids` for the wsdd pattern and a kill that logs its arguments."""
+    d, log = _wsdd_stubs(tmp_path, False, [])
+    klog = tmp_path / "kill.log"
+    _stub(d, "pgrep", 'echo "$*" >> "%s"\nprintf "%%s\\n" %s\n[ -n "%s" ]\n'
+          % (klog, " ".join(pids), " ".join(pids)))
+    _stub(d, "kill", 'echo "kill $*" >> "%s"\n' % klog)
+    return d, klog
+
+
+def test_a_wsdd_still_running_after_its_package_went_is_stopped_1507(tmp_path):
+    # live stream-snv 12.11.2026: the package was purged, but the wsdd gvfsd started on 1.11 (its
+    # binary deleted) still held UDP 3702 on the Dante address 10.77.7.204.
+    d, klog = _proc_stubs(tmp_path, ["16817"])
+    r = _bash("strih_vban_leg_wsdd_remove", path_prefix=d)
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = klog.read_text().splitlines()
+    assert any(c.startswith("kill") and "16817" in c for c in calls), calls
+    assert "16817" in r.stdout, r.stdout
+
+
+def test_no_running_wsdd_kills_nothing_1507(tmp_path):
+    d, klog = _proc_stubs(tmp_path, [])
+    r = _bash("strih_vban_leg_wsdd_remove", path_prefix=d)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not klog.exists() or not any(c.startswith("kill") for c in klog.read_text().splitlines())
+
+
+def _grade_wsdd(tmp_path, ss_out):
+    d = tmp_path / "gbin"
+    d.mkdir()
+    _stub(d, "ss", 'cat <<\'EOF\'\n%sEOF\n' % ss_out)
+    body = ('ok() { echo "OK $*"; }; bad() { echo "FAIL $*"; }; note() { echo "NOTE $*"; }\n'
+            '_strih_vban_leg_wsdd_grade 10.77.7.204')
+    return _bash(body, path_prefix=d)
+
+
+def test_verify_fails_a_socket_on_udp_3702_of_the_dante_address_1507(tmp_path):
+    r = _grade_wsdd(tmp_path, 'UNCONN 0 0 10.77.7.204:3702 0.0.0.0:* users:(("python3",pid=16817,fd=18))\n'
+                              'UNCONN 0 0 10.77.9.204:3702 0.0.0.0:* users:(("python3",pid=16817,fd=10))\n')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("FAIL (vban-leg) wsdd") and "16817" in r.stdout, r.stdout
+
+
+def test_verify_passes_a_leg_without_ws_discovery_1507(tmp_path):
+    r = _grade_wsdd(tmp_path, 'UNCONN 0 0 10.77.9.204:5353 0.0.0.0:* users:(("avahi",pid=1,fd=1))\n')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("OK (vban-leg) wsdd"), r.stdout
+
+
+def test_the_leg_grade_runs_the_wsdd_row_on_a_dante_leg_1507():
+    text = LEG_LIB.read_text()
+    body = text[text.index("strih_vban_leg_grade() {"):]
+    body = body[:body.index("\n}\n")]
+    assert "_strih_vban_leg_wsdd_grade" in body
