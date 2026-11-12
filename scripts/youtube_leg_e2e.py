@@ -515,7 +515,9 @@ def fold(verdict_json, block):
 def _verdict_args(a, st, windows, host, rec, vod=None, out="verdict"):
     """The verdict tool's arguments on the measurement host (its paths in the host's stage dir); `vod`
     + `out` judge another point (a file on the host) the same way (issue 1387)."""
-    args = ["--vod", vod or st["vod_id"], "--recording", f"{rec}@{st['record_start_utc']:.3f}",
+    # one argv word (issue 1511): a YouTube id may start with '-', which argparse reads as an option after
+    # a separate `--vod`
+    args = [f"--vod={vod or st['vod_id']}", "--recording", f"{rec}@{st['record_start_utc']:.3f}",
             "--markers", host.path("in", "markers.csv"), "--out", host.path(out),
             "--probe-bin", host.path("in", "recording-verdict")]
     for w in window_args(windows):
