@@ -768,7 +768,7 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   link change, a refused reapply fails by name (`test_the_live_32_moves_to_the_24_by_reapply_...`).
 - **The filter:** read from dstack's sockets: bound to the interface address, its ARC / flow / mDNS instance
   CLIENT sockets on port 0, so a peer's reply is admitted by its SOURCE port, to the ephemeral range only
-  (never 319 or the VBAN ports). The peer ports are the defaults + this box's devices. Input from the /24 to the
+  (never 319 or the VBAN ports). The peer ports are dstack's SLOT RANGES (ARC 4440-4471, flows 4455-4486, CMC 8800-8831: a peer PC's device sits in any slot, base + k) + this box's devices, merged as nft prints them. Issue 1508: the base-only set dropped mbc-snv's slot-1 reply (from 4456) after mbc's restart 11.11.2026 12:05Z, and stream-snv's program audio had ~2 % holes for 18 h (flow request, no answer, every ~6 s). Stateless on purpose (no conntrack); dstack's two-networks standard names the same ranges. Input from the /24 to the
   devices' ports + 5353, 8700, 8702, 8708; output from the leg's address to the /24 and 224.0.0.231, .233,
   .251. IGMP both ways: without it a snooping switch ages the groups out.
 - **Traps:** `nft list` prints touching ports of an interval set merged (`4440-4441`) and a `skuid` as a
