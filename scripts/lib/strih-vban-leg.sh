@@ -264,7 +264,14 @@ strih_vban_leg_sysctl_text() {
 # desktop session and it binds every address, the Dante leg's included). A production OBS box never browses
 # SMB. Read with `apt-get -s` first: anything else apt would take with it refuses, nothing changed.
 strih_vban_leg_wsdd_remove() {
-  local sim other
+  local sim other pids
+  # a wsdd the purge left running (its binary deleted) keeps its sockets: stop it (live stream-snv 12.11.2026)
+  pids="$(pgrep -f '/usr/bin/wsdd( |$)' 2>/dev/null | tr '\n' ' ' || true)"
+  if [ -n "${pids// /}" ]; then
+    # shellcheck disable=SC2086  # the pids, one word each
+    env kill $pids 2>/dev/null || true
+    echo "  wsdd stopped (pid ${pids% }): nothing but Dante on the Dante leg (issue 1507)"
+  fi
   [ "$(dpkg-query -W -f='${Status}' wsdd 2>/dev/null || true)" = "install ok installed" ] || return 0
   sim="$(DEBIAN_FRONTEND=noninteractive apt-get -s purge wsdd 2>/dev/null)" \
     || { echo "strih-vban-leg: apt-get -s purge wsdd failed -- nothing changed" >&2; return 1; }
@@ -276,6 +283,18 @@ strih_vban_leg_wsdd_remove() {
   DEBIAN_FRONTEND=noninteractive apt-get purge -y wsdd >/dev/null \
     || { echo "strih-vban-leg: apt-get purge wsdd failed (issue 1507)" >&2; return 1; }
   echo "  wsdd purged: nothing but Dante on the Dante leg (issue 1507)"
+}
+
+# _strih_vban_leg_wsdd_grade ADDR -> verify item 9's `(vban-leg) wsdd` row (issue 1507): no WS-Discovery
+# socket (UDP 3702) on the Dante address.
+_strih_vban_leg_wsdd_grade() {
+  local hit
+  hit="$(ss -Hulnp 2>/dev/null | grep -F " ${1}:3702 " || true)"
+  if [ -n "$hit" ]; then
+    bad "(vban-leg) wsdd: UDP 3702 bound on ${1} ($(grep -oE 'pid=[0-9]+' <<<"$hit" | sort -u | tr '\n' ' ')) -- re-run setup-strih.sh step 13"
+  else
+    ok "(vban-leg) wsdd: no WS-Discovery socket on ${1}"
+  fi
 }
 
 # strih_vban_leg_nm_props IF ADDR [PARENT VLAN_ID] -> `property<TAB>value` lines: the profile, as
@@ -903,6 +922,7 @@ strih_vban_leg_grade() {
     fi
   fi
   _strih_vban_leg_leftover_grade "$ifc" "$addr" "$parent"
+  if [ "$(_strih_vban_leg_plen)" = 24 ]; then _strih_vban_leg_wsdd_grade "$addr"; fi
   # the kernel's view: the address, no route through the leg but the policy one
   if p="$(_strih_vban_leg_live_problems "$ifc" "$addr")"; then
     bad "(vban-leg) routes: $(tr '\n' ';' <<<"$p") -- only the leg's own traffic may use it (re-run setup-strih.sh step 13)"
