@@ -83,3 +83,31 @@ def test_the_wrapper_exits_0_after_its_own_kill_and_runs_the_watch_1512():
     assert "strih_obs_shutdown_watch" in tail
     assert "STRIH_OBS_SHUTDOWN_BOUND_S" in tail
     assert tail.index("strih_obs_shutdown_watch") < tail.index('wait "$OBS_PID"')
+
+
+def test_the_watch_reads_only_the_new_end_of_the_log_never_the_whole_file_1512():
+    # review of the release PR: grepping the whole OBS log every second (hundreds of MB after a
+    # multi-day session) loads a broadcast box; the watch reads only what was appended since its last look.
+    text = START.read_text()
+    body = text[text.index("strih_obs_shutdown_watch() {"):]
+    body = body[:body.index("\n}\n")]
+    assert "tail -c" in body, body
+    assert "grep -qF '==== Shutting down' \"$log\"" not in body, body
+
+
+def test_a_shutdown_line_written_in_two_pieces_is_still_seen_1512(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    dump = tmp_path / "dump"
+    script = (
+        'set -euo pipefail\n. "$1"\n'
+        'since=$(date +%s)\n'
+        'sleep 30 & pid=$!\n'
+        'f="$2/2026-11-12 18-42-16.txt"; head -c 200000 /dev/zero | tr "\\0" x > "$f"; echo >> "$f"\n'
+        '( sleep 1.5; printf "18:40:41.461: ==== Shut" >> "$f"; sleep 1.5; printf "ting down ====\\n" >> "$f" ) &\n'
+        'strih_obs_shutdown_watch "$pid" "$2" "$since" 2 "$3"\n'
+        'rc=0; wait "$pid" || rc=$?\necho "OBS_RC=$rc"\n'
+    )
+    r = subprocess.run(["bash", "-c", script, "h", str(START), str(logs), str(dump)],
+                       capture_output=True, text=True, timeout=60)
+    assert "OBS_RC=137" in r.stdout and dump.is_dir(), r.stdout + r.stderr

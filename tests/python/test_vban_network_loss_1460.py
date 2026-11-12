@@ -87,3 +87,10 @@ def test_the_bench_passes_the_profile_obs_log_to_the_grade():
     call = sh[sh.index('python3 "$ANALYZE" "$RUN_DIR/p$_i-audio.mkv"'):]
     call = call[:call.index("|| _arc=$?")]
     assert '--obs-log "$RUN_DIR/p$_i-obs.log"' in call and '--input-name "$INPUT_NAME"' in call, call
+
+
+def test_a_concealed_run_that_overlaps_a_scheduled_loss_is_never_a_network_loss():
+    # review of the release PR: a network loss next to a scheduled one merges into ONE longer logged run;
+    # it starts on the scheduled packet but does not match (packet, count), so it was mislabelled network.
+    sched = _sched([(100, 2)])
+    assert vs.network_losses([_line(100, 3), _line(99, 2)], INPUT, sched) == []

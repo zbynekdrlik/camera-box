@@ -52,3 +52,46 @@ def test_the_event_contract_checks_the_drop_ins_on_cam2():
     line = next(l for l in text.splitlines()
                 if "artifacts_remote=" in l and "event_assert_artifacts_check_cmds" in l)
     assert re.search(r"\$\(rig_test_feed_dropin_paths\)", line), line
+
+
+def test_a_purged_drop_in_systemd_still_has_loaded_is_reloaded_and_its_unit_restarted(tmp_path):
+    # review of the release PR: the EVENT purge removes a leftover /run drop-in with a plain rm; without a
+    # daemon-reload systemd keeps the loaded override (cam2's intercom stays OFF on air) while item 8
+    # reads the file gone and passes. The net after the purge reloads + try-restarts every unit whose
+    # drop-in dir changed under it (NeedDaemonReload=yes), and nothing else.
+    log = tmp_path / "systemctl.log"
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "systemctl").write_text(
+        "#!/bin/bash\necho \"$*\" >> \"%s\"\n"
+        "if [ \"$1\" = show ]; then case \"$*\" in *camera-box.service*) echo yes ;; *) echo no ;; esac; fi\n" % log)
+    (stub / "systemctl").chmod(0o755)
+    r = _bash('bash -c "$(rig_test_feed_dropin_reload_cmds $(rig_test_feed_dropin_paths))"',
+              env={"PATH": "%s:%s" % (stub, os.environ["PATH"])})
+    assert r.returncode == 0, r.stderr
+    calls = log.read_text().splitlines()
+    assert "show -p NeedDaemonReload --value camera-box.service" in calls, calls
+    assert "show -p NeedDaemonReload --value cam2-painter.service" in calls, calls
+    assert "daemon-reload" in calls, calls
+    assert "try-restart camera-box.service" in calls, calls
+    assert "try-restart cam2-painter.service" not in calls, calls
+
+
+def test_nothing_reloads_when_systemd_has_no_stale_drop_in(tmp_path):
+    log = tmp_path / "systemctl.log"
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "systemctl").write_text("#!/bin/bash\necho \"$*\" >> \"%s\"\n[ \"$1\" = show ] && echo no\nexit 0\n" % log)
+    (stub / "systemctl").chmod(0o755)
+    r = _bash('bash -c "$(rig_test_feed_dropin_reload_cmds $(rig_test_feed_dropin_paths))"',
+              env={"PATH": "%s:%s" % (stub, os.environ["PATH"])})
+    assert r.returncode == 0, r.stderr
+    calls = log.read_text().splitlines()
+    assert "daemon-reload" not in calls and not [c for c in calls if c.startswith("try-restart")], calls
+
+
+def test_event_runs_the_reload_net_right_after_the_purge():
+    s = RIG.read_text()
+    purge = s.index("cam_ssh \"$(event_artifact_purge_cmds ")
+    net = s.index("rig_test_feed_dropin_reload_cmds", purge)
+    assert net - purge < 400, net - purge

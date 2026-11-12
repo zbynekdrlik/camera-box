@@ -89,3 +89,21 @@ def test_the_venue_stream_box_comes_from_the_facts():
                               str(t._SCRIPTS / "lib" / "program-audio-rx.sh"), box],
                              capture_output=True, text=True, timeout=60)
         assert out.returncode == 0 and out.stdout.strip() == want, (box, out.stdout, out.stderr)
+
+
+def test_both_stream_reads_must_be_active(tmp_path):
+    # review of the release PR: the output stopping between the two snapshots is not a production.
+    state = tmp_path / "state"
+    for _ in range(3):
+        log = _silent(tmp_path, state, "scene0=PRO\nscene1=PRO\nactive0=1\nactive1=0\n")
+        assert "production=yes" not in log and not _silent_pages(log), log
+
+
+def test_an_away_stream_box_is_never_probed(tmp_path):
+    # review: an away PP stream box would make every SILENT pass wait up to the probe's 45 s bound.
+    state = tmp_path / "state"
+    log = t._run(tmp_path, t._body(0, age=SILENT_AGE, head=2, key="obs-vban:ASIO zvuk"), state,
+                 box="strih-pp|strih-pp.lan stream-pp|stream-pp.lan", production=PRO_LIVE,
+                 extra_env={"OBS_FLEET_HOME": "strih-pp resolume-snv"})
+    assert not (tmp_path / "production.args").exists(), log
+    assert "production=unknown" in log, log

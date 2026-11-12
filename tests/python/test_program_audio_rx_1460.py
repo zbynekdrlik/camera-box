@@ -313,7 +313,7 @@ def _body(events, age=4, head=2, key="obs-vban:Zvuk z mixu", gap=10):
 
 
 def _run(tmp_path, body, state, box="stream-pp|stream-pp.lan", dry_run=True, notify=None, page="1",
-         production=None, production_rc=1):
+         production=None, production_rc=1, extra_env=None):
     """`production` = the stuck-output probe's key=value lines for the venue's stream box (the SILENT
     page's production read); None = the stream OBS is absent (rc 1), never a live box."""
     prod = tmp_path / "production.sh"
@@ -334,6 +334,7 @@ def _run(tmp_path, body, state, box="stream-pp|stream-pp.lan", dry_run=True, not
                 "OBS_FLEET_HOME": "stream-pp strih-pp resolume-snv",
                 "AUDIO_MIXER_ALERT_STATE_FILE": str(state),
                 "AIRULESET_NOTIFY": notify or "/nonexistent/airuleset.py"})
+    env.update(extra_env or {})
     env.pop("AUDIO_MIXER_PROGRAM_RX_PAGE", None)
     if page is not None:
         env["AUDIO_MIXER_PROGRAM_RX_PAGE"] = page

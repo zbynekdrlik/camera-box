@@ -138,3 +138,40 @@ def test_the_leg_grade_runs_the_wsdd_row_on_a_dante_leg_1507():
     body = text[text.index("strih_vban_leg_grade() {"):]
     body = body[:body.index("\n}\n")]
     assert "_strih_vban_leg_wsdd_grade" in body
+
+
+def test_verify_fails_a_wildcard_or_scoped_3702_socket_too_1507(tmp_path):
+    # review of the release PR: a wsdd bound to every address (0.0.0.0 / *) or shown as addr%iface also
+    # answers on the Dante address.
+    for i, sock in enumerate(("0.0.0.0:3702", "*:3702", "10.77.7.204%enp56s0.70:3702", "[::]:3702")):
+        d = tmp_path / str(i)
+        d.mkdir()
+        r = _grade_wsdd(d, 'UNCONN 0 0 %s 0.0.0.0:* users:(("python3",pid=7,fd=3))\n' % sock)
+        assert r.stdout.startswith("FAIL (vban-leg) wsdd"), (sock, r.stdout)
+
+
+def test_the_leftover_stop_comes_after_a_refused_purge_never_before_1507(tmp_path):
+    # review: a refused purge says "nothing changed", so the leftover wsdd is stopped only once the
+    # package side is settled.
+    d, log = _wsdd_stubs(tmp_path, True, ["Purg wsdd [2:0.8-5ubuntu1]", "Remv gvfs-backends [1.54]"])
+    klog = tmp_path / "kill.log"
+    _stub(d, "pgrep", 'echo "$*" >> "%s"\necho 16817\n' % klog)
+    _stub(d, "kill", 'echo "kill $*" >> "%s"\n' % klog)
+    r = _bash("strih_vban_leg_wsdd_remove", path_prefix=d)
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert not klog.exists() or not [c for c in klog.read_text().splitlines() if c.startswith("kill")], klog.read_text()
+
+
+def test_the_leftover_stop_waits_for_the_process_to_go_and_says_so_1507(tmp_path):
+    # wsdd catches SIGTERM and needs a few seconds (live stream-snv 12.11.2026: still there 2 s later).
+    d, _log = _wsdd_stubs(tmp_path, False, [])
+    count = tmp_path / "n"
+    count.write_text("0")
+    klog = tmp_path / "kill.log"
+    _stub(d, "pgrep", 'n=$(cat "%s"); echo $((n+1)) > "%s"\n[ "$n" -lt 3 ] && echo 16817 || exit 1\n' % (count, count))
+    _stub(d, "kill", 'echo "kill $*" >> "%s"\n' % klog)
+    _stub(d, "sleep", 'exit 0\n')
+    r = _bash("strih_vban_leg_wsdd_remove", path_prefix=d)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert int(count.read_text()) >= 3, "the stop polls until the process is gone"
+    assert "wsdd stopped" in r.stdout, r.stdout
