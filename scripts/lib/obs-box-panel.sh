@@ -692,10 +692,12 @@ _obs_box_panel_launchers_row() {
 # xfce4-panel running for the user) and (panel-window); the other rows are the openbox box's.
 _obs_box_panel_xfce_rows() {
   local repo="$1" home="$2" user="$3" why bad en wins
-  if [ "$(dpkg-query -W -f='${Status}' xfce4-panel 2>/dev/null || true)" = "install ok installed" ]; then
-    printf 'OK|(panel-pkg) xfce4-panel installed (STRIH_DESKTOP=xfce)\n'
-  else
+  if [ "$(dpkg-query -W -f='${Status}' xfce4-panel 2>/dev/null || true)" != "install ok installed" ]; then
     printf 'FAIL|(panel-pkg) xfce4-panel not installed -- re-run setup-strih.sh step 11 (issue 1466)\n'
+  elif [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_XFCE_XKB_PLUGIN_PKG" 2>/dev/null || true)" != "install ok installed" ]; then
+    printf 'FAIL|(panel-pkg) %s not installed (the keyboard layout item) -- re-run setup-strih.sh step 16h (issue 1466)\n' "$OBS_BOX_XFCE_XKB_PLUGIN_PKG"
+  else
+    printf 'OK|(panel-pkg) xfce4-panel + %s installed (STRIH_DESKTOP=xfce)\n' "$OBS_BOX_XFCE_XKB_PLUGIN_PKG"
   fi
   why="$(obs_box_xfce_grade_channel "$home" "$user" xfce4-panel obs_box_xfce_panel_spec "$home")" || true
   if [ "$why" != ok ]; then

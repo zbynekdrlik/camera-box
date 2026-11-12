@@ -37,6 +37,9 @@ OBS_BOX_XFCE_XSESSION="${OBS_BOX_XFCE_XSESSION:-/usr/share/xsessions/xfce.deskto
 OBS_BOX_XFCE_PGREP="${OBS_BOX_XFCE_PGREP:-pgrep}"
 OBS_BOX_XFCE_SESSION_ENTRY=obs-box-session.desktop
 OBS_BOX_XFCE_PANEL_PLUGIN_PKG=xfce4-pulseaudio-plugin
+# the keyboard layout item on every xfce box (owner 12.11.2026: the layout must be visible + clickable on
+# the panel, nobody remembers Alt+Shift; the tint2 panel has one since issue 1441)
+OBS_BOX_XFCE_XKB_PLUGIN_PKG=xfce4-xkb-plugin
 # the rows of obs_box_session_grade_rows on an xfce box (an openbox box prints 2)
 OBS_BOX_XFCE_ROWS=8
 
@@ -120,8 +123,8 @@ obs_box_xfce_keys_spec() {
 
 # obs_box_xfce_panel_plugins HOME -> the panel's plugins in order, `id|kind|launcher-id` (launcher-id only
 # for a launcher): the applications menu, one launcher per obs_box_panel_launchers app (Vypnúť first),
-# the task list, an expanding separator, the system tray, the pulseaudio plugin on the stream role, the
-# clock, the actions button.
+# the task list, an expanding separator, the keyboard layout (xkb, every role), the system tray, the
+# pulseaudio plugin on the stream role, the clock, the actions button.
 obs_box_xfce_panel_plugins() {
   local home="${1:?home required}" n=1 id rest
   printf '%s|applicationsmenu|\n' "$n"
@@ -131,6 +134,7 @@ obs_box_xfce_panel_plugins() {
   done < <(obs_box_panel_launchers "$home")
   n=$((n + 1)); printf '%s|tasklist|\n' "$n"
   n=$((n + 1)); printf '%s|separator|\n' "$n"
+  n=$((n + 1)); printf '%s|xkb|\n' "$n"
   n=$((n + 1)); printf '%s|systray|\n' "$n"
   if [ "$(strih_box_role)" = stream ]; then n=$((n + 1)); printf '%s|pulseaudio|\n' "$n"; fi
   n=$((n + 1)); printf '%s|clock|\n' "$n"
@@ -160,6 +164,9 @@ obs_box_xfce_panel_spec() {
       launcher) printf '/plugins/plugin-%s/items\tarray:string\tobs-box-panel-%s.desktop\n' "$pid" "$lid" ;;
       separator) printf '/plugins/plugin-%s/expand\tbool\ttrue\n/plugins/plugin-%s/style\tuint\t0\n' "$pid" "$pid" ;;
       systray) printf '/plugins/plugin-%s/square-icons\tbool\ttrue\n' "$pid" ;;
+      # the active layout as text (US / SK), a click switches; the layouts stay the X server's us,sk +
+      # alt_shift (display-type 1 = text, display-name 0 = country code, group-policy 0 = global)
+      xkb) printf '/plugins/plugin-%s/display-type\tuint\t1\n/plugins/plugin-%s/display-name\tuint\t0\n/plugins/plugin-%s/group-policy\tuint\t0\n' "$pid" "$pid" "$pid" ;;
       # our own headphone keys run the helper on the one operator sink (issue 1465), never the plugin's
       pulseaudio) printf '/plugins/plugin-%s/enable-keyboard-shortcuts\tbool\tfalse\n/plugins/plugin-%s/enable-multimedia-keys\tbool\tfalse\n' "$pid" "$pid" ;;
     esac
@@ -330,16 +337,19 @@ obs_box_session_install() {
 }
 
 # obs_box_xfce_panel_install REPO HOME USER -> the xfce4-panel half of step 16h (an xfce box only): the
-# pulseaudio plugin on the stream role, each launcher's .desktop in its plugin folder, the panel channel.
+# pulseaudio plugin on the stream role, the xkb plugin on every role, each launcher's .desktop in its plugin
+# folder, the panel channel.
 obs_box_xfce_panel_install() {
   : "${1:?repo required}"
   local home="${2:?home required}" user="${3:?user required}" pid kind lid name ex icon f grp
   grp="$(id -gn "$user")" || return 1
-  if [ "$(strih_box_role)" = stream ] \
-    && [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_XFCE_PANEL_PLUGIN_PKG" 2>/dev/null || true)" != "install ok installed" ]; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$OBS_BOX_XFCE_PANEL_PLUGIN_PKG" \
-      || { echo "obs-box-xfce: apt-get install ${OBS_BOX_XFCE_PANEL_PLUGIN_PKG} failed" >&2; return 1; }
-  fi
+  local pkg pkgs="$OBS_BOX_XFCE_XKB_PLUGIN_PKG"
+  [ "$(strih_box_role)" = stream ] && pkgs="$OBS_BOX_XFCE_PANEL_PLUGIN_PKG $pkgs"
+  for pkg in $pkgs; do
+    [ "$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)" != "install ok installed" ] || continue
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" \
+      || { echo "obs-box-xfce: apt-get install ${pkg} failed" >&2; return 1; }
+  done
   while IFS='|' read -r pid kind lid; do
     [ "$kind" = launcher ] || continue
     IFS='|' read -r _ name ex icon < <(obs_box_panel_launchers "$home" | grep "^${lid}|")

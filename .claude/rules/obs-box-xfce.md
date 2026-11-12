@@ -56,7 +56,10 @@ same word (`/usr/share/xsessions/xfce.desktop`, read on strih-snv: xfce4 4.20).
 ## The panel and the keys (one source with tint2 / openbox)
 
 - `obs_box_xfce_panel_plugins` = applicationsmenu, one launcher per `obs_box_panel_launchers` app (the
-  SAME list as tint2, Vypnúť first), tasklist, an expanding separator, systray, pulseaudio (stream role
+  SAME list as tint2, Vypnúť first), tasklist, an expanding separator, xkb (EVERY role: the keyboard layout as text US / SK, a click switches,
+  `display-type` 1 / `display-name` 0 / `group-policy` 0, the layouts stay X's `us,sk` + alt_shift; owner
+  12.11.2026: nobody remembers Alt+Shift, the switch must be on the panel; package `xfce4-xkb-plugin`
+  installed by step 16h, graded in `(panel-pkg)`), systray, pulseaudio (stream role
   only, its own keyboard + multimedia keys OFF so our helper keys win), clock, actions. Ids 1..N in that
   order; ONE panel `p=8;x=0;y=0` (bottom), length 100, locked, 30 px.
 - `obs_box_xfce_keys_spec`: `commands/custom` replaced wholesale + `override=true`: Alt+F1 menu, the
@@ -168,6 +171,6 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
    48 PASS.
 4. The operator list: touchpad tap + two-finger scroll, the mouse wheel in the Restreamer windows,
    the start menu, Vypnúť / actions power-off (no password), Print -> flameshot, the headphone keys +
-   the pulseaudio plugin, the keyboard layout (Alt+Shift; there is no layout item in xfce4-panel yet).
+   the pulseaudio plugin, the keyboard layout (the panel's xkb item + Alt+Shift).
 5. CPU (`top`) and OBS `program-render-audit lagged` beside the last openbox numbers.
 6. Rollback: `STRIH_DESKTOP=openbox` + setup-strih + reboot.
