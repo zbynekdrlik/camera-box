@@ -56,7 +56,7 @@ def test_the_log_line_makes_it_a_network_loss_and_the_grade_passes():
 
 
 def test_a_network_loss_that_moved_the_timeline_still_fails():
-    p1, p2 = 8 * FS // 256, 14 * FS // 256
+    p2 = 14 * FS // 256
     x = t._conceal(t.synth(20, jumps=[(p2 * 256 / FS + 2 * 256 / FS, 2)]), p2 * 256 / FS, 2)
     sched = _sched([])
     full = vs.with_network_losses(sched, vs.network_losses([_line(p2, 2)], INPUT, sched))
