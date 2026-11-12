@@ -43,8 +43,11 @@ STRIH_DANTE_INFO_PORT=8700
 # the info + heartbeat multicast ports
 STRIH_DANTE_GROUP_PORTS="8702 8708"
 STRIH_DANTE_GROUPS="224.0.0.231 224.0.0.233 224.0.0.251"
-# a peer's default ARC / flow control / CMC ports (dstack arc::PORT, flows::PORT, cmc::PORT)
-STRIH_DANTE_PEER_DEFAULT_PORTS="4440 4455 8800"
+# a peer's ARC / flow control / CMC ports over dstack's device slots: the base (dstack arc::PORT,
+# flows::PORT, cmc::PORT) + k for slot k = 0..31. A peer PC's device can sit in any slot (issue 1508:
+# mbc-snv answered from 4456 after mbc's restart and the base-only set dropped it for 18 h). Stateless on
+# purpose: the leg has no conntrack (dstack two-networks: replies by the slot ranges, never base ports only).
+STRIH_DANTE_PEER_DEFAULT_PORTS="4440-4471 4455-4486 8800-8831"
 # net.ipv4.ip_local_port_range's Linux default, where a port-0 client socket lands
 STRIH_DANTE_EPHEMERAL_PORTS="32768-60999"
 
@@ -53,12 +56,6 @@ strih_dante_leg_declared() {
   local v
   v="$(strih_lx_dante_devices 2>/dev/null)" || return 1
   [ -n "$v" ] && [ "$v" != none ]
-}
-
-# _strih_dante_sorted_set ITEM... -> the items sorted by their first number, unique, `, `-joined: the
-# order `nft list` prints an anonymous set in.
-_strih_dante_sorted_set() {
-  printf '%s\n' "$@" | sort -t- -k1,1n -u | paste -s -d, - | sed 's/,/, /g'
 }
 
 # _strih_dante_merged_set ITEM... -> the same with touching ports and ranges merged: `nft list` prints an
@@ -90,10 +87,11 @@ strih_dante_in_ports() {
     "$STRIH_DANTE_MDNS_PORT" "$STRIH_DANTE_INFO_PORT" $STRIH_DANTE_GROUP_PORTS
 }
 
-# strih_dante_peer_ports DEVICES -> the nft set of the service ports a peer answers from (pure).
+# strih_dante_peer_ports DEVICES -> the nft set of the service ports a peer answers from (pure), merged
+# the way `nft list` prints an interval set.
 strih_dante_peer_ports() {
   # shellcheck disable=SC2046,SC2086  # the lists split on purpose
-  _strih_dante_sorted_set $(strih_dante_service_ports "$1") $STRIH_DANTE_PEER_DEFAULT_PORTS \
+  _strih_dante_merged_set $(strih_dante_service_ports "$1") $STRIH_DANTE_PEER_DEFAULT_PORTS \
     "$STRIH_DANTE_MDNS_PORT" "$STRIH_DANTE_INFO_PORT"
 }
 
