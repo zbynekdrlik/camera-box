@@ -260,6 +260,24 @@ strih_vban_leg_sysctl_text() {
   if [ "${2:-}" = yes ]; then printf 'net/ipv4/conf/%s/rp_filter = 2\n' "$ifc"; fi
 }
 
+# strih_vban_leg_wsdd_remove -> issue 1507: purge `wsdd` (Windows network browsing; gvfsd starts it in a
+# desktop session and it binds every address, the Dante leg's included). A production OBS box never browses
+# SMB. Read with `apt-get -s` first: anything else apt would take with it refuses, nothing changed.
+strih_vban_leg_wsdd_remove() {
+  local sim other
+  [ "$(dpkg-query -W -f='${Status}' wsdd 2>/dev/null || true)" = "install ok installed" ] || return 0
+  sim="$(DEBIAN_FRONTEND=noninteractive apt-get -s purge wsdd 2>/dev/null)" \
+    || { echo "strih-vban-leg: apt-get -s purge wsdd failed -- nothing changed" >&2; return 1; }
+  other="$(printf '%s\n' "$sim" | grep -E '^(Purg|Remv) ' | grep -vE '^(Purg|Remv) wsdd( |$)' || true)"
+  if [ -n "$other" ]; then
+    echo "strih-vban-leg: purging wsdd would also remove: $(printf '%s' "$other" | tr '\n' ';') -- nothing changed (issue 1507)" >&2
+    return 1
+  fi
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y wsdd >/dev/null \
+    || { echo "strih-vban-leg: apt-get purge wsdd failed (issue 1507)" >&2; return 1; }
+  echo "  wsdd purged: nothing but Dante on the Dante leg (issue 1507)"
+}
+
 # strih_vban_leg_nm_props IF ADDR [PARENT VLAN_ID] -> `property<TAB>value` lines: the profile, as
 # `nmcli -g` reads it back (the vlan kind adds vlan.parent + vlan.id after the interface name). With Dante
 # devices the address is the real /24 and ipv4.route-table holds its connected route out of main, so the
@@ -271,7 +289,11 @@ strih_vban_leg_nm_props() {
   routes="$(strih_vban_leg_net "$addr") table=${STRIH_VBAN_LEG_ROUTE_TABLE}"
   printf '%s\t%s\n' connection.id "$STRIH_VBAN_LEG_PROFILE" connection.interface-name "$ifc"
   if [ "$parent" != - ]; then printf '%s\t%s\n' vlan.parent "$parent" vlan.id "$id"; fi
-  if [ "$plen" = 24 ]; then routes=""; printf '%s\t%s\n' ipv4.route-table "$STRIH_VBAN_LEG_ROUTE_TABLE"; fi
+  # issue 1507 (dstack two-networks standard): a Dante leg's route metric is 900
+  if [ "$plen" = 24 ]; then
+    routes=""
+    printf '%s\t%s\n' ipv4.route-table "$STRIH_VBAN_LEG_ROUTE_TABLE" ipv4.route-metric 900
+  fi
   printf '%s\t%s\n' \
     connection.autoconnect yes \
     ipv4.method manual \
@@ -774,6 +796,8 @@ strih_vban_leg_install() {
   fi
   _strih_vban_leg_filter_apply "$ifc" "$sender" "$port" "$addr" || return 1
   _strih_vban_leg_sysctl_apply "$ifc" || return 1
+  # issue 1507: nothing but Dante on a Dante leg (wsdd binds every address, the leg's included)
+  if [ "$(_strih_vban_leg_plen)" = 24 ]; then strih_vban_leg_wsdd_remove || return 1; fi
   # issue 1495: a `mac:` leg on a NIC a VLAN move retired (the rollback) takes it out of the unmanaged drop-in
   if [ "$parent" = - ]; then _strih_vban_leg_unretire "$ifc" || return 1; fi
   _strih_vban_leg_nm_apply "$ifc" "$addr" "$mac" "$parent" "$id" || return 1

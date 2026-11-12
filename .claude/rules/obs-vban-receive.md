@@ -785,6 +785,10 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   INADDR_ANY:319 sockets; by its config its gm_allowlist keeps it on video-clock.lan (NOT measured with the
   audio grandmaster's packets arriving: read dsync's `/status` grandmaster after the first deploy; the clock
   watchdog pages a foreign one). Who may bind 319: `.claude/rules/strih-dante-input.md`.
+- **Nothing but Dante on a Dante leg (issue 1507, dstack two-networks):** the /24 profile declares
+  `ipv4.route-metric 900`, and the install purges `wsdd` (gvfsd starts it in a desktop session; it bound UDP
+  3702 on 10.77.7.204 on stream-snv) after an `apt-get -s` read that refuses any other removal. Both land at
+  the next setup run (a profile change is a reapply: never live under a running stream-obs).
 - **`rp_filter=2` on the leg:** an inbound multicast's reverse lookup has no `from` match and resolves
   through the rig NIC.
 - **Address conflict detection is off on the leg (`ipv4.dad-timeout 0`, issue 1495, live 9.11.2026):** the
