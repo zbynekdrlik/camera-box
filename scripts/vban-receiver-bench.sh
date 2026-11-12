@@ -602,6 +602,7 @@ for _p in $PROFILES; do
     fi
     python3 "$ANALYZE" "$RUN_DIR/p$_i-audio.mkv" --schedule "$RUN_DIR/p$_i-schedule.json" --stream 0 \
       --lead-s "$ANALYSIS_LEAD_S" --ppm-bound "$PPM_BOUND" --hold-frames "$_hold" --json \
+      --obs-log "$RUN_DIR/p$_i-obs.log" --input-name "$INPUT_NAME" \
       > "$RUN_DIR/p$_i-analysis.json" || _arc=$?
     if [ "$_arc" = 0 ]; then _sine=PASS; fi
   fi
