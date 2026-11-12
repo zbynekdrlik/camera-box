@@ -69,6 +69,9 @@ the jack, the program-audio guard read FOREIGN and the E2E `[0/8]` preflight ref
   TEST and EVENT.
 - EVENT removes both in ONE window before its camera-box restart; a failed window is recorded (#868), never a
   half-way stop.
+- The EVENT contract's item 8 lists every drop-in path (`rig_test_feed_dropin_paths`, the one declaration), so a
+  drop-in a failed removal left behind fails the contract by name; the #721 purge lists the same paths (lock-step
+  test `harness_event_artifact_purge_721.rs`), harmless on the read-only /etc pair.
 - The no-display drop-in stays in `/run` (every E2E cleanup clears it; cam2 carries its own provisioned
   `cam2-no-display.conf` in `/etc` anyway).
 - Tests: `tests/python/test_rig_test_feed_persist_1482.py` on the issue-1407 fake read-only-root box.
