@@ -80,15 +80,23 @@ strih_wait_rig_address() {
 # for the obs project (obs#40: threads, per-task wait channels, children, a best-effort gdb backtrace)
 # into DUMP_DIR, then SIGKILL OBS. rc 0 always; DUMP_DIR exists only when it killed.
 strih_obs_shutdown_watch() {
-  local pid="$1" logdir="$2" since="$3" bound="$4" dump="$5" log="" seen="" t
+  local pid="$1" logdir="$2" since="$3" bound="$4" dump="$5" log="" seen="" t off=0 size
   [[ "$bound" =~ ^[0123456789]{1,4}$ ]] && [ "$bound" -gt 0 ] || bound=60
   while kill -0 "$pid" 2>/dev/null; do
     if [ -z "$log" ]; then
       log="$(find "$logdir" -maxdepth 1 -name '*.txt' -newermt "@${since}" -printf '%T@ %p\n' 2>/dev/null \
         | sort -rn | head -n 1 | cut -d' ' -f2- || true)"
     fi
-    if [ -z "$seen" ] && [ -n "$log" ] && grep -qF '==== Shutting down' "$log" 2>/dev/null; then
-      seen="$SECONDS"
+    # only what was appended since the last look (+ 64 bytes, so a line written in two pieces is
+    # still read whole): a multi-day OBS log is hundreds of MB, never re-read every second
+    if [ -z "$seen" ] && [ -n "$log" ]; then
+      size="$(stat -c %s "$log" 2>/dev/null || echo 0)"
+      if [ "$size" -gt "$off" ]; then
+        if tail -c "+$(( off > 64 ? off - 63 : 1 ))" "$log" 2>/dev/null | grep -qF '==== Shutting down'; then
+          seen="$SECONDS"
+        fi
+        off="$size"
+      fi
     fi
     if [ -n "$seen" ] && [ $((SECONDS - seen)) -ge "$bound" ]; then
       echo "WARN issue 1512: obs (pid ${pid}) still alive ${bound} s after '==== Shutting down' -- dumping to ${dump}, then SIGKILL"

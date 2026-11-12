@@ -400,8 +400,9 @@ def network_losses(lines, input_name, schedule):
             continue
         n = int(m.group("n"))
         packet = (int(m.group("nu")) - n - start) % (1 << 32)
-        if n > CONCEAL_MAX_SLOTS or (packet, n) in planned or (packet, n) in seen:
-            continue
+        if n > CONCEAL_MAX_SLOTS or (packet, n) in seen \
+                or any(packet < p + c and p < packet + n for p, c in planned):
+            continue  # a scheduled loss, or a network loss merged with one into one logged run
         seen.add((packet, n))
         out.append({"packet": packet, "count": n, "sample": packet * fpp, "time_s": packet * fpp / rate,
                     "network": True})

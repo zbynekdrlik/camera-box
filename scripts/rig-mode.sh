@@ -1850,6 +1850,8 @@ do_event() {
   # a plain rm fails there; the drop-in clear with its rw window above is their real remover, this is the net for /run.
   # shellcheck disable=SC2046
   cam_ssh "$(event_artifact_purge_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG" $(rig_test_feed_dropin_paths))" 2>/dev/null || true
+  # shellcheck disable=SC2046
+  cam_ssh "$(rig_test_feed_dropin_reload_cmds $(rig_test_feed_dropin_paths))" 2>/dev/null || true
   echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
   # issue 1410: the burn clear and the mapping enforce reach strih too, so an unreachable strih made

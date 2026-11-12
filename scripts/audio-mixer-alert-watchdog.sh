@@ -363,21 +363,22 @@ analyze_body() {
 # the roster / unreadable / hung = unknown, an absent OBS (probe rc 1) = no. Test seam
 # AUDIO_MIXER_PRODUCTION_CMD: an executable run as `<cmd> <host> 4455` in place of the probe.
 program_rx_production() {
-  local box="$1" sb pair sip="" out rc=0 s0 s1 a0
+  local box="$1" sb pair sip="" out rc=0 s0 s1 a0 a1
   sb="$(program_audio_rx_stream_box "$box")"
   for pair in $BOXES; do [ "${pair%%|*}" = "$sb" ] && sip="${pair##*|}"; done
   if [ -z "$sb" ] || [ -z "$sip" ]; then printf 'unknown stream_box=%s\n' "${sb:-<none>}"; return 0; fi
+  if ! obs_fleet_poll_now "$sb"; then printf 'unknown stream_box=%s (away, not probed)\n' "$sb"; return 0; fi
   if [ -n "${AUDIO_MIXER_PRODUCTION_CMD:-}" ]; then
     out="$("$AUDIO_MIXER_PRODUCTION_CMD" "$sip" 4455 2>/dev/null)" || rc=$?
   else
     out="$(timeout 45 python3 "$HERE/stream_output_stuck_probe.py" "$sip" 4455 --window-s 0.5 2>/dev/null)" || rc=$?
   fi
-  s0="$(field "$out" scene0)"; s1="$(field "$out" scene1)"; a0="$(field "$out" active0)"
+  s0="$(field "$out" scene0)"; s1="$(field "$out" scene1)"; a0="$(field "$out" active0)"; a1="$(field "$out" active1)"
   if [ "$rc" -eq 1 ]; then printf 'no stream_box=%s (OBS absent)\n' "$sb"
-  elif [ "$rc" -ne 0 ] || [ -z "$s0" ] || [ -z "$s1" ] || [ -z "$a0" ]; then
+  elif [ "$rc" -ne 0 ] || [ -z "$s0" ] || [ -z "$s1" ] || [ -z "$a0" ] || [ -z "$a1" ]; then
     printf 'unknown stream_box=%s (probe rc %s)\n' "$sb" "$rc"
-  elif [ "$s0" = PRO ] && [ "$s1" = PRO ] && [ "$a0" = 1 ]; then printf 'yes stream_box=%s\n' "$sb"
-  else printf "no stream_box=%s (scene '%s'/'%s', streaming %s)\n" "$sb" "$s0" "$s1" "$a0"
+  elif [ "$s0" = PRO ] && [ "$s1" = PRO ] && [ "$a0" = 1 ] && [ "$a1" = 1 ]; then printf 'yes stream_box=%s\n' "$sb"
+  else printf "no stream_box=%s (scene '%s'/'%s', streaming %s/%s)\n" "$sb" "$s0" "$s1" "$a0" "$a1"
   fi
   return 0
 }
