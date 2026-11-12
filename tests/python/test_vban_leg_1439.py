@@ -479,7 +479,7 @@ VLAN_PROPS_1439 = {"connection.id": "vban-dante70", "connection.interface-name":
                    "ipv4.routing-rules": "priority 100 from 10.77.7.202 table 70", "ipv4.dad-timeout": "0",
                    "ipv6.method": "disabled"}
 VLAN_PROPS = dict(VLAN_PROPS_1439, **{"ipv4.addresses": "10.77.7.202/24", "ipv4.routes": "",
-                                      "ipv4.route-table": "70"})
+                                      "ipv4.route-table": "70", "ipv4.route-metric": "900"})  # metric: issue 1507
 
 
 def _strih_rig():
