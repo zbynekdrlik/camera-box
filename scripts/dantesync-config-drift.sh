@@ -113,6 +113,10 @@ while IFS='|' read -r name addr os role homegate user _; do
   if [ -n "$ONLY" ]; then
     case " $ONLY " in *" $name "*) ;; *) continue ;; esac
   fi
+  if dantesync_fleet_dsync_graded "$name"; then
+    echo "node=$name role=$role verdict=SKIPPED (graded by dsync -- DSYNC_GRADED_NODES, issue 1487)"
+    continue
+  fi
   if cambox_offline_ack_is_acked "$name"; then
     echo "node=$name role=$role verdict=EXCLUDED (acked offline: $(cambox_offline_ack_reason "$name"))"
     continue

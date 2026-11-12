@@ -82,11 +82,9 @@ fi
 #   mbc       -- the Master Broadcast Console (Ableton, the measurement-audio chain), audio VLAN.
 #   fohabl    -- the FOH Ableton PC that hosts the AIC128-D card, audio VLAN, ssh user `master` with
 #                its own password (DANTESYNC_FOHABL_SSH_PASS).
-#   iem-snv / companion-snv -- the old Windows IEM PC (a dstack development PC since 2026-11, on the AUDIO VLAN at
-#                10.77.7.114, locked to the audio GM since 4.11.2026) and the SNV Bitfocus Companion box
-#                (Linux), both on the video clock (GM 10.77.9.230). Owner 13.10.2026: "ako to ze na iem
-#                pc nei je upgradovany dantesync?!!! udriziavas flotilu pod jednotnou verziou" -- found by
-#                a :8898 scan of every rig subnet at 1.8.28 / 1.8.20; never outside this table again.
+#   iem-snv / companion-snv -- issue 1487: no longer rows here. dsync (the dstack project) grades and
+#                upgrades both itself; DSYNC_FLEET_HANDED_OVER below keeps the outside-fleet scan from
+#                flagging them. (Owner 13.10.2026 had found them outside every roll at 1.8.28 / 1.8.20.)
 #   strih-pp / stream-pp / resolume-pp -- issue 1412: the Poprad (PP) venue. strih-pp is the PP NTP
 #                master (scripts/strih-boxes/strih-pp.env: STRIH_DANTESYNC_ROLE=server), stream-pp and
 #                resolume-pp (Windows; its obs-fleet row, issue 1426, is only in the build-parity facet) follow it; all three lock to the PP PTP
@@ -110,8 +108,6 @@ resolume-snv|obs:resolume-snv|windows|video|obsfleet|-|
 imag|obs:imag|linux|video|obsfleet|-|
 mbc|10.77.7.232|windows|audio|always|-|
 fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS
-iem-snv|iem-snv.lan|windows|audio|always|-|
-companion-snv|companion-snv.lan|linux|video|always|-|
 strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|
 stream-pp|obs:stream-pp|linux|video-pp|reach|-|
 resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|
@@ -120,7 +116,19 @@ alex-nb|10.77.7.109|windows|audio|reach|alexnb|}"
 # issue 1487: the nodes dsync upgrades itself (its own release flow since the handover to the dsync
 # project). They stay rows of the table, so the clock watchdog and the config drift check keep
 # grading them on :8898, but the fleet upgrader never rolls them and the version gate never pins them.
-DSYNC_SELF_UPGRADED_NODES="${DSYNC_SELF_UPGRADED_NODES-companion-snv mbc fohabl iem-snv alex-nb}"
+# alex-nb left it on 12.11.2026: dsync cannot log in there, so camera-box rolls it again.
+DSYNC_SELF_UPGRADED_NODES="${DSYNC_SELF_UPGRADED_NODES-mbc fohabl}"
+
+# issue 1487: the nodes dsync GRADES itself (dsync#179: a dev1 user timer reads their :8898 every 60 s
+# and pages through airuleset notify). camera-box keeps their UPGRADE path (the fleet upgrader and the
+# version gate still read them) until dsync can log in there (airuleset#1311), but drops them from every
+# GRADING roster here -- the clock watchdog's defaults (and through it the handover clock item) and the
+# config drift check -- so one node never has two graders paging on it.
+DSYNC_GRADED_NODES="${DSYNC_GRADED_NODES-alex-nb resolume-pp}"
+
+# issue 1487: hosts that run dsync but are dsync's own (graded + upgraded by it, no row here). The
+# version gate's outside-fleet scan names them as handed over, never as an OUTSIDE-FLEET alarm.
+DSYNC_FLEET_HANDED_OVER="${DSYNC_FLEET_HANDED_OVER-iem-snv.lan companion-snv.lan}"
 
 # The audio-VLAN PTP grandmaster: an Audinate device, locked to the same clock as the video
 # grandmaster video-clock.lan (#1367 comment 5832526338). Since 25.9.2026 ~21:07 the leader is
@@ -434,6 +442,40 @@ dantesync_fleet_present() {
 # dantesync_fleet_self_upgraded NAME -> 0 iff dsync upgrades NAME itself (issue 1487).
 dantesync_fleet_self_upgraded() {
   case " $DSYNC_SELF_UPGRADED_NODES " in *" ${1:-} "*) [ -n "${1:-}" ] ;; *) return 1 ;; esac
+}
+
+# dantesync_fleet_dsync_graded NAME -> 0 iff dsync grades NAME itself (issue 1487, DSYNC_GRADED_NODES).
+dantesync_fleet_dsync_graded() {
+  case " $DSYNC_GRADED_NODES " in *" ${1:-} "*) [ -n "${1:-}" ] ;; *) return 1 ;; esac
+}
+
+# dantesync_fleet_graded_here "NAMES" -> the space-separated NAMES camera-box grades itself: every
+# name of the list(s) dantesync_fleet_dsync_graded does not claim, in the given order (issue 1487).
+dantesync_fleet_graded_here() {
+  local out="" name list="$*"
+  for name in $list; do
+    dantesync_fleet_dsync_graded "$name" && continue
+    out="${out:+$out }$name"
+  done
+  printf '%s' "$out"
+}
+
+# dantesync_fleet_handed_over HOST -> 0 iff HOST is a DSYNC_FLEET_HANDED_OVER host: the same name, or
+# the same first label, case-insensitively, a trailing dot ignored (a PTR answer) (issue 1487).
+dantesync_fleet_handed_over() {
+  local host h
+  host="${1:-}"
+  host="${host%.}"
+  host="${host,,}"
+  [ -n "$host" ] || return 1
+  for h in $DSYNC_FLEET_HANDED_OVER; do
+    h="${h%.}"
+    h="${h,,}"
+    if [ "$host" = "$h" ] || [ "${host%%.*}" = "${h%%.*}" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 # dantesync_fleet_spec <linux|win|local> <default-user> [--present] -> the node spec for ONE arm of

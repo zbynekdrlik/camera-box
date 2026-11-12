@@ -679,6 +679,11 @@ main() {
       for kip in $(getent ahostsv4 "$khost" 2>/dev/null | awk '{print $1}' | sort -u); do known+=("$kip"); done
     done
     for kip in $(hostname -I 2>/dev/null); do known+=("$kip"); done
+    # issue 1487: the hosts dsync grades + upgrades itself (DSYNC_FLEET_HANDED_OVER) are known too
+    for khost in $DSYNC_FLEET_HANDED_OVER; do
+      known+=("$khost")
+      for kip in $(getent ahostsv4 "$khost" 2>/dev/null | awk '{print $1}' | sort -u); do known+=("$kip"); done
+    done
     if [ -n "${DANTESYNC_FLEET_SCAN_CMD:-}" ]; then
       scan_cmd=("$DANTESYNC_FLEET_SCAN_CMD")
     else
@@ -688,11 +693,15 @@ main() {
     uout="$(timeout 180 "${scan_cmd[@]}" --nets "$DANTESYNC_FLEET_SCAN_NETS" --known "${known[@]}" 2>/dev/null || true)"
     while read -r uline uip uname; do
       [ "$uline" = UNKNOWN ] || continue
+      if dantesync_fleet_handed_over "$uname"; then
+        printf '  %-15s %-28s HANDED-OVER  (dsync grades + upgrades it itself -- DSYNC_FLEET_HANDED_OVER, issue 1487)\n' "$uip" "$uname"
+        continue
+      fi
       found=1
       printf '  %-15s %-28s OUTSIDE-FLEET  (dantesync answers :8898; add a row to scripts/lib/dantesync-fleet.sh)\n' "$uip" "$uname"
       echo "!! DANTESYNC-FLEET ALARM: ${uip} (${uname}) runs dantesync but is NOT in the fleet table -- no roll, gate or watchdog reaches it (report-only, does NOT block this run)." >&2
     done <<<"$uout"
-    [ "$found" = 1 ] || echo "  none           OK  (every dantesync node on ${DANTESYNC_FLEET_SCAN_NETS} is a fleet node)"
+    [ "$found" = 1 ] || echo "  none           OK  (every dantesync node on ${DANTESYNC_FLEET_SCAN_NETS} is a fleet node or handed over to dsync)"
   fi
 
   exit "$rc"

@@ -76,7 +76,7 @@ tray's old unit, binary and release record.
 
 ## Scope
 
-`DSYNC_SELF_UPGRADED_NODES` (companion-snv mbc fohabl iem-snv alex-nb): dsync upgrades these itself.
+`DSYNC_SELF_UPGRADED_NODES` (`mbc fohabl` since 12.11.2026): dsync upgrades these itself.
 They stay rows of the fleet table, so the clock watchdog and the drift check keep grading them on
 :8898, but the upgrader never rolls them (named or not), and the version gate never pins them. They may
 keep their state dir in place, so the drift check reads `/etc/dsync`, then `/etc/dantesync`.
@@ -88,12 +88,20 @@ reads each one with the same `dsync --version` reader and prints it in its own s
 `dantesync_self_upgraded_verdict` on `release_version_order_word` (semver, never text): below the pin
 = `SELF-BEHIND (version=V pin=P; ...)` + a `!! DSYNC-SELF-UPGRADED WARNING` stderr line, at/above =
 `OK`, unread = `SELF-UNKNOWN` + a NOTE. The gate exit NEVER moves (our gate must not follow dsync's
-deploy cadence) and nothing rolls them. An unreachable `reach` one (alex-nb) is `SKIPPED (unreachable`
+deploy cadence) and nothing rolls them. An unreachable `reach` one is `SKIPPED (unreachable`
 like a rolled node; one named on the command line is graded on the pin as before. The handover check
 (item `dantesync`) turns the rows into a Slovak `pozor:` note on its line and the summary
 (`rig-dev-handover-check.md`), and the 30-min `fleet-parity-alert-watchdog.sh` logs them (one
 `self-upgraded below the pin` line; never drift, never a catch-up roll, never a page). Tests:
 `tests/python/test_dsync_self_upgraded_version_1487.py`, `tests/python/test_fleet_parity_1426.py`.
+
+**12.11.2026, dsync#179 (design 6837165923): dsync GRADES its nodes itself** (a dev1 user timer reads
+:8898 every 60 s on mbc, fohabl, iem-snv, companion-snv, alex-nb, resolume-pp and pages through airuleset
+notify). So camera-box splits them three ways (`dantesync-fleet.md`, "The nodes dsync owns"):
+iem-snv + companion-snv are no rows any more (dsync grades + upgrades them; `DSYNC_FLEET_HANDED_OVER`);
+alex-nb + resolume-pp stay rows that the upgrader rolls and the version gate pins (dsync cannot log in
+there until airuleset#1311), but `DSYNC_GRADED_NODES` drops them from every grader; alex-nb left
+`DSYNC_SELF_UPGRADED_NODES`, so camera-box rolls it again.
 
 **resolume-snv** moved on 2.11.2026 by dsync's own `install.ps1`, once. That is not a path: only
 camera-box moves rig boxes. It reads SAME at the new location, so the upgrader only checks its tray
