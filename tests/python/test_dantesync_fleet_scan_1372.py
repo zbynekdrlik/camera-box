@@ -37,7 +37,7 @@ def test_the_scan_nets_are_declared_once_in_the_fleet_lib():
     assert m and m.group(1).split() == ["10.77.9", "10.77.8", "10.77.7", "10.76.9", "10.76.8"]
 
 
-def _gate(tmp_path, scan_out):
+def _gate(tmp_path, scan_out, **over):
     b = tmp_path / "bin"
     b.mkdir(parents=True)
     (b / "sshpass").write_text("#!/usr/bin/env bash\nexit 255\n")
@@ -53,6 +53,7 @@ def _gate(tmp_path, scan_out):
                 "FAKE_SCAN_OUT": scan_out, "FAKE_SCAN_ARGS": str(tmp_path / "args"),
                 "DANTESYNC_FLEET_CRED_FILE": str(tmp_path / "none.env"), "DANTESYNC_NEWEST_RELEASE": "0.0.0",
                 "DANTESYNC_VERSION_GATE_SSH_PASS": "pw"})
+    env.update(over)
     r = subprocess.run(["bash", str(SCRIPTS / "dantesync-version-gate.sh"), "--pin", "0.0.0", "--fleet-file",
                         str(fleet), "--fleet"], capture_output=True, text=True, env=env, timeout=120)
     args = (tmp_path / "args").read_text() if (tmp_path / "args").exists() else ""
@@ -61,16 +62,33 @@ def _gate(tmp_path, scan_out):
 
 def test_the_gate_names_a_node_outside_the_fleet_and_never_fails_on_it(tmp_path):
     clean, _ = _gate(tmp_path / "a", "")
-    r, args = _gate(tmp_path / "b", "UNKNOWN 10.77.9.231 iem-snv.lan\n")
+    r, args = _gate(tmp_path / "b", "UNKNOWN 10.77.9.231 stray-pc.lan\n")
     assert "-- dantesync nodes outside the fleet table (report-only, ALARM never blocks) --" in r.stdout
-    assert "10.77.9.231" in r.stdout and "iem-snv.lan" in r.stdout and "OUTSIDE-FLEET" in r.stdout
+    assert "10.77.9.231" in r.stdout and "stray-pc.lan" in r.stdout and "OUTSIDE-FLEET" in r.stdout
     assert "DANTESYNC-FLEET ALARM" in r.stderr and "10.77.9.231" in r.stderr
     assert r.returncode == clean.returncode, "report-only: the unknown node never changes the gate result"
     assert "--known" in args and "10.77.9.202" in args  # the fleet targets are passed as known
     # every fleet row is known, also one the gate SKIPPED this run (a `reach` node away, live 13.10.2026:
     # resolume-pp read OUTSIDE-FLEET while it was skipped as unreachable)
+    # issue 1487: + the hosts dsync grades and upgrades itself (DSYNC_FLEET_HANDED_OVER)
     for host in ("resolume-pp.lan", "strih-pp.lan", "iem-snv.lan", "companion-snv.lan"):
         assert host in args.split(), host
+
+
+def test_a_node_handed_over_to_dsync_is_never_an_outside_fleet_alarm(tmp_path):
+    """issue 1487: iem-snv + companion-snv left the fleet table for dsync; when the scan still sees
+    them (by PTR name, also a trailing-dot or upper-case answer) the gate names them HANDED-OVER."""
+    r, _ = _gate(tmp_path, "UNKNOWN 10.77.7.114 iem-snv.lan\nUNKNOWN 10.77.9.205 COMPANION-SNV.lan.\n")
+    assert "OUTSIDE-FLEET" not in r.stdout and "DANTESYNC-FLEET ALARM" not in r.stderr, r.stdout + r.stderr
+    assert "10.77.7.114" in r.stdout and "HANDED-OVER" in r.stdout
+    assert "10.77.9.205" in r.stdout
+    assert "  none           OK" in r.stdout
+
+
+def test_the_handed_over_list_is_env_overridable(tmp_path):
+    r, args = _gate(tmp_path, "UNKNOWN 10.77.7.114 iem-snv.lan\n", DSYNC_FLEET_HANDED_OVER="")
+    assert "OUTSIDE-FLEET" in r.stdout and "iem-snv.lan" in r.stdout
+    assert "iem-snv.lan" not in args.split()
 
 
 def test_the_gate_reports_none_when_every_node_is_in_the_fleet(tmp_path):

@@ -20,9 +20,9 @@ set -euo pipefail
 # READS (read-only): dev1's own /etc/dsync/config.json (local), a Linux node's
 # /etc/dsync/config.json and a Windows node's C:\ProgramData\dsync\config.json over
 # `scp -O` (the raw BYTES, so a PowerShell-written byte-order mark -- which makes dantesync ignore the
-# file -- is caught). A traveling box that is away (obs_fleet_is_home false) is SKIPPED; a node acked
-# offline in rig-fleet.txt / CAMBOX_OFFLINE_ACK is EXCLUDED; any other unread node is UNKNOWN, never
-# a silent pass.
+# file -- is caught). An away traveling box and a node dsync grades itself (DSYNC_GRADED_NODES, issue
+# 1487) are SKIPPED; a node acked offline in rig-fleet.txt / CAMBOX_OFFLINE_ACK is EXCLUDED; any other
+# unread node is UNKNOWN, never a silent pass.
 #
 # CREDENTIALS: a node whose fleet row names a credvar (fohabl: DANTESYNC_FOHABL_SSH_PASS) is read with
 # that variable's value, taken from the environment or the dev1-local credential file
@@ -112,6 +112,10 @@ DRIFTED="" UNKNOWNS="" rc_total=0
 while IFS='|' read -r name addr os role homegate user _; do
   if [ -n "$ONLY" ]; then
     case " $ONLY " in *" $name "*) ;; *) continue ;; esac
+  fi
+  if dantesync_fleet_dsync_graded "$name"; then
+    echo "node=$name role=$role verdict=SKIPPED (graded by dsync -- DSYNC_GRADED_NODES, issue 1487)"
+    continue
   fi
   if cambox_offline_ack_is_acked "$name"; then
     echo "node=$name role=$role verdict=EXCLUDED (acked offline: $(cambox_offline_ack_reason "$name"))"

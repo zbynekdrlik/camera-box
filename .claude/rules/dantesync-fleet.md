@@ -131,6 +131,10 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
   login `alexnb` with the fleet default password. A notebook is often off, so it is a `reach` node:
   skipped by every consumer while ssh :22 does not answer, never a page or a failed gate. Its W32Time
   service + the two Time Synchronization tasks are disabled (dantesync is the only clock authority).
+  Since 12.11.2026 dsync grades it (`DSYNC_GRADED_NODES`, below); camera-box only rolls + pins it.
+- **iem-snv + companion-snv are NOT rows (issue 1487, 12.11.2026).** dsync grades and upgrades both
+  itself (dsync#179). They were rows from 13.10.2026 (found outside every roll at 1.8.28 / 1.8.20) to
+  12.11.2026; `DSYNC_FLEET_HANDED_OVER` keeps the outside-fleet scan from flagging them.
 - **lv1 (10.77.7.100) is deliberately absent** (owner ROZHODNUTÉ 25.9.2026: an operational PC, on the
   network temporarily).
 - **The audio grandmaster** is `DANTESYNC_AUDIO_GM_HOST` (default 10.77.7.104 since the leader moved
@@ -167,10 +171,20 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
 The E2E `[0/8]` version gate is NOT switched to `--fleet`: it gates the run's ACTIVE set, and a
 powered-off FOH PC would refuse every E2E. It stays per-run (camera_active_excluding + imag ack).
 
-**The nodes dsync upgrades itself (issue 1487):** `DSYNC_SELF_UPGRADED_NODES` stay rows here, graded by
-the watchdog and the drift check, but out of the upgrader and the version pin (`dsync-rename.md`). The
-version gate `--fleet` still reads their version into a report-only section (`SELF-BEHIND` below the
-pin, never a gate failure, never a roll), and the handover relays it.
+## The nodes dsync owns (issue 1487)
+
+Three lists in `scripts/lib/dantesync-fleet.sh`, each env-overridable (an EMPTY value = none), each
+with a `[ -n ]`-guarded accessor of the same shape:
+
+| list (default) | what dsync does | camera-box |
+|---|---|---|
+| `DSYNC_SELF_UPGRADED_NODES` (`mbc fohabl`), `dantesync_fleet_self_upgraded` | upgrades | grades (watchdog + drift); never rolls, never pins; the version gate `--fleet` reads the version into a report-only section (`SELF-BEHIND` below the pin), the handover relays it (`dsync-rename.md`) |
+| `DSYNC_GRADED_NODES` (`alex-nb resolume-pp`), `dantesync_fleet_dsync_graded` | grades (dsync#179) | rolls + pins (dsync cannot log in there until airuleset#1311); NEVER grades: `dantesync_fleet_graded_here "<names>"` filters every clock-watchdog default roster (CAM / OBS / FIXED / REACH / LOCAL; an explicit `DANTE_CLOCK_*_NODES` override is kept byte for byte), so the handover clock item never sees them either; the drift check prints `verdict=SKIPPED (graded by dsync` and fetches nothing |
+| `DSYNC_FLEET_HANDED_OVER` (`iem-snv.lan companion-snv.lan`), `dantesync_fleet_handed_over` | grades + upgrades | no row at all; the version gate's outside-fleet scan passes these hosts (+ their resolved IPs) as known, and an answering node whose PTR name matches one (same name or first label, case-insensitive, trailing dot ignored) prints `HANDED-OVER`, never `OUTSIDE-FLEET` / an ALARM |
+
+One grader per node: a node graded by both dsync and camera-box pages twice (the reason for the split).
+Moving a node to dsync is one word in one list; tests:
+`tests/python/test_dsync_graded_nodes_1487.py` (+ the fleet tests named below).
 
 ## Config drift (report-only)
 

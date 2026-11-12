@@ -206,7 +206,7 @@ def test_the_canary_is_never_the_master_and_the_master_goes_last():
     assert src('dantesync_masters_last "strih-snv cam3 strih-pp dev1" "strih-snv strih-pp"').stdout.split() == ["cam3", "dev1", "strih-snv", "strih-pp"]
 
 
-@pytest.mark.parametrize("node", ["companion-snv", "mbc", "fohabl", "iem-snv", "alex-nb"])
+@pytest.mark.parametrize("node", ["mbc", "fohabl"])
 def test_a_node_dsync_upgrades_itself_stays_a_clock_row_outside_the_roll(node):
     r = bash(f'. scripts/lib/dantesync-fleet.sh; dantesync_fleet_self_upgraded {node}; echo rc=$?; '
              f'dantesync_fleet_field {node} role')
@@ -215,8 +215,9 @@ def test_a_node_dsync_upgrades_itself_stays_a_clock_row_outside_the_roll(node):
 
 def test_a_rolled_node_is_not_a_self_upgraded_one():
     r = bash('. scripts/lib/dantesync-fleet.sh; dantesync_fleet_self_upgraded resolume-snv; echo rc=$?; '
-             'dantesync_fleet_self_upgraded ""; echo rc=$?')
-    assert r.stdout.split() == ["rc=1", "rc=1"]
+             'dantesync_fleet_self_upgraded ""; echo rc=$?; dantesync_fleet_self_upgraded alex-nb; echo rc=$?')
+    # issue 1487 (12.11.2026): dsync cannot log in to alex-nb, so camera-box rolls it again
+    assert r.stdout.split() == ["rc=1", "rc=1", "rc=1"]
 
 
 def test_a_windows_node_already_moved_reads_the_new_location():
