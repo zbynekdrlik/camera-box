@@ -79,10 +79,16 @@ def test_an_empty_graded_list_grades_everything_here_again(tmp_path):
 
 @pytest.mark.parametrize("host,rc", [("iem-snv.lan", 0), ("IEM-SNV.LAN.", 0), ("iem-snv", 0),
                                      ("companion-snv.lan", 0), ("iem-snv-2.lan", 1), ("stray.lan", 1),
-                                     ("?", 1), ("", 1)])
+                                     ("iem-snv.pp.lan", 1), ("?", 1), ("", 1)])
 def test_handed_over_matches_name_label_case_and_ptr_dot(tmp_path, host, rc):
     r = _bash(tmp_path, f'set +e; dantesync_fleet_handed_over "{host}"; echo "rc=$?"')
     assert r.stdout.strip() == f"rc={rc}", r.stderr
+
+
+def test_a_bare_handed_over_entry_matches_a_scanned_full_name(tmp_path):
+    r = _bash(tmp_path, 'set +e; dantesync_fleet_handed_over iem-snv.lan; echo "rc=$?"; '
+                        'dantesync_fleet_handed_over iem-snv.pp.lan; echo "rc=$?"', DSYNC_FLEET_HANDED_OVER="iem-snv")
+    assert r.stdout.split() == ["rc=0", "rc=0"], r.stderr
 
 
 # --- the graders drop them ------------------------------------------------------------------------
