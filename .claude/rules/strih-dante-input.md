@@ -74,6 +74,12 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   no rx_holes and reads UNKNOWN; in v0.2.0 `underruns` mixed late blocks with skips, so it proves nothing), clock=free or holdover=1, or a `dante-input error:` in the window = FAIL; no
   opening line, a restart, a counter backwards, no delivered frames = UNKNOWN = FAIL. The closing line is
   the second status line after the stop.
+- **Timing signals, report-only (issue 1485, 12.11.2026):** the window grade counts `dante-input timing:`
+  lines and dlink's `engine pump lost or overran blocks` WARN inside the same window as the counters (it
+  opens at the last status line BEFORE the start mark, so a line between that and the mark is inside):
+  `report_only: {timing_lines, pump_warn_lines}` + one `timing (report-only):` summary line; verify item 9
+  adds one NOTE with both counts over the OBS log. Never a gate: a WARN that lost blocks also raises the
+  gated `rebootstraps`; a missed=0 WARN loses nothing. Tests: `tests/python/test_dante_timing_report_only_1485.py`.
 - **No CPU pinning for the Dante threads (dstack v0.6.28; owner ruling relayed by dstack issue 1,
   4.11.2026: nobody can guard cores on every PC).** On 3.-4.11.2026 camera-box reserved CPU 15 for OBS's
   `dstack-engine` + `dstack-rx` and CPU 14 for the hub's (a root helper behind a sudoers line, OBS
