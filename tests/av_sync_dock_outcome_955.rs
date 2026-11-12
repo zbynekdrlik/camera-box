@@ -13,7 +13,7 @@
 //! (camera-box-audio.hpp) is a byte-identical pure extraction of that SAME chain — mirrors
 //! `src/av_sync_dock.rs::DockLockOutcome`/`dock_lock_outcome()`. `decide()` itself and its hold-band
 //! math are UNCHANGED (`.claude/rules/dock-lock-hold-band.md`); only the branch NAME is extracted.
-//! Same twin-harness pattern as `tests/av_sync_dock_audit_log.rs` (#634) and
+//! Same twin-harness pattern as `obs:tests/vendored/tests/av_sync_dock_audit_log.rs` (#634) and
 //! `tests/av_sync_dock_lock_926.rs` (#926) — compile+run a tiny real C++ program against the real
 //! production header, off-rig, no vendored-OBS build needed.
 //!

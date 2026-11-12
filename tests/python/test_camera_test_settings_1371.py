@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""issue 1371 -- the E2E [0/8] test-camera shutter/ISO enforce over the bkshading USB path.
+"""issue 1371 (REST since issue 1452) -- the E2E [0/8] test-camera shutter/ISO enforce.
 
 Owner, 25.9.2026: the test camera's shutter and ISO were wrong, so the test must check AND set
-them itself. The step is a pure Python decision module (`scripts/camera_test_settings.py`) + a thin
-sourced bash transport (`scripts/lib/camera-test-settings.sh`) + a checked-in baseline
-(`scripts/camera-test-baseline.json`) + one call in `scripts/recording-e2e.sh`.
+them itself. Since issue 1452 (shading#6, owner 9.11.2026) the step drives the camera over the
+Blackmagic REST API on its USB-C link (CDC-NCM), the shading v0.2.x contract's endpoints. The step is
+a pure Python decision module (`scripts/camera_test_settings.py`) + a thin sourced bash transport
+(`scripts/lib/camera-test-settings.sh`) + a checked-in baseline (`scripts/camera-test-baseline.json`)
++ one call in `scripts/recording-e2e.sh`.
 
 Tier-0 (no cargo, no camera, no rig): the pure module is called directly; the bash lib is driven
-end-to-end with a fake `sshpass` (emulating the cambox sysfs + gphoto2) and a fake `obs_phase2.py`
-(the issue-1271 rig-busy guard), under the caller's real `set -euo pipefail`.
-Runnable directly or under pytest (the `python-tests` CI job).
+end-to-end with a fake `sshpass` that RUNS the generated remote text under bash with PATH = stubs
+(`systemctl`, a fake camera `curl`, the real text tools) over a fake /sys/class/net tree + a lease
+file, and a fake `obs_phase2.py` (the issue-1271 rig-busy guard), under the caller's real
+`set -euo pipefail`. Runnable directly or under pytest (the `python-tests` CI job).
 """
 import importlib.util
 import json
@@ -27,9 +30,7 @@ MODULE = os.path.join(REPO, "scripts", "camera_test_settings.py")
 LIB = os.path.join(REPO, "scripts", "lib", "camera-test-settings.sh")
 BASELINE = os.path.join(REPO, "scripts", "camera-test-baseline.json")
 E2E = os.path.join(REPO, "scripts", "recording-e2e.sh")
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from shading_release_fake_1487 import contract  # noqa: E402
+REST_CONTRACT = os.path.join(REPO, "tests", "fixtures", "shading_pinned_rest", "CONTRACT.md")
 
 _spec = importlib.util.spec_from_file_location("camera_test_settings", MODULE)
 cts = importlib.util.module_from_spec(_spec)
@@ -37,7 +38,7 @@ _spec.loader.exec_module(cts)
 
 
 def _baseline_text(values):
-    return json.dumps({"schema": 1, "values": values})
+    return json.dumps({"schema": 2, "values": values})
 
 
 def _all_null():
@@ -46,91 +47,103 @@ def _all_null():
 
 def _pinned(**extra):
     v = _all_null()
-    v.update({"iso": 400, "d002": "18000"})
+    v.update({"iso": 400, "shutterAngle": 18000, "shutterSpeed": 120})
     v.update(extra)
     return v
 
 
-def _blocks(values):
-    """gphoto2 multi --get-config stdout for READ_KEYS (a None value = a block with no Current:)."""
-    out = []
-    for k in cts.READ_KEYS:
-        out.append("Label: %s" % k)
-        out.append("Type: RANGE")
-        if values.get(k) is not None:
-            out.append("Current: %s" % values[k])
-        out.append("END")
-    return "\n".join(out) + "\n"
+# The camera state the fake curl serves: REST key -> value; `unit` picks how the shutter is reported.
+def _read_text(cam, unit="shutterAngle", fps="60", codes=None):
+    """The transport's read lines for a camera state (what `camera_test_settings_rest_cmd get` prints)."""
+    codes = codes or {}
+    bodies = {
+        "video/iso": {"iso": cam.get("iso")},
+        "video/shutter": {unit: cam.get(unit)},
+        "video/whiteBalance": {"whiteBalance": cam.get("whiteBalance")},
+        "video/whiteBalanceTint": {"whiteBalanceTint": cam.get("whiteBalanceTint")},
+        "lens/iris": {"apertureStop": cam.get("apertureStop"), "normalised": 0.3},
+        "system/format": {"frameRate": fps, "codec": "BRaw:Q0"},
+    }
+    lines = ["CTS_CAMERA enx02aa 172.25.77.161"]
+    for ep in cts.READ_ENDPOINTS:
+        code = codes.get(ep, "200")
+        lines.append("CTS_GET %s %s %s" % (ep, code, json.dumps(bodies[ep]) if code == "200" else ""))
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------------------------
-# key names come from the shading contract -- never guessed
+# the endpoints come from the shading REST contract -- never guessed
 # ---------------------------------------------------------------------------------------------
-def _contract_keys():
-    """{key: its camera-box E2E column} of the contract's gphoto2 key table."""
-    rows = re.findall(r"^\| `([^`]+)` \| [^|]* \| ([^|]*?) \|$", contract(), re.M)
-    assert len(rows) >= 8, rows
-    return dict(rows)
+def _contract_rows():
+    """{endpoint: (json column, relay-use column)} of the REST contract's endpoint table."""
+    text = open(REST_CONTRACT, encoding="utf-8").read()
+    rows = re.findall(r"^\| `([^`]+)` \| ([^|]*) \| ([^|]*) \| [^|]* \|$", text, re.M)
+    assert len(rows) >= 10, rows
+    return {ep: (js, use) for ep, js, use in rows}
 
 
-def test_every_read_key_is_a_contract_key():
-    keys = _contract_keys()
-    for k in cts.READ_KEYS:
-        assert k in keys, "key %r is not in the shading contract %s" % (k, sorted(keys))
-        assert "read" in keys[k], "the contract does not let the E2E read %r: %s" % (k, keys[k])
+def test_every_read_endpoint_is_a_contract_endpoint():
+    rows = _contract_rows()
+    for ep in cts.READ_ENDPOINTS:
+        assert ep in rows, "endpoint %r is not in the shading REST contract %s" % (ep, sorted(rows))
+        assert "read" in rows[ep][1], (ep, rows[ep])
 
 
-def test_every_enforceable_key_is_one_the_contract_lets_the_e2e_set():
-    keys = _contract_keys()
-    for k in cts.ENFORCEABLE_KEYS:
-        assert "set" in keys[k], "the contract does not let the E2E set %r: %s" % (k, keys[k])
+def test_every_enforceable_field_is_one_the_contract_lets_a_caller_set_on_its_endpoint():
+    rows = _contract_rows()
+    for key, ep, field in cts.FIELDS:
+        js, use = rows[ep]
+        assert "set" in use, "the contract does not set %r: %s" % (ep, use)
+        assert field in js, "%s is not a field of %s (%s)" % (field, ep, js)
 
 
-def test_shutter_and_iso_are_the_required_keys_and_fps_is_never_enforced():
-    assert cts.REQUIRED_KEYS == ("iso", "d002")
-    # issue 1402: d006 is the PROJECT fps (x100), d007 the OFF-SPEED fps. Only the project fps is
-    # read, as log context; neither is ever enforced or set.
-    assert cts.CONTEXT_KEYS == ("d006",)
-    assert "x100" in cts.KEY_LABELS["d006"] and "project fps" in cts.KEY_LABELS["d006"]
-    for k in ("d006", "d007"):
-        assert k not in cts.ENFORCEABLE_KEYS
-    assert "d006" in cts.READ_KEYS and "d007" not in cts.READ_KEYS
+def test_the_aperture_is_set_by_apertureStop_only_and_fps_is_never_enforced():
+    # the contract: on lens/iris only apertureStop moves the iris
+    assert cts.FIELD_OF["apertureStop"] == "apertureStop"
+    assert "system/format" not in cts.ENDPOINT_OF.values()
+    assert cts.CONTEXT_ENDPOINT == "system/format" and "system/format" in cts.READ_ENDPOINTS
+    assert cts.REQUIRED_ENDPOINTS == ("video/iso", "video/shutter")
 
 
 # ---------------------------------------------------------------------------------------------
 # baseline
 # ---------------------------------------------------------------------------------------------
-def test_checked_in_baseline_is_valid_and_carries_every_key():
+def test_checked_in_baseline_is_valid_pins_both_shutter_units_of_one_exposure():
     b = cts.load_baseline(open(BASELINE, encoding="utf-8").read())
     assert set(b) == set(cts.ENFORCEABLE_KEYS)
-
-
-def test_baseline_values_normalize_to_gphoto2_strings():
-    b = cts.load_baseline(_baseline_text(_pinned(**{"f-number": "f/5.6", "d005": -3})))
-    assert b["iso"] == "400" and b["d002"] == "18000" and b["f-number"] == "f/5.6" and b["d005"] == "-3"
     assert cts.baseline_pinned(b)
-    assert cts.pinned_keys(b) == ["iso", "d002", "f-number", "d005"]
+    # 1/1000 s at 60 fps is an angle of 21.6 deg: both units hold the same owner-confirmed exposure
+    assert cts.shutter_denominator("shutterAngle", b["shutterAngle"], "60") == b["shutterSpeed"]
 
 
-def test_null_required_key_is_unpinned():
+def test_baseline_values_are_numbers():
+    b = cts.load_baseline(_baseline_text(_pinned(apertureStop=5.6, whiteBalanceTint=-3)))
+    assert b["iso"] == 400 and b["shutterAngle"] == 18000 and b["apertureStop"] == 5.6
+    assert b["whiteBalanceTint"] == -3
+    assert cts.baseline_pinned(b)
+
+
+def test_iso_and_one_shutter_unit_make_a_pinned_baseline():
     assert not cts.baseline_pinned(cts.load_baseline(_baseline_text(_all_null())))
-    half = _all_null()
-    half["iso"] = 400
-    assert not cts.baseline_pinned(cts.load_baseline(_baseline_text(half)))
+    only_iso = dict(_all_null(), iso=400)
+    assert not cts.baseline_pinned(cts.load_baseline(_baseline_text(only_iso)))
+    assert cts.baseline_pinned(cts.load_baseline(_baseline_text(dict(only_iso, shutterSpeed=500))))
+    assert cts.baseline_pinned(cts.load_baseline(_baseline_text(dict(only_iso, shutterAngle=18000))))
 
 
 def test_malformed_baselines_are_refused():
     bad = [
         "not json",
         "[]",
-        json.dumps({"schema": 2, "values": _all_null()}),
-        json.dumps({"schema": 1}),
-        _baseline_text(dict(_all_null(), shutter=500)),  # unknown key
-        _baseline_text({k: None for k in cts.ENFORCEABLE_KEYS if k != "d005"}),  # missing key
+        json.dumps({"schema": 1, "values": _all_null()}),
+        json.dumps({"schema": 2}),
+        _baseline_text(dict(_all_null(), d002=500)),  # a gphoto2 key
+        _baseline_text({k: None for k in cts.ENFORCEABLE_KEYS if k != "apertureStop"}),  # missing key
         _baseline_text(_pinned(iso=True)),
-        _baseline_text(_pinned(iso="")),
-        _baseline_text(_pinned(d002="18000; reboot")),
-        _baseline_text(_pinned(d002=18000.5)),
+        _baseline_text(_pinned(iso="400")),
+        _baseline_text(_pinned(shutterAngle=18000.5)),
+        _baseline_text(_pinned(iso=0)),
+        _baseline_text(_pinned(whiteBalance=99999)),
     ]
     for text in bad:
         try:
@@ -143,64 +156,73 @@ def test_malformed_baselines_are_refused():
 # ---------------------------------------------------------------------------------------------
 # parse / plan / grade
 # ---------------------------------------------------------------------------------------------
-def test_parse_current_mirrors_the_relay_and_drops_null():
-    assert cts.parse_current("Label: ISO\nCurrent: 400\nChoice: 0 100") == "400"
-    assert cts.parse_current("Label: F\nCurrent: (null)") is None
-    assert cts.parse_current("Label: F\nCurrent:") is None
-    assert cts.parse_current("Label: F") is None
+def test_parse_read_takes_the_camera_values_and_its_shutter_unit():
+    cur = cts.parse_read(_read_text({"iso": 800, "shutterAngle": 9000, "whiteBalance": 5600}))
+    assert cur["iso"] == 800 and cur["shutterAngle"] == 9000 and cur["shutterSpeed"] is None
+    assert cur["fps"] == "60" and cur["apertureStop"] is None
+    cur = cts.parse_read(_read_text({"iso": 800, "shutterSpeed": 250}, unit="shutterSpeed"))
+    assert cts.camera_shutter_key(cur) == "shutterSpeed" and cur["shutterSpeed"] == 250
 
 
-def test_split_config_blocks_needs_the_exact_block_count():
-    assert cts.split_config_blocks("A\nEND\nB\nEND\n", 2) == ["A", "B"]
-    assert cts.split_config_blocks("A\nEND\nB\n", 2) is None
-    assert cts.split_config_blocks("A\nEND\nB\nEND\nC\nEND", 2) is None
+def test_an_optional_endpoint_the_firmware_does_not_serve_reads_none():
+    # the Pocket 6K at fw 8.6 answers 404/501 on some endpoints (the contract's table)
+    cur = cts.parse_read(_read_text({"iso": 800, "shutterAngle": 9000},
+                                    codes={"video/whiteBalanceTint": "404", "system/format": "501"}))
+    assert cur is not None and cur["whiteBalanceTint"] is None and cur["fps"] is None
 
 
-def test_parse_read_requires_iso_and_shutter_values():
-    cur = cts.parse_read(_blocks({"iso": 800, "d002": 9000, "d006": 6000}))
-    assert cur["iso"] == "800" and cur["d002"] == "9000" and cur["f-number"] is None
-    assert cts.parse_read(_blocks({"iso": 800, "d006": 6000})) is None
+def test_parse_read_requires_iso_and_shutter_answers():
+    assert cts.parse_read(_read_text({"iso": 800, "shutterAngle": 9000}, codes={"video/iso": "404"})) is None
+    assert cts.parse_read(_read_text({"iso": 800, "shutterAngle": 9000}, codes={"video/shutter": "500"})) is None
+    assert cts.parse_read(_read_text({"iso": 800, "shutterAngle": None})) is None
     assert cts.parse_read("") is None
+    assert cts.parse_read("CTS_GET video/iso 200 <html>not a camera</html>\n") is None
 
 
-def test_plan_sets_only_the_pinned_keys_that_differ():
-    b = cts.load_baseline(_baseline_text(_pinned(d004=5600)))
-    cur = {"iso": "800", "d002": "18000", "f-number": "f/2.8", "d004": "5600", "d005": "0", "d006": "6000"}
-    assert cts.plan_sets(cur, b) == [("iso", "400")]
-    cur["d004"] = "3200"
-    assert cts.plan_sets(cur, b) == [("iso", "400"), ("d004", "5600")]
-    assert cts.plan_sets(dict(cur, iso="400", d004="5600"), b) == []
+def test_plan_sets_only_the_enforced_keys_that_differ_in_the_cameras_unit():
+    b = cts.load_baseline(_baseline_text(_pinned(whiteBalance=5600)))
+    cur = {"iso": 800, "shutterAngle": 18000, "shutterSpeed": None, "whiteBalance": 5600,
+           "whiteBalanceTint": 0, "apertureStop": 2.8, "fps": "60"}
+    assert cts.plan_sets(cur, b) == [("iso", 400)]
+    cur["whiteBalance"] = 3200
+    assert cts.plan_sets(cur, b) == [("iso", 400), ("whiteBalance", 5600)]
+    # a camera reporting speed is set in speed, never in angle
+    sp = dict(cur, shutterAngle=None, shutterSpeed=60, iso=400, whiteBalance=5600)
+    assert cts.plan_sets(sp, b) == [("shutterSpeed", 120)]
+    assert cts.set_requests(cts.plan_sets(sp, b)) == [("video/shutter", '{"shutterSpeed":120}')]
 
 
-def test_grade_readback_names_every_pinned_key_that_did_not_apply():
-    b = cts.load_baseline(_baseline_text(_pinned()))
-    assert cts.grade_readback({"iso": "400", "d002": "18000"}, b) == []
-    assert cts.grade_readback({"iso": "400", "d002": "9000"}, b) == [("d002", "18000", "9000")]
+def test_a_camera_in_a_shutter_unit_the_baseline_leaves_null_is_refused_never_converted():
+    b = cts.load_baseline(_baseline_text(dict(_all_null(), iso=400, shutterAngle=18000)))
+    cur = {"iso": 400, "shutterAngle": None, "shutterSpeed": 120, "fps": "60"}
+    try:
+        cts.plan_sets(cur, b)
+    except cts.ShutterUnitError as e:
+        assert "shutterSpeed" in str(e)
+    else:
+        raise AssertionError("must refuse")
+
+
+def test_grade_readback_names_every_enforced_key_that_did_not_apply():
+    b = cts.load_baseline(_baseline_text(_pinned(apertureStop=5.6)))
+    good = {"iso": 400, "shutterAngle": 18000, "apertureStop": 5.6}
+    assert cts.grade_readback(good, b) == []
+    assert cts.grade_readback(dict(good, apertureStop=5.604), b) == []  # 2-decimal camera report
+    assert cts.grade_readback(dict(good, shutterAngle=9000), b) == [("shutterAngle", 18000, 9000)]
 
 
 def test_shutter_denominator_uses_the_relay_formula():
-    # the relay's convert_angle_or_denom(angle100, fps100): the project fps is d006, already x100
-    assert cts.shutter_denominator("18000", "6000") == 120  # 180 deg at 60 fps = 1/120
-    assert cts.shutter_denominator("4320", "6000") == 500
-    assert cts.shutter_denominator("2160", "6000") == 1000
-    assert cts.shutter_denominator("18000", "5994") == 120  # 59.94 fps: 119.88 rounds half up
-    assert cts.shutter_denominator("18000", "2500") == 50
-    assert cts.shutter_denominator(None, "6000") is None
-    assert cts.shutter_denominator("0", "6000") is None
-    assert cts.shutter_denominator("18000", None) is None
+    assert cts.shutter_denominator("shutterAngle", 18000, "60") == 120
+    assert cts.shutter_denominator("shutterAngle", 2160, "60") == 1000
+    assert cts.shutter_denominator("shutterAngle", 18000, "59.94") == 120
+    assert cts.shutter_denominator("shutterAngle", 18000, None) is None
+    assert cts.shutter_denominator("shutterSpeed", 500, None) == 500
 
 
-def test_the_shutter_log_prints_the_project_fps_from_d006():
-    lines = cts._before_lines("NOW", {"iso": "800", "d002": "18000", "d006": "6000"})
-    assert "SHUTTER NOW 1/120 s at 60 fps" in lines
-    lines = cts._before_lines("NOW", {"iso": "800", "d002": "18000", "d006": "5994"})
-    assert "SHUTTER NOW 1/120 s at 59.94 fps" in lines
-
-
-def test_read_args_is_one_session_over_every_read_key():
-    args = cts.read_args()
-    assert args.count("--get-config") == len(cts.READ_KEYS)
-    assert [args[i + 1] for i in range(0, len(args), 2)] == list(cts.READ_KEYS)
+def test_set_requests_are_one_numeric_field_json_each():
+    reqs = cts.set_requests([("iso", 8000), ("apertureStop", 5.6), ("whiteBalanceTint", -3)])
+    assert reqs == [("video/iso", '{"iso":8000}'), ("lens/iris", '{"apertureStop":5.6}'),
+                    ("video/whiteBalanceTint", '{"whiteBalanceTint":-3}')]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -235,16 +257,22 @@ def test_cli_status_plan_grade():
     path = _tmp_baseline(_pinned())
     try:
         assert _cli(["status", "--baseline", path]).stdout.strip() == "pinned"
-        r = _cli(["plan", "--baseline", path], _blocks({"iso": 800, "d002": 18000, "d006": 6000}))
-        assert r.returncode == 0
+        r = _cli(["plan", "--baseline", path], _read_text({"iso": 800, "shutterAngle": 18000}))
+        assert r.returncode == 0, r.stderr
         assert "BEFORE iso 800" in r.stdout and "SHUTTER BEFORE 1/120 s at 60 fps" in r.stdout
         assert "SET iso 800 -> 400" in r.stdout
-        assert "SETARGS --set-config iso=400" in r.stdout
-        assert "d002=" not in r.stdout.split("SETARGS", 1)[1]
-        r = _cli(["grade", "--baseline", path], _blocks({"iso": 400, "d002": 9000, "d006": 6000}))
-        assert r.returncode == cts.EXIT_MISMATCH and "MISMATCH d002 want=18000 got=9000" in r.stdout
-        assert _cli(["grade", "--baseline", path], _blocks({"iso": 400, "d002": 18000})).returncode == 0
+        assert 'SETREQ video/iso {"iso":400}' in r.stdout
+        assert "video/shutter" not in r.stdout.split("SETREQ", 1)[1]
+        r = _cli(["grade", "--baseline", path], _read_text({"iso": 400, "shutterAngle": 9000}))
+        assert r.returncode == cts.EXIT_MISMATCH and "MISMATCH shutterAngle want=18000 got=9000" in r.stdout
+        assert _cli(["grade", "--baseline", path], _read_text({"iso": 400, "shutterAngle": 18000})).returncode == 0
         assert _cli(["plan", "--baseline", path], "garbage").returncode == cts.EXIT_UNREADABLE
+    finally:
+        os.unlink(path)
+    path = _tmp_baseline(dict(_all_null(), iso=400, shutterAngle=18000))
+    try:
+        r = _cli(["plan", "--baseline", path], _read_text({"iso": 400, "shutterSpeed": 60}, unit="shutterSpeed"))
+        assert r.returncode == cts.EXIT_SHUTTER_UNIT and "shutterSpeed" in r.stderr
     finally:
         os.unlink(path)
     path = _tmp_baseline(dict(_all_null(), shutter=1))
@@ -254,23 +282,26 @@ def test_cli_status_plan_grade():
         os.unlink(path)
 
 
-def test_cli_suggest_pins_only_shutter_and_iso():
-    r = _cli(["suggest"], _blocks({"iso": 320, "d002": 4320, "f-number": "f/4", "d006": 6000}))
+def test_cli_suggest_pins_iso_and_the_cameras_shutter_unit():
+    r = _cli(["suggest"], _read_text({"iso": 320, "shutterSpeed": 500, "apertureStop": 4.0}, unit="shutterSpeed"))
     doc = json.loads(r.stdout)
-    assert doc["values"]["iso"] == "320" and doc["values"]["d002"] == "4320"
-    assert doc["values"]["f-number"] is None
-    # the suggestion is itself a valid, pinned baseline
+    assert doc["values"]["iso"] == 320 and doc["values"]["shutterSpeed"] == 500
+    assert doc["values"]["shutterAngle"] is None and doc["values"]["apertureStop"] is None
     assert cts.baseline_pinned(cts.load_baseline(r.stdout))
+
+
+def test_cli_read_endpoints():
+    assert _cli(["read-endpoints"]).stdout.split() == list(cts.READ_ENDPOINTS)
 
 
 # ---------------------------------------------------------------------------------------------
 # the bash transport, end to end with fakes
 # ---------------------------------------------------------------------------------------------
 FAKE_SSHPASS = r'''#!/usr/bin/env python3
-# Emulates `sshpass -p PW ssh ... root@IP CMD`. The sysfs presence probe is emulated (the box's
-# /sys cannot be faked); every OTHER remote command -- the gphoto2 sessions with their on-box
-# single-gphoto2-user checks -- is really RUN by bash, with PATH = only the stub dir (systemctl,
-# pgrep, gphoto2 stubs + the real timeout), so the lib's generated remote text is what is tested.
+# Emulates `sshpass -p PW ssh ... root@IP CMD`. The sysfs presence probe is emulated; every OTHER
+# remote command -- the REST sessions with their on-box checks + camera discovery -- is really RUN by
+# bash, with PATH = only the stub dir (systemctl, a fake camera curl, real text tools), so the lib's
+# generated remote text is what is tested.
 import json, os, subprocess, sys
 d = os.environ["FAKE_CAM_DIR"]
 args = sys.argv[1:]
@@ -285,6 +316,8 @@ if "CTS_USB" in cmd:
         sys.exit(255)  # unreachable box: no marker line
     print("CTS_USB:%d" % p)
     sys.exit(0)
+if state.get("ssh_exit"):
+    sys.exit(state["ssh_exit"])
 env = {"PATH": os.path.join(d, "stubs"), "FAKE_CAM_DIR": d, "FAKE_IP": ip}
 r = subprocess.run(["/bin/bash", "-c", cmd], env=env)
 sys.exit(r.returncode)
@@ -311,50 +344,55 @@ print(s)
 sys.exit(0 if s == "active" else 3)
 '''
 
-STUB_PGREP = r'''
-import json, os, sys
-d = os.environ["FAKE_CAM_DIR"]
-state = json.load(open(os.path.join(d, "state.json")))
-assert sys.argv[1:] == ["-x", "gphoto2"], sys.argv
-sys.exit(0 if state.get("gphoto2_busy") else 1)
-'''
-
-STUB_GPHOTO2 = r'''
+# The camera: GET returns the endpoint body from the state, PUT applies a field unless `ignore` holds
+# it (a camera that silently ignores a write). Logs `GET <ip>` once per read session (on video/iso)
+# and `SET <ip> <key>=<value>` per PUT.
+STUB_CURL = r'''
 import json, os, sys
 d = os.environ["FAKE_CAM_DIR"]
 ip = os.environ["FAKE_IP"]
 state_path = os.path.join(d, "state.json")
 state = json.load(open(state_path))
-args = sys.argv[1:]
+a = sys.argv[1:]
+def opt(name):
+    return a[a.index(name) + 1] if name in a else None
+url = [x for x in a if x.startswith("http://")][0]
+assert url.startswith("http://172.25.77.161/control/api/v1/"), url
+ep = url.split("/control/api/v1/", 1)[1]
 def log(line):
     with open(os.path.join(d, "calls.log"), "a") as f:
         f.write(line + "\n")
-if state.get("read_exit"):
-    sys.exit(state["read_exit"])
-sets = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--set-config"]
-gets = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--get-config"]
-if sets:
-    log("SET " + ip + " " + " ".join(sets))
-    # was the production-exposure snapshot already on disk when the camera was changed?
+if state.get("curl_dead"):
+    sys.stdout.write("000")
+    sys.exit(7)
+cam = state["camera"]
+unit = state.get("unit", "shutterAngle")
+if opt("-X") == "PUT":
+    body = json.loads(opt("-d"))
+    (field, value), = body.items()
+    log("SET %s %s=%s" % (ip, field, value))
     state["snapshot_at_set"] = os.path.exists(os.path.join(d, "home", ".camera-box", "camera-prod-exposure.json"))
-    for kv in sets:
-        k, v = kv.split("=", 1)
-        if k not in state.get("ignore", []):
-            state["camera"][k] = v
+    if field not in state.get("ignore", []):
+        cam[field] = value
     json.dump(state, open(state_path, "w"))
+    sys.stdout.write("204")
     sys.exit(0)
-log("GET " + ip)
-state["reads"] = state.get("reads", 0) + 1
-json.dump(state, open(state_path, "w"))
-if state.get("read_fail"):
-    sys.stderr.write("*** Error: Could not detect any camera\n")
-    sys.exit(1)
-for k in gets:
-    print("Label: %s" % k)
-    if state["camera"].get(k) is not None:
-        print("Current: %s" % state["camera"][k])
-    print("END")
-sys.exit(0)
+if ep == "video/iso":
+    log("GET " + ip)
+    state["reads"] = state.get("reads", 0) + 1
+    json.dump(state, open(state_path, "w"))
+bodies = {
+    "video/iso": {"iso": cam.get("iso")},
+    "video/shutter": {unit: cam.get(unit)},
+    "video/whiteBalance": {"whiteBalance": cam.get("whiteBalance")},
+    "video/whiteBalanceTint": {"whiteBalanceTint": cam.get("whiteBalanceTint")},
+    "lens/iris": {"apertureStop": cam.get("apertureStop"), "normalised": 0.3},
+    "system/format": {"frameRate": cam.get("fps", "60")},
+}
+code = "404" if ep in state.get("not_served", []) or ep not in bodies else "200"
+with open(opt("-o"), "w") as f:
+    f.write(json.dumps(bodies[ep], indent=1) if code == "200" else "<html>404</html>")
+sys.stdout.write(code)
 '''
 
 FAKE_OBS_PHASE2 = r'''#!/usr/bin/env python3
@@ -366,12 +404,46 @@ busy = os.environ.get("FAKE_BUSY") == "1"
 print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": busy, "recording": False}]}))
 '''
 
+BOX_TOOLS = ("readlink", "cat", "sed", "head", "cut", "tr", "rm", "awk", "mktemp")
+
+
+def _make_net(root, link=True, lease=True):
+    """A fake /sys/class/net: the LAN NIC (an e1000e PCI device) and, with `link`, the camera's
+    cdc_ncm link on a vendor-1edb USB device, ifindex 7, plus its networkd lease."""
+    net = os.path.join(root, "net")
+    dev = os.path.join(root, "devices")
+    leases = os.path.join(root, "leases")
+    for p in (net, leases, os.path.join(dev, "drivers", "cdc_ncm"), os.path.join(dev, "drivers", "e1000e")):
+        os.makedirs(p, exist_ok=True)
+    pci = os.path.join(dev, "pci", "0000:01:00.0")
+    os.makedirs(pci)
+    os.symlink(os.path.join(dev, "drivers", "e1000e"), os.path.join(pci, "driver"))
+    os.makedirs(os.path.join(net, "enp1s0"))
+    os.symlink(pci, os.path.join(net, "enp1s0", "device"))
+    if link:
+        usb = os.path.join(dev, "usb", "4-2")
+        intf = os.path.join(usb, "4-2:1.5")
+        os.makedirs(intf)
+        with open(os.path.join(usb, "idVendor"), "w") as f:
+            f.write("1edb\n")
+        os.symlink(os.path.join(dev, "drivers", "cdc_ncm"), os.path.join(intf, "driver"))
+        n = os.path.join(net, "enx02743ba02a02")
+        os.makedirs(n)
+        os.symlink(intf, os.path.join(n, "device"))
+        with open(os.path.join(n, "ifindex"), "w") as f:
+            f.write("7\n")
+        if lease:
+            with open(os.path.join(leases, "7"), "w") as f:
+                f.write("# networkd lease\nADDRESS=172.25.77.162\nSERVER_ADDRESS=172.25.77.161\n")
+    return net, leases
+
 
 class Rig:
     def __init__(self, present, camera, baseline_values, ack="", busy=False, ignore=(), read_fail=False,
-                 relay_state="inactive", relay_active_after_reads=None, gphoto2_busy=False, read_exit=0,
-                 no_pgrep=False, snapshot=None, pipefail=True, readonly_snap_dir=False, extra_env=None):
-        self.root = tempfile.mkdtemp(prefix="cts1371-")
+                 relay_state="inactive", relay_active_after_reads=None, ssh_exit=0, no_curl=False,
+                 link=True, unit="shutterAngle", not_served=(), snapshot=None, pipefail=True,
+                 readonly_snap_dir=False, extra_env=None):
+        self.root = tempfile.mkdtemp(prefix="cts1452-")
         # A temp HOME: the production-exposure snapshot lives in ~/.camera-box on the runner, and a
         # test must never read or write the real one.
         self.home = os.path.join(self.root, "home")
@@ -400,16 +472,17 @@ class Rig:
         # The on-box stubs run with PATH = the stub dir only, so they carry an absolute interpreter.
         shebang = "#!%s\n" % sys.executable
         self._exe(os.path.join(stubs, "systemctl"), shebang + STUB_SYSTEMCTL)
-        self._exe(os.path.join(stubs, "gphoto2"), shebang + STUB_GPHOTO2)
-        if not no_pgrep:
-            self._exe(os.path.join(stubs, "pgrep"), shebang + STUB_PGREP)
-        os.symlink(shutil.which("timeout"), os.path.join(stubs, "timeout"))
+        if not no_curl:
+            self._exe(os.path.join(stubs, "curl"), shebang + STUB_CURL)
+        for tool in BOX_TOOLS:
+            os.symlink(shutil.which(tool, path="/usr/bin:/bin"), os.path.join(stubs, tool))
+        self.net, self.leases = _make_net(self.root, link=link)
         with open(os.path.join(self.here, "camera-test-baseline.json"), "w") as f:
             f.write(_baseline_text(baseline_values))
         with open(os.path.join(self.root, "state.json"), "w") as f:
-            json.dump({"present": present, "camera": camera, "ignore": list(ignore), "read_fail": read_fail,
+            json.dump({"present": present, "camera": camera, "ignore": list(ignore), "curl_dead": read_fail,
                        "relay_state": relay_state, "relay_active_after_reads": relay_active_after_reads,
-                       "gphoto2_busy": gphoto2_busy, "read_exit": read_exit, "reads": 0}, f)
+                       "ssh_exit": ssh_exit, "unit": unit, "not_served": list(not_served), "reads": 0}, f)
         open(os.path.join(self.root, "calls.log"), "w").close()
         self.ack = ack
         self.busy = busy
@@ -449,6 +522,8 @@ class Rig:
         env["FAKE_CAM_DIR"] = self.root
         env["FAKE_BUSY"] = "1" if self.busy else "0"
         env["CAMBOX_OFFLINE_ACK"] = self.ack
+        env["CAMERA_TEST_SETTINGS_NET_SYSFS"] = self.net
+        env["CAMERA_TEST_SETTINGS_LEASES_DIR"] = self.leases
         env.pop("CAMERA_TEST_BASELINE", None)
         env.pop("OBS_PASSWORD", None)
         env.pop("OBS_WS_PASSWORD", None)
@@ -479,7 +554,12 @@ class Rig:
         return self
 
 
-GOOD = {"iso": "400", "d002": "18000", "f-number": "f/5.6", "d004": "5600", "d005": "0", "d006": "6000"}
+GOOD = {"iso": 400, "shutterAngle": 18000, "whiteBalance": 5600, "whiteBalanceTint": 0, "apertureStop": 5.6,
+        "fps": "60"}
+
+
+def _seq(r):
+    return [c.split(" ")[0] for c in r.calls if not c.startswith("PRESENCE")]
 
 
 def test_lib_parses():
@@ -521,10 +601,10 @@ def test_acked_but_present_camera_is_a_stale_ack_abort():
 
 
 def test_present_camera_with_null_baseline_refuses_and_prints_the_values_to_pin():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="800"), _all_null()).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=800), _all_null()).run()
     assert r.rc == 1, r.out
     assert "not pinned" in r.out
-    assert '"iso": "800"' in r.out and '"d002": "18000"' in r.out
+    assert '"iso": 800' in r.out and '"shutterAngle": 18000' in r.out
     assert not any(c.startswith(("SET", "GUARD")) for c in r.calls), r.calls
 
 
@@ -532,68 +612,107 @@ def test_camera_already_at_baseline_sets_nothing_and_needs_no_guard():
     r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned()).run()
     assert r.rc == 0, r.out
     assert "already at the baseline" in r.out
+    assert "CTS_CAMERA enx02743ba02a02 172.25.77.161" in r.out
     assert [c for c in r.calls if c.startswith("GET")] == ["GET 10.77.9.61"]
     assert not any(c.startswith(("SET", "GUARD")) for c in r.calls), r.calls
 
 
 def test_wrong_shutter_and_iso_are_set_after_the_guard_and_read_back():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600", d002="36000"), _pinned()).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600, shutterAngle=36000), _pinned()).run()
     assert r.rc == 0, r.out
     assert "set to the baseline and read back" in r.out
     assert "BEFORE iso 1600" in r.out and "AFTER iso 400" in r.out
     assert "SHUTTER BEFORE 1/60 s" in r.out and "SHUTTER AFTER 1/120 s" in r.out
-    seq = [c.split(" ")[0] for c in r.calls if not c.startswith("PRESENCE")]
-    assert seq == ["GET", "GUARD", "SET", "GET"], r.calls
-    assert "SET 10.77.9.61 iso=400 d002=18000" in r.calls
-    assert r.camera["iso"] == "400" and r.camera["d002"] == "18000"
+    assert _seq(r) == ["GET", "GUARD", "SET", "SET", "GET"], r.calls
+    assert "SET 10.77.9.61 iso=400" in r.calls and "SET 10.77.9.61 shutterAngle=18000" in r.calls
+    assert r.camera["iso"] == 400 and r.camera["shutterAngle"] == 18000
 
 
-def test_an_off_speed_camera_logs_the_project_fps_never_the_off_speed_rate():
-    # issue 1402: d006 = project fps 60 (x100), d007 = off-speed 50. The shutter is logged at the
-    # project fps the camera records, never at the off-speed sensor rate.
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600", d002="36000", d007="50"), _pinned()).run()
+def test_a_camera_that_reports_shutter_speed_is_set_in_speed():
+    r = Rig({"10.77.9.61": 1}, {"iso": 400, "shutterSpeed": 60}, _pinned(), unit="shutterSpeed").run()
     assert r.rc == 0, r.out
-    assert "SHUTTER BEFORE 1/60 s at 60 fps" in r.out
-    assert "SHUTTER AFTER 1/120 s at 60 fps" in r.out
-    assert "at 50 fps" not in r.out
-    # fps is only read, never written
-    assert "SET 10.77.9.61 iso=400 d002=18000" in r.calls
-    assert not any("d006" in c or "d007" in c for c in r.calls if c.startswith("SET")), r.calls
-    assert r.camera["d006"] == "6000" and r.camera["d007"] == "50"
+    assert "SET 10.77.9.61 shutterSpeed=120" in r.calls
+    assert not any("shutterAngle" in c for c in r.calls if c.startswith("SET")), r.calls
+
+
+def test_a_shutter_unit_the_baseline_does_not_pin_aborts_by_name():
+    b = dict(_all_null(), iso=400, shutterAngle=18000)
+    r = Rig({"10.77.9.61": 1}, {"iso": 400, "shutterSpeed": 60}, b, unit="shutterSpeed").run()
+    assert r.rc == 1, r.out
+    assert "shutterSpeed" in r.out and "refusing to guess a conversion" in r.out
+    assert not any(c.startswith(("SET", "GUARD")) for c in r.calls), r.calls
+
+
+def test_the_fps_is_only_read_never_written():
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600, fps="50"), _pinned()).run()
+    assert r.rc == 0, r.out
+    assert "SHUTTER BEFORE 1/100 s at 50 fps" in r.out
+    assert not any("frameRate" in c or "fps" in c for c in r.calls if c.startswith("SET")), r.calls
 
 
 def test_camera_on_cam2_is_resolved_there():
-    r = Rig({"10.77.9.61": 0, "10.77.9.62": 1}, dict(GOOD, iso="200"), _pinned()).run()
+    r = Rig({"10.77.9.61": 0, "10.77.9.62": 1}, dict(GOOD, iso=200), _pinned()).run()
     assert r.rc == 0, r.out
     assert "cam2 (10.77.9.62)" in r.out
     assert "SET 10.77.9.62 iso=400" in r.calls
 
 
 def test_a_set_that_does_not_read_back_aborts():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, d002="36000"), _pinned(), ignore=("d002",)).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, shutterAngle=36000), _pinned(), ignore=("shutterAngle",)).run()
     assert r.rc == 1, r.out
-    assert "MISMATCH d002 want=18000 got=36000" in r.out
+    assert "MISMATCH shutterAngle want=18000 got=36000" in r.out
     assert "did NOT read back" in r.out
 
 
-def test_gphoto2_read_failure_on_a_present_camera_aborts():
+def test_a_camera_that_does_not_answer_on_its_link_aborts_as_unreadable():
     r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), read_fail=True).run()
     assert r.rc == 1, r.out
-    assert "gphoto2 read failed" in r.out
+    assert "REST read was unreadable" in r.out
+
+
+def test_a_camera_on_usb_without_a_network_link_aborts_naming_the_link_and_web_media_manager():
+    r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), link=False).run()
+    assert r.rc == 1, r.out
+    assert "has no network link" in r.out and "Web media manager" in r.out and "(bb)" in r.out
+    assert not any(c.startswith(("GET", "SET")) for c in r.calls), r.calls
+
+
+def _no_lease_rig(box_addr):
+    """No lease file: `ip -4 -o addr show dev <link>` (a stub) gives the box BOX_ADDR."""
+    rig = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned())
+    os.unlink(os.path.join(rig.leases, "7"))
+    Rig._exe(os.path.join(rig.root, "stubs", "ip"),
+             "#!/bin/sh\necho '7: enx02743ba02a02    inet %s brd 172.25.77.163 scope global'\n" % box_addr)
+    return rig.run()
+
+
+def test_the_camera_address_falls_back_to_the_other_host_of_the_links_30():
+    r = _no_lease_rig("172.25.77.162/30")
+    assert r.rc == 0, r.out
+    assert "CTS_CAMERA enx02743ba02a02 172.25.77.161" in r.out
+
+
+def test_the_30_fallback_also_works_when_the_box_holds_the_first_host():
+    # box .161 -> camera .162; the fake curl only answers .161, so the abort names the address it used
+    r = _no_lease_rig("172.25.77.161/30")
+    assert "CTS_CAMERA enx02743ba02a02 172.25.77.162" in r.out, r.out
+
+
+def test_a_link_without_a_lease_and_without_a_30_address_has_no_camera():
+    r = _no_lease_rig("172.25.77.162/24")
+    assert r.rc == 1, r.out
+    assert "has no network link" in r.out
 
 
 def test_a_relay_still_active_on_the_camera_box_aborts_by_name():
-    # review finding: the issue-808 pause is best-effort, so "exactly one gphoto2 user" is checked
-    # on the box, in the same remote command, before every gphoto2 session.
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), relay_state="active").run()
+    # the issue-808 pause is best-effort, so the relay is checked on the box before every session
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600), _pinned(), relay_state="active").run()
     assert r.rc == 1, r.out
     assert "bkshading-relay is still active on cam1 (10.77.9.61)" in r.out
     assert not any(c.startswith(("GET", "SET", "GUARD")) for c in r.calls), r.calls
 
 
 def test_a_relay_waiting_to_restart_counts_as_active():
-    # `systemctl is-active --quiet` is false for activating/deactivating; only a truly stopped
-    # unit lets the session run.
     for st in ("activating", "deactivating", "reloading"):
         r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), relay_state=st).run()
         assert r.rc == 1, (st, r.out)
@@ -604,39 +723,27 @@ def test_a_relay_waiting_to_restart_counts_as_active():
 
 
 def test_a_relay_that_comes_back_between_read_and_set_aborts_the_set():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), relay_active_after_reads=1).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600), _pinned(), relay_active_after_reads=1).run()
     assert r.rc == 1, r.out
     assert "bkshading-relay is still active" in r.out and "the set would race" in r.out
-    assert [c.split(" ")[0] for c in r.calls if not c.startswith("PRESENCE")] == ["GET", "GUARD"], r.calls
+    assert _seq(r) == ["GET", "GUARD"], r.calls
 
 
-def test_a_box_without_pgrep_refuses_instead_of_skipping_the_check():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), no_pgrep=True).run()
+def test_a_box_without_curl_refuses_by_name():
+    r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), no_curl=True).run()
     assert r.rc == 1, r.out
-    assert "pgrep is not available on cam1 (10.77.9.61)" in r.out
+    assert "curl is not available on cam1 (10.77.9.61)" in r.out
     assert not any(c.startswith("GET") for c in r.calls), r.calls
 
 
-def test_a_leftover_gphoto2_process_aborts_by_name():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), gphoto2_busy=True).run()
-    assert r.rc == 1, r.out
-    assert "another gphoto2 process is running on cam1 (10.77.9.61)" in r.out
-
-
 def test_a_transport_timeout_is_named_not_reported_as_unreadable_output():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), read_exit=124).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), ssh_exit=124).run()
     assert r.rc == 1, r.out
     assert "transport rc=124 (timed out)" in r.out
 
 
-def test_suggest_flags_a_value_that_cannot_be_pinned():
-    r = _cli(["suggest"], _blocks({"iso": "Auto ISO", "d002": 4320, "d006": 6000}))
-    assert r.returncode == 0
-    assert "UNPINNABLE iso" in r.stderr
-
-
 def test_a_live_broadcast_blocks_the_set():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), busy=True).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600), _pinned(), busy=True).run()
     assert r.rc == 1, r.out
     assert any(c.startswith("GUARD") for c in r.calls)
     assert not any(c.startswith("SET") for c in r.calls), r.calls
@@ -646,6 +753,21 @@ def test_invalid_checked_in_baseline_aborts():
     r = Rig({"10.77.9.61": 1}, dict(GOOD), dict(_all_null(), bogus=1)).run()
     assert r.rc == 1, r.out
     assert "invalid" in r.out
+
+
+def test_a_put_body_is_refused_before_it_reaches_the_box_unless_it_is_one_numeric_field():
+    def run(spec):
+        return subprocess.run(["bash", "-c", '. "$1"; camera_test_settings_rest_cmd put "$2"', "t", LIB, spec],
+                              capture_output=True, text=True)
+    assert run('video/iso|{"iso":8000}').returncode == 0
+    assert run('lens/iris|{"apertureStop":5.6}').returncode == 0
+    for bad in ('video/iso|{"iso":"8000; reboot"}', "video/iso|{\"iso\":1}'x", 'system/format|{"frameRate":24}',
+                'video/iso|{"iso":8000,"x":1}'):
+        r = run(bad)
+        assert r.returncode == 1 and "refused PUT" in r.stderr, (bad, r.stdout)
+    get = subprocess.run(["bash", "-c", '. "$1"; camera_test_settings_rest_cmd get video/iso "$2"', "t", LIB,
+                          'x"; reboot; "'], capture_output=True, text=True)
+    assert get.returncode == 1 and "refused GET" in get.stderr, get.stdout
 
 
 # ---------------------------------------------------------------------------------------------
@@ -658,7 +780,7 @@ def test_recording_e2e_calls_the_step_once_after_the_relay_pause_trap():
     call = 'camera_test_settings_enforce "$HERE" "$STRIH" "$STREAM" "$CAM_PW" "$CAMERA_NAME=$CAM1_IP" "cam2=$PAINTER_IP"'
     assert s.count(src) == 1
     assert s.count("camera_test_settings_enforce ") == 1
-    lines = [l for l in s.splitlines() if l.startswith("camera_test_settings_enforce ")]
+    lines = [ln for ln in s.splitlines() if ln.startswith("camera_test_settings_enforce ")]
     assert lines == [call], "the call must be ONE bare statement at column 0: %r" % lines
     pause = s.index('bkshading_e2e_pause_stop cam2 "$PAINTER_IP"')
     trap_close = s.index("' EXIT HUP INT TERM", pause)

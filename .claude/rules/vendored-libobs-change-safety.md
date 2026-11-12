@@ -13,7 +13,6 @@ paths:
   - "vendor/obs-studio/libobs-opengl/gl-subsystem.h"
   - "vendor/obs-studio/libobs-opengl/gl-subsystem.c"
   - "vendor/obs-studio/frontend/widgets/OBSProjector.cpp"
-  - "tests/gl_egl_present_vsync_1107.rs"
   - "tests/genlock_release_cadence.rs"
   - "tests/genlock_relock_selection_parity.rs"
   - "vendor/obs-studio/libobs/obs.c"
@@ -31,8 +30,6 @@ paths:
   - ".github/workflows/windows-genlock-fast.yml"
   - "vendor/obs-studio/libobs/obs-audio.c"
   - "vendor/obs-studio/libobs/obs-genlock-mix-guard.h"
-  - "tests/genlock_audio_mix_guard_1381.rs"
-  - "tests/c/genlock_audio_mix_guard_1381_harness.c"
 ---
 
 # Changing the genlock C in `libobs` — CI is its first compile, so buy verification back (#1003)
@@ -555,8 +552,8 @@ libobs-opengl-only hot-swap.
 
 ## Driving a lifted `audio_callback` path through scenarios (issue 1381, the mix buffering guard)
 
-`tests/genlock_audio_mix_guard_1381.rs` lifts most of `audio_callback` verbatim (the blocks between
-its `/* ---- */` banners, each anchor asserted unique) into `tests/c/genlock_audio_mix_guard_1381_harness.c`
+`obs:tests/vendored/tests/genlock_audio_mix_guard_1381.rs` lifts most of `audio_callback` verbatim (the blocks between
+its `/* ---- */` banners, each anchor asserted unique) into `obs:tests/c/genlock_audio_mix_guard_1381_harness.c`
 and drives it tick by tick. Lessons from its two review rounds:
 - **Every scenario must be reachable in real libobs.** Check list membership and registration
   before you model a source. Composites (scenes, transitions) are never in `first_audio_source`:
@@ -572,7 +569,7 @@ and drives it tick by tick. Lessons from its two review rounds:
   numbers that hold under the carried-over value (the guard's mix tick is such a static on purpose:
   an audio reset zeroes `struct obs_core_audio`).
 - **A literal you add can blind another test's single-occurrence anchor.**
-  `tests/audio_telemetry_800.rs` proves the #800 rate limit with
+  `obs:tests/vendored/tests/audio_telemetry_800.rs` proves the #800 rate limit with
   `src.contains("60000000000ULL")`. A second 60 s literal anywhere in obs-audio.c makes that check
   pass even with the limit deleted. Grep the other gates' `contains(` literals for any constant you
   add, and spell a new one differently (`(60ULL * 1000000000ULL)`).
@@ -626,7 +623,7 @@ and drives it tick by tick. Lessons from its two review rounds:
   - Count LOG_DEBUG lines separately. A count of the stock debug lines (the "exceeded
     TS_SMOOTHING_THRESHOLD" / "jumped" lines) also proves that no packet reached the stock path.
   - Put the exact expected line in the truth table.
-  - Worked example: `tests/genlock_audio_relabel_ingest_1381.rs`.
+  - Worked example: `obs:tests/vendored/tests/genlock_audio_relabel_ingest_1381.rs`.
 - **A decision that runs OUTSIDE the lifted branch can be lifted as a second slice (receiver slice 2,
   design 5901213031).** The relabel remainder booking runs after the skew hold, far below the
   place-vs-append branch. Lift it verbatim between two count-1 comment anchors and substitute it into

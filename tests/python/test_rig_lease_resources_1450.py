@@ -288,12 +288,14 @@ def _yml_step(path, name_start):
     return text[i:j if j != -1 else len(text)]
 
 
-def test_the_full_path_e2e_gate_declares_snv_video_and_resolume_only_with_cg_chain():
+def test_the_full_path_e2e_gate_declares_snv_video_and_resolume_on_every_recording_run():
+    # issue 1509: every pull_request run records and its program-audio guard fails it on SP-program
+    # audio, so it claims resolume-snv whether the CG chain profile is armed or not.
     wf = ROOT / ".github" / "workflows" / "full-path-e2e.yml"
     step = _yml_step(wf, "Rig-busy gate")
-    assert ("RIG_LEASE_RESOURCES: ${{ (github.event_name == 'pull_request' && vars.CG_CHAIN == '1') "
+    assert ("RIG_LEASE_RESOURCES: ${{ github.event_name == 'pull_request' "
             "&& 'snv-video,resolume-snv' || 'snv-video' }}") in step, step
-    # the same condition the recording step arms the CG profile with (cg-chain-e2e.sh: CG_CHAIN = "1")
+    # the recording step still arms the CG profile by its own condition (cg-chain-e2e.sh: CG_CHAIN = "1")
     assert "CG_CHAIN: ${{ github.event_name == 'pull_request' && vars.CG_CHAIN || '0' }}" in wf.read_text()
 
 
@@ -384,7 +386,11 @@ def test_the_ro_units_apply_claims_all_when_a_venue_has_no_atom(tmp_path):
     sys.path.insert(0, str(HERE))
     import test_cambox_ro_units_1394 as ro  # noqa: E402
     r, sshdir = ro._cli(run, "--apply", "--box", "cam3",
-                        env={"FAKE_RECORD_LEASE": "1", "STRIH_BOXES_DIR": str(facts)})
+                        env={"FAKE_RECORD_LEASE": "1", "STRIH_BOXES_DIR": str(facts),
+                             # issue 1506: a venue with no strih/stream in the obs fleet list
+                             # refuses unless the caller names the guard's boxes; this test is
+                             # about the lease claim, so it names them.
+                             "STRIH_HOST": "10.77.9.202", "STREAM_HOST": "10.77.9.204"})
     assert r.returncode == 0, r.stdout + r.stderr
     declared = json.loads((sshdir / "lease-0").read_text())["resources"]
     assert declared == ATOMS

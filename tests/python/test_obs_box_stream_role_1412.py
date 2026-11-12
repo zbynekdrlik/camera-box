@@ -90,11 +90,12 @@ def test_the_program_sender_and_venue_close_the_fact_list():
     keys = r.stdout.split()
     i = keys.index("STRIH_PROGRAM_SENDER")
     assert keys[i:i + 3] == ["STRIH_PROGRAM_SENDER", "STRIH_VENUE", "STRIH_CAMERA_DEV1_NET"]
-    # issue 1425 appended the fixed OBS audio buffering, issue 1387 the four JPEG XS link facts.
+    # issue 1425 appended the fixed OBS audio buffering, issue 1387 the four JPEG XS link facts, issue 1466 the desktop session.
     assert keys[i + 3:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS",
                             "STRIH_HTTPS_PUBLIC", "STRIH_STREAM_DEV_SCENE", "STRIH_BKSHADING_RELAYS",
                             "STRIH_AUDIO_BUFFERING_MS", "STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS",
-                            "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS"]
+                            "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS",
+                            "STRIH_DESKTOP"]
 
 
 def test_stream_pp_loads_as_the_stream_role(boxes):
@@ -239,14 +240,18 @@ def test_the_program_audio_input_name_reaches_the_seeder():
     class FakeObs:
         def __init__(self):
             self.calls = []
-            self.kind = "asio_input_capture"   # RemoveInput / CreateInput change it, like OBS
+            self.kind = "asio_input_capture"   # SetInputName / RemoveInput / CreateInput change it, like OBS
+            self.aside = None                  # issue 1495: the replace renames the old input aside
 
         def req(self, t, d=None, ignore_err=False):
             self.calls.append((t, d))
             if t == "GetInputList":
-                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.kind else []}
-            if t == "RemoveInput":
-                self.kind = None
+                inputs = [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.kind else []
+                return {"inputs": inputs + ([{"inputName": self.aside, "inputKind": "?"}] if self.aside else [])}
+            if t == "SetInputName" and d["inputName"] == "Zvuk z mixu":
+                self.aside, self.kind = d["newInputName"], None
+            if t == "RemoveInput" and d["inputName"] == self.aside:
+                self.aside = None
             if t == "CreateInput":
                 self.kind = d["inputKind"]
             if t == "GetSceneList":
@@ -259,7 +264,7 @@ def test_the_program_audio_input_name_reaches_the_seeder():
     res = s.bootstrap(obs, [], studio=False, update_only=True, audio_name="Zvuk z mixu")
     created = [d for t, d in obs.calls if t == "CreateInput"]
     assert created and created[0]["inputName"] == "Zvuk z mixu" and created[0]["inputKind"] == "pulse_input_capture"
-    assert ("RemoveInput", {"inputName": "Zvuk z mixu"}) in obs.calls
+    assert ("RemoveInput", {"inputName": "Zvuk z mixu (seed replace 1)"}) in obs.calls
     assert "Zvuk z mixu" in res and "ASIO zvuk" not in res
 
 
@@ -430,14 +435,18 @@ def test_a_replace_keeps_the_audio_input_in_every_scene_and_its_sync_offset():
     class FakeObs:
         def __init__(self):
             self.calls = []
-            self.kind = "wasapi_input_capture"   # RemoveInput / CreateInput change it, like OBS
+            self.kind = "wasapi_input_capture"   # SetInputName / RemoveInput / CreateInput change it, like OBS
+            self.aside = None                    # issue 1495: the replace renames the old input aside
 
         def req(self, t, d=None, ignore_err=False):
             self.calls.append((t, d))
             if t == "GetInputList":
-                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.kind else []}
-            if t == "RemoveInput":
-                self.kind = None
+                inputs = [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.kind else []
+                return {"inputs": inputs + ([{"inputName": self.aside, "inputKind": "?"}] if self.aside else [])}
+            if t == "SetInputName" and d["inputName"] == "Zvuk z mixu":
+                self.aside, self.kind = d["newInputName"], None
+            if t == "RemoveInput" and d["inputName"] == self.aside:
+                self.aside = None
             if t == "CreateInput":
                 self.kind = d["inputKind"]
             if t == "GetSceneList":
@@ -453,10 +462,12 @@ def test_a_replace_keeps_the_audio_input_in_every_scene_and_its_sync_offset():
     obs = FakeObs()
     res = s.seed_program_audio_input(obs, "Zvuk z mixu")
     kinds = [t for t, _d in obs.calls]
-    assert kinds.index("GetSceneItemList") < kinds.index("RemoveInput") < kinds.index("CreateInput")
+    # issue 1495: state read, old input renamed aside, new one created, the old one removed LAST
+    assert (kinds.index("GetSceneItemList") < kinds.index("SetInputName") < kinds.index("CreateInput")
+            < kinds.index("RemoveInput"))
     created = [d for t, d in obs.calls if t == "CreateInput"][0]
     assert created["sceneName"] == "POST" and created["inputKind"] == "pulse_input_capture"
-    assert ("CreateSceneItem", {"sceneName": "PRE", "sourceName": "Zvuk z mixu"}) in obs.calls
+    assert ("CreateSceneItem", {"sceneName": "PRE", "sourceName": "Zvuk z mixu", "sceneItemEnabled": False}) in obs.calls
     assert ("SetInputAudioSyncOffset", {"inputName": "Zvuk z mixu", "inputAudioSyncOffset": 250}) in obs.calls
     assert "kept in 2 scene(s)" in res
 

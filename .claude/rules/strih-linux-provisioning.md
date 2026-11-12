@@ -85,6 +85,10 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
     fixture that shrinks `STRIH_CAMERAS` (the 1361 `strih-zz` box and `seed_manifest_follows_the_camera_and_cg_facts`)
     must shrink the dependent fact too, or the load refuses before the assertion. Grep the test tree for
     the other fact's literal (`STRIH_CAMERAS=2 3 5`) and read each replacement.
+- **`STRIH_DESKTOP` (issue 1466)** = `openbox` | `xfce`, the last key: the operator session
+  (`.claude/rules/obs-box-xfce.md`). stream-snv is the first `xfce` box. It is not in the 1361 golden
+  (the openbox autostart is `strih_session_start_text openbox`, unchanged), so moving a box is the fact
+  line + setup-strih + a reboot, with no golden regeneration.
 - **Changing strih-snv's `STRIH_CAMERAS` is a fact change with four test consumers** (issue 1413):
   regenerate the 1361 golden from the new facts (`render.sh`), and update the default-box tests that
   read the live list -- `tests/strih_provision_pure_functions.rs` (`strih_lx_ndi_inputs` count, the
@@ -461,6 +465,52 @@ a restart trigger by design, so a `not-applied` master is deployed in the nightl
 **Live acceptance on the next strih-snv genlock deploy:** `ActiveEnterTimestamp` of dantesync on strih-snv
 unchanged, the master's `last_date_step_ts` unchanged, and the deploy log shows the `kept running` line.
 
+## dsync binds PTP to the declared rig NIC: `--interface` (issue 1439, ROZHODNUTÉ 1.11.2026)
+
+The owner ruled that dsync's PTP NIC is set explicitly, never picked by chance. On 1.11.2026,
+stream-snv's VBAN-leg NIC got its address first, and dantesync 1.20.0 joined PTP there for a whole
+production.
+
+- **The unit.** `strih_dantesync_unit_text ROLE ARGS RIG_NIC` appends `--interface <RIG_NIC>` to
+  ExecStart. A name that is not 1-15 of `[A-Za-z0-9._-]`, or one that starts with `-`, emits nothing.
+- **No ExecStartPre wait.** dsync >= 1.21 waits for the configured NIC and never falls back. The 1.11
+  stopgap waited for the rig IP, which only worked while the rig NIC had the lowest ifindex.
+- **Where the NIC comes from.** setup-strih step 2 and verify item 6c both use
+  `strih_dantesync_rig_nic` (`scripts/lib/strih-dantesync.sh`). It follows the ONE rig-NIC rule,
+  `strih_lx_rig_nic`: `STRIH_NIC_IFACE`, then the fact `STRIH_NIC_DRIVER`, then the NIC carrying
+  STRIH_IP. An unresolved NIC fails step 2, so no unit is ever written without the flag.
+- **Verify item 6d** (`strih_dantesync_iface_grade` over the pure `strih_dantesync_iface_verdict`)
+  reads dsync's OWN `/status` once, bounded. Both `ptp_interface_configured` and `ptp_interface` must
+  equal the rig NIC. The verdicts are `not-configured` / `configured-elsewhere` / `joined-elsewhere` /
+  `unreadable` / `norig`, all FAIL. The boot-journal join reader is gone.
+- **Rollout cost.** The first setup-strih run after this change rewrites the unit, so it restarts
+  dsync once on each box. On the date master that keeps the fleet date (`date-offset.json`, since
+  1.15).
+- **The 1361 golden** renders the unit with `enp7s0` (render.sh `${STRIH_NIC_IFACE:-enp7s0}`), the
+  strih-snv rig NIC.
+- **Camboxes** (issue 1439 part 2): `scripts/lib/cambox-dsync-unit.sh` holds the unit
+  (`cambox_dsync_unit_text [NIC]`, byte-identical to the old STEP 17 heredoc without a NIC,
+  ` --interface <NIC>` after `--ntp-server strih.lan` with one) and the NIC rule `cambox_lan_nic
+  SYSROOT` = the ONE `enp*` with a `device` link AND `carrier` 1 (the netplan #1155 name rule: the
+  bkshading USB link is `enx*`, a VLAN has no device link). Every live cambox has TWO onboard r8169
+  ports and the cable sits in either (read 9.11.2026: cam2 enp3s0, cam3 enp1s0, cam5 enp2s0), so the
+  cabled port decides; none or two cabled = rc 1 by name, never a guess. A cable moved to the other
+  port later leaves dsync waiting on the old one (it never falls back): `(ba)` FAILs and the apply
+  re-binds it.
+  - setup-device STEP 17 writes through both (enable-only, fails by name on an unresolved NIC).
+  - verify-device `(ba)` grades `/status` + the unit's ExecStart over the SAME verdict.
+  - A live box gets it from `scripts/cambox-ro-units-apply.sh`: the unit written in the verified rw
+    window when it differs, `systemctl restart dsync` only after the close and only when written, then
+    a bounded `/status` read-back (locked + configured == joined == the NIC,
+    `CAMBOX_RO_UNITS_DSYNC_WAIT_S` default 150 s, the cold lock ~95 s). One dsync restart per cambox,
+    off-production. Its FAIL lines keep the `FAIL: [issue 1394]` prefix the CLI's RESULT reads.
+- **One verdict for every node class:** `dsync_iface_verdict` / `dsync_iface_grade` live in
+  `scripts/lib/dsync-iface.sh` (with the `is_locked` + NIC field reader the apply embeds via
+  `declare -f`); `strih_dantesync_iface_*` are thin wrappers kept for verify-strih item 6d.
+- Tests: `tests/python/test_strih_dantesync_interface_1439.py` (the OBS boxes),
+  `tests/python/test_cambox_dsync_interface_1439.py` (the camboxes: the resolver over a fake sysfs, the
+  unit, STEP 17's real lines, `(ba)` run as its slice, the apply on the issue-1407 fake box).
+
 ## Ubuntu 26.04 (owner ROZHODNUTÉ 18.9.2026)
 
 The strih-snv notebook runs **Ubuntu 26.04 LTS (resolute)**, NOT 24.04 (owner: „chcem prejst na 26
@@ -720,7 +770,7 @@ lease; strih-snv has run Xorg + openbox since 23.9.
 - **Tests:** `tests/strih_drm_output_provision_1346.rs` (the lib helpers + the wiring anchors),
   `tests/python/test_strih_drm_output_1346.py` (the Python grammar, the shared
   `tests/fixtures/drm_output_view_parity.tsv` with the C lift, read/write, the CLI) and
-  `tests/drm_output_view_1346.rs` (the vendored side).
+  `obs:tests/vendored/tests/drm_output_view_1346.rs` (the vendored side).
 - **Live acceptance (supervisor/owner, needs an HDMI monitor on strih-snv):** FULL-bundle deploy (a
   frontend + libobs change) → plug the monitor → re-run setup-strih step 6 → restart
   `strih-obs.service` → both views scan out (switch in Tools), the choice survives an OBS restart,

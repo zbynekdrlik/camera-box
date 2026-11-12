@@ -8,7 +8,8 @@ development period (`~/.camera-box/camera-prod-exposure.json`); `rig-mode.sh`'s 
 it, reads it back and moves it aside. Split out of `test_camera_test_settings_1371.py` (which keeps
 the enforce step's own tests) and reusing its fake-camera harness: the bash lib is driven end to end
 under the caller's `set -euo pipefail` with a fake `sshpass` that RUNS the remote text against
-stub `systemctl` / `pgrep` / `gphoto2`, with a temp HOME so no test touches the real snapshot.
+stub `systemctl` / a fake camera `curl` (the REST API since issue 1452), with a temp HOME so no test
+touches the real snapshot.
 Runnable directly or under pytest (the `python-tests` CI job).
 """
 import importlib.util
@@ -32,7 +33,7 @@ MODULE = h.MODULE
 Rig = h.Rig
 GOOD = h.GOOD
 _pinned = h._pinned
-_blocks = h._blocks
+_read_text = h._read_text
 _cli = h._cli
 _tmp_baseline = h._tmp_baseline
 _baseline_text = h._baseline_text
@@ -44,11 +45,14 @@ _baseline_text = h._baseline_text
 # before its FIRST set of a development period; rig-mode EVENT puts it back and reads it back.
 # ---------------------------------------------------------------------------------------------
 RIG_MODE = os.path.join(REPO, "scripts", "rig-mode.sh")
-PROD = {"schema": 1, "box": "cam1", "taken_utc": "2026-09-26T15:00:00Z",
-        "values": {"iso": "800", "d002": "36000"}, "context": {"d006": "6000"}}
-# issue 1402: a snapshot saved before the d006 switch carries the project fps as the WHOLE-fps
-# context.d007 (the old key). LEGACY: still restores and logs, until the next production snapshot.
-LEGACY_PROD = dict(PROD, context={"d007": "60"})
+PROD = {"schema": 2, "box": "cam1", "taken_utc": "2026-09-26T15:00:00Z",
+        "values": {"iso": 800, "shutterAngle": 36000}, "context": {"fps": "60"}}
+# issue 1452: a snapshot saved by the gphoto2-era E2E (schema 1, gphoto2 keys + x100 d006) still
+# restores: d002 IS the REST shutterAngle (degrees x100). issue 1402: an even older one carries the
+# project fps as the WHOLE-fps context.d007.
+GPHOTO2_PROD = {"schema": 1, "box": "cam1", "taken_utc": "2026-09-26T15:00:00Z",
+                "values": {"iso": "800", "d002": "36000"}, "context": {"d006": "6000"}}
+LEGACY_PROD = dict(GPHOTO2_PROD, context={"d007": "60"})
 
 
 def test_default_snapshot_path_is_in_the_runner_home_and_the_env_overrides_it():
@@ -59,38 +63,47 @@ def test_default_snapshot_path_is_in_the_runner_home_and_the_env_overrides_it():
 
 def test_build_snapshot_records_the_values_the_test_is_about_to_overwrite():
     b = cts.load_baseline(_baseline_text(_pinned()))
-    cur = {"iso": "800", "d002": "36000", "f-number": "f/4", "d004": "5600", "d005": "0", "d006": "6000"}
+    cur = {"iso": 800, "shutterAngle": 36000, "shutterSpeed": None, "apertureStop": 4.0, "whiteBalance": 5600,
+           "whiteBalanceTint": 0, "fps": "60"}
     doc = cts.build_snapshot(cur, b, "cam1", "2026-09-26T15:00:00Z")
     assert doc == PROD
     # a pinned optional key is recorded too; an unpinned one is never touched, so never restored
-    b = cts.load_baseline(_baseline_text(_pinned(d004=3200)))
-    assert cts.build_snapshot(cur, b, "cam1", "t")["values"] == {"iso": "800", "d002": "36000", "d004": "5600"}
+    b = cts.load_baseline(_baseline_text(_pinned(whiteBalance=3200)))
+    assert cts.build_snapshot(cur, b, "cam1", "t")["values"] == {"iso": 800, "shutterAngle": 36000,
+                                                                  "whiteBalance": 5600}
     # the round trip is a valid snapshot
     assert cts.load_snapshot(json.dumps(doc)) == doc
 
 
-def test_build_snapshot_refuses_a_value_it_could_not_restore():
+def test_build_snapshot_holds_the_shutter_in_the_unit_the_camera_reports():
     b = cts.load_baseline(_baseline_text(_pinned()))
-    cur = {"iso": "Auto ISO", "d002": "36000", "d006": "6000"}
-    try:
-        cts.build_snapshot(cur, b, "cam1", "t")
-    except cts.SnapshotError as e:
-        assert "iso" in str(e)
-    else:
-        raise AssertionError("a value that is not a plain token must not be snapshotted")
+    cur = {"iso": 800, "shutterAngle": None, "shutterSpeed": 50, "fps": "25"}
+    assert cts.build_snapshot(cur, b, "cam1", "t")["values"] == {"iso": 800, "shutterSpeed": 50}
+
+
+def test_a_gphoto2_era_snapshot_reads_as_rest_values():
+    doc = cts.load_snapshot(json.dumps(dict(GPHOTO2_PROD, values={"iso": "800", "d002": "36000", "d004": "5600",
+                                                                   "d005": "-3", "f-number": "f/4.0"})))
+    assert doc["values"] == {"iso": 800, "shutterAngle": 36000, "whiteBalance": 5600, "whiteBalanceTint": -3,
+                             "apertureStop": 4.0}
+    assert doc["context"] == {"fps": "60"}
+    assert cts.load_snapshot(json.dumps(LEGACY_PROD))["context"] == {"fps": "60"}
+    assert cts.snapshot_summary(cts.load_snapshot(json.dumps(GPHOTO2_PROD))) == cts.snapshot_summary(PROD)
 
 
 def test_malformed_snapshots_are_refused():
     bad = [
         "not json",
         "[]",
-        json.dumps(dict(PROD, schema=2)),
+        json.dumps(dict(PROD, schema=3)),
         json.dumps({k: v for k, v in PROD.items() if k != "values"}),
         json.dumps(dict(PROD, values={})),
-        json.dumps(dict(PROD, values={"d007": "60"})),  # fps is never restored
-        json.dumps(dict(PROD, values={"d006": "6000"})),  # neither is the project fps
+        json.dumps(dict(PROD, values={"fps": 60})),  # fps is never restored
+        json.dumps(dict(GPHOTO2_PROD, values={"d006": "6000"})),  # neither is the project fps
         json.dumps(dict(PROD, values={"iso": "800; reboot"})),
-        json.dumps(dict(PROD, values={"iso": 800})),
+        json.dumps(dict(PROD, values={"iso": "800"})),
+        json.dumps(dict(PROD, values={"iso": None})),
+        json.dumps(dict(GPHOTO2_PROD, values={"iso": "Auto ISO"})),
         json.dumps(dict(PROD, box="")),
         json.dumps({k: v for k, v in PROD.items() if k != "taken_utc"}),
     ]
@@ -104,40 +117,47 @@ def test_malformed_snapshots_are_refused():
 
 def test_restore_plan_and_grade_touch_only_the_snapshot_keys_that_differ():
     snap = PROD["values"]
-    assert cts.restore_plan(snap, {"iso": "8000", "d002": "2160", "d006": "6000"}) == [("iso", "800"), ("d002", "36000")]
-    assert cts.restore_plan(snap, {"iso": "800", "d002": "2160"}) == [("d002", "36000")]
-    assert cts.restore_plan(snap, {"iso": "800", "d002": "36000"}) == []
-    assert cts.grade_restore(snap, {"iso": "800", "d002": "36000"}) == []
-    assert cts.grade_restore(snap, {"iso": "800", "d002": "2160"}) == [("d002", "36000", "2160")]
+    assert cts.restore_plan(snap, {"iso": 8000, "shutterAngle": 2160, "fps": "60"}) == [("iso", 800), ("shutterAngle", 36000)]
+    assert cts.restore_plan(snap, {"iso": 800, "shutterAngle": 2160}) == [("shutterAngle", 36000)]
+    assert cts.restore_plan(snap, {"iso": 800, "shutterAngle": 36000}) == []
+    assert cts.grade_restore(snap, {"iso": 800, "shutterAngle": 36000}) == []
+    assert cts.grade_restore(snap, {"iso": 800, "shutterAngle": 2160}) == [("shutterAngle", 36000, 2160)]
+
+
+def test_a_restore_into_a_camera_that_now_reports_the_other_shutter_unit_is_refused():
+    try:
+        cts.restore_plan(PROD["values"], {"iso": 800, "shutterAngle": None, "shutterSpeed": 60})
+    except cts.ShutterUnitError as e:
+        assert "shutterAngle" in str(e) and "shutterSpeed" in str(e)
+    else:
+        raise AssertionError("must refuse")
 
 
 def test_snapshot_summary_is_plain_slovak_with_the_shutter_as_1_over_n():
     assert cts.snapshot_summary(PROD) == "ISO 800, uzávierka 1/60 s (uhol 360°), cam1 2026-09-26T15:00:00Z"
     no_fps = dict(PROD, context={})
     assert cts.snapshot_summary(no_fps) == "ISO 800, uzávierka uhol 360°, cam1 2026-09-26T15:00:00Z"
-    odd = dict(PROD, values={"iso": "8000", "d002": "2160"})
+    odd = dict(PROD, values={"iso": 8000, "shutterAngle": 2160})
     assert "1/1000 s (uhol 21.6°)" in cts.snapshot_summary(odd)
+    speed = dict(PROD, values={"iso": 8000, "shutterSpeed": 1000})
+    assert "uzávierka 1/1000 s," in cts.snapshot_summary(speed)
 
 
-def test_snapshot_summary_reads_the_project_fps_from_d006_and_the_legacy_d007_only_without_it():
+def test_a_gphoto2_era_snapshot_reads_the_project_fps_from_d006_and_the_legacy_d007_only_without_it():
+    def summary(doc):
+        return cts.snapshot_summary(cts.load_snapshot(json.dumps(doc)))
     # issue 1402: context.d006 is the project fps x100
-    assert "1/50 s" in cts.snapshot_summary(dict(PROD, values={"iso": "800", "d002": "18000"},
-                                                  context={"d006": "2500"}))
+    assert "1/50 s" in summary(dict(GPHOTO2_PROD, values={"iso": "800", "d002": "18000"}, context={"d006": "2500"}))
     # a legacy snapshot (whole-fps context.d007 only) logs the same 1/N s
-    assert cts.snapshot_summary(LEGACY_PROD) == cts.snapshot_summary(PROD)
-    assert "1/50 s" in cts.snapshot_summary(dict(LEGACY_PROD, values={"iso": "800", "d002": "18000"},
-                                                 context={"d007": "25"}))
+    assert summary(LEGACY_PROD) == cts.snapshot_summary(PROD)
+    assert "1/50 s" in summary(dict(LEGACY_PROD, values={"iso": "800", "d002": "18000"}, context={"d007": "25"}))
     # d006 present: the legacy key is never read, even when it disagrees (an off-speed d007)
-    assert "1/60 s" in cts.snapshot_summary(dict(PROD, context={"d006": "6000", "d007": "50"}))
+    assert "1/60 s" in summary(dict(GPHOTO2_PROD, context={"d006": "6000", "d007": "50"}))
     # a present d006 that is null or not a number is unreadable, never "absent": no legacy fallback
-    # (review round 1: a null d006 fell back to the off-speed d007)
-    assert cts.context_fps100({"d006": None, "d007": "50"}) is None
-    assert cts.context_fps100({"d006": "x", "d007": "60"}) is None
-    assert cts.context_fps100({"d007": "60"}) == 6000
-    assert cts.context_fps100({"d006": "5994", "d007": "50"}) == 5994
-    assert cts.context_fps100({}) is None
-    no_number = dict(PROD, context={"d006": "x", "d007": "60"})
-    assert cts.snapshot_summary(no_number) == "ISO 800, uzávierka uhol 360°, cam1 2026-09-26T15:00:00Z"
+    assert summary(dict(GPHOTO2_PROD, context={"d006": None, "d007": "50"})) == \
+        "ISO 800, uzávierka uhol 360°, cam1 2026-09-26T15:00:00Z"
+    assert summary(dict(GPHOTO2_PROD, context={"d006": "x", "d007": "60"})) == \
+        "ISO 800, uzávierka uhol 360°, cam1 2026-09-26T15:00:00Z"
 
 
 def test_consumed_path_and_the_newest_consumed_snapshot():
@@ -158,12 +178,12 @@ def test_snapshot_state_line_for_the_handover_check():
             json.dump(PROD, f)
         line = cts.snapshot_state(p)
         assert line.startswith("exposure state=restored restored=20260926T160000Z box=cam1")
-        assert "iso=800 d002=36000" in line
+        assert "iso=800 shutterAngle=36000" in line
         with open(p, "w") as f:
             json.dump(PROD, f)
         line = cts.snapshot_state(p)
         assert line.startswith("exposure state=pending box=cam1 taken=2026-09-26T15:00:00Z")
-        assert "iso=800 d002=36000" in line
+        assert "iso=800 shutterAngle=36000" in line
         with open(p, "w") as f:
             f.write("{broken")
         assert cts.snapshot_state(p).startswith("exposure state=invalid ")
@@ -177,20 +197,20 @@ def test_cli_snapshot_writes_once_and_never_overwrites():
     try:
         p = os.path.join(root, "sub", "camera-prod-exposure.json")
         r = _cli(["snapshot", "--baseline", base, "--snapshot", p, "--box", "cam1"],
-                 _blocks({"iso": 800, "d002": 36000, "d006": 6000}))
+                 _read_text({"iso": 800, "shutterAngle": 36000}))
         assert r.returncode == 0, r.stderr
         assert "SNAPSHOT saved" in r.stdout
         doc = json.load(open(p))
-        assert doc["values"] == {"iso": "800", "d002": "36000"} and doc["box"] == "cam1"
+        assert doc["values"] == {"iso": 800, "shutterAngle": 36000} and doc["box"] == "cam1"
         r = _cli(["snapshot", "--baseline", base, "--snapshot", p, "--box", "cam2"],
-                 _blocks({"iso": 8000, "d002": 2160, "d006": 6000}))
+                 _read_text({"iso": 8000, "shutterAngle": 2160}))
         assert r.returncode == 0 and "SNAPSHOT kept" in r.stdout
         assert json.load(open(p)) == doc
-        # an unrestorable value is refused and nothing is written
+        # an unreadable camera read is refused and nothing is written
         q = os.path.join(root, "q.json")
         r = _cli(["snapshot", "--baseline", base, "--snapshot", q, "--box", "cam1"],
-                 _blocks({"iso": "Auto ISO", "d002": 36000, "d006": 6000}))
-        assert r.returncode == cts.EXIT_SNAPSHOT_FAILED and not os.path.exists(q)
+                 _read_text({"iso": 800, "shutterAngle": 36000}, codes={"video/iso": "500"}))
+        assert r.returncode == cts.EXIT_UNREADABLE and not os.path.exists(q)
     finally:
         shutil.rmtree(root)
         os.unlink(base)
@@ -208,17 +228,17 @@ def test_cli_snapshot_path_honours_the_env_and_home():
 
 # --- the E2E side: the snapshot is taken before the FIRST set of a development period -----------
 def test_the_first_set_snapshots_the_owners_exposure_before_changing_it():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="800", d002="36000"), _pinned()).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=800, shutterAngle=36000), _pinned()).run()
     assert r.rc == 0, r.out
     doc = json.loads(r.snapshot)
-    assert doc["values"] == {"iso": "800", "d002": "36000"}
-    assert doc["box"] == "cam1" and doc["context"] == {"d006": "6000"}
+    assert doc["values"] == {"iso": 800, "shutterAngle": 36000}
+    assert doc["box"] == "cam1" and doc["context"] == {"fps": "60"}
     assert r.snapshot_at_set is True, "the snapshot must be on disk BEFORE the camera is changed"
     assert "SNAPSHOT saved" in r.out
 
 
 def test_a_pending_snapshot_is_never_overwritten_by_a_later_run():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), snapshot=PROD).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600), _pinned(), snapshot=PROD).run()
     assert r.rc == 0, r.out
     assert json.loads(r.snapshot) == PROD
     assert "SNAPSHOT kept" in r.out
@@ -231,22 +251,14 @@ def test_a_camera_already_at_the_baseline_takes_no_snapshot():
 
 
 def test_a_set_blocked_by_a_live_broadcast_takes_no_snapshot():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), busy=True).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600), _pinned(), busy=True).run()
     assert r.rc == 1, r.out
-    assert r.snapshot is None
-
-
-def test_an_unrestorable_camera_value_aborts_before_the_set():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="Auto ISO"), _pinned()).run()
-    assert r.rc == 1, r.out
-    assert "production exposure" in r.out and "iso" in r.out
-    assert not any(c.startswith("SET") for c in r.calls), r.calls
     assert r.snapshot is None
 
 
 def test_an_unwritable_snapshot_aborts_before_the_set():
     # ~/.camera-box is a FILE, so the snapshot cannot be written: the owner's exposure would be lost
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned())
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600), _pinned())
     with open(r.snap_dir, "w") as f:
         f.write("not a dir")
     r.run()
@@ -270,15 +282,15 @@ def test_restore_without_a_snapshot_is_a_quiet_no_op():
 
 
 def test_restore_puts_the_owners_exposure_back_and_consumes_the_snapshot():
-    r = _restore(dict(GOOD, iso="400", d002="18000"))
+    r = _restore(dict(GOOD, iso=400, shutterAngle=18000))
     assert r.rc == 0, r.out
     assert "AFTER-RESTORE rc=0 outcome=restored" in r.out
     # review round 1: the rig-busy guard runs BEFORE the relay stop and the camera session, and
     # again right before the set (each is a rig mutation during a possibly live broadcast)
     seq = [c.split(" ")[0] for c in r.calls if not c.startswith("PRESENCE")]
-    assert seq == ["GUARD", "RELAYSTOP", "GET", "GUARD", "SET", "GET"], r.calls
-    assert "SET 10.77.9.61 iso=800 d002=36000" in r.calls
-    assert r.camera["iso"] == "800" and r.camera["d002"] == "36000"
+    assert seq == ["GUARD", "RELAYSTOP", "GET", "GUARD", "SET", "SET", "GET"], r.calls
+    assert "SET 10.77.9.61 iso=800" in r.calls and "SET 10.77.9.61 shutterAngle=36000" in r.calls
+    assert r.camera["iso"] == 800 and r.camera["shutterAngle"] == 36000
     assert r.snapshot is None, "a verified restore moves the snapshot aside"
     assert len(r.consumed) == 1 and r.consumed_docs[0] == PROD
     assert "RESTORE iso 400 -> 800" in r.out and "RESTORED iso 800" in r.out
@@ -287,21 +299,21 @@ def test_restore_puts_the_owners_exposure_back_and_consumes_the_snapshot():
 
 
 def test_a_legacy_snapshot_with_only_the_whole_fps_d007_still_restores_and_logs_the_same_shutter():
-    # issue 1402: a snapshot taken before the d006 switch, during a running development period;
-    # the camera is off-speed (d007 50), the project fps d006 is 60
-    r = _restore(dict(GOOD, iso="400", d002="18000", d007="50"), snapshot=LEGACY_PROD)
+    # issue 1402 + 1452: a gphoto2-era snapshot taken before the d006 switch, during a running
+    # development period; d002 restores as the REST shutterAngle
+    r = _restore(dict(GOOD, iso=400, shutterAngle=18000), snapshot=LEGACY_PROD)
     assert r.rc == 0, r.out
     assert "AFTER-RESTORE rc=0 outcome=restored" in r.out
-    assert "SET 10.77.9.61 iso=800 d002=36000" in r.calls
-    assert r.camera["iso"] == "800" and r.camera["d002"] == "36000"
+    assert "SET 10.77.9.61 iso=800" in r.calls and "SET 10.77.9.61 shutterAngle=36000" in r.calls
+    assert r.camera["iso"] == 800 and r.camera["shutterAngle"] == 36000
     assert "pending production exposure: ISO 800, uzávierka 1/60 s (uhol 360°), cam1" in r.out
-    assert "SHUTTER AFTER 1/60 s at 60 fps" in r.out and "at 50 fps" not in r.out
+    assert "SHUTTER AFTER 1/60 s at 60 fps" in r.out
     assert "1/60 s" in r.discord
     assert r.snapshot is None and len(r.consumed) == 1 and r.consumed_docs[0] == LEGACY_PROD
 
 
 def test_restore_when_the_camera_already_has_the_production_values_sets_nothing():
-    r = _restore(dict(GOOD, iso="800", d002="36000"))
+    r = _restore(dict(GOOD, iso=800, shutterAngle=36000))
     assert r.rc == 0, r.out
     assert "outcome=already" in r.out
     assert not any(c.startswith("SET") for c in r.calls), r.calls
@@ -330,14 +342,14 @@ def test_restore_with_the_camera_absent_is_loud_and_keeps_the_snapshot():
 
 
 def test_restore_that_does_not_read_back_keeps_the_snapshot():
-    r = _restore(dict(GOOD, iso="400", d002="18000"), ignore=("d002",))
+    r = _restore(dict(GOOD, iso=400, shutterAngle=18000), ignore=("shutterAngle",))
     assert "outcome=failed" in r.out, r.out
-    assert "MISMATCH d002 want=36000 got=18000" in r.out
+    assert "MISMATCH shutterAngle want=36000 got=18000" in r.out
     assert json.loads(r.snapshot) == PROD and r.consumed == []
 
 
 def test_restore_blocked_by_a_live_broadcast_keeps_the_snapshot():
-    r = _restore(dict(GOOD, iso="400", d002="18000"), busy=True)
+    r = _restore(dict(GOOD, iso=400, shutterAngle=18000), busy=True)
     assert "outcome=failed" in r.out, r.out
     assert any(c.startswith("GUARD") for c in r.calls)
     # a live broadcast: no relay stop, no camera session, no set
@@ -347,7 +359,7 @@ def test_restore_blocked_by_a_live_broadcast_keeps_the_snapshot():
 
 
 def test_restore_refuses_a_relay_that_comes_back_before_the_set():
-    r = _restore(dict(GOOD, iso="400", d002="18000"), relay_active_after_reads=1)
+    r = _restore(dict(GOOD, iso=400, shutterAngle=18000), relay_active_after_reads=1)
     assert "outcome=failed" in r.out, r.out
     assert "bkshading-relay is still active" in r.out
     assert not any(c.startswith("SET") for c in r.calls), r.calls
@@ -355,7 +367,7 @@ def test_restore_refuses_a_relay_that_comes_back_before_the_set():
 
 
 def test_restore_names_a_transport_timeout():
-    r = _restore(dict(GOOD), read_exit=124)
+    r = _restore(dict(GOOD), ssh_exit=124)
     assert "outcome=failed" in r.out, r.out
     assert "transport rc=124 (timed out)" in r.out and "NOT restored" in r.out
 
@@ -370,9 +382,9 @@ def test_restore_of_an_invalid_snapshot_is_loud_and_touches_nothing():
 
 def test_restore_that_cannot_move_the_snapshot_aside_is_restored_but_flagged():
     # review round 1: a verified restore whose consume fails is NOT "not restored"
-    r = _restore(dict(GOOD, iso="400", d002="18000"), readonly_snap_dir=True)
+    r = _restore(dict(GOOD, iso=400, shutterAngle=18000), readonly_snap_dir=True)
     assert "outcome=restored-unconsumed" in r.out, r.out
-    assert r.camera["iso"] == "800" and r.camera["d002"] == "36000"
+    assert r.camera["iso"] == 800 and r.camera["shutterAngle"] == 36000
     assert "NOT restored" not in r.out
     assert "camera_test_settings.py consume" in r.out
     assert json.loads(r.snapshot) == PROD
@@ -381,7 +393,7 @@ def test_restore_that_cannot_move_the_snapshot_aside_is_restored_but_flagged():
 
 
 def test_a_successful_restore_clears_an_earlier_failure_marker():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="400", d002="18000"), _pinned(), snapshot=PROD)
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=400, shutterAngle=18000), _pinned(), snapshot=PROD)
     with open(os.path.join(r.snap_dir, "camera-prod-exposure.restore-failed.json"), "w") as f:
         json.dump({"utc": "2026-09-26T16:00:00Z", "reason": "camera absent"}, f)
     r.run(mode="restore")
@@ -391,7 +403,7 @@ def test_a_successful_restore_clears_an_earlier_failure_marker():
 
 def test_the_snapshot_abort_does_not_depend_on_the_callers_pipefail():
     # review round 1: `python3 ... | prefix || rc=$?` only saw the python rc under pipefail
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), pipefail=False)
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600), _pinned(), pipefail=False)
     with open(r.snap_dir, "w") as f:
         f.write("not a dir")
     r.run()
@@ -401,7 +413,7 @@ def test_the_snapshot_abort_does_not_depend_on_the_callers_pipefail():
 
 def test_build_snapshot_refuses_a_box_or_time_it_could_not_read_back():
     b = cts.load_baseline(_baseline_text(_pinned()))
-    cur = {"iso": "800", "d002": "36000", "d006": "6000"}
+    cur = {"iso": 800, "shutterAngle": 36000, "fps": "60"}
     for box, utc in (("cam 1", "t"), ("cam1", ""), ("cam1;x", "t")):
         try:
             cts.build_snapshot(cur, b, box, utc)
@@ -459,25 +471,26 @@ def test_the_discord_note_never_fails_without_a_message_file():
 
 def test_an_invalid_pending_snapshot_is_never_counted_as_kept():
     # review round 2: "No record = no set" -- an unreadable snapshot is no record
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), snapshot="{broken").run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600), _pinned(), snapshot="{broken").run()
     assert r.rc == 1, r.out
     assert not any(c.startswith("SET") for c in r.calls), r.calls
     assert r.snapshot == "{broken"
 
 
 def test_a_pending_snapshot_gains_a_newly_pinned_key_but_never_changes_a_kept_one():
-    # the baseline pins d004 mid-period: the owner's d004 is still on the camera, so it is added;
-    # the kept iso/d002 (the owner's, from before the first set) are never touched
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600", d004="3200"), _pinned(d004=5600), snapshot=PROD).run()
+    # the baseline pins whiteBalance mid-period: the owner's is still on the camera, so it is added;
+    # the kept iso/shutter (the owner's, from before the first set) are never touched
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600, whiteBalance=3200), _pinned(whiteBalance=5600),
+            snapshot=PROD).run()
     assert r.rc == 0, r.out
     doc = json.loads(r.snapshot)
-    assert doc["values"] == {"iso": "800", "d002": "36000", "d004": "3200"}
+    assert doc["values"] == {"iso": 800, "shutterAngle": 36000, "whiteBalance": 3200}
     assert doc["box"] == PROD["box"] and doc["taken_utc"] == PROD["taken_utc"]
     assert r.snapshot_at_set is True
 
 
 def test_a_new_snapshot_drops_a_stale_restore_failed_marker():
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned())
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso=1600), _pinned())
     os.makedirs(r.snap_dir)
     with open(os.path.join(r.snap_dir, "camera-prod-exposure.restore-failed.json"), "w") as f:
         json.dump({"utc": "2026-09-20T10:00:00Z", "reason": "old"}, f)
@@ -489,7 +502,7 @@ def test_a_new_snapshot_drops_a_stale_restore_failed_marker():
 def test_the_restore_guard_gets_rig_modes_obs_password():
     # review round 2: rig-mode.sh keeps the OBS WS password in OBS_WS_PASSWORD, the shared guard
     # reads OBS_PASSWORD -- the restore must hand it over, or an auth-enabled OBS fails the guard open
-    r = _restore(dict(GOOD, iso="400", d002="18000"), extra_env={"OBS_WS_PASSWORD": "wspw"})
+    r = _restore(dict(GOOD, iso=400, shutterAngle=18000), extra_env={"OBS_WS_PASSWORD": "wspw"})
     assert "outcome=restored" in r.out, r.out
     guards = [c for c in r.calls if c.startswith("GUARD")]
     assert guards and all(c.endswith("pw=wspw") for c in guards), guards
@@ -507,7 +520,7 @@ def test_a_failed_snapshot_write_leaves_no_temp_file():
 
         cts.os.fsync = boom
         try:
-            doc = cts.build_snapshot({"iso": "800", "d002": "36000"}, cts.load_baseline(open(base).read()),
+            doc = cts.build_snapshot({"iso": 800, "shutterAngle": 36000}, cts.load_baseline(open(base).read()),
                                      "cam1", "2026-09-26T15:00:00Z")
             try:
                 cts.write_snapshot_once(target, doc)

@@ -214,13 +214,19 @@ obs_box_role_apply() {
 # latency pin never written: the stream A/V delay is the operator's knob), the NDI output
 # `<prefix> (stream)`, the program audio input name (the box fact, issue 1462), and (issue 1439) the
 # console's VBAN stream that input receives: "program_audio_vban" = the obs-vban source's settings
-# from the box facts (strih_scenes.py switches that input to the source, keeping its mixer state).
+# from the box facts (strih_scenes.py switches that input to the source, keeping its mixer state), or
+# (issue 1495) on a box whose facts declare the Dante device stream-obs, "program_audio_dante" = that
+# input becomes the obs release's dante_input (the strih role's issue-1485 switch, role-free).
 obs_box_stream_seed_manifest_json() {
   local sender prefix vban ai
   sender="$(strih_lx_program_sender)" || return 1
   ai="$(strih_lx_program_audio_input)" || return 1
   prefix="$(strih_lx_ndi_prefix)" || return 1
-  vban="$(strih_lx_program_audio_vban_json)" || return 1
+  if strih_program_dante_declared; then
+    vban="$(printf '{"device": "%s"}' "$(strih_dante_input_device)")"
+  else
+    vban="$(strih_lx_program_audio_vban_json)" || return 1
+  fi
   [ -n "$sender" ] || { echo "obs-box-role: STRIH_PROGRAM_SENDER is none -- not a stream box" >&2; return 1; }
   printf '{\n  "mode": "update-only",\n  "inputs": [\n'
   printf '    {"sender": "%s", "input": "%s", "scene": "%s", "class": "program"}\n' \
@@ -230,7 +236,8 @@ obs_box_stream_seed_manifest_json() {
     "$(strih_lx_camera_latency_ms)" "$ai" "$OBS_BOX_STREAM_AUDIO_MONITOR"
   # The loader validated the four facts (one stream name and one input name of plain characters, two
   # integers); the block's one renderer is strih_lx_program_audio_vban_json (scripts/lib/strih-provision.sh).
-  printf '  "program_audio_vban": %s,\n' "$vban"
+  if strih_program_dante_declared; then printf '  "program_audio_dante": %s,\n' "$vban"
+  else printf '  "program_audio_vban": %s,\n' "$vban"; fi
   # issue 1436 (owner 25.10.2026): the Audio Monitor plugin's filter on the program input plays it to the
   # operator's locked headphone sink, as on the Windows stream box (seeded only when the input has none)
   printf '  "program_audio_monitor_filter": "%s",\n' "$OBS_BOX_STREAM_AUDIO_MONITOR_FILTER_DEVICE"

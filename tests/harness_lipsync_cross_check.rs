@@ -170,6 +170,27 @@ fn verdict_cmd_wires_a_negative_syncnet_offset_ms_930() {
     assert!(cmd.contains("--syncnet-offset-ms=-37.5"), "cmd: {cmd}");
 }
 
+/// issue 1032: the cross-check compares SyncNet against the QR/QPSK RESIDUAL, so the verdict call
+/// carries the feed's expected A/V leg (`--av-expected-ms=`, the `=` form for the negative value).
+#[test]
+fn verdict_cmd_wires_the_expected_av_leg_1032() {
+    let cmd = run_sourced(
+        "lipsync_verdict_cmd /repo/target/debug/recording-verdict /tmp/qrqpsk.mp4 /tmp/markers.csv 0 -46",
+    );
+    assert!(cmd.contains("--syncnet-offset-ms=0"), "cmd: {cmd}");
+    assert!(cmd.contains("--av-expected-ms=-46"), "cmd: {cmd}");
+}
+
+/// issue 1032: the expected leg defaults to the rig's own test feed (direct = -46, optical = 0),
+/// the same source the E2E A/V gate reads.
+#[test]
+fn expected_av_leg_defaults_to_the_rig_test_feed_1032() {
+    let direct = run_sourced("RIG_TEST_FEED=direct lipsync_default_av_expected_ms");
+    assert_eq!(direct.trim(), "-46", "direct: {direct}");
+    let optical = run_sourced("RIG_TEST_FEED=optical lipsync_default_av_expected_ms");
+    assert_eq!(optical.trim(), "0", "optical: {optical}");
+}
+
 /// The report-JSON field extractor must pull the exact `mean_offset_ms` field
 /// av_sync_calibrate.py --calibrate's --report-json writes (a real fixture shape, not guessed).
 #[test]

@@ -11,6 +11,10 @@ import json
 import pathlib
 import re
 import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import vban_leg_fakes_1439 as fk  # noqa: E402
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 LIB = _ROOT / "scripts/lib/program-audio-continuity.sh"
@@ -20,9 +24,9 @@ NAME = "2026-10-23 02-35-32.txt"
 FIRST = 41400
 
 
-def _fake_box(tmp_path, upto=None, newest=NAME, fail=False):
-    """A READ_CMD replaying the fixture as the box's log (cut at line `upto` when given)."""
-    lines = LOG.read_text().splitlines()
+def _fake_box(tmp_path, upto=None, newest=NAME, fail=False, log=None):
+    """A READ_CMD replaying the fixture (or LOG) as the box's log (cut at line `upto` when given)."""
+    lines = (log or LOG).read_text().splitlines()
     if upto is not None:
         lines = lines[: upto - FIRST + 1]
     box = tmp_path / "boxlog.txt"  # the box's whole log: the fixture starts at its line 41400
@@ -48,7 +52,8 @@ def _marks(tmp_path, start, stop, sname=NAME, ename=NAME):
 def _run(tmp_path, body, read_cmd, host="10.77.9.204", **env):
     script = tmp_path / "harness.sh"
     script.write_text("set -euo pipefail\n" + f'. "{LIB}"\n' + body + "\necho HARNESS-END\n")
-    e = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(tmp_path),
+    # issue 1495: these windows replay the VBAN-era stream-snv log, so the box facts are its VBAN rollback shape
+    e = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(tmp_path), "STRIH_BOXES_DIR": fk.pre_1495_boxes_dir(),
          "PROGRAM_AUDIO_CONTINUITY_READ_CMD": str(read_cmd), "PROGRAM_AUDIO_CONTINUITY_STEP_S": "0",
          "PROGRAM_AUDIO_CONTINUITY_WAIT_S": "0", "HOST": host, "DIR": str(tmp_path),
          "HERE": str(_ROOT / "scripts")}
@@ -269,3 +274,89 @@ def test_a_block_that_could_not_be_merged_is_named_loudly(tmp_path):
     r = _run(tmp_path, _gate_body(), _fake_box(tmp_path))
     assert "GATE=1" in r.stdout
     assert "the E2E report will NOT show it" in r.stderr, r.stderr
+
+
+# --- issue 1495: a stream box whose program is its own Dante device (stream-obs) ---------------------------
+
+def _dante_status(t, delivered, rx_loss=0):
+    v = dict(clock="media", holdover=0, gm="00aabb", polls=10, re_anchors=0, rx_packets=delivered // 48,
+             rx_loss=rx_loss, rx_gaps=0, rx_late=0, socket_drops=0, blocks=delivered // 32, underruns=0, overruns=0,
+             delivered_frames=delivered, rx_holes=0, rx_written_late=0, late_blocks=0, rebootstraps=0,
+             max_process_us=40, obs_dropped=0, max_obs_us=30)
+    return "%s: dante-input status: %s" % (t, " ".join("%s=%s" % i for i in v.items()))
+
+
+def _dante_box(tmp_path, loss_after=0):
+    """The real stream log with three multiview-audit lines turned into `dante-input status:` lines: the
+    last one before the window start (42000) and the first two after the stop (42100)."""
+    lines = LOG.read_text().splitlines()
+    mv = [i for i, l in enumerate(lines) if "multiview-audit:" in l]
+    before = max(i for i in mv if FIRST + i < 42000)
+    after = [i for i in mv if FIRST + i > 42100][:2]
+    for n, i in enumerate([before] + after):
+        lines[i] = _dante_status(lines[i][:12], 1000000 + n * 480000, rx_loss=loss_after if n else 0)
+    d = tmp_path / "dante"
+    d.mkdir()
+    f = d / "log.txt"
+    f.write_text("\n".join(lines) + "\n")
+    return _fake_box(d, log=f)
+
+
+def _real_facts():
+    return str(_ROOT / "scripts" / "strih-boxes")
+
+
+def test_a_dante_stream_box_folds_its_device_counters_into_the_block(tmp_path):
+    _verdict(tmp_path)
+    _marks(tmp_path, 42000, 42100)
+    r = _run(tmp_path, _gate_body(), _dante_box(tmp_path), STRIH_BOXES_DIR=_real_facts())
+    assert "GATE=0" in r.stdout, r.stdout + r.stderr
+    b = _block(tmp_path)
+    assert b["input"] == "mbc" and b["vban"] is False and b["checks"]["obs_vban"].startswith("n/a"), b
+    assert b["stream_dante"]["verdict"] == "PASS" and b["stream_dante"]["device"] == "stream-obs", b
+    assert "stream Dante program input 'stream-obs': PASS" in r.stdout
+
+
+def test_a_dante_loss_in_the_window_fails_the_run_named_stream_dante(tmp_path):
+    _verdict(tmp_path)
+    _marks(tmp_path, 42000, 42100)
+    r = _run(tmp_path, _gate_body(), _dante_box(tmp_path, loss_after=3), STRIH_BOXES_DIR=_real_facts())
+    assert "GATE=1" in r.stdout, r.stdout + r.stderr
+    b = _block(tmp_path)
+    assert b["verdict"] == "FAIL" and "stream Dante: rx_loss +3" in b["failures"], b
+
+
+def test_a_dante_stream_box_without_device_lines_is_unknown(tmp_path):
+    # the VBAN-era log has no `dante-input status:` line: the device did not run, never a pass
+    _verdict(tmp_path)
+    _marks(tmp_path, 42000, 42100)
+    r = _run(tmp_path, _gate_body(), _fake_box(tmp_path), STRIH_BOXES_DIR=_real_facts())
+    assert "GATE=1" in r.stdout, r.stdout + r.stderr
+    b = _block(tmp_path)
+    assert b["verdict"] == "UNKNOWN" and b["stream_dante"]["verdict"] == "UNKNOWN", b
+
+
+def test_a_dante_closing_line_after_the_mix_closes_is_waited_for(tmp_path):
+    # the mix's closing lines are in the first reads, the device's 2nd status line after the stop only later
+    _verdict(tmp_path)
+    _marks(tmp_path, 42000, 42100)
+    full = _dante_box(tmp_path)
+    lines = (tmp_path / "dante" / "log.txt").read_text().splitlines()
+    statuses = [i for i, l in enumerate(lines) if "dante-input status:" in l]
+    short_dir = tmp_path / "short"
+    short_dir.mkdir()
+    cut = short_dir / "log.txt"
+    cut.write_text("\n".join(lines[: statuses[-1]] + lines[statuses[-1] + 1:]) + "\n")
+    short = _fake_box(short_dir, log=cut)
+    flip = tmp_path / "flip.sh"
+    flip.write_text(f"""#!/usr/bin/env bash
+set -euo pipefail
+n=$(cat '{tmp_path}/count' 2>/dev/null || echo 0); echo $((n + 1)) > '{tmp_path}/count'
+if [ "$n" -lt 2 ]; then exec '{short}' "$@"; else exec '{full}' "$@"; fi
+""")
+    flip.chmod(0o755)
+    r = _run(tmp_path, _gate_body(), flip, STRIH_BOXES_DIR=_real_facts(), PROGRAM_AUDIO_CONTINUITY_WAIT_S="5",
+             PROGRAM_AUDIO_CONTINUITY_STEP_S="1")
+    assert "GATE=0" in r.stdout, r.stdout + r.stderr
+    assert "closing status line is not in the log yet" in r.stdout
+    assert _block(tmp_path)["stream_dante"]["verdict"] == "PASS"

@@ -107,6 +107,18 @@ def test_the_conf_names_only_the_operator_outputs(tmp_path):
     assert t.count('Section "OutputClass"') == 1 and t.rstrip().endswith("EndSection")
 
 
+def test_the_conf_names_its_driver_so_x_still_loads_modesetting_1494(tmp_path):
+    # Issue 1494 (8.11.2026): an OutputClass WITHOUT a Driver line adds a "(null)" entry to Xorg's
+    # autoconfigured driver list; the list stops at the first NULL, so the iGPU panel sink's
+    # modesetting driver never loaded and the strih-snv panel was black.
+    r = _run('strih_x_display_conf_text "HDMI-0" "HDMI-0 DP-0"', tmp_path)
+    assert r.returncode == 0, r.stderr
+    body = r.stdout.split('Section "OutputClass"', 1)[1].split("EndSection", 1)[0]
+    lines = [ln.strip() for ln in body.splitlines()]
+    assert 'Driver "nvidia"' in lines, "every OutputClass names its Driver"
+    assert lines.index('MatchDriver "nvidia-drm"') < lines.index('Driver "nvidia"')
+
+
 def test_strih_snv_keeps_hdmi0_out_with_dp0_as_its_operator_output(tmp_path):
     r = _run('strih_x_display_conf_text "HDMI-0" "HDMI-0 DP-0"', tmp_path)
     assert 'Option "MetaModes" "DP-0: nvidia-auto-select"' in r.stdout

@@ -490,7 +490,7 @@ in `vendor/obs-studio/frontend/widgets/NewlevelBuildDate.hpp`, guarded
 C++ bug is therefore INVISIBLE to PR CI until the supervisor's full rebuild. Extract ANY
 non-trivial frontend logic into a pure header and behaviorally unit-test it off-rig with the #293
 harness pattern — **which now covers C++ too**: `tests/obs_titlebar_newlevel_parse.rs`
-compiles+runs `NewlevelBuildDate.hpp` via `c++ -std=c++17` (the `obs_display_budget.rs` twin uses
+compiles+runs `NewlevelBuildDate.hpp` via `c++ -std=c++17` (the obs repo's `obs_display_budget.rs` twin uses
 `cc -std=c11`). Run it with `cargo test --test obs_titlebar_newlevel_parse` (no probe).
 
 Two LAYERS guard "the deployed stack is the build we think it is":
@@ -980,7 +980,7 @@ budget on EVERY tick → skipped forever → the strih Multiview FROZE solid for
 - **TESTABILITY PATTERN (reusable for ANY vendored-C decision):** extract the decision into a pure
   header (only `<stdbool.h>`/`<stdint.h>`, a `static inline`) and unit-test it from a DEFAULT-features
   Rust integration test that compiles+runs a tiny `cc -std=c11` harness over the real header
-  (`tests/obs_display_budget.rs`). This sidesteps "Linux can't build libobs" — the test
+  (`obs:tests/vendored/tests/obs_display_budget.rs`). This sidesteps "Linux can't build libobs" — the test
   exercises the EXACT production code, no probe.
 - **Pinned source anchors changed (the #269 lock-step — update ALL of `tests/genlock_preload.rs`
   (probe-gated) + BOTH `windows-genlock{,-fast}.yml` pwsh gates together):** the OLD

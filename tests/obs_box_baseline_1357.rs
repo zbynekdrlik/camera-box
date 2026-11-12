@@ -674,8 +674,8 @@ fn the_kiosk_item_installs_xorg_and_switches_the_dm_before_the_gnome_purge() {
         "install -> DM switch -> purge (the #504 order)"
     );
     assert!(
-        k.contains("autologin-session=openbox"),
-        "the kiosk autologins into openbox, never a GNOME session"
+        k.contains("autologin-session=${SESSION}") && k.contains(r#"local SESSION="${4:-openbox}""#),
+        "the kiosk autologins into openbox by default (issue 1466: or the box's xfce), never a GNOME session"
     );
 }
 
@@ -1629,10 +1629,14 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/obs-downstream-keyer.sh",
         // issue 1372: the dantesync step-2 action (setup-strih.sh + verify-strih.sh)
         "scripts/lib/strih-dantesync.sh",
+        // issue 1439: the shared dsync PTP-NIC grade (sourced by strih-dantesync.sh)
+        "scripts/lib/dsync-iface.sh",
         // issue 1391: the rig NIC driver via DKMS (setup-strih step 1b + verify-strih item 36)
         "scripts/lib/strih-nic-driver.sh",
         // issue 1418: the operator surface (setup-strih step 16g + verify-strih item 43)
         "scripts/lib/strih-operator.sh",
+        // issue 1466: the session start + the XFCE session (setup-strih steps 15 + 16h, verify item 48)
+        "scripts/lib/obs-box-xfce.sh",
         // sourced one level down (strih-box-facts.sh / ndi-discovery.sh)
         "scripts/lib/obs-fleet.sh",
         "scripts/camera-set.sh",

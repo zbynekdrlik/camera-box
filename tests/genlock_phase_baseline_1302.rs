@@ -31,7 +31,7 @@ const HEADER: &str = "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp";
 const STATE_HEADER: &str = "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.hpp";
 const WIDGETS: &str = "vendor/obs-studio/frontend/widgets";
 const RECENT_CPP: &str = "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.cpp";
-/// The widget's `GENLOCK_RECENT_EVENT_WINDOW_MS` (pinned by `tests/genlock_lock_json_guards.rs`).
+/// The widget's `GENLOCK_RECENT_EVENT_WINDOW_MS` (pinned by `obs:tests/vendored/tests/genlock_lock_json_guards.rs`).
 const WINDOW_MS: i64 = 60_000;
 
 fn repo(rel: &str) -> PathBuf {

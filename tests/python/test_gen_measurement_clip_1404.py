@@ -303,7 +303,7 @@ def test_the_geometry_is_the_painters():
     fp = _src("src/bin/frame-probe.rs")
     assert "#[arg(long, default_value_t = 1920)]\n    canvas_w: u32" in fp
     assert "#[arg(long, default_value_t = 1080)]\n    canvas_h: u32" in fp
-    assert gen.TOP_MARGIN_PX == _rust_const(_src("src/colour_scale.rs"), "TOP_MARGIN_PX")
+    assert gen.TOP_MARGIN_PX == _rust_const(vstack_src.read("av/burn/src/colour_scale.rs"), "TOP_MARGIN_PX")
     assert f"--dual-qr --qr-size {gen.QR_SIZE} " in _src("systemd/cam2-painter.service")
     m = re.search(r"default_value_t = (\d+)\)\]\n    audio_marker_cadence_ticks", fp)
     assert m and int(m.group(1)) == gen.MARKER_EVERY_TICKS
@@ -326,7 +326,7 @@ def test_the_counter_stays_clear_of_both_qrs_and_the_bottom_burn_band():
         rx, _, _ = gen.qr_placement(n, True)
         assert lx + module * n <= x and x + w <= rx, f"counter overlaps a {n}-module QR image"
         assert ly <= y and y + h <= ly + module * n
-    assert y + h < 736  # above every bottom burn slot (src/burn_regions.rs: the band starts at 736)
+    assert y + h < 736  # above every bottom burn slot (vstack:av/burn/src/burn_regions.rs: the band starts at 736)
 
 
 def test_a_rendered_frame_is_white_with_black_qrs_and_counter():
@@ -476,7 +476,7 @@ def test_911016_is_a_reserved_tick_excluded_origin_id_everywhere_the_ids_are_lis
     block = rec[rec.index("pub const NODE_BURN_RUN_IDS"):]
     block = block[:block.index("];")]
     assert "recording_latency::MEASUREMENT_CLIP_RUN_ID" in block
-    assert "911_016 =>" not in _src("src/burn_regions.rs")  # no overlay slot: never an echo-gated burn
+    assert "911_016 =>" not in vstack_src.read("av/burn/src/burn_regions.rs")  # no overlay slot: never an echo-gated burn
 
 
 def test_the_default_clip_length_is_a_whole_number_of_index_wraps_1404():

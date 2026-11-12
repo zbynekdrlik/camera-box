@@ -88,10 +88,13 @@ strih_x_display_conf_text() {
 # The fixed HDMI outputs of the drm-output config (${1}) never enter the X layout: X starts with only the
 # operator outputs named below that are connected, and with an empty screen when none is (the display
 # watch keeps that screen usable), so OBS's vk-direct acquire finds them free at every monitor state.
-# Applies at the next X start.
+# Applies at the next X start. The Driver line is required (issue 1494): an OutputClass without one puts
+# "(null)" into X's autoconfigured driver list and the drivers after it (the iGPU panel's modesetting)
+# never load.
 Section "OutputClass"
     Identifier "camera-box-fixed-hdmi"
     MatchDriver "nvidia-drm"
+    Driver "nvidia"
     Option "AllowEmptyInitialConfiguration" "true"
     Option "MetaModes" "${mm}"
 EndSection

@@ -11,7 +11,7 @@
 //!
 //! The decisions are pinned elsewhere: the freeze + action by
 //! `tests/genlock_audio_buffering_parity_1367.rs` (C vs the Rust authority), the behaviour by the
-//! issue-1381 lift (`tests/genlock_audio_mix_guard_1381.rs`, the E1 replays). This file pins the
+//! issue-1381 lift (`obs:tests/vendored/tests/genlock_audio_mix_guard_1381.rs`, the E1 replays). This file pins the
 //! WIRING: ONE needle list, required here and by the pwsh step in both `windows-genlock*.yml`
 //! workflows, plus the order of the three per-tick steps and the encoder count's two sites.
 //!

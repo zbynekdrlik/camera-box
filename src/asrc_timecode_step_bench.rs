@@ -908,7 +908,7 @@ fn a_sender_that_catches_up_or_pauses_takes_todays_path_byte_for_byte_1381() {
     // forward step, a pause after a backward one, a sender that never follows and a steady feed are
     // never read as one, so the bench's ingest runs exactly its path without the relabel -- every
     // landing, every append/placement, every servo input. (This proves no false relabel on the
-    // model; the shipped C branch is pinned by the lift harness tests/genlock_audio_relabel_ingest_1381.rs.)
+    // model; the shipped C branch is pinned by the lift harness obs:tests/vendored/tests/genlock_audio_relabel_ingest_1381.rs.)
     let mut cases = vec![StepCase {
         wall_ns: 0,
         lag_ns: 0,

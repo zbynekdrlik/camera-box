@@ -10,7 +10,7 @@
 //! mailbox's latest-ready buffer (`drmModeAddFB2WithModifiers` FBs on the lease fd). The M1
 //! solid dumb-buffer path stays as the initial image + fail-open fallback.
 //!
-//! Same verification model as the M1 sibling (`tests/drm_output_lease_1152.rs`, per
+//! Same verification model as the M1 sibling (`obs:tests/vendored/tests/drm_output_lease_1152.rs`, per
 //! `.claude/rules/vendored-libobs-change-safety.md`): std-only source anchors runnable via
 //! `rustc --test` (revert protection), plus a VERBATIM lift-compile of the pure decision
 //! helpers under `-Werror -Wconversion` over hand-written truth tables (the helpers have no

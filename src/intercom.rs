@@ -49,7 +49,15 @@ fn find_power_buttons() -> Vec<(String, i32)> {
     devices
 }
 
-fn run_power_button_monitor(muted: Arc<AtomicBool>, running: Arc<AtomicBool>) {
+/// Issue 1501: the power button. A single press toggles the microphone (after the double-press
+/// window, `crate::button_press`), a double press flips the cameraman preview between the strih NDI
+/// feed and the local camera (`crate::preview_tap::PreviewSwitch`). Spawned by main.rs for every
+/// box, intercom or not.
+pub fn run_power_button_monitor(
+    muted: Arc<AtomicBool>,
+    preview: Arc<crate::preview_tap::PreviewSwitch>,
+    running: Arc<AtomicBool>,
+) {
     let devices = find_power_buttons();
     if devices.is_empty() {
         tracing::warn!("No power button found - mute toggle disabled");
@@ -68,8 +76,37 @@ fn run_power_button_monitor(muted: Arc<AtomicBool>, running: Arc<AtomicBool>) {
         devices.len()
     );
     let mut event_buf = [0u8; 24];
+    let mut classifier = crate::button_press::PressClassifier::default();
+    let clock = std::time::Instant::now();
+    let mut last_path = String::new();
+    let act = |action: crate::button_press::PressAction, path: &str| match action {
+        crate::button_press::PressAction::Single => {
+            let was_muted = muted.fetch_xor(true, Ordering::Relaxed);
+            let now_muted = !was_muted;
+            tracing::info!(
+                "🎤 Microphone {} (via {}, single press)",
+                if now_muted { "MUTED" } else { "UNMUTED" },
+                path
+            );
+        }
+        crate::button_press::PressAction::Double => {
+            let now = preview.toggle();
+            tracing::info!(
+                "preview: double press (via {}) -> the cameraman preview shows {} (issue 1501)",
+                path,
+                match now {
+                    crate::preview_tap::PreviewSource::Local => "the LOCAL camera",
+                    crate::preview_tap::PreviewSource::Strih => "the strih NDI feed",
+                }
+            );
+        }
+    };
 
     while running.load(Ordering::Relaxed) {
+        let now_ms = clock.elapsed().as_millis() as u64;
+        if let Some(a) = classifier.tick(now_ms) {
+            act(a, &last_path);
+        }
         for (path, fd) in &devices {
             let n = unsafe {
                 libc::read(
@@ -88,13 +125,11 @@ fn run_power_button_monitor(muted: Arc<AtomicBool>, running: Arc<AtomicBool>) {
                     event_buf[23],
                 ]);
                 if event_type == 1 && event_code == 116 && event_value == 1 {
-                    let was_muted = muted.fetch_xor(true, Ordering::Relaxed);
-                    let now_muted = !was_muted;
-                    tracing::info!(
-                        "🎤 Microphone {} (via {})",
-                        if now_muted { "MUTED" } else { "UNMUTED" },
-                        path
-                    );
+                    let at = clock.elapsed().as_millis() as u64;
+                    if let Some(a) = classifier.press(at) {
+                        act(a, &last_path);
+                    }
+                    last_path.clone_from(path);
                 }
             }
         }
@@ -446,16 +481,15 @@ fn apply_intercom_priority() {
     crate::affinity::pin_off_capture_core("intercom");
 }
 
-pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<()> {
+/// `muted` is created ONCE by main.rs (starts MUTED) and shared with the power-button thread
+/// (issue 1501), so it survives the retries below.
+pub fn run_intercom(
+    config: IntercomConfig,
+    running: Arc<AtomicBool>,
+    muted: Arc<AtomicBool>,
+) -> Result<()> {
     apply_intercom_priority();
-
-    // Mute state and power button monitor - created ONCE, survives retries
-    let muted = Arc::new(AtomicBool::new(true));
     tracing::info!("🎤 Microphone starts MUTED - press power button to unmute");
-
-    let muted_btn = Arc::clone(&muted);
-    let running_btn = Arc::clone(&running);
-    std::thread::spawn(move || run_power_button_monitor(muted_btn, running_btn));
 
     while running.load(Ordering::Relaxed) {
         tracing::info!(

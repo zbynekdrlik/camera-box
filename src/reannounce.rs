@@ -109,6 +109,29 @@ pub fn is_discoverable_interface(name: &str) -> bool {
     !NON_LAN_IFACE_PREFIXES.iter().any(|p| n.starts_with(p))
 }
 
+/// The kernel driver of a Blackmagic camera's USB-C link (the bkshading REST relay's CDC-NCM
+/// link, issue 1452; the camera link file matches `Driver=cdc_ncm` + `ID_VENDOR_ID=1edb`). That
+/// link is a private two-host net to the camera, never the LAN.
+pub const CAMERA_LINK_DRIVER: &str = "cdc_ncm";
+/// Blackmagic Design's USB vendor id: `cdc_ncm` alone is also the fallback driver of many USB LAN
+/// adapters, so only a cdc_ncm link of THIS vendor is the camera link.
+pub const CAMERA_LINK_USB_VENDOR: &str = "1edb";
+
+/// True when `name` (whose kernel driver is `driver` and USB vendor `usb_vendor`, `None` when
+/// unreadable) is a LAN NIC whose IPv4 address belongs in the discovery signature:
+/// `is_discoverable_interface` AND not the camera's USB-C link (cdc_ncm of vendor 1edb). Issue 1452 (10.11.2026, cam3): the Pocket re-enumerating on USB flapped
+/// the link and the sender re-announced twice, listing the camera link address beside the LAN
+/// (the two-network standard: a non-Dante sender advertises the LAN address only).
+pub fn is_discoverable_interface_with_driver(
+    name: &str,
+    driver: Option<&str>,
+    usb_vendor: Option<&str>,
+) -> bool {
+    let camera_link = driver == Some(CAMERA_LINK_DRIVER)
+        && usb_vendor.map(|v| v.trim().eq_ignore_ascii_case(CAMERA_LINK_USB_VENDOR)) == Some(true);
+    is_discoverable_interface(name) && !camera_link
+}
+
 /// Decide whether the NDI sender should be re-announced (destroyed + re-created so the NDI
 /// runtime re-registers it via mDNS on the CURRENT network).
 ///
@@ -260,6 +283,45 @@ mod tests {
             !st.should_reannounce(&up),
             "once the retry succeeds the trigger converges"
         );
+    }
+
+    #[test]
+    fn the_camera_usb_link_is_never_in_the_signature_1452() {
+        // cam3 10.11.2026: the Pocket 6K's cdc_ncm link (enx021263423402, 172.28.51.114).
+        assert!(!is_discoverable_interface_with_driver(
+            "enx021263423402",
+            Some(CAMERA_LINK_DRIVER),
+            Some("1edb\n")
+        ));
+        // the LAN NIC (r8169) and an unreadable driver stay discoverable
+        assert!(is_discoverable_interface_with_driver(
+            "enp1s0",
+            Some("r8169"),
+            None
+        ));
+        assert!(is_discoverable_interface_with_driver("enp1s0", None, None));
+        // a virtual interface stays excluded whatever its driver
+        assert!(!is_discoverable_interface_with_driver(
+            "docker0",
+            Some("bridge"),
+            None
+        ));
+    }
+
+    #[test]
+    fn a_usb_lan_adapter_on_cdc_ncm_stays_the_lan_1452() {
+        // cdc_ncm is also the generic driver of USB LAN adapters (RTL8156, vendor 0bda): only the
+        // Blackmagic vendor 1edb marks the camera link; an unreadable vendor keeps the interface.
+        assert!(is_discoverable_interface_with_driver(
+            "enx6c1ff766154b",
+            Some(CAMERA_LINK_DRIVER),
+            Some("0bda")
+        ));
+        assert!(is_discoverable_interface_with_driver(
+            "enx6c1ff766154b",
+            Some(CAMERA_LINK_DRIVER),
+            None
+        ));
     }
 
     #[test]

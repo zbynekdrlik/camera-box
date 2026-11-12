@@ -8,7 +8,9 @@
 # per-box FIXED OBS audio buffering, box side.
 #
 # The box fact STRIH_AUDIO_BUFFERING_MS (scripts/strih-boxes/<box>.env, 0..960 ms) is written by
-# setup-strih step 5 to ~/.camera-box/genlock-audio-buffering-ms of the OBS user. The genlock libobs
+# setup-strih FIRST (before step 1, so no OBS start during or after setup reads an old or missing file:
+# 28.10.2026 strih-pp's OBS started 11 s before step 5 wrote it) to ~/.camera-box/genlock-audio-buffering-ms
+# of the OBS user. The genlock libobs
 # reads that file once per audio reset (obs.c genlock_audio_buffering_read_box_ms): the buffering is
 # then exactly that value from the first tick and never grows (a late mixed member is re-anchored,
 # MIXED_LATE), and the log carries ONE line
@@ -17,8 +19,10 @@
 #
 # Public API:
 #   obs_audio_buffering_ms_ok VALUE             -> 0 iff an integer 0..960 (ASCII digits, spelled out)
-#   obs_audio_buffering_install HOME USER MS    -> setup-strih step 5: write the marker (compare-then-write)
-#   obs_audio_buffering_verdict FACT MARKER LOG -> pure grade: `ok <detail>` rc 0 | `FAIL: <reason>` rc 1
+#   obs_audio_buffering_install HOME USER MS    -> setup-strih, before step 1: write the marker (compare-then-write)
+#   obs_audio_buffering_running_note HOME USER MS -> setup-strih, right after: what a RUNNING OBS holds (a loud
+#                                                  WARNING when it is not FIXED at MS; never restarts OBS)
+#   obs_audio_buffering_verdict FACT MARKER LOG [LATER] -> pure grade: `ok <detail>` rc 0 | `FAIL: <reason>` rc 1
 #   obs_audio_buffering_verify_row FACT HOME LOGFILE -> verify-strih item 48 (calls the caller's ok/bad)
 #   obs_audio_buffering_e2e_gate_all STRIH SUSER SPW STREAM TUSER TPW -> the recording-e2e [0/8] row
 #
@@ -29,7 +33,9 @@
 # OBS_AUDIO_BUFFERING_MUTED_EVENTS or more between two lines (a minute): a member re-anchored on most
 # ticks is later than the fixed window, i.e. muted for good (the design's known limit). Ticks, not ms: a
 # fact that is not a whole number of 21.3 ms ticks is rounded UP to whole ticks, and the telemetry
-# prints the rounded ms (85 -> 4 ticks = 85 ms, 50 -> 3 ticks = 64 ms).
+# prints the rounded ms (85 -> 4 ticks = 85 ms, 50 -> 3 ticks = 64 ms). LATER = 1 when the marker file was
+# last written after the running OBS started (_obs_audio_buffering_later): a running OBS not FIXED at the
+# fact is then named as one that predates the marker. LATER only words a failure, it never fails a box.
 
 OBS_AUDIO_BUFFERING_MARKER_REL=".camera-box/genlock-audio-buffering-ms"
 OBS_AUDIO_BUFFERING_MAX_MS=960
@@ -91,12 +97,69 @@ obs_audio_buffering_install() {
   echo "  ${file}: written (${want} ms) -- OBS reads it at its next start (restart strih-obs.service to apply)"
 }
 
+# obs_audio_buffering_running_note HOME USER MS -> one line about the OBS of USER right now: not running
+# (it reads the marker at its next start), running FIXED at MS (nothing to do), or a loud `WARNING:` that
+# names what it runs (the last `genlock-audio-buffering:` line of its newest log) and asks for a restart of
+# strih-obs.service. Setup never restarts OBS: a genlock deploy stops OBS before setup and starts it after.
+# Always rc 0 (a report, called as a bare statement under the caller's errexit); stdout only.
+obs_audio_buffering_running_note() {
+  local home="${1-}" user="${2-}" ms="${3-}" f newest="" last="" what v
+  if ! command -v pgrep >/dev/null 2>&1; then
+    echo "  WARNING: cannot tell whether OBS runs (no pgrep on this box) -- if it does, restart strih-obs.service so it reads ~/${OBS_AUDIO_BUFFERING_MARKER_REL} (issue 1425)"
+    return 0
+  fi
+  if ! pgrep -u "$user" -x obs >/dev/null 2>&1; then
+    echo "  OBS is not running -- it reads ~/${OBS_AUDIO_BUFFERING_MARKER_REL} at its next start"
+    return 0
+  fi
+  for f in "${home%/}"/.config/obs-studio/logs/*.txt; do
+    [ -f "$f" ] || continue
+    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
+  done
+  if [ -n "$newest" ]; then
+    last="$(grep -a -o -E 'genlock-audio-buffering: (FIXED [0123456789]+ ms|NOT deterministic)' "$newest" 2>/dev/null | tail -n 1)" || last=""
+  fi
+  what="${last#genlock-audio-buffering: }"
+  [ -n "$what" ] || what="no genlock-audio-buffering line in its newest log"
+  v="${what#FIXED }"
+  v="${v%% ms}"
+  if [[ "$what" == "FIXED "* ]] && obs_audio_buffering_ms_ok "$v" && obs_audio_buffering_ms_ok "$ms" \
+    && [ "$((10#$v))" = "$((10#$ms))" ]; then
+    echo "  the running OBS already holds ${what} (the box fact)"
+    return 0
+  fi
+  echo "  WARNING: OBS is running with ${what}, the box fact STRIH_AUDIO_BUFFERING_MS is ${ms} ms -- libobs reads ~/${OBS_AUDIO_BUFFERING_MARKER_REL} only at start: restart strih-obs.service as ${user} (setup never restarts OBS; a genlock deploy stops it before setup and starts it after) (issue 1425)"
+  return 0
+}
+
+# _obs_audio_buffering_later MARKER_FILE LOG_FILE -> `1` when the marker was last written after the OBS run
+# that writes LOG_FILE started, `0` when not (the same second counts as not later), nothing when unknown
+# (no marker, no log, a log name that is not OBS's `YYYY-MM-DD HH-MM-SS.txt`). The start is the log NAME,
+# which OBS stamps in the box's local time when it starts, read with the box's own `date`; so this runs ON
+# the box (the E2E row ships it there through `declare -f`, never a second copy). Always rc 0.
+_obs_audio_buffering_later() {
+  local m="${1-}" f="${2-}" b d='[0123456789]' ls ms
+  [ -f "$m" ] && [ -n "$f" ] || return 0
+  b="${f##*/}"
+  b="${b%.txt}"
+  [ "${#b}" = 19 ] && [ "${b:10:1}" = " " ] || return 0
+  # shellcheck disable=SC2254  # the digit class is the pattern
+  case "${b:0:10}" in $d$d$d$d-$d$d-$d$d) ;; *) return 0 ;; esac
+  # shellcheck disable=SC2254
+  case "${b:11:8}" in $d$d-$d$d-$d$d) ;; *) return 0 ;; esac
+  ls="$(date -d "${b:0:10} ${b:11:2}:${b:14:2}:${b:17:2}" +%s 2>/dev/null)" || return 0
+  ms="$(stat -c %Y "$m" 2>/dev/null)" || return 0
+  [[ "$ls" =~ ^[0123456789]+$ ]] && [[ "$ms" =~ ^[0123456789]+$ ]] || return 0
+  if [ "$ms" -gt "$ls" ]; then echo 1; else echo 0; fi
+  return 0
+}
+
 # obs_audio_buffering_verdict FACT MARKER LOG_TEXT -> the grade (see the header). MARKER = the marker
 # file's content with its trailing newline removed, or OBS_AUDIO_BUFFERING_ABSENT. LOG_TEXT = the newest
 # OBS log's lines (all of them, or only those OBS_AUDIO_BUFFERING_LOG_ERE matches; empty = no log).
 # Prints ONE line and returns 0 (`ok ...`) or 1 (`FAIL: ...`). Pure: no file or network access.
 obs_audio_buffering_verdict() {
-  local fact="${1-}" marker="${2-}" log="${3-}" line fixed_re tel_re above_re mix_re
+  local fact="${1-}" marker="${2-}" log="${3-}" later="${4-}" line fixed_re tel_re above_re mix_re
   local fixed_ms="" fixed_ticks="" seen=0 tel_n=0 tel_bad="" above="" warn=""
   local unfrozen=0 ml_last="" ml_jump=0 ml d
   fixed_re='genlock-audio-buffering: FIXED ([0123456789]+) ms \(([0123456789]+) ticks\)'
@@ -109,11 +172,11 @@ obs_audio_buffering_verdict() {
   fi
   fact="$((10#$fact))"
   if [ "$marker" = "$OBS_AUDIO_BUFFERING_ABSENT" ]; then
-    echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} is missing (the fact is ${fact} ms) -- re-run setup-strih step 5, then restart strih-obs.service"
+    echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} is missing (the fact is ${fact} ms) -- re-run setup-strih (it writes the marker before step 1), then restart strih-obs.service"
     return 1
   fi
   if ! obs_audio_buffering_ms_ok "$marker" || [ "$((10#$marker))" != "$fact" ]; then
-    echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} reads '${marker}', the box fact STRIH_AUDIO_BUFFERING_MS is ${fact} ms -- re-run setup-strih step 5, then restart strih-obs.service"
+    echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} reads '${marker}', the box fact STRIH_AUDIO_BUFFERING_MS is ${fact} ms -- re-run setup-strih (it writes the marker before step 1), then restart strih-obs.service"
     return 1
   fi
   if [ -z "$log" ]; then
@@ -148,6 +211,11 @@ obs_audio_buffering_verdict() {
   done <<< "$log"
   if [ "$seen" = 0 ]; then
     echo "FAIL: the running OBS log has no genlock-audio-buffering line (a bundle before issue 1425, or OBS has not started since)"
+    return 1
+  fi
+  if [ "$later" = 1 ] && { [ -z "$fixed_ms" ] || [ "$((10#$fixed_ms))" != "$fact" ]; }; then
+    if [ -n "$fixed_ms" ]; then warn="FIXED $((10#$fixed_ms)) ms"; elif [[ "$warn" == "NOT deterministic"* ]]; then warn="NOT deterministic"; else warn="'${warn:0:80}'"; fi
+    echo "FAIL: the running OBS started before ~/${OBS_AUDIO_BUFFERING_MARKER_REL} was last written (libobs reads it once, at start): it runs ${warn}, the marker and the box fact say ${fact} ms -- restart strih-obs.service"
     return 1
   fi
   if [ -z "$fixed_ms" ]; then
@@ -192,13 +260,14 @@ _obs_audio_buffering_read_marker() {
 # obs_audio_buffering_verify_row FACT HOME LOGFILE -> verify-strih item 48: ONE `ok`/`bad` row through
 # the CALLER's ok / bad functions. Read-only.
 obs_audio_buffering_verify_row() {
-  local fact="${1-}" home="${2-}" logf="${3-}" marker log="" v
+  local fact="${1-}" home="${2-}" logf="${3-}" marker log="" v later=""
   marker="$(_obs_audio_buffering_read_marker "${home%/}/${OBS_AUDIO_BUFFERING_MARKER_REL}")"
+  later="$(_obs_audio_buffering_later "${home%/}/${OBS_AUDIO_BUFFERING_MARKER_REL}" "$logf")"
   if [ -n "$logf" ] && [ -f "$logf" ]; then
     log="$(grep -a -E "$OBS_AUDIO_BUFFERING_LOG_ERE" "$logf" 2>/dev/null || true)"
     [ -n "$log" ] || log="(no audio-buffering line)"
   fi
-  if v="$(obs_audio_buffering_verdict "$fact" "$marker" "$log")"; then
+  if v="$(obs_audio_buffering_verdict "$fact" "$marker" "$log" "$later")"; then
     ok "(audio-buffering) ${v#ok }"
   else
     bad "(audio-buffering) ${v#FAIL: } (issue 1425)"
@@ -206,10 +275,12 @@ obs_audio_buffering_verify_row() {
 }
 
 # obs_audio_buffering_remote_cmd -> the ONE bash text the E2E row runs on a Linux OBS box over ssh:
-# `MARKER=<content|__ABSENT__>`, `LOG=yes|none`, then the newest OBS log's matching lines.
+# `MARKER=<content|__ABSENT__>`, `LATER=<1|0|>` (_obs_audio_buffering_later, shipped by `declare -f`),
+# `LOG=yes|none`, then the newest OBS log's matching lines.
 obs_audio_buffering_remote_cmd() {
+  declare -f _obs_audio_buffering_later
   # shellcheck disable=SC2016  # the $-words are expanded on the box, not here
-  printf 'm="$HOME/%s"; if [ -f "$m" ]; then printf "MARKER=%%s\\n" "$(head -c 16 "$m")"; else echo "MARKER=%s"; fi; f="$(ls -1t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -1)"; if [ -n "$f" ]; then echo LOG=yes; grep -a -E %s "$f" || true; else echo LOG=none; fi' \
+  printf 'm="$HOME/%s"; if [ -f "$m" ]; then printf "MARKER=%%s\\n" "$(head -c 16 "$m")"; else echo "MARKER=%s"; fi; f="$(ls -1t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -1)"; echo "LATER=$(_obs_audio_buffering_later "$m" "$f")"; if [ -n "$f" ]; then echo LOG=yes; grep -a -E %s "$f" || true; else echo LOG=none; fi' \
     "$OBS_AUDIO_BUFFERING_MARKER_REL" "$OBS_AUDIO_BUFFERING_ABSENT" "'${OBS_AUDIO_BUFFERING_LOG_ERE}'"
 }
 
@@ -242,7 +313,7 @@ obs_audio_buffering_box_fact() {
 # reads 20), and the verdict: `ok` line rc 0, or an ERROR line rc 1. An unreadable box FAILS, never passes.
 obs_audio_buffering_e2e_gate() {
   local host="${1-}" user="${2-}" pw="${3-}" dir="${BASH_SOURCE[0]%/*}" name class fact raw tmo
-  local marker="" log="" have_log="" line v
+  local marker="" log="" have_log="" later="" line v
   name="$(obs_fleet_name_for_host "$host" 2>/dev/null)" || name="$host"
   class="$(obs_fleet_class_for_host "$host" 2>/dev/null)" || class=""
   case "$class" in
@@ -269,6 +340,7 @@ obs_audio_buffering_e2e_gate() {
   while IFS= read -r line; do
     case "$line" in
       MARKER=*) [ -z "$have_log" ] && marker="${line#MARKER=}" ;;
+      LATER=*) [ -z "$have_log" ] && later="${line#LATER=}" ;;
       LOG=yes) have_log=yes ;;
       LOG=none) have_log=none ;;
       *) [ "$have_log" = yes ] && log="${log}${line}"$'\n' ;;
@@ -279,7 +351,7 @@ obs_audio_buffering_e2e_gate() {
     return 1
   fi
   [ "$have_log" = yes ] && [ -z "$log" ] && log="(no audio-buffering line)"
-  if v="$(obs_audio_buffering_verdict "$fact" "$marker" "$log")"; then
+  if v="$(obs_audio_buffering_verdict "$fact" "$marker" "$log" "$later")"; then
     echo "    ok: ${name} audio buffering ${v#ok }"
     return 0
   fi

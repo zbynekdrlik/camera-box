@@ -219,7 +219,7 @@ def test_measure_runs_the_tool_on_the_vod_and_folds_a_pass(fk, tmp_path):
     call = [c for c in fk.calls() if c[0] == "verdict"][0][1:]
     stage = f"{fk.home}/youtube-leg-1404/{tmp_path.name}"  # the dev1 run dir's name keys the host stage
     assert call[0] == f"{stage}/code/youtube_leg_verdict.py"  # the tool runs ON the measurement host
-    assert call[call.index("--vod") + 1] == "AbCdEfGhIjK"
+    assert "--vod=AbCdEfGhIjK" in call  # one argv word: an id may start with '-' (issue 1511)
     assert call[call.index("--recording") + 1] == f"{stage}/stream-recording.mkv@{T0 + 60:.3f}"
     assert call[call.index("--probe-bin") + 1] == f"{stage}/in/recording-verdict"
     assert call[call.index("--markers") + 1] == f"{stage}/in/markers.csv"

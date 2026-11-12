@@ -99,6 +99,9 @@ STRIH_HOST="$(strih_lx_host)"
 BOX_NAME="$(strih_lx_hostname)"
 
 echo -e "${GREEN}=== ${BOX_NAME} setup (issue 1317 / 1361): Linux strih cutter, facts scripts/strih-boxes/${STRIH_FACT_BOX}.env, host ${STRIH_HOST} ===${NC}"
+# issue 1425: the audio-buffering marker FIRST -- libobs reads it once, at OBS start (28.10 strih-pp: 11 s too late); never restarts OBS.
+obs_audio_buffering_install "$USER_HOME" "$DESKTOP_USER" "$(strih_lx_audio_buffering_ms)" || fail "issue 1425: the fixed OBS audio buffering marker could not be written (above)"
+obs_audio_buffering_running_note "$USER_HOME" "$DESKTOP_USER" "$(strih_lx_audio_buffering_ms)"
 
 # ---------------------------------------------------------------------------------------------
 step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
@@ -153,8 +156,8 @@ echo "  dantesync role: ${DS_ROLE}  (args: '${DS_ARGS:-<bare NTP master>}')"
 # issue 1372: the unit is rewritten, reloaded and the daemon (re)started ONLY on a real change
 # (strih_dantesync_install, scripts/lib/strih-dantesync.sh) -- restarting the fleet date master steps
 # the whole rig's date, so a redeploy on an unchanged unit keeps it running.
-DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_lx_ip)")" \
-  || fail "strih_dantesync_unit_text refused to emit a unit for role '$DS_ROLE' args '$DS_ARGS'"
+DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_dantesync_rig_nic)")" \
+  || fail "no dsync unit for role '$DS_ROLE' args '$DS_ARGS' (issue 1439: is the rig NIC resolvable? STRIH_NIC_IFACE overrides)"
 strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE" \
   || fail "dsync.service install failed (role '${DS_ROLE}') -- see the line above"
 
@@ -366,7 +369,6 @@ obs_audio_monitor_install /usr/lib/x86_64-linux-gnu /usr/share || fail "issue 14
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"
 # issue 1317: ~/.config/obs-studio owned by the DESKTOP user (under sudo a bare `mkdir` roots it: `Permission denied`).
 strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "$OBS_CFG" || fail "cannot create ${OBS_CFG} as ${DESKTOP_USER} (above)"
-obs_audio_buffering_install "$USER_HOME" "$DESKTOP_USER" "$(strih_lx_audio_buffering_ms)" || fail "issue 1425: the fixed OBS audio buffering marker could not be written (above)"
 strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-profile-facts.txt" | sed 's/^/  /'
 rm -f "$GENLOCK_DIR/strih-lx-profile-facts.txt"   # issue 1414: the pre-rename name of the role file
 mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/null || true
@@ -596,7 +598,7 @@ obs_box_lowlatency_kernel "$STRIH_KERNEL_SERIES"
 obs_box_cpu_affinity strih        # -> /etc/strih-isolated-cpus.conf, strih-obs-start.sh's taskset pin
 obs_box_nvidia_prime strih        # nvidia-driver-595-open + PRIME nvidia-PRIMARY (the RTX 5050)
 obs_box_dejitter "$DESKTOP_USER" strih "$OBS_CFG"
-obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth
+obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth "$(strih_box_desktop)"   # issue 1466: the lightdm session = STRIH_DESKTOP
 obs_box_power_envelope "$STRIH_PL1_W" strih_fetch_repo_file "$STRIH_PL1_STEPDOWN_W"
 obs_box_touchpad strih
 obs_box_maxperf_persistence strih
@@ -675,7 +677,7 @@ fi
 # finds no /run/user/<uid>/pipewire-0 otherwise (the hub's pw-cat backoff self-heals; linger removes the gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
-if strih_program_dante_declared; then echo "  the OBS program-audio input = the dante_input source of the Dante device strih-obs (issue 1485), seeded by scripts/strih_scenes.py --bootstrap"; elif strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
+if strih_program_dante_declared; then echo "  the OBS program-audio input = the dante_input source of the Dante device $(strih_dante_input_device) (issue 1485/1495), seeded by scripts/strih_scenes.py --bootstrap"; elif strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
 [ -n "${STRIH_PW_PURGED:-}" ] || echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
@@ -700,8 +702,9 @@ else
   echo "  SKIP: ${WHY}"
   strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"
 fi
-strih_vban_leg_install || fail "issue 1439: the VBAN-only leg (a second NIC or a VLAN on the rig NIC, ROZHODNUTE 6360417876) failed (above)"
-strih_dante_input_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1485: the strih-obs Dante device's ~/.camera-box/dante-input.toml (above; the site file $(strih_dante_input_site_file) must exist)"
+strih_vban_leg_install || { strih_vban_leg_after_change "$DESKTOP_USER" || true; fail "issue 1439: the VBAN-only leg (a second NIC or a VLAN on the rig NIC, ROZHODNUTE 6360417876) failed (above)"; }
+strih_vban_leg_after_change "$DESKTOP_USER" || fail "issue 1495: the running intercom hub did not come back from its restart after the leg changed (above) -- journalctl -u intercom-hub"
+strih_dante_input_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1485: the program Dante device's ~/.camera-box/dante-input.toml (above; the site file $(strih_dante_input_site_file) must exist)"
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"
@@ -748,6 +751,7 @@ if [ -d /etc/janus ] || command -v janus >/dev/null 2>&1; then
   strih_janus_http_jcfg_text > /etc/janus/janus.transport.http.jcfg
   chmod 644 /etc/janus/janus.transport.http.jcfg
   echo "  wrote /etc/janus/janus.plugin.audiobridge.jcfg (room ${JANUS_ROOM} 'interkom') + janus.transport.websockets.jcfg (ws :8188 loopback-only, no wss) + janus.transport.http.jcfg (loopback 127.0.0.1:8088)"
+  strih_janus_ice_apply || fail "issue 1499: janus.jcfg ICE enforce list (Janus must not offer the audio-VLAN address) -- above"
   systemctl enable janus 2>/dev/null || warn "  could not enable janus.service (install janus first)"
   # Ubuntu's janus package auto-STARTS the service on install (before these jcfg existed). If it is
   # already running, restart it to load the freshly written room/ws/http jcfg; otherwise leave it
@@ -798,6 +802,8 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/menu.xml"
 rm -f "${USER_HOME}/.config/autostart/companion-satellite.desktop" "${USER_HOME}/.config/autostart/obs.desktop"
 rmdir "${USER_HOME}/.config/autostart" 2>/dev/null || true
 echo "  ~/.config/openbox/autostart (display layout + kiosk preamble + strih-obs/bundle-state/session-app starts, Companion Satellite included) + menu.xml written for ${DESKTOP_USER}; GNOME-era XDG autostarts removed"
+# issue 1466: the ONE session start /usr/local/bin/obs-box-session-start on every box; an xfce box (STRIH_DESKTOP) runs it from XDG autostart.
+obs_box_session_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1466: the operator session could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop build, run by companion-satellite.service"
@@ -891,9 +897,9 @@ if WHY="$(obs_box_step_applies 16c)"; then   # issue 1412: scripts/lib/obs-box-r
 # from a checkout fetches it; no fallback. Enable-only, but a RUNNING service on another binary restarts
 # after the unit is written, so a deploy never leaves the panel on the old version.
 BKSH_OLD="$(sha256sum /opt/bkshading/bkshading 2>/dev/null || true)"
-BKSH_DIR="$(shading_release_service "${HERE}/..")" || fail "the pinned shading release (above)"
+BKSH_PIN="$(shading_pin_file_for_box "${HERE}/.." "$STRIH_FACT_BOX")" && BKSH_DIR="$(SHADING_RELEASE_PIN_FILE="$BKSH_PIN" shading_release_service "${HERE}/..")" || fail "the pinned shading release (above)"
 strih_bkshading_service_install "$BKSH_DIR" /opt/bkshading/bkshading || fail "bkshading service install from ${BKSH_DIR} failed (above)"
-echo "  installed bkshading service $(shading_pin_tag "${HERE}/..") -> /opt/bkshading/bkshading (web/ beside it)"
+echo "  installed bkshading service $(SHADING_RELEASE_PIN_FILE="$BKSH_PIN" shading_pin_tag "${HERE}/..") -> /opt/bkshading/bkshading (web/ beside it)"
 # Seed the operator config ONLY IF absent (the projector.json / bkshading.example.toml precedent).
 install -d -m 0755 /etc/bkshading
 if [ ! -f /etc/bkshading/bkshading.toml ]; then

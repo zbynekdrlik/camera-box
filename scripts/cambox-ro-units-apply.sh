@@ -16,7 +16,10 @@ set -euo pipefail
 #   - the box's off-box log sink (issue 1394, owner 9.10.2026: its OWN venue strih, never dev1):
 #     remote_log_sink_ip resolves it per box from the venue fact files BEFORE the first box is
 #     touched, and the same window rewrites the netconsole script, journal-upload.conf and the upload
-#     drop-in where issue 1311 put them; systemd-journal-upload restarts after the close.
+#     drop-in where issue 1311 put them; systemd-journal-upload restarts after the close;
+#   - dsync bound to the box's LAN NIC (issue 1439): dsync.service rewritten in the same window when it
+#     lacks `--interface <NIC>` (the NIC resolved ON the box), dsync restarted after the close only
+#     then, and /status read back (locked, configured == joined == the NIC, up to 150 s).
 #
 # It is a root write on a cambox, so --apply TAKES the rig lease (scripts/lib/rig-lease.sh, repo
 # camera-box-ro-units-apply) for its whole run and releases it on every exit: a live foreign holder
@@ -63,11 +66,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/rig-heartbeat.sh"     # rig_held_reason: the issue-281 heartbeat + the rig lease (rig-lease.sh)
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh"  # stray_session_check_assert -- the ONE shared rig-busy guard
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"  # obs_fleet_host: a venue's strih/stream for the guard (issue 1506)
 
 CAM_PW="${CAM_PW:-newlevel}"
 SSH_TIMEOUT="${SSH_TIMEOUT:-10}"
-STRIH_HOST="${STRIH_HOST:-10.77.9.202}"
-STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
+# issue 1506: the guard reads the strih/stream of EACH box's own venue (rig_refused); a caller-set
+# STRIH_HOST/STREAM_HOST pair still wins for every box.
+STRIH_HOST="${STRIH_HOST:-}"
+STREAM_HOST="${STREAM_HOST:-}"
 RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
 RIG_BUSY_HERE="${CAMBOX_RO_UNITS_OBS_PHASE2_DIR:-$HERE}"
 
@@ -234,7 +241,15 @@ rig_refused() {
     return 0
   fi
   RIG_REFUSAL=""
-  if ! (stray_session_check_assert "$RIG_BUSY_HERE" "$STRIH_HOST" "$STREAM_HOST" "the issue-1394 read-only-root apply on $1"); then
+  local _strih="$STRIH_HOST" _stream="$STREAM_HOST" _hosts
+  if [ -z "$_strih" ] || [ -z "$_stream" ]; then
+    if ! _hosts="$(stray_session_hosts_for_camera "$1")"; then
+      RIG_REFUSAL="the strih/stream of $1's venue cannot be resolved, so the rig-busy guard cannot read them (issue 1506)"
+      return 0
+    fi
+    _strih="${_hosts%% *}" _stream="${_hosts##* }"
+  fi
+  if ! (stray_session_check_assert "$RIG_BUSY_HERE" "$_strih" "$_stream" "the issue-1394 read-only-root apply on $1"); then
     RIG_REFUSAL="strih or stream records or streams (the rig-busy guard above)"
     return 0
   fi
@@ -330,6 +345,8 @@ for _i in "${!NAMES[@]}"; do
     FAILED+=("$_name (root-rw: $(ro_window_holders "$_out"); nothing was started)")
   else
     case "$_out" in
+      *"dsync.service is not written, dsync is never bound to a guess"*)
+        FAILED+=("$_name (dsync not bound: the LAN NIC does not resolve, see its PLAN line; the rest of the unit set ran, issue 1439)") ;;
       *"OK: the unit files are written"* | *"OK: nothing to write on"*)
         FAILED+=("$_name (the unit files are in place; a step outside the rw window failed: $(first_fail_line "$_out"))") ;;
       *) FAILED+=("$_name (rc=$_rc; the unit set did not land: $(first_fail_line "$_out"))") ;;

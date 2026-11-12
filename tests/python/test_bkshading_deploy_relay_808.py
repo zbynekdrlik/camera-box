@@ -172,6 +172,7 @@ def _fake_deploy_env(tmp, remote_sha, root_opts="ro,relatime"):
         "case \"$cmd\" in\n"
         # issue 808: the deploy reads the relay state first and refuses on an unreadable read, so
         # the fake box answers it like a real one whose relay is stopped.
+        '  *"uname -n"*) printf "cam9\\n" ;;\n'  # issue 1452: the box names itself (a default-pin box)
         '  *"is-active"*) printf "inactive\\n" ;;\n'
         '  *"findmnt"*) printf "__ROOT__\\n" ;;\n'
         '  *sha256sum*) printf "__SHA__\\n" ;;\n'
@@ -583,3 +584,15 @@ def test_a_binary_the_pin_does_not_name_is_refused():
 def test_the_ci_run_flag_is_gone():
     r = _run_script(["--host", "10.77.9.201", "--run", "123", "--dry-run"])
     assert r.returncode == 2 and "unknown argument" in r.stderr, r.stderr
+
+
+def test_ssh_and_scp_never_read_a_stale_known_hosts_entry_1452():
+    # 10.11.2026: dev1's known_hosts held old keys for 10.77.9.147/.197 (other hosts had those
+    # addresses before the handheld boards). StrictHostKeyChecking=no alone then disables password
+    # auth on a CHANGED key, so every deploy failed `ssh rc=255` before touching the box.
+    import re as _re
+    text = open(os.path.join(REPO, "scripts", "bkshading-deploy-relay.sh")).read()
+    for fn in ("ssh_box", "scp_box"):
+        line = [ln for ln in text.splitlines() if ln.startswith(fn + "() {")][0]
+        assert "-o UserKnownHostsFile=/dev/null" in line, line
+        assert _re.search(r"-o LogLevel=ERROR", line), line

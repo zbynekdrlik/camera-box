@@ -382,7 +382,7 @@ if WHY="$(obs_box_step_applies 13)"; then
   strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs
   strih_intercom_hub_alsa_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1438: the cutters' card, opened through ALSA
 fi
-strih_vban_leg_grade   # the VBAN-only leg, every role (issue 1439, scripts/lib/strih-vban-leg.sh)
+strih_vban_leg_grade; [ "$(strih_vban_leg_kind)" = none ] || strih_janus_ice_grade   # the leg (issue 1439) + Janus ICE on LAN only (issue 1499)
 # 9b) MiniFuse period + quantum drop-ins (issue 1345, FAIL) + the live quantum (a NOTE); stream role: the locked PipeWire (1465).
 strih_pipewire_purge_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(pipewire-purge) the grader did not print all of its rows"   # issue 1440: a box with no PipeWire
 if ! WHY="$(obs_box_step_applies 12-strih-audio)"; then
@@ -767,8 +767,8 @@ case "$DS_ROLE_VERDICT" in
   *)               bad "(dantesync-role) unknown verdict '${DS_ROLE_VERDICT}'" ;;
 esac
 
-# 6d) dantesync PTP NIC (issue 1439): this boot's newest PTP join must be on the NIC carrying STRIH_IP.
-DS_JOIN_V="$(strih_dantesync_join_verdict "$(strih_lx_ip)")"; case "$DS_JOIN_V" in ok:*) ok "(dantesync-nic) PTP joined on the rig NIC ${DS_JOIN_V#ok:}" ;; *) bad "(dantesync-nic) ${DS_JOIN_V} (ok = the NIC carrying $(strih_lx_ip); wrong:<joined>:<rig> = restart dantesync once the rig NIC is up, dantesync#131)" ;; esac
+# 6d) dsync PTP NIC (issue 1439): /status names the configured AND the joined NIC, both the rig NIC.
+DS_NIC_V="$(strih_dantesync_iface_grade "$(strih_dantesync_rig_nic 2>/dev/null || true)")"; case "$DS_NIC_V" in ok:*) ok "(dantesync-nic) PTP bound to + joined on the rig NIC ${DS_NIC_V#ok:}" ;; *) bad "(dantesync-nic) ${DS_NIC_V} (ok = --interface <rig NIC> and joined there; re-run setup-strih.sh step 2, it restarts dsync once)" ;; esac
 # 6c) dantesync UNIT content (issue 1372), read-only: the installed unit is byte-identical to the one
 #     setup-strih step 2 emits for the role, no drop-in overrides it, and the running process runs its
 #     ExecStart (strih_dantesync_unit_verdict). Step 2 restarts only on a change (a date-master restart
@@ -776,7 +776,7 @@ DS_JOIN_V="$(strih_dantesync_join_verdict "$(strih_lx_ip)")"; case "$DS_JOIN_V" 
 DS_UNIT_PATH_V="/etc/systemd/system/dsync.service"
 DS_ARGS_V="$(strih_lx_dantesync_args 2>/dev/null)" || DS_ARGS_V=""
 DS_UNIT_ARGV_V="$(strih_dantesync_running_argv 2>/dev/null || true)"
-if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" "$(strih_lx_ip)" 2>/dev/null)"; then
+if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" "$(strih_dantesync_rig_nic 2>/dev/null)" 2>/dev/null)"; then
   DS_UNIT_V="$(strih_dantesync_unit_verdict "$DS_UNIT_WANT" "$DS_UNIT_PATH_V" "${DS_UNIT_PATH_V}.d" "$DS_UNIT_ARGV_V" || true)"
 else
   DS_UNIT_V=no-unit
@@ -848,7 +848,7 @@ else note "(program-audio) not graded: ${WHY}"; fi
 if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.." "${STRIH_LX_USER:-newlevel}" || bad "(tally) the grader did not print all of its rows"
 else note "(tally) not graded: ${WHY}"; fi
 # 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 14 rows) + 44) issue 1420 kiosk panel (scripts/lib/obs-box-panel.sh).
-strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"
+strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"; obs_box_session_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(session) the grader did not print all of its rows"   # 48) issue 1466 the session start + the XFCE session (scripts/lib/obs-box-xfce.sh)
 # 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh: nginx + each name's cert + the upstreams + renewal) + issue 1453 tunnel + TURN (strih-interkom-public.sh).
 if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; strih_interkom_public_grade_report || bad "(https-public) the grader did not print both rows"; else note "(https) not graded: ${WHY}"; fi
 if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_grade_report || bad "(log-sink) the grader did not print all of its rows"; else note "(log-sink) not graded: ${WHY}"; fi   # 46) issue 1394 cambox log sink (scripts/lib/strih-cambox-log-sink.sh: files, units, listeners)
@@ -976,7 +976,7 @@ fi
 #     GNOME purged, the openbox autostart contract, the power envelope, the touchpad InputClass. One
 #     PASS/FAIL line per item; a box missing ANY item FAILS (it supersedes the old never-sleep,
 #     governor and crash-popup items).
-BASELINE_FACTS="$(bash -c "$(obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service)" 2>/dev/null || true)"
+BASELINE_FACTS="$(bash -c "$(obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service "$(strih_box_desktop)")" 2>/dev/null || true)"
 while IFS='|' read -r _bl_item _bl_state _bl_detail; do
   [ -n "$_bl_item" ] || continue
   if [ "$_bl_state" = OK ]; then

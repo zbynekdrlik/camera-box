@@ -144,7 +144,7 @@ def test_measure_judges_the_capture_with_the_same_tool_and_reports_it_only(tmp_p
     assert len(calls) == 2
     vod, point = calls
     stage = f"{fk.home}/youtube-leg-1404/{tmp_path.name}"
-    assert point[point.index("--vod") + 1] == f"{stage}/{ylp.CAPTURE_NAME}"
+    assert f"--vod={stage}/{ylp.CAPTURE_NAME}" in point  # one argv word (issue 1511)
     assert point[point.index("--out") + 1] == f"{stage}/{ylp.SUB}"
     for flag in ("--recording", "--markers", "--probe-bin", "--publish", "--unpublish"):
         assert point[point.index(flag) + 1] == vod[vod.index(flag) + 1]  # the same reference + inputs

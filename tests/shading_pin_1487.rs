@@ -18,12 +18,29 @@ fn read(rel: &str) -> String {
 }
 
 fn pin(key: &str) -> String {
-    read("scripts/shading-release.pin")
+    pin_in("scripts/shading-release.pin", key)
+}
+
+/// Issue 1452: the relay pin is chosen per box, so a tree carries several pin files of one format.
+fn pin_in(file: &str, key: &str) -> String {
+    read(file)
         .lines()
         .find_map(|l| l.strip_prefix(&format!("{key}=")))
-        .unwrap_or_else(|| panic!("no {key} in the pin file"))
+        .unwrap_or_else(|| panic!("no {key} in {file}"))
         .to_string()
 }
+
+/// Every pin file of the tree with the fixture dir holding its tag's contract copy.
+const PINS: [(&str, &str); 2] = [
+    (
+        "scripts/shading-release.pin",
+        "tests/fixtures/shading_pinned",
+    ),
+    (
+        "scripts/shading-release-rest.pin",
+        "tests/fixtures/shading_pinned_rest",
+    ),
+];
 
 fn fetch(url: &str) -> String {
     let out = Command::new("curl")
@@ -39,9 +56,12 @@ fn fetch(url: &str) -> String {
 }
 
 fn raw(path: &str) -> String {
+    raw_at(&pin("SHADING_RELEASE_COMMIT"), path)
+}
+
+fn raw_at(commit: &str, path: &str) -> String {
     fetch(&format!(
-        "https://raw.githubusercontent.com/zbynekdrlik/shading/{}/{path}",
-        pin("SHADING_RELEASE_COMMIT")
+        "https://raw.githubusercontent.com/zbynekdrlik/shading/{commit}/{path}"
     ))
 }
 
@@ -66,38 +86,70 @@ const ASSETS: [(&str, &str); 4] = [
 
 #[test]
 fn the_pin_carries_a_tag_a_commit_and_every_asset() {
-    let tag = pin("SHADING_RELEASE_TAG");
-    let v = tag.strip_prefix('v').expect("a vX.Y.Z tag");
-    assert_eq!(v.split('.').count(), 3, "{tag}");
-    assert_eq!(pin("SHADING_RELEASE_COMMIT").len(), 40);
-    for (key, _) in ASSETS {
-        assert_eq!(pin(key).len(), 64, "{key}");
+    for (file, _) in PINS {
+        let tag = pin_in(file, "SHADING_RELEASE_TAG");
+        let v = tag.strip_prefix('v').expect("a vX.Y.Z tag");
+        assert_eq!(v.split('.').count(), 3, "{file}: {tag}");
+        assert_eq!(pin_in(file, "SHADING_RELEASE_COMMIT").len(), 40, "{file}");
+        for (key, _) in ASSETS {
+            assert_eq!(pin_in(file, key).len(), 64, "{file}: {key}");
+        }
     }
 }
 
 #[test]
 fn every_pinned_sha256_is_the_releases_own() {
-    let tag = pin("SHADING_RELEASE_TAG");
-    for (key, asset) in ASSETS {
-        let side = fetch(&format!(
-            "https://github.com/zbynekdrlik/shading/releases/download/{tag}/{asset}.sha256"
-        ));
-        assert_eq!(
-            side.trim(),
-            format!("{}  {asset}", pin(key)),
-            "{asset}: refresh scripts/shading-release.pin"
-        );
+    for (file, _) in PINS {
+        let tag = pin_in(file, "SHADING_RELEASE_TAG");
+        for (key, asset) in ASSETS {
+            let side = fetch(&format!(
+                "https://github.com/zbynekdrlik/shading/releases/download/{tag}/{asset}.sha256"
+            ));
+            assert_eq!(
+                side.trim(),
+                format!("{}  {asset}", pin_in(file, key)),
+                "{asset}: refresh {file}"
+            );
+        }
     }
+}
+
+/// Issue 1452: the per-box map names only pin files of this tree, and the default pin is never a
+/// REST relay (a v0.2.x relay has no gphoto2 fallback: a box goes onto it only by name).
+#[test]
+fn the_box_map_names_only_existing_pin_files_and_the_default_stays_the_gphoto2_relay() {
+    let map = read("scripts/shading-release-boxes.txt");
+    let mut listed = 0;
+    for line in map.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut f = line.split_whitespace();
+        let (box_, file) = (f.next().unwrap(), f.next().expect("a pin file"));
+        assert!(
+            PINS.iter().any(|(p, _)| *p == format!("scripts/{file}")),
+            "{box_}: {file} is no pin file of this tree"
+        );
+        listed += 1;
+    }
+    assert!(listed >= 1, "the map lists the REST boxes");
+    assert!(
+        pin("SHADING_RELEASE_TAG").starts_with("v0.1."),
+        "the fleet default stays the gphoto2 relay until every camera serves REST"
+    );
 }
 
 /// The contract and the one table a camera-box lib keeps in sync with shading's source.
 #[test]
 fn the_pinned_copy_is_the_tags_contract_and_ndi_search_paths() {
-    assert_eq!(
-        raw("docs/CONTRACT.md"),
-        read("tests/fixtures/shading_pinned/CONTRACT.md"),
-        "the contract moved: read what changed, adapt, refresh the fixture"
-    );
+    for (file, fixtures) in PINS {
+        assert_eq!(
+            raw_at(&pin_in(file, "SHADING_RELEASE_COMMIT"), "docs/CONTRACT.md"),
+            read(&format!("{fixtures}/CONTRACT.md")),
+            "{file}: the contract moved: read what changed, adapt, refresh the fixture"
+        );
+    }
     assert_eq!(
         raw("bkshading/service/src/preview/ndi_paths.rs"),
         read("tests/fixtures/shading_pinned/ndi_paths.rs"),
@@ -105,13 +157,22 @@ fn the_pinned_copy_is_the_tags_contract_and_ndi_search_paths() {
     );
 }
 
-/// The gphoto2 keys the E2E uses directly while the relay is stopped are a contract row.
+/// Issue 1452: the REST endpoints the E2E uses directly while the relay is stopped are contract rows
+/// of the REST relay's contract, and so is the camera link file camera-box installs.
 #[test]
-fn the_e2e_gphoto2_keys_stand_in_the_contract() {
-    let contract = read("tests/fixtures/shading_pinned/CONTRACT.md");
-    for key in ["iso", "d002", "d004", "f-number", "d005", "d006"] {
-        assert!(contract.contains(&format!("| `{key}` |")), "{key}");
+fn the_e2e_rest_endpoints_and_the_camera_link_stand_in_the_rest_contract() {
+    let contract = read("tests/fixtures/shading_pinned_rest/CONTRACT.md");
+    for ep in [
+        "video/iso",
+        "video/shutter",
+        "video/whiteBalance",
+        "video/whiteBalanceTint",
+        "lens/iris",
+        "system/format",
+    ] {
+        assert!(contract.contains(&format!("| `{ep}` |")), "{ep}");
     }
+    assert!(contract.contains("/etc/systemd/network/05-bkshading-camera.network"));
 }
 
 #[test]
@@ -153,6 +214,8 @@ fn every_deploy_path_takes_the_pinned_release() {
 fn the_relay_version_is_graded_against_the_pin_never_camera_box() {
     let h = read("scripts/rig-dev-handover-check.sh");
     assert!(h.contains("bkshading_relay_version_verdict \"$pin\" \"$rlv\" \"$main\""));
-    assert!(read("scripts/deploy-fleet.sh").contains("RELAY_VER=\"$(shading_pin_version"));
+    // issue 1452: each box's relay version is the version of ITS pin (scripts/shading-release-boxes.txt)
+    assert!(read("scripts/deploy-fleet.sh")
+        .contains("_rver=\"$(SHADING_RELEASE_PIN_FILE=\"$_rpin\" shading_pin_version"));
     assert!(!read("scripts/deploy-fleet.sh").contains("not from the same build"));
 }

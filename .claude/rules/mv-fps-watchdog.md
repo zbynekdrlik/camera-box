@@ -208,9 +208,9 @@ decision (`obs_display_should_skip`) is untouched; accumulated in the audit bloc
 `obs_display` fields (`render_audit_pre_mv_sum_ns`/`_max_ns`/`render_audit_tick_count`), reset per
 window. `mv_audit.rs` ignores unknown keys so every consumer is unaffected (proven by
 `parse_tolerates_appended_1260_budget_fields`). Lock-step anchors updated: `tests/genlock_preload.rs`
-+ `tests/mv_audit_emit.rs` + BOTH `windows-genlock*.yml` (the format string) — verify a further field
++ `obs:tests/vendored/tests/mv_audit_emit.rs` + BOTH `windows-genlock*.yml` (the format string) — verify a further field
 add the same way (lift-compile the `blog` under `-Wformat=2`, offline `re.sub`-squish pwsh check,
-`cargo test --test mv_audit_emit` + `--lib mv_audit`).
+the obs repo's `mv_audit_emit` test (issue 1504) + `cargo test --lib mv_audit`).
 
 ### Per-cell MV instrumentation (issue 1260 lever (1), LANDED — CI-compile + supervisor deploy pending)
 
@@ -255,7 +255,7 @@ mv_top1=<sanitized-name>:<ms> mv_top2=<sanitized-name>:<ms>`.
   bounds the upload cost, so it was left as a follow-up candidate.
 - **Verify a further token/field the same way:** the pure parser add is in `src/mv_audit.rs`
   (optional `Option<>` fields, unknown-key tolerant); the FRONTEND↔libobs chain is guarded by
-  `mv_audit_emit.rs`'s `render_display_and_frontend_carry_the_per_cell_instrumentation_1260` test
+  the obs repo's `mv_audit_emit.rs`'s `render_display_and_frontend_carry_the_per_cell_instrumentation_1260` test
   (std-only, reads the vendored source files — it also guards that preview + program
   are timed, per the review fix); the pure name sanitizer (`obs_audit_copy_cell_name`) has a
   COMMITTED lift-test `tests/mv_audit_cell_name_sanitizer_1260.rs` (extracts the real static from

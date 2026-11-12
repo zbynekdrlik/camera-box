@@ -2,7 +2,7 @@
 //! `source_output_audio_data` and of the media-clock stamps of the vendored `vlc-video` plugin.
 //!
 //! The decision is pinned by `tests/genlock_audio_asrc_basis_parity_1425.rs` (C == Rust), the behaviour
-//! through the shipped ingest by `tests/genlock_audio_arrival_rebase_1425.rs`, the 8 h two-clock model by
+//! through the shipped ingest by `obs:tests/vendored/tests/genlock_audio_arrival_rebase_1425.rs`, the 8 h two-clock model by
 //! `src/asrc_arrival_rebase_bench.rs`, the VLC mapping by `tests/vlc_video_media_clock_1425.rs`. This
 //! file pins that the code CALLS them where the design says: the stamp-domain rebase right after the
 //! direct-stamp detection and before the smoothing, the system-domain rebase under `audio_buf_mutex`

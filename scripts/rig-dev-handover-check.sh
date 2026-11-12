@@ -293,8 +293,6 @@ run_probe avlatency bash "$AVLATENCY_PROBE"
 probe_shading() {
   local spec="$1" pw="$2" tok label ip en act online verdict body port="${SHADING_RELAY_PORT:-8771}"
   local versions cbv rlv pin main
-  pin="$(shading_pin_version "$HERE/.." 2>/dev/null || true)"
-  main="$(shading_pin_version_of_text "$(git -C "$HERE/.." show origin/main:scripts/shading-release.pin 2>/dev/null || true)")"
   # Bounds are PER BOX (timeout 8 ssh / 6 curl below), not the whole-item RDH_*_TIMEOUT budget --
   # a per-box bound keeps the worst case linear in the small cambox count and never hangs the run.
   [ -n "$spec" ] || { printf 'roster empty -- no camboxes to probe\n'; return 0; }
@@ -325,6 +323,10 @@ probe_shading() {
       "$label" "$ip" "${en:-?}" "${act:-?}" "${online:-?}" "$verdict"
     cbv="$(bkshading_relay_versions_field "$versions" camera-box)"
     rlv="$(bkshading_relay_versions_field "$versions" relay)"
+    # issue 1452: graded against THIS box's pin (scripts/shading-release-boxes.txt) of this tree, or of
+    # origin/main (a pin change on dev reaches the boxes with the merge).
+    pin="$(shading_pin_version_for_box "$HERE/.." "$label" 2>/dev/null || true)"
+    main="$(shading_pin_version_for_box_at_ref "$HERE/.." origin/main "$label")"
     printf '%s (%s): camera-box=%s relay=%s pin=%s -> verdict=%s\n' \
       "$label" "$ip" "${cbv:-?}" "${rlv:-?}" "${pin:-?}" "$(bkshading_relay_version_verdict "$pin" "$rlv" "$main")"
   done

@@ -254,7 +254,7 @@ fn steady_multi_consumes_at_an_integer_source_multiple_of_the_canvas() {
     // newest) is gone with the boundary conveyor for N>=2 sources — the STICKY multiple now picks
     // the GRID-EXACT release at the top of genlock_release_tick, which presents every second frame
     // at the grid target (the crawl cannot return: the target advances one canvas interval per
-    // tick by construction). Pinned in detail by tests/genlock_n2_grid_wiring_1367.rs.
+    // tick by construction). Pinned in detail by obs:tests/vendored/tests/genlock_n2_grid_wiring_1367.rs.
     assert!(
         src.contains(
             "const uint32_t release_n = genlock_effective_source_multiple(source, interval); \
@@ -1257,7 +1257,7 @@ fn release_cadence_extracted_into_genlock_release_tick_1038() {
 /// ACQUIRE BRACKETING GATE with the N>=2 conveyor it served (it gated on N>=2 only): an N>=2
 /// source's target is a pure function of the pin, so a new pin moves its presented frame on the
 /// next tick. Its helper, counter, clears and log marker are gone
-/// (tests/genlock_n2_grid_wiring_1367.rs pins their absence).
+/// (obs:tests/vendored/tests/genlock_n2_grid_wiring_1367.rs pins their absence).
 #[test]
 fn pin_rise_forces_an_n1_reacquire_1161() {
     let src = squish(&vendor_file(OBS_SOURCE));

@@ -81,6 +81,20 @@ They stay rows of the fleet table, so the clock watchdog and the drift check kee
 :8898, but the upgrader never rolls them (named or not), and the version gate never pins them. They may
 keep their state dir in place, so the drift check reads `/etc/dsync`, then `/etc/dantesync`.
 
+**Their version is still READ and NAMED (9.11.2026, mbc on 1.27.3 vs the pin 1.28.0 silenced the
+stream-snv program ~20 min with the version printed nowhere).** `dantesync-version-gate.sh --fleet`
+reads each one with the same `dsync --version` reader and prints it in its own section
+`-- nodes dsync upgrades itself (issue 1487, report-only, never blocks) --`, graded by the pure
+`dantesync_self_upgraded_verdict` on `release_version_order_word` (semver, never text): below the pin
+= `SELF-BEHIND (version=V pin=P; ...)` + a `!! DSYNC-SELF-UPGRADED WARNING` stderr line, at/above =
+`OK`, unread = `SELF-UNKNOWN` + a NOTE. The gate exit NEVER moves (our gate must not follow dsync's
+deploy cadence) and nothing rolls them. An unreachable `reach` one (alex-nb) is `SKIPPED (unreachable`
+like a rolled node; one named on the command line is graded on the pin as before. The handover check
+(item `dantesync`) turns the rows into a Slovak `pozor:` note on its line and the summary
+(`rig-dev-handover-check.md`), and the 30-min `fleet-parity-alert-watchdog.sh` logs them (one
+`self-upgraded below the pin` line; never drift, never a catch-up roll, never a page). Tests:
+`tests/python/test_dsync_self_upgraded_version_1487.py`, `tests/python/test_fleet_parity_1426.py`.
+
 **resolume-snv** moved on 2.11.2026 by dsync's own `install.ps1`, once. That is not a path: only
 camera-box moves rig boxes. It reads SAME at the new location, so the upgrader only checks its tray
 and runs a finalize with nothing to do, and the gates read `C:\Program Files\dsync`.

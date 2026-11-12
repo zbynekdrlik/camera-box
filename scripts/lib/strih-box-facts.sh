@@ -82,7 +82,8 @@ strih_box_fact_keys() {
     STRIH_BKSHADING_RELAYS \
     STRIH_AUDIO_BUFFERING_MS \
     STRIH_JXS_CAMERAS STRIH_JXS_CAMERA_PIN_MS \
-    STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS
+    STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS \
+    STRIH_DESKTOP
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -309,11 +310,11 @@ strih_box_validate() {
   # or all four `none`: a hub-fed strih (none deployed since strih-pp took lv1's `strih-obs`, 24.10.2026).
   local vs="${f[STRIH_PROGRAM_VBAN_STREAMS]}" vp="${f[STRIH_PROGRAM_VBAN_PORT]}" vr="${f[STRIH_PROGRAM_VBAN_RESERVE_MS]}"
   local ai="${f[STRIH_PROGRAM_AUDIO_INPUT]}"
-  if [[ " ${f[STRIH_DANTE_DEVICES]} " == *" strih-obs="* ]]; then
-    # issue 1485: the program from the Dante device strih-obs (the obs release's dante_input source): no
-    # VBAN program, the input name kept (strih role only; one program source)
-    [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}" = none:none:none ] && [ "$ai" != none ] \
-      || { echo "strih-box ${name}: a strih-obs Dante device (STRIH_DANTE_DEVICES) is the program source: strih role only, STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS none, STRIH_PROGRAM_AUDIO_INPUT the input name (issue 1485)" >&2; bad=1; }
+  if [[ " ${f[STRIH_DANTE_DEVICES]} " == *" ${f[STRIH_ROLE]}-obs="* ]]; then
+    # issue 1485 / 1495: the program from the Dante device <role>-obs (strih-obs on a strih box, stream-obs on
+    # a stream box; the obs release's dante_input source): no VBAN program, the input name kept (one source)
+    [ "${vs}:${vp}:${vr}" = none:none:none ] && [ "$ai" != none ] \
+      || { echo "strih-box ${name}: a ${f[STRIH_ROLE]}-obs Dante device (STRIH_DANTE_DEVICES) is the program source: STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS none, STRIH_PROGRAM_AUDIO_INPUT the input name (issue 1485)" >&2; bad=1; }
     _strih_box_obs_input_name "$ai" \
       || { echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_INPUT '${ai}' must be the OBS program-audio input's name (1..64 letters, digits, space, . _ - ( ), no space first or last)" >&2; bad=1; }
   elif [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}:${ai}" = none:none:none:none ]; then
@@ -476,6 +477,12 @@ strih_box_validate() {
   fi
   strih_box_jxs_facts_ok "${f[STRIH_ROLE]}" "${f[STRIH_CAMERAS]}" "${f[STRIH_JXS_CAMERAS]}" "${f[STRIH_JXS_CAMERA_PIN_MS]}" \
     "${f[STRIH_JXS_PROGRAM_PORT]}" "${f[STRIH_JXS_PROGRAM_PIN_MS]}" "strih-box ${name}: " || bad=1
+  # issue 1466 (ROZHODNUTE 6737530836, the gradual move to XFCE): the operator desktop session the box
+  # boots into -- openbox (the kiosk + tint2) or xfce (xfwm4 + xfce4-panel); moving a box = this line.
+  case "${f[STRIH_DESKTOP]}" in
+    openbox|xfce) ;;
+    *) echo "strih-box ${name}: STRIH_DESKTOP '${f[STRIH_DESKTOP]}' must be openbox or xfce (the operator session, issue 1466)" >&2; bad=1 ;;
+  esac
   [ "$bad" = 0 ]
 }
 
@@ -750,6 +757,10 @@ strih_lx_cg_sender() {
 
 # strih_box_role -> the box's role (fact STRIH_ROLE: strih | stream, issue 1412).
 strih_box_role() { strih_box_fact STRIH_ROLE; }
+
+# strih_box_desktop -> the operator desktop session (fact STRIH_DESKTOP: openbox | xfce, issue 1466); the
+# lightdm session name is the same word (/usr/share/xsessions/<it>.desktop).
+strih_box_desktop() { strih_box_fact STRIH_DESKTOP; }
 
 # strih_lx_dante_gm -> the PTP grandmaster host the box's dantesync config allows (fact STRIH_DANTE_GM;
 # RIG_GRANDMASTER_IP overrides it for one run, the same override every rig grandmaster read honours).

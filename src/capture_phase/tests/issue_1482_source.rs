@@ -300,13 +300,138 @@ fn a_burst_of_card_steps_never_leaves_the_stamp_a_slot_behind_the_capture_1482()
             worst = worst.max((mid - capture).abs());
         }
     }
+    eprintln!("burst: worst {:.1} ms", worst / 1e6);
     assert_eq!((p.phase_steps(), p.reseeds()), (5, 0));
-    // One slot: half a slot (the slot middle) + the hysteresis + a step's ~0.5 s of held stamps
-    // on the old phase (the step-1 cost, 6 ms here) fit inside it; two slots old does not.
+    let r = p.source_reanchors();
+    assert!((1..=5).contains(&r), "{r} re-anchors for five steps");
+    // The bound is the requirement, not the result: a stamp a slot old is what underran the strih
+    // FIFO live. Expected worst: half a slot (the slot middle, 8.3 ms) + the re-anchor band
+    // (a quarter slot, 4.2 ms: the source line may sit that far off before it moves) + the
+    // hysteresis (0.5 ms) + jitter = ~13 ms; measured 13.7 ms here (14.7 ms on the sawtooth card,
+    // 7.11.2026). Two slots old (the unclamped line, 25.7 ms) fails it.
     assert!(
         worst <= I60 as f64,
         "the stamped slot's middle sat {:.1} ms from the capture (bound {:.1} ms)",
         worst / 1e6,
         I60 as f64 / 1e6
+    );
+}
+
+/// Review of the burst clamp (7.11.2026): a clamp to the band edge left the stamp the short fit
+/// +- a quarter slot, so it moved with the card's teeth. On cam2's sawtooth card a burst must still
+/// move the stamp only by the burst's own slots, never back and forth with a tooth: every slot
+/// advance is 1 or 2 (a real forward move), never 0 right after a 2 (a dup after a gap) or the
+/// reverse, and the crossings stay within the burst's slot count + 1.
+#[test]
+fn a_burst_on_a_sawtooth_card_moves_the_stamp_only_by_its_own_slots_1482() {
+    let start = I60 as f64 - 1_000_000.0;
+    let mut frames = retiming_card(
+        60 * 240,
+        0.0,
+        100.0,
+        4_000_000.0,
+        start,
+        30_000.0,
+        0x1482_5a07,
+    );
+    let first = after_switch(30);
+    for burst in 0..5 {
+        for f in frames.iter_mut().skip(first + burst * 180) {
+            f.ts += 6_000_000;
+            f.source += 6_000_000.0;
+        }
+    }
+    let offset = (SEC_2309 * NS_PER_SECOND - MONO0) as i64;
+    let mut p = CapturePhase::new();
+    let mut prev: Option<u64> = None;
+    let mut last_odd: Option<(usize, u64)> = None;
+    let mut back_and_forth = Vec::new();
+    let mut worst = 0.0f64;
+    let mut crossings_at_switch = 0;
+    for (k, f) in frames.iter().enumerate() {
+        let slot = p.stamp_frame(f.seq, f.ts, offset, I60);
+        if k == after_switch(15) {
+            crossings_at_switch = p.crossings();
+        }
+        if k > after_switch(15) {
+            let s = slot.unwrap_or_else(|| panic!("frame {k}: stamp-driven"));
+            let mid = s as f64 + I60 as f64 / 2.0;
+            worst = worst.max((mid - (f.source + offset as f64)).abs());
+            if let Some(q) = prev {
+                let adv = grid_steps_between(q, s, I60);
+                if adv != 1 {
+                    if let Some((j, a)) = last_odd {
+                        if a != adv && k - j < 60 {
+                            back_and_forth.push(k);
+                        }
+                    }
+                    last_odd = Some((k, adv));
+                }
+            }
+        }
+        prev = slot;
+    }
+    let crossings = p.crossings() - crossings_at_switch;
+    eprintln!(
+        "sawtooth burst: crossings {crossings} phase_steps {} reseeds {} worst {:.1} ms",
+        p.phase_steps(),
+        p.reseeds(),
+        worst / 1e6
+    );
+    assert_eq!(p.reseeds(), 0);
+    assert!(
+        back_and_forth.is_empty(),
+        "the stamp went back and forth with a tooth at frames {back_and_forth:?}"
+    );
+    // 5 x 6 ms = 30 ms = 1.8 slots: at most 2 real moves + 1 edge settle.
+    assert!(crossings <= 2, "{crossings} crossings for a 1.8-slot burst");
+    let r = p.source_reanchors();
+    assert!((1..=5).contains(&r), "{r} re-anchors for five steps");
+    assert!(worst <= I60 as f64, "worst {:.1} ms", worst / 1e6);
+}
+
+/// The re-anchor band: within a quarter slot (never under 3 ms) nothing moves; past it the
+/// distance onto the short fit, signed; an unrepresentable distance moves nothing.
+#[test]
+fn the_source_reanchor_band_and_sign_1482() {
+    let b = I60 / SOURCE_MAX_OFFSET_DIVISOR;
+    let t = 5_000_000_000u64;
+    assert_eq!(source_reanchor_ns(t + b, t, I60), None);
+    assert_eq!(source_reanchor_ns(t - b, t, I60), None);
+    assert_eq!(
+        source_reanchor_ns(t + b + 1, t, I60),
+        Some(-((b + 1) as i64))
+    );
+    assert_eq!(source_reanchor_ns(t - b - 1, t, I60), Some((b + 1) as i64));
+    // 120 fps: a quarter slot is 2.08 ms, the floor keeps a 2.5 ms tooth inside the band.
+    let i120 = 8_333_333u64;
+    assert_eq!(source_reanchor_ns(t + 2_500_000, t, i120), None);
+    assert_eq!(
+        source_reanchor_ns(t + SOURCE_REANCHOR_MIN_BAND_NS + 1, t, i120),
+        Some(-((SOURCE_REANCHOR_MIN_BAND_NS + 1) as i64))
+    );
+    assert_eq!(source_reanchor_ns(u64::MAX, 0, I60), None);
+}
+
+/// A shift moves the source prediction by exactly the delta and keeps the rate.
+#[test]
+fn a_source_shift_moves_the_intercept_only_1482() {
+    let frames = camera(60 * 90, 15.9, 30_000.0, 8_000_000.0, 0x1482_5a08);
+    let mut t = CapturePhaseTracker::new();
+    for f in &frames {
+        t.observe(f.seq, f.ts);
+    }
+    let before = t.source.predict_ns(t.last_x).expect("ready");
+    let period = t.source.period_ns().unwrap();
+    for delta in [7_000_000i64, -11_000_000] {
+        let p0 = t.source.predict_ns(t.last_x).unwrap();
+        t.source.shift(delta);
+        let p1 = t.source.predict_ns(t.last_x).unwrap();
+        assert_eq!(p1 as i64 - p0 as i64, delta);
+        assert!((t.source.period_ns().unwrap() - period).abs() < 1e-6);
+    }
+    assert_eq!(
+        t.source.predict_ns(t.last_x).unwrap() as i64,
+        before as i64 - 4_000_000
     );
 }

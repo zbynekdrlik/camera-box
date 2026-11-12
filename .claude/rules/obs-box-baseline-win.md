@@ -65,6 +65,29 @@ become the `/setactive` target when the stock GUID is absent.
 USB are OK on both. `DontShowUI` is absent on BOTH, so `wer_dontshowui` reads DRIFT on both until the
 owner sets it. That is an expected report-only row, not a bug.
 
+## The declared network layout (issue 1495)
+
+The standard is dstack's `docs/two-networks.md` (owner ruling 10.11.2026: ONE standard for every PC with a
+Dante leg, dstack owns it); `net_layout` grades its section 6 items 1-3 for a Windows PC, never a local variant.
+
+`scripts/lib/win-net-layout.sh` (sourced by the baseline lib) adds ONE graded item, `net_layout`, from a
+`net_layout` section in the same gather (Get-* reads only, `key=value` lines). Only a host that declares a
+layout (`win_net_layout_declared <COMPUTERNAME>`, today RESOLUME-SNV) gets the row in
+`win-baseline-check.sh` and the gate's report rows (`win_baseline_report_rows`); a box that declares none gets no row.
+- RESOLUME-SNV (dstack#155, 10.11.2026): one physical NIC Up = `Ethernet 4` Realtek Gaming USB 2.5GbE
+  (USB VID_0BDA&PID_8156) at 2.5 Gbps, `Ethernet` (I225-V) and `Wi-Fi` Disabled; LAN 10.77.9.201/23 Dhcp,
+  the ONLY default route via 10.77.8.1, interface metric 20; `Dante70` = Realtek Virtual Adapter, VlanID
+  70, 10.77.7.107/24 Manual, metric 900, no DNS registration, NetBIOS 2, ms_server/ms_msclient/ms_tcpip6/LLTD
+  (ms_lltdio, ms_rspndr) unbound; NDI `adapters.allowed` exactly 10.77.9.201.
+- A DRIFT names every failed sub-check (`lan_speed`, `default_route`, `dante_vlan`, ...); a missing or
+  incomplete section is UNKNOWN. The firewall is NOT graded: the owner's production rule keeps every
+  profile off and dstack's `dstack155` rules are inert until the owner decides (dstack#155).
+- NDI 6.3.2 announces its senders by mDNS on EVERY adapter whatever `adapters.allowed` says (measured
+  10.11.2026: the cg OBS restarted with that setting still announced on 10.77.7.107). The setting is
+  graded, but it does not keep NDI off the Dante VLAN.
+- The live fixture is `tests/python/fixtures/win_net_layout_1495/resolume_live_2026-11-10.txt`, the
+  real gather run read-only over the fleet MCP (`mcp__fleet__Call` machine `win-resolume`).
+
 ## Gather, grade, consumers
 
 - **Gather** = `win_baseline_gather_ps1`, a read-only `.ps1`. Run it as a FILE

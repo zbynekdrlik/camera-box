@@ -32,9 +32,14 @@ set -euo pipefail
 # performs are the standing-approved WORK — this script does NOT ask permission and does NOT gate on
 # "is it off-air"; the operator who runs it guards live timing. It does NOT reboot the host.
 #
-# Usage:  scripts/bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64]
+# Usage:  scripts/bkshading-deploy-relay.sh --host <ip> [--box <name>] [--arch amd64|arm64]
 #                                           [--binary <path>] [--dry-run] [--force-live]
 #   --host <ip>       (required) the cambox/SBC to deploy the relay to (e.g. 10.77.9.201).
+#   --box <name>      issue 1452: the box's name (camN, or the SBC's hostname) -- picks ITS pin from
+#                     scripts/shading-release-boxes.txt (the REST relay v0.2.x only where its camera
+#                     serves REST); none = the fleet default pin. Before anything changes, the box's own
+#                     hostname is read: a box whose name maps to ANOTHER pin is refused (a forgotten
+#                     --box), never deployed the wrong release.
 #   --arch <a>        target arch of the release asset: `amd64` (default; cambox) or `arm64`
 #                     (SBC/handheld zero-class arm64 SBC, issue 808 SBC milestone).
 #                     The remount cycle follows the target's own root mode, never a flag.
@@ -75,10 +80,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/shading-release.sh" # the pinned shading release (issue 1487)
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh" # stray_session_check_assert() — the ONE shared rig-busy guard
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh" # obs_fleet_host: the --box venue's strih/stream for the guard (issue 1506)
+# shellcheck source=scripts/lib/remote-logging.sh
+. "$HERE/lib/remote-logging.sh" # remote_log_camera_venue: the venue of --box (issue 1506)
 # shellcheck source=scripts/lib/rig-lease.sh
 . "$HERE/lib/rig-lease.sh"  # issue 1371: the rig lease an E2E holds while it owns the camboxes
 # shellcheck source=scripts/lib/ro-window.sh
 . "$HERE/lib/ro-window.sh" # ro_window_close_cmds / ro_window_holders — the ONE verified ro close (issue 1407)
+# shellcheck source=scripts/lib/bkshading-camera-link.sh
+. "$HERE/lib/bkshading-camera-link.sh" # issue 1452: the camera link file a REST-pin relay needs
 
 RELAY_DEST="$(bkshading_relay_bin_path)"     # /usr/local/bin/bkshading-relay (one source of truth)
 RELAY_UNIT="$(bkshading_relay_unit_name)"    # bkshading-relay.service (one source of truth)
@@ -91,8 +102,10 @@ RELAY_STAGE="${RELAY_DEST}.deploy.$$"
 # Rig-busy guard inputs (mirror scripts/rig-busy-gate.sh's own defaults). The guard reuses the
 # shared obs_phase2.py rig-busy-check; RIG_BUSY_HERE names the dir holding obs_phase2.py (this
 # script's own scripts/ dir), overridable so a Tier-0 test can point it at a fake.
-STRIH_HOST="${STRIH_HOST:-10.77.9.202}"
-STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
+# issue 1506: unset = the guard reads the strih/stream of the --box camera's own venue (resolved at the
+# preflight); with no --box (an SBC/handheld relay) the home venue's pair. A caller-set pair wins.
+STRIH_HOST="${STRIH_HOST:-}"
+STREAM_HOST="${STREAM_HOST:-}"
 OBS_PASSWORD="${OBS_PASSWORD:-}"
 RIG_BUSY_HERE="${BKSHADING_DEPLOY_OBS_PHASE2_DIR:-$HERE}"
 SSH_PASS="${SSH_PASS:-newlevel}"
@@ -113,6 +126,7 @@ else
 fi
 
 HOST=""
+BOX=""
 BINARY=""
 DRY_RUN=0
 FORCE_LIVE=0   # --force-live: bypass the rig-busy guard (supervisor-only, logged loudly)
@@ -124,6 +138,7 @@ require_val() { [ "$1" -ge 2 ] || { echo "ERROR: $2 requires a value (see --help
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host) require_val "$#" --host; HOST="$2"; shift 2 ;;
+    --box) require_val "$#" --box; BOX="$2"; shift 2 ;;
     --arch) require_val "$#" --arch; ARCH="$2"; shift 2 ;;
     --binary) require_val "$#" --binary; BINARY="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -147,6 +162,12 @@ case "$ARCH" in
   *) echo "ERROR: --arch must be amd64 or arm64 (got: $ARCH)" >&2; exit 2 ;;
 esac
 ASSET="$(shading_relay_asset_for_arch "$ARCH")"
+# issue 1452: the pin of THIS box (scripts/shading-release-boxes.txt). Every lib call below reads it
+# through SHADING_RELEASE_PIN_FILE, so the fetch and the two sha256 proofs are the same code for any pin.
+PIN_SEAM="${SHADING_RELEASE_PIN_FILE:-}"
+PIN_FILE="$(shading_pin_file_for_box "$HERE/.." "$BOX")" || exit 2
+SHADING_RELEASE_PIN_FILE="$PIN_FILE"
+export SHADING_RELEASE_PIN_FILE
 
 # The provisioning a box needs before its relay runs: the cambox relay canon, or the SBC one.
 if [ "$ARCH" = "arm64" ]; then
@@ -165,8 +186,8 @@ maybe_remount_rw() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remo
 # then runs in its own session, so a second Ctrl-C from the terminal cannot reach it (sshpass forwards
 # SIGINT to its ssh child even when this shell ignores it).
 RESTORE_SESSION=()
-ssh_box() { "${RESTORE_SESSION[@]}" "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "root@$1" "$2"; }
-scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$2" "root@$1:$3"; }
+ssh_box() { "${RESTORE_SESSION[@]}" "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "root@$1" "$2"; }
+scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$2" "root@$1:$3"; }
 
 # issue 808 (cam6/cam7, 25.9.2026): the ro remount used to be swallowed (`2>/dev/null; true`), the
 # script printed OK and the box root stayed read-WRITE. issue 1407: the close is now the ONE shared
@@ -286,6 +307,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 DRY-RUN — bkshading relay deploy plan:
   host           : $HOST
   arch           : $ARCH (asset $ASSET, shading $(shading_pin_tag "$HERE/.."))
+  pin            : ${PIN_FILE##*/} (box '${BOX:-<none: the fleet default>}'; the box's own hostname is checked against it before the swap)
   source binary  : $BINARY (sha256 $LOCAL_SHA)
   deploy target  : root@$HOST:$RELAY_DEST
   steps          : $STEPS
@@ -331,6 +353,17 @@ if [ "$FORCE_LIVE" = 1 ]; then
   echo "WARNING: --force-live — BYPASSING the rig-busy guard for the bkshading relay deploy to $HOST." >&2
   echo "         A relay deploy/restart during a LIVE broadcast can fork-wedge the cambox (2026-09-13 escalation); supervisor override only." >&2
 else
+  if [ -z "$STRIH_HOST" ] || [ -z "$STREAM_HOST" ]; then
+    if [ -n "$BOX" ]; then
+      _guard_hosts="$(stray_session_hosts_for_camera "$BOX")" || {
+        echo "ERROR: [preflight] the strih/stream of ${BOX}'s venue cannot be resolved -- refusing the relay deploy to $HOST (issue 1506)" >&2
+        exit 1
+      }
+    else
+      _guard_hosts="$(obs_fleet_host strih-snv) $(obs_fleet_host stream-snv)"
+    fi
+    STRIH_HOST="${_guard_hosts%% *}" STREAM_HOST="${_guard_hosts##* }"
+  fi
   stray_session_check_assert "$RIG_BUSY_HERE" "$STRIH_HOST" "$STREAM_HOST" "the bkshading relay deploy to $HOST"
 fi
 
@@ -356,6 +389,25 @@ if [ "$WAS_RC" -ne 0 ] || [ "$RESTORE_ACTION" = unreadable ]; then
   exit 1
 fi
 echo "relay state before the swap: $WAS_ACTIVE -> after the swap: $([ "$RESTORE_ACTION" = start ] && echo 'start it again' || echo 'leave it stopped')"
+
+# issue 1452: the box names itself; its own pin must be the one this deploy carries (a cam3 deployed
+# without --box would otherwise get the fleet default, a PP box given --box cam3 the REST relay its camera
+# cannot serve). An unreadable name keeps the pin --box chose (or the default), and says so.
+BOX_SELF="$(ssh_box "$HOST" "uname -n 2>/dev/null || true" 2>/dev/null || true)"
+BOX_SELF="$(printf '%s' "$BOX_SELF" | tr -d '[:space:]')"
+if [ -n "$BOX_SELF" ]; then
+  SELF_PIN="$(SHADING_RELEASE_PIN_FILE="$PIN_SEAM" shading_pin_file_for_box "$HERE/.." "$BOX_SELF")" || exit 1
+  if [ "$SELF_PIN" != "$PIN_FILE" ]; then
+    echo "ERROR: $HOST names itself '$BOX_SELF', whose pin is ${SELF_PIN##*/}, but this deploy carries ${PIN_FILE##*/} (--box '${BOX:-<none>}') -- pass --box $BOX_SELF; nothing changed on the box (issue 1452)" >&2
+    exit 1
+  fi
+  echo "box $HOST names itself '$BOX_SELF': pin ${PIN_FILE##*/} (issue 1452)"
+elif [ -z "$BOX" ]; then
+  echo "ERROR: could not read the box's own name on $HOST and no --box was given -- its relay pin cannot be chosen; pass --box <name>; nothing changed on the box (issue 1452)" >&2
+  exit 1
+else
+  echo "NOTE: could not read the box's own name on $HOST -- deploying the pin of --box '$BOX' (${PIN_FILE##*/}) as given (issue 1452)"
+fi
 
 # issue 808, slice B: the remount cycle follows the TARGET's own root mode -- read it like the relay
 # state above: an unreadable read (ssh failure / empty / unexpected) REFUSES before touching the box,
@@ -437,6 +489,20 @@ if [ "$FINISH_RC" -ne 0 ]; then
   exit 1
 fi
 echo "OK: relay deployed + byte-verified (executable) on $HOST ($RELAY_DEST, sha256 $LOCAL_SHA)$([ "$RO_ROOT" = 1 ] && echo ', root back to read-only')"
+
+# issue 1452: a REST-pin relay finds the camera through the camera link file; on a cambox it is put in
+# place by its own verified ro window (networkd reloaded after the close). The SBC gets it from
+# bkshading-provision-sbc.sh --install (its root may still be read-write by design).
+if [ "$ARCH" = amd64 ] && [ "$(shading_pin_transport "$HERE/..")" = rest ]; then
+  if LINK_OUT="$(ssh_box "$HOST" "$(bkshading_camera_link_apply_program)" 2>&1)"; then
+    printf '%s\n' "$LINK_OUT" | sed 's/^/       /'
+    echo "OK: the camera link file is in place on $HOST (issue 1452)"
+  else
+    printf '%s\n' "$LINK_OUT" | sed 's/^/       /' >&2
+    echo "ERROR: the relay is deployed, but the camera link file did not land on $HOST (above) -- the REST relay cannot find the camera until it does (issue 1452)" >&2
+    exit 1
+  fi
+fi
 
 # The deploy never STARTS a relay that was not running: the predicate is the single source of truth
 # (always `no`); if a future change flips it, that is a RED test, not a silent live start. An active

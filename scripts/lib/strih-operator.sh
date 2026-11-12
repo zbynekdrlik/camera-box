@@ -714,10 +714,30 @@ strih_operator_xrandr_providers() {
     }' || true
 }
 
-# strih_operator_panel_gpu_verdict XRANDR_TEXT READ_RC -> ONE row: every reverse-PRIME display sink runs
-# on the modesetting DDX (the shared baseline removes STRIH_OPERATOR_AMDGPU_DDX_PKG to put it there).
+# strih_operator_igpu_panel SYSFS -> `<connector> (<driver>)` of the first CONNECTED eDP connector whose
+# card is not driven by nvidia (strih-snv: `card2-eDP-2 (amdgpu)`), empty when there is none. NVIDIA's own
+# eDP port on a mux notebook (card1-eDP-1) never counts: a panel it drives needs no PRIME sink.
+strih_operator_igpu_panel() {
+  local c st drv
+  for c in "${1:-/sys}"/class/drm/card*-eDP-*; do
+    [ -r "$c/status" ] || continue
+    st="$(cat -- "$c/status" 2>/dev/null)" || continue
+    [ "$st" = connected ] || continue
+    drv="$(readlink -f -- "$(dirname -- "$c")/$(basename -- "$c" | cut -d- -f1)/device/driver" 2>/dev/null)" || drv=""
+    drv="${drv##*/}"
+    [ "$drv" = nvidia ] && continue
+    printf '%s (%s)' "$(basename -- "$c")" "${drv:-unknown driver}"
+    return 0
+  done
+  return 0
+}
+
+# strih_operator_panel_gpu_verdict XRANDR_TEXT READ_RC [IGPU_PANEL] -> ONE row: every reverse-PRIME
+# display sink runs on the modesetting DDX (the shared baseline removes STRIH_OPERATOR_AMDGPU_DDX_PKG to
+# put it there). IGPU_PANEL (strih_operator_igpu_panel) = a connected panel X must reach through such a
+# sink: with it, ONE provider means the sink never came up (issue 1494) and FAILs.
 strih_operator_panel_gpu_verdict() {
-  local text="${1-}" rc="${2:-0}" rows count n sink out name src="" sinks="" bad=""
+  local text="${1-}" rc="${2:-0}" panel="${3-}" rows count n sink out name src="" sinks="" bad=""
   case "$rc" in
     0) ;;
     124 | 137)
@@ -745,6 +765,9 @@ strih_operator_panel_gpu_verdict() {
   elif [ -n "$bad" ]; then
     printf 'FAIL|(panel-gpu) the reverse-PRIME panel sink %s runs on its vendor DDX, not modesetting, behind the X screen'"'"'s GPU %s: its panel commits wait on %s fences, and on the amdgpu DDX one never signalled (the strih-snv 11/12.10.2026 freeze) -- re-run setup-strih.sh step 11 and restart X: the shared baseline removes %s, whose own 10-amdgpu.conf beats any OutputClass override; a sink on another vendor DDX needs that DDX package removed the same way\n' \
       "$bad" "${src:-Provider 0}" "${src:-Provider 0}" "$STRIH_OPERATOR_AMDGPU_DDX_PKG"
+  elif [ "$count" = 1 ] && [ -n "$panel" ]; then
+    printf 'FAIL|(panel-gpu) X lists only %s, but the panel %s is connected: its modesetting sink never loaded, so the panel is black (strih-snv 8.11.2026, issue 1494) -- an xorg.conf.d OutputClass without a Driver line puts (null) into the autoconfigured driver list and stops it before modesetting; check /etc/X11/xorg.conf.d and the Xorg log for "loading driver: (null)", re-run setup-strih.sh step 6 and restart X\n' \
+      "${src:-Provider 0}" "$panel"
   elif [ "$count" = 1 ]; then
     printf 'NOTE|(panel-gpu) one GPU provider (%s), no PRIME -- not graded\n' "${src:-Provider 0}"
   elif [ -n "$sinks" ]; then
@@ -872,7 +895,7 @@ strih_operator_grade_rows() {
     strih_operator_input_verdict <<<"$slaves"
   fi
   if xr="$(strih_operator_xrandr_read "$user" "$home")"; then xr_rc=0; else xr_rc=$?; fi
-  strih_operator_panel_gpu_verdict "$xr" "$xr_rc"
+  strih_operator_panel_gpu_verdict "$xr" "$xr_rc" "$(strih_operator_igpu_panel "$(strih_operator_sysfs)")"
   if kl="$(strih_operator_klog_read)"; then kl_rc=0; else kl_rc=$?; fi
   strih_operator_drm_hang_verdict "$kl" "$kl_rc"
   strih_operator_keyboard_row "$user" "$home"

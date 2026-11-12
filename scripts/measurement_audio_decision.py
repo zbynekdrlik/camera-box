@@ -99,6 +99,31 @@ def classify(peak_db, box_reachable, meter_present, threshold_db):
     return "PRESENT"
 
 
+# issue 1495 (owner 8.11.2026): the production page. A live program never sits under this for a whole
+# probe window (room/mic noise alone reads far above it); the meter floor is -100 dB, which is exactly
+# what an empty Ableton master or a dead VBAN leg reads (8.11.2026: peak_db=-100.0 for 58 min).
+PROGRAM_DIGITAL_SILENCE_DB = -90.0
+
+
+def stream_active_from_probe(text):
+    """`stream_active` (0/1) from the probe's `stream_active=<n>` line; absent or garbled = 0, so a
+    probe that could not read the stream state never pages."""
+    for ln in (text or "").splitlines():
+        if ln.startswith("stream_active="):
+            return 1 if ln[len("stream_active="):].strip() == "1" else 0
+    return 0
+
+
+def production_page(peak_db, meter_present, stream_active, box_reachable):
+    """issue 1495: PAGE iff stream OBS streams and `mbc` reads digital silence; SKIP when the box was
+    not reachable (the network-reach watchdog owns that page); OK otherwise (no reading never pages)."""
+    if box_reachable != 1:
+        return "SKIP"
+    if stream_active != 1 or meter_present != 1 or peak_db is None:
+        return "OK"
+    return "PAGE" if peak_db < PROGRAM_DIGITAL_SILENCE_DB else "OK"
+
+
 def analyze(probe_text, box_reachable, threshold_db):
     """Fetch-result -> `{"verdict", "peak_db", "meter_present"}`. When the box was not reachable,
     returns SKIP WITHOUT parsing the (empty) body, mirroring the caller's no-double-page guard."""
@@ -124,7 +149,20 @@ def _main(argv):
     # audio_preflight_default_threshold_db so the #748 bar is single-source (never retyped here).
     a.add_argument("--threshold-db", type=float, required=True)
 
+    p = sub.add_parser("production",
+                       help="issue 1495: the probe's key=value stdin -> page=PAGE|OK|SKIP (+ stream_active, peak_db)")
+    p.add_argument("--box-reachable", type=int, required=True)
+
     ns = ap.parse_args(argv)
+
+    if ns.cmd == "production":
+        text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
+        peak, present = extract_probe(text)
+        active = stream_active_from_probe(text)
+        print(f"page={production_page(peak, present, active, ns.box_reachable)}")
+        print(f"stream_active={active}")
+        print(f"peak_db={_fmt(peak)}")
+        return 0
 
     if ns.cmd == "analyze":
         # The probe emits well-formed ASCII key=value lines, but tolerant-decode anyway (the

@@ -259,7 +259,8 @@ def test_verify_strih_carries_item_48_within_budget():
     s = (SCRIPTS / "setup-strih.sh").read_text()
     call = 'obs_audio_buffering_install "$USER_HOME" "$DESKTOP_USER" "$(strih_lx_audio_buffering_ms)" || fail'
     assert s.count(call) == 1
-    assert s.index('step 5 "OBS profile facts') < s.index(call) < s.index("step 6 ")
+    # 28.10.2026 strih-pp: the marker must be written before any OBS start -- before step 1, not at step 5.
+    assert s.index(call) < s.index('step 1 "')
     assert len(s.splitlines()) <= 1000
 
 

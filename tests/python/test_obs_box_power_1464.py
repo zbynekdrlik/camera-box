@@ -247,7 +247,9 @@ def test_the_power_launcher_is_first_on_every_box(tmp_path, box_name):
     rows = _launchers(home, env, box_name)
     # the icon ships with the panel (an absolute path), never a theme name the kiosk may not carry
     icon = str(home / ".local/share/icons/obs-box-panel/power.svg")
-    assert rows[0] == ["power", "Vypnúť", "/usr/bin/python3 /opt/test/obs-box-power", icon]
+    # issue 1465 item 7: the dialog runs in its own scope (still in the user manager, outside a session)
+    assert rows[0] == ["power", "Vypnúť", "/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-%s -- " % "power" + "/usr/bin/python3 /opt/test/obs-box-power",
+                       icon]
 
 
 def test_chrome_is_a_launcher_on_the_stream_role_where_it_is_installed(tmp_path):
@@ -256,7 +258,8 @@ def test_chrome_is_a_launcher_on_the_stream_role_where_it_is_installed(tmp_path)
     assert [x[0] for x in rows] == ["power", "obs", "restreamer", "chrome"]
     # issue 1469: the kiosk autologin never unlocks the GNOME login keyring, so Chrome uses its own
     # basic password store and never pops "Unlock Login Keyring".
-    assert rows[3] == ["chrome", "Chrome", "%s --password-store=basic" % (tmp_path / "google-chrome-stable"),
+    assert rows[3] == ["chrome", "Chrome", "/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-%s -- " % "chrome"
+                       + "%s --password-store=basic" % (tmp_path / "google-chrome-stable"),
                        "google-chrome"]
 
 
@@ -288,7 +291,7 @@ def test_install_puts_the_power_program_and_its_launcher(box):
     icon = box.home / ".local/share/icons/obs-box-panel/power.svg"
     assert icon.read_bytes() == POWER_ICON.read_bytes()
     assert "Name=Vypnúť" in desk and ("Icon=%s" % icon) in desk
-    assert "Exec=/usr/bin/python3 %s" % box.power in desk
+    assert ("Exec=" + "/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-%s -- " % "power" + "/usr/bin/python3 %s" % box.power) in desk
     second = _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=box.env())
     assert second.returncode == 0 and "written" not in second.stdout, second.stdout
 

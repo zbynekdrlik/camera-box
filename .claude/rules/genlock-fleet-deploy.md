@@ -128,6 +128,11 @@ Full-path E2E at the `genlock_parity` preflight (the recurring #923/#932 pain).
 
 ## The shape (a PLANNER + bounded ssh-executor, same as `launch-obs-genlock.sh`)
 
+- **No `--plan` = EXECUTE, on every arm.** `--yes` only confirms the box-backup RETENTION deletions;
+  leaving it out never makes a dry run. `deploy-genlock-fleet.sh --boxes strih-pp` (no `--plan`)
+  stopped strih-pp's OBS, ran setup-strih and restarted OBS on 11.11.2026 00:14 when a plan was
+  intended. To read the plan, pass `--plan --run-id ... --sha ... --stage ...` explicitly.
+
 - Pure builder functions emit each box's program; unit-tested by sourcing (`tests/deploy_genlock_fleet.rs`).
 - **Windows (strih/stream) is EMIT-ONLY** — a bash script cannot drive the `win-*` MCP
   (`win-ssh-vs-mcp` HARD rule), so it PRINTS the PowerShell program the agent pastes into the box's
@@ -311,7 +316,8 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    start marker, `:8899 genlock_build_sha` == canonical, and since issue 1485 on a strih-role box the RUNNING intercom
    hub's `/api/version` (read on the box at 127.0.0.1:8790) == the intercom pin's version, and since
    issue 1387 the JPEG XS program output `jxs=off|started` -- an enabled output that failed, retries,
-   restarts or has not started yet keeps the poll refusing, `jxs-link.md`) AND `strih_lx_stable_verdict` holds the SAME
+   restarts or has not started yet keeps the poll refusing, `jxs-link.md`, and since issue 1425 the
+   started OBS's `abuf=` = FIXED at the box fact `STRIH_AUDIO_BUFFERING_MS`, `genlock-audio-buffering-floor.md`) AND `strih_lx_stable_verdict` holds the SAME
    non-zero MainPID and NRestarts from the first good poll for `STRIH_LX_VERIFY_SETTLE_SECS` (default
    90 s; a bad poll restarts the window). A `Type=simple` unit reads `active` between crash-loop
    restarts, and the one crash loop seen on this box (the CEF trap) cycled every ~60 s, so neither a

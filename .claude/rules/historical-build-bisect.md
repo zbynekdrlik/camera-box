@@ -50,3 +50,7 @@ on cam3) will be refused. Real neutralization seams:
 - `ci.yml` has a `deploy-fleet` job (`if: github.ref=='refs/heads/main' && push`) that AUTO-DEPLOYS
   the active fleet to main's build, honoring `rig-fleet.txt` offline-acks. During a historical-build
   window, **ack the staged boxes offline in `rig-fleet.txt`** or a dev→main merge redeploys over them.
+- **A Linux OBS-box (strih) deploy grades the started OBS's FIXED audio buffering** (issue 1425,
+  the read-back's `abuf=`). A staged tree without `STRIH_AUDIO_BUFFERING_MS` (before issue 1425) gets
+  one NOTE and is not graded; an OBS build that logs no `genlock-audio-buffering:` line is refused
+  (`abuf=none`) — deploying such an OBS is a deliberate non-deterministic box, never a silent pass.

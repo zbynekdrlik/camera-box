@@ -162,6 +162,13 @@ main() {
   ddrift="$(printf '%s\n' "$dout" | awk '$3 == "DRIFT" {printf "%s%s=%s", sep, $1, $2; sep=","}')"
   [ -n "$ddrift" ] && ndrift="$(printf '%s' "$ddrift" | tr ',' '\n' | grep -c .)"
   log "dantesync: gate rc=$drc drift=${ddrift:-none}"
+  # issue 1487: a node dsync upgrades itself, below the pin -- the gate's report-only SELF-BEHIND
+  # row. Logged only: never drift, never caught up (dsync rolls it), never paged.
+  local dself
+  dself="$(printf '%s\n' "$dout" | awk '$3 == "SELF-BEHIND" {printf "%s%s=%s", sep, $1, $2; sep=","}')"
+  if [ -n "$dself" ]; then
+    log "dantesync: self-upgraded below the pin (report-only, never rolled): $dself"
+  fi
 
   # 3. dantesync catch-up
   if [ "$drc" -eq 20 ] && [ "$ndrift" -gt 0 ]; then

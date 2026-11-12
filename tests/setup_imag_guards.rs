@@ -2538,8 +2538,11 @@ fn setup_imag_504_writes_lightdm_autologin_openbox_session() {
          has no one to log in by hand"
     );
     assert!(
-        body.contains("autologin-session=openbox"),
-        "{SETUP} (#504) must set autologin-session=openbox — the kiosk WM, NOT GNOME"
+        body.contains("autologin-session=${SESSION}")
+            && body.contains(r#"local SESSION="${4:-openbox}""#)
+            && !body.contains("obs_box_kiosk \"$DESKTOP_USER\" imag keep-bluetooth xfce"),
+        "{SETUP} (#504) must set autologin-session to the kiosk session, openbox by default (issue 1466: \
+         imag passes no session) — the kiosk WM, NOT GNOME"
     );
 }
 

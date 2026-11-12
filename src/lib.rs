@@ -74,10 +74,14 @@ pub mod reannounce;
 // `STRIH-<box> (interkom)` output). Pure + cross-platform so it unit-tests Tier-0; the NDI finder
 // loop that feeds it lives in `ndi` and the display loop that drives it in `ndi_display`.
 pub mod preview_source;
+// Issue 1501: the power button single/double press classifier and the cameraman preview's
+// source switch + local-camera frame tap. Pure std, Tier-0.
+pub mod button_press;
+pub mod preview_tap;
 
 // #367 — colour-scale reference layout (pure geometry + colour table). Cross-platform, no
 // probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
-pub mod colour_scale;
+pub use burn_geom::colour_scale;
 
 // #751 — constant-velocity motion sweep (the UFO-test element) for the cam2 painter. Pure
 // geometry + position math (no probe deps, unit-tests Tier-0); the probe-gated framebuffer blit
@@ -734,7 +738,7 @@ pub mod cg_chain_gate;
 // filter. The Tier-0 authority the C mirror vendor/distroav/src/burn-tick-cache.hpp is checked
 // against; the filter preps + stamps the burn frame_id ONCE per tick so strih's 4K Multiview
 // stops re-rendering all 7 burns per MV frame (the #278/#293 budget collapse to 7.5fps).
-pub mod burn_tick_cache;
+pub use burn_geom::burn_tick_cache;
 // #1122 — PURE, dependency-free E2E recordings retention decision (keep newest-N runs UNION
 // younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
 // a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 (Windows) and
@@ -780,12 +784,12 @@ pub mod aux_tick;
 // the #202 bottom tile cannot hide it, and colour_sample pads the same slots. Corners are pinned
 // to the shipped burn-geom.hpp by tests/burn_regions_cpp_parity_1370.rs; the camera slot and the
 // run_id map by probe-gated tests in burn_region_decode.rs.
-pub mod burn_regions;
+pub use burn_geom::burn_regions;
 // issue 1367 — find a node burn's white quiet-zone box inside its slot crop (pure, Tier-0 beside
 // burn_regions). The probe-gated slot recovery decodes that box alone inside a white border when
 // the fixed slot crop reads nothing: the crop models the camera burn at 320 px, the writer
 // renders it 287 px, and a camera filming an OBS multiview puts QR content in the strips around it.
-pub mod burn_quiet_zone;
+pub use burn_geom::burn_quiet_zone;
 // #1141 — head-end OPTICAL blur/shutter preflight: pure crate-root classifier (Tier-0) over
 // the running service's `rough=` capture telemetry, consumed by scripts/lib/optical-preflight.sh.
 pub mod optical_preflight;

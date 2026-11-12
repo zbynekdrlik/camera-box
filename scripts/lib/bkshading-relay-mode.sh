@@ -40,7 +40,7 @@ _BKSH_MODE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # box). Its LAST FAIL line is the one bkshading_relay_mode_apply relays, so it says what to do.
 _bkshading_relay_mode_close() {  # $1 = rig mode (test|event), $2 = what landed on disk
   local after=""
-  [ "$1" = event ] && after=", so the relay is NOT started"
+  [ "$2" = enable ] && after=", so the relay is NOT started"
   ro_window_close_cmds "issue 1407" "\$(hostname 2>/dev/null || echo this box)" \
     "The $2 of $(bkshading_relay_unit_name) is on disk, but this box is left on a writable root$after." \
     "the root is still read-WRITE: stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run rig-mode.sh $1."
@@ -95,10 +95,10 @@ STOP
 # reboot; `start` brings the shading capability up for the broadcast. Only the `enable` runs inside
 # the rw window; the start runs AFTER the verified close (issue 1407), so a root that does not read
 # ro again starts nothing.
-bkshading_relay_mode_start_cmds() {
+bkshading_relay_mode_start_cmds() {  # [$1 = the rig mode it runs in: event (default) | test, issue 1452]
   local unit close
   unit="$(bkshading_relay_unit_name)"
-  close="$(_bkshading_relay_mode_close event enable)"
+  close="$(_bkshading_relay_mode_close "${1:-event}" enable)"
   cat <<START
 _rm_missing=0; systemctl cat $unit >/dev/null 2>&1 || _rm_missing=1 || true
 if [ "\$_rm_missing" -eq 1 ]; then echo "RELAY_ENABLED=not-found"; exit 0; fi
@@ -159,21 +159,27 @@ bkshading_relay_mode_apply() {
       return 0
       ;;
   esac
-  local pair label ip
+  local pair label ip box_cmds box_verb
   for pair in "$@"; do
     label="${pair%%=*}"
     ip="${pair#*=}"
     if [ -z "$label" ] || [ -z "$ip" ] || [ "$label" = "$ip" ]; then
       continue
     fi
+    box_cmds="$cmds"; box_verb="$verb"
+    if [ "$action" = test ] && bkshading_relay_box_always_on "$label"; then
+      # issue 1452 (owner 10.11.2026): a REST relay v0.2.x opens no PTP session -- it stays on.
+      box_cmds="$(bkshading_relay_mode_start_cmds test)"
+      box_verb="kept enabled+running (TEST mode -- REST relay v0.2.x opens no PTP session, issue 1452)"
+    fi
     _out=""; _rc=0
     _out="$(sshpass -p "$cam_pw" timeout 12 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
-      root@"$ip" "$cmds" 2>&1)" || _rc=$?
+      root@"$ip" "$box_cmds" 2>&1)" || _rc=$?
     _state="$(printf '%s\n' "$_out" | grep -oE '^RELAY_ENABLED=.*' | tail -n 1)"
     if [ "$_rc" -ne 0 ]; then
       # issue 1407: a failed ro close lists its writers on the box; this ONE line names them too.
       _holders="$(ro_window_holders "$_out")"
-      echo "    [issue 1311] bkshading-relay $verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)${_holders:+ (holders: $_holders)}" >&2
+      echo "    [issue 1311] bkshading-relay $box_verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)${_holders:+ (holders: $_holders)}" >&2
       _entry="$label ($ip)${_holders:+ [writers: $_holders]}"
       BKSHADING_RELAY_MODE_FAILED="${BKSHADING_RELAY_MODE_FAILED:+$BKSHADING_RELAY_MODE_FAILED, }$_entry"
       BKSHADING_RELAY_MODE_FAILED_BOXES="${BKSHADING_RELAY_MODE_FAILED_BOXES:+$BKSHADING_RELAY_MODE_FAILED_BOXES, }$label ($ip)"
@@ -184,7 +190,7 @@ bkshading_relay_mode_apply() {
       fi
       _failed=1
     else
-      echo "    [issue 1311] bkshading-relay $verb on $label ($ip) [${_state:-read-back n/a}]"
+      echo "    [issue 1311] bkshading-relay $box_verb on $label ($ip) [${_state:-read-back n/a}]"
     fi
   done
   [ "${_failed:-0}" -eq 0 ]
@@ -224,7 +230,7 @@ bkshading_relay_mode_result() {  # $1 = rig mode (test|event), $2 = the apply's 
   # armed, so the line says what is NOT confirmed, never more.
   case "$mode" in
     event) state="its shading relay may not be running for the broadcast, or not armed for a reboot" ;;
-    test) state="its shading relay may still be running, or armed for a reboot" ;;
+    test) state="its shading relay may not be in its TEST state (a gphoto2 relay may still run or be armed for a reboot; a REST relay, issue 1452, may not run or not be armed)" ;;
   esac
   echo "RESULT: rig-mode $mode -- the bkshading relay step FAILED (issue 1407, rc=$rc) on $(_bkshading_relay_mode_failed_boxes): $state. A box listed with writers still has a read-WRITE root (stop the writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro). Every other step of the switch ran. Fix the box (its [issue 1311] FAIL line above says why), then re-run rig-mode.sh $mode." >&2
   return 0

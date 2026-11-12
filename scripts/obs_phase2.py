@@ -3186,6 +3186,27 @@ def _mbc_vban_input_check(a, want_stream, want_port):
           f"port={want_port}, muted=False)")
 
 
+def _mbc_dante_input_check(a):
+    """issue 1495: the item-2 read for a Linux stream box whose mbc input is the dante_input source -- the
+    same two read-only requests, graded by the pure program_audio_vban.mbc_dante_transport_problem."""
+    ws = _conn(a.host, a.password)
+    try:
+        kind = _rpc(ws, "GetInputSettings", {"inputName": a.input}).get("inputKind", "")
+        muted = bool(_rpc(ws, "GetInputMute", {"inputName": a.input}).get("inputMuted"))
+    finally:
+        ws.close()
+    problem = _program_audio_vban_module().mbc_dante_transport_problem(kind, muted)
+    if problem:
+        raise SystemExit(
+            f"[obs] {a.host}: mbc Dante-input check FAIL on '{a.input}' — {problem}. The Linux stream box "
+            f"receives the program (and the mbc measurement audio in it) through its Dante device "
+            f"{a.dante_device!r} (the OBS launch seed strih_scenes.py --bootstrap makes '{a.input}' the "
+            f"dante_input source, issue 1495). This must be fixed before the measurement audio can ever "
+            f"arrive (issue 901)."
+        )
+    print(f"PASS: {a.host} '{a.input}' Dante input OK (kind={kind!r}, device={a.dante_device!r}, muted=False)")
+
+
 def mbc_input_check(a):
     """#901 original item 2: hard-fail loud, BEFORE any measurement-audio probe, when the mbc
     Dante transport is unambiguously wrong (muted, or bound to something other than the Dante
@@ -3194,6 +3215,11 @@ def mbc_input_check(a):
     facts) the input must be the obs-vban receive source instead; without them this is unchanged."""
     want_stream = getattr(a, "vban_stream", None)
     want_port = getattr(a, "vban_port", None)
+    if getattr(a, "dante_device", None):
+        if want_stream is not None or want_port is not None:
+            raise SystemExit("[obs] mbc-input-check: --dante-device excludes --vban-stream / --vban-port (issue 1495)")
+        _mbc_dante_input_check(a)
+        return
     if (want_stream is None) != (want_port is None):
         raise SystemExit("[obs] mbc-input-check: --vban-stream and --vban-port go together (issue 1462)")
     if want_stream is not None:
@@ -3322,6 +3348,8 @@ def main():
             # (the box facts); both or neither.
             p.add_argument("--vban-stream", default=None)
             p.add_argument("--vban-port", type=int, default=None)
+            # issue 1495: a Linux stream box whose mbc input is the dante_input source of this device
+            p.add_argument("--dante-device", default=None)
         if name == "record":
             p.add_argument(
                 "--action", required=True,

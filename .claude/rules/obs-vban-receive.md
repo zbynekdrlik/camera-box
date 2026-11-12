@@ -1,6 +1,11 @@
 ---
 paths:
   - "scripts/lib/strih-dante-leg.sh"
+  - "scripts/lib/strih-janus-ice.sh"
+  - "scripts/janus_ice_cfg.py"
+  - "tests/python/test_vban_leg_nic_to_vlan_1495.py"
+  - "tests/python/test_vban_leg_move_1495.py"
+  - "scripts/lib/strih-vban-leg-move.sh"
   - "vendor/obs-vban/src/vban-source.c"
   - "vendor/obs-vban/src/vban-receive-timeline.h"
   - "src/vban_receive_timeline.rs"
@@ -451,17 +456,41 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   (`stream-box-linux.md`).
 - **Seed:** the stream manifest carries `program_audio_vban`; `strih_scenes.py` switches `Zvuk z mixu`
   through `scripts/program_audio_vban.py` (installed next to it by setup step 6; the launch preflight
-  imports it). A replace reads the operator state BEFORE `RemoveInput` and puts back scenes (hidden
-  items stay hidden), volume, mute, monitoring, tracks, balance, sync offset and filters (index order,
-  disabled ones stay disabled). An input already of the vban kind is never rewritten (a difference
-  from the facts is only named). `GetInputKindList` without the vban kind (a bundle without the
-  plugin) = nothing removed. An unreadable manifest block = the input untouched, never turned back
-  into the pulse capture. Every create and re-create (`input_create_verified`) first waits, bounded
-  (30 x 0.1 s), for the name to be free (a removed source can hold it for a moment and CreateInput
-  then refuses), reads the result back from `GetInputList`, and tries once more (a re-create removes
-  an old input still listed first). An input OBS never lists as the wanted kind is a loud
+  imports it). A replace reads the operator state first and puts back scenes (each at the old item's
+  index; hidden items stay hidden, never a scene it was not in), volume, mute, monitoring, tracks,
+  balance, sync offset and filters (index order, disabled ones stay disabled). An input already of
+  the vban kind is never rewritten (a difference from the facts is only named). `GetInputKindList`
+  without the vban kind (a bundle without the plugin) = nothing removed. An unreadable manifest block
+  = the input untouched, never turned back into the pulse capture. Every create (`input_create_verified`)
+  first waits, bounded (30 x 0.1 s), for the name to be free, reads the result back from
+  `GetInputList`, and tries once more. An input OBS never lists as the wanted kind is a loud
   `replace FAILED (was ...)` / `create FAILED` naming what OBS lists, with nothing put back onto it:
   restart OBS and the launch seed runs again. verify item 9 FAILs the kind too.
+- **A replace never removes the old input first (issue 1495, live stream-snv 9.11.2026).** A removed
+  OBS source stays listed and keeps its NAME until its last strong reference goes
+  (`obs_source_remove` only marks it; `obs_get_source_by_name` and `GetInputList` still find it), and
+  the av-sync dock re-looks `mbc` up by name every 5 s and KEEPS what it finds (issue 1470's held
+  reference), a removed source included: the old `mbc` lingered until an OBS restart, CreateInput
+  refused the name, and the remove-first replace had already taken the program audio off every scene.
+  `input_recreate` now: `SetInputName` old -> `<name> (seed replace N)` (read back), CreateInput the new
+  one with a HIDDEN item in each scene the old one was in (+ the state, `SetSceneItemIndex` to the old
+  index), `RemoveInput` the aside one, then at once show the items that were visible (a one-request
+  gap, never a double sound). Monitoring and the `audio_monitor` filters (the operator's headphones:
+  they play whatever the items show) are put back only AFTER the old input is gone, the program filters
+  before (review rounds 1-2). A replace whose wanted kind changed after an interrupted one takes the
+  state from the aside that still holds scene items, not from the half-made `<name>`, and removes that
+  aside together with the renamed half before the show (never played beside the new input, round 3). A refused create renames the old input back (`kept the old input`); a refused
+  rename removes nothing. The next launch seed RESUMES from an aside input that still holds scene items
+  when `<name>` is absent (OBS died mid-replace: the state comes from it, never a fresh create in the
+  program scene); a removed aside a holder keeps (listed, in no scene) is never a resume source. Next
+  to a matching `<name>`, an aside with scene items FINISHES the replace (`<name>` gets an item in each
+  of its scenes, the state, the visibility, then the aside goes: a replace that died after its create
+  left `<name>` hidden), any other aside is removed; after a successful replace the stale asides are
+  removed. An aside input a holder still keeps after its remove is named in the status (`still lingers
+  as`), never a failure. Unchanged limits: a second item of the input in one scene and an item inside a
+  group are not seen by `input_state_read` (lost at the replace). The dock side (treat a removed source
+  as absent) is the obs project's. Tests: `tests/python/test_program_audio_replace_1495.py` (a fake OBS
+  whose dock re-pins by name).
 - **Collection port:** the `stream-pp` preset converts the program input to the same source
   (`--program-audio-vban PORT:STREAM:MS` / `none`); the collection keeps the mixer keys on the object.
   Every OTHER VBAN receive source is dropped with a DROP line on every preset (review round 2: the
@@ -651,7 +680,80 @@ VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, ne
   lacks the off-leg counter, so verify FAILs `(vban-leg) filter` there until then. On stream-snv the
   run touches no NM state; on strih-snv neither (the VLAN exists): no link reset on either.
 
-## The Dante variant of the leg (issue 1485, strih-snv only)
+## A leg moves from a second NIC to a VLAN: the kind transition (issue 1495, stream-snv 9.11.2026)
+
+Owner 9.11.2026: "stream nb sa ma prerobit na jeden ethernet" (after the USB-C NIC dropped off the bus on
+8.11, ~58 min without program audio). stream-snv's leg became `vlan:70` on the onboard r8169 rig NIC
+(`enp56s0.70`), the switch port (foh2_video ether4) carrying VLAN 89 untagged + 70 tagged, admit-all (set by
+the supervisor). The scan of a vlan leg lists only `vlan` profiles, so the old ETHERNET `vban-dante70` on the
+USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `_retire_nic_legs`):
+- ONLY after the VLAN came up and read back (`_strih_vban_leg_live_problems` clean) is the old profile
+  deleted, then the VLAN is read back again (one `device reapply` restores a routing rule the old profile's
+  deactivation took with it; still wrong = rc 1). The seconds between the read-back and the delete are the
+  only time two interfaces carry the address.
+- A VLAN that does not come up leaves the old leg untouched (program audio keeps flowing).
+- The old leg is never unfiltered: BEFORE the main table moves to the VLAN, `_strih_vban_leg_retiring_filter`
+  loads the same ruleset rendered for the old NIC as its own live table `inet vban_dante70_retiring` (only
+  while an ACTIVE NIC leg carries the address, `_strih_vban_leg_carrying_nic_leg`: 0 found / 1 none / 2
+  unreadable, and unreadable refuses the step with nothing changed); it is deleted once the old leg is
+  retired. On a failure path it stays until the next good run (known limit: it is live only, so a reboot in
+  between leaves the old leg unfiltered; the failure message says to re-run setup before any reboot, and
+  verify's leftover row FAILs that box).
+- verify's leftover row on a VLAN leg also FAILs a default route through a retired NIC (the drop-in's NIC
+  below); another interface's default route (a venue WiFi) is never this row's.
+- A VLAN created THIS run that does not read back is DELETED again (`_strih_vban_leg_rollback_new_vlan`), but
+  only on a vlan leg and only while an ACTIVE NIC leg still carries the address: ONE interface on the address
+  again, setup fails by name, the next run creates the VLAN anew. With no such NIC leg (the 8.11 shape: the USB
+  NIC gone, its profile inactive) the VLAN stays, it is the only leg. A `mac:` leg is never rolled back.
+- **The retired NIC is LINK-DOWN and unmanaged, never parked under a profile** (`scripts/lib/strih-vban-leg-move.sh`,
+  live 9.11.2026 19:00Z: the first cut parked it under `vban-dante70-retired` with no address, an ACTIVE profile kept
+  the link admin UP on the switch (VLAN 70 untagged), mbc kept its ARP entry for .204 = the old MAC and sent the
+  Dante stream there for ~65 min of silent program; fixed by hand with `nmcli device disconnect` + `ip link set down`).
+  Retirement now: `nmcli device disconnect <nic>` (blocks its autoconnect) BEFORE the profile delete, then
+  `_strih_vban_leg_retire_down`: a NetworkManager drop-in `/etc/NetworkManager/conf.d/90-vban-dante70-retired.conf`
+  (`[device-vban-dante70-retired]`, `match-device=interface-name:<nic>;mac:<mac>`, `managed=0`; entries are added,
+  never dropped), `nmcli general reload conf` + `nmcli device set <nic> managed no`, `ip link set dev <nic> down`.
+  - Why durable: NetworkManager.conf(5) `managed` in a `[device-*]` section (on 1.46+, above udev rules): an
+    unmanaged device is never activated, not at an NM restart, not at boot, where the kernel creates every
+    interface DOWN; with no NM device there is no automatic DHCP profile either, so no parking profile is needed.
+    Known limit: anything outside NetworkManager that ups it (a hand `ip link set up`, a networkd config) does;
+    verify catches it. NOT read on a box yet (the manpage only): after the first setup run on stream-snv, restart
+    NetworkManager and then reboot, and read `nmcli -g GENERAL.STATE device show <nic>` = `unmanaged` and IFF_UP
+    clear in `/sys/class/net/<nic>/flags` after each (or verify item 9's leftover row).
+  - A `mac:` leg back on a retired NIC (the rollback to the USB NIC) takes its entries out of the drop-in first
+    (`_strih_vban_leg_unretire`: rewrite or remove, `general reload conf`, `device set <nic> managed yes`); else
+    NetworkManager refuses its activation as strictly unmanaged. Handed back, NetworkManager may bring its
+    automatic DHCP profile up on the port for a moment; the `mac:` apply then adopts that profile as the leg's
+    (the mac kind's adopt rule), so it converges in the same run.
+  - A failed link-down fails the step only after the leg is restored (the retiring filter deleted, the shared
+    rule reapplied, the announce sent): the old profile is already gone at that point.
+  - Never the rig NIC: refused by name AND by MAC (a VLAN shares its parent's MAC).
+  - Every run (`_strih_vban_leg_retired_upkeep`, a vlan leg): a 9.11 `vban-dante70-retired` profile is deleted
+    (device disconnected first) and its NIC retired down; a retired NIC whose link is up again is taken down.
+  - verify `(vban-leg) leftover` FAILs a retired NIC (the drop-in's, or a parking profile's) whose link is admin UP
+    (sysfs `flags` IFF_UP; `up` / `unreadable` FAIL), a parking profile left, and a default route through it; the
+    OK row names `the retired NIC <nic> unmanaged + link down`. An unplugged retired NIC is not graded.
+- **The leg address is announced after a change** (`_strih_vban_leg_announce`): iputils
+  `arping -q -U -c 2 -I <leg> <addr>` (unsolicited ARP requests, source = target = the leg address, bounded by
+  `timeout 10`) once the changed leg READ BACK (created, brought up or reapplied this run), and once after a
+  retirement (also after the per-run cleanup of a 9.11 parking profile / a retired NIC that came up again; that
+  cleanup is NOT a leg change: it never touches the leg address, so it restarts no hub). Why: the leg runs `ipv4.dad-timeout 0`, so NetworkManager announces nothing, and the kernel's
+  `arp_notify` fires at NETDEV_UP, before NM adds the address. Never on the rig NIC or STRIH_IP. No arping =
+  `iputils-arping` installed (not on stream-snv on 9.11.2026); a non-iputils arping (Habets', other flags) or a
+  failed send = a WARN (a neighbour then waits for its ARP entry to expire). An unchanged leg announces nothing.
+  `arping -U` exits 0 after sending, 2 on a down interface (checked in a netns on dev1).
+- A profile whose name nmcli cannot read fails the scan (rc 1), never "not ours".
+- A `vban-dante70` ethernet profile bound to the rig NIC is never touched (a WARN; verify FAILs it).
+- verify item 9 `(vban-leg) leftover`: the leg address on any other interface, and on a vlan leg any
+  ethernet `vban-dante70` profile left, FAIL.
+- The first-VLAN warning names the atlantic reset as one driver's behaviour; r8169 showed none (the wait
+  ends with the "no reset on this NIC" NOTE after `STRIH_VBAN_LEG_RESET_SEEN_S`).
+- Tests: `tests/python/test_vban_leg_nic_to_vlan_1495.py` + `test_vban_leg_move_1495.py` (the retired NIC's link,
+  the announce, the hub restart; the fakes model the sysfs link flags, NM's activation bringing a link up,
+  `device disconnect` / `device set managed`, an iputils `arping`, `pgrep`). The `mac:` tests of `test_vban_leg_1439.py` run on
+  a copy of the facts with stream-snv in its pre-1495 shape (`vban_leg_fakes_1439.pre_1495_boxes`).
+
+## The Dante variant of the leg (issue 1485, strih-snv; stream-snv since issue 1495)
 
 Owner 2.11.2026: each application is its own Dante device; PP gets no Dante; VBAN stays. Fact
 `STRIH_DANTE_DEVICES` = `none` everywhere but strih-snv (`name=arc:cmc:flows:rxfirst-rxlast`, space-joined;
@@ -666,7 +768,7 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   link change, a refused reapply fails by name (`test_the_live_32_moves_to_the_24_by_reapply_...`).
 - **The filter:** read from dstack's sockets: bound to the interface address, its ARC / flow / mDNS instance
   CLIENT sockets on port 0, so a peer's reply is admitted by its SOURCE port, to the ephemeral range only
-  (never 319 or the VBAN ports). The peer ports are the defaults + this box's devices. Input from the /24 to the
+  (never 319 or the VBAN ports). The peer ports are dstack's SLOT RANGES (ARC 4440-4471, flows 4455-4486, CMC 8800-8831: a peer PC's device sits in any slot, base + k) + this box's devices, merged as nft prints them. Issue 1508: the base-only set dropped mbc-snv's slot-1 reply (from 4456) after mbc's restart 11.11.2026 12:05Z, and stream-snv's program audio had ~2 % holes for 18 h (flow request, no answer, every ~6 s). Stateless on purpose (no conntrack); dstack's two-networks standard names the same ranges. Input from the /24 to the
   devices' ports + 5353, 8700, 8702, 8708; output from the leg's address to the /24 and 224.0.0.231, .233,
   .251. IGMP both ways: without it a snooping switch ages the groups out.
 - **Traps:** `nft list` prints touching ports of an interval set merged (`4440-4441`) and a `skuid` as a
@@ -683,8 +785,29 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   INADDR_ANY:319 sockets; by its config its gm_allowlist keeps it on video-clock.lan (NOT measured with the
   audio grandmaster's packets arriving: read dsync's `/status` grandmaster after the first deploy; the clock
   watchdog pages a foreign one). Who may bind 319: `.claude/rules/strih-dante-input.md`.
+- **Nothing but Dante on a Dante leg (issue 1507, dstack two-networks):** the /24 profile declares
+  `ipv4.route-metric 900`, and the install purges `wsdd` (gvfsd starts it in a desktop session; it bound UDP
+  3702 on 10.77.7.204 on stream-snv) after an `apt-get -s` read that refuses any other removal. Both land at
+  the next setup run (a profile change is a reapply: never live under a running stream-obs).
 - **`rp_filter=2` on the leg:** an inbound multicast's reverse lookup has no `from` match and resolves
   through the rig NIC.
+- **Address conflict detection is off on the leg (`ipv4.dad-timeout 0`, issue 1495, live 9.11.2026):** the
+  NIC-to-VLAN handover brings the VLAN up while the old NIC leg still holds the SAME address on the same
+  L2, and NetworkManager's ACD refused it ("IP address 10.77.7.204 cannot be configured because it is
+  already in use in the network by host 00:E0:4C:68:01:85"). The fake nmcli models that refusal.
+- **A leg profile change is a `device reapply`, and a RUNNING dstack device does not survive it**
+  (strih-snv, 9.11.2026 19:04): the reapply briefly takes the address away, the hub's `strih-snv-intercom`
+  then logged `info packet could not be sent: No such device (os error 19)` every 0.25 s and its
+  subscriptions stayed `pending` until `systemctl restart intercom-hub` (OBS's `strih-obs` was restarted
+  by the deploy anyway). So the leg lib records every change it makes (create, up, reapply, the transition's
+  retirement) in `STRIH_VBAN_LEG_CHANGED`, and setup step 13 runs `strih_vban_leg_after_change` right after
+  `strih_vban_leg_install` (also when the install failed after touching the leg): a RUNNING `intercom-hub` is
+  `systemctl try-restart`ed (never a start), the crash-loop probe runs (a loop fails setup by name), the running
+  install is recorded (`strih_intercom_hub_record_loaded`, so the post-16i restart fires again only for a later
+  hub file change), one line names the reason. Here, not after 16i: a later step that fails would leave the hub
+  stalled. A running OBS on a Dante-program box gets one WARNING naming its device and
+  `systemctl --user restart strih-obs.service` (never restarted by setup; the genlock deploy stops OBS before
+  setup, so a deploy never prints it). An unchanged leg restarts nothing.
 - **Unproven until the first live run:** `man nm-settings-nmcli` says `ipv4.route-table` affects device-routes
   too, but the fake NetworkManager assumes it, so the
   first reapply on strih-snv is the proof: `ip route show table 70` carries the /24, main does not, and the
@@ -692,6 +815,13 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   can lose packets.
 - **Known limit, unmeasured:** libndi sends its own mDNS from every interface; with 5353 open it can reach
   the audio VLAN from the leg address (read with tcpdump on the leg). Its NDI TCP stays dropped.
+
+- **Janus offers the LAN address only (issue 1499, dstack two-networks section 4).** A box with a leg gets
+  janus.jcfg's managed `ice_enforce_list = "<STRIH_IP>"` block (`scripts/janus_ice_cfg.py`, through
+  `scripts/lib/strih-janus-ice.sh`, setup step 14 before its Janus restart); no leg = the block removed, so
+  strih-pp / stream-pp stay untouched. An enforce list makes Janus ignore the package's `ice_ignore_list =
+  "vmnet"` line, which stays as is. The grade (`(janus-ice)`, from verify item 9 for a declared leg only)
+  also FAILs a running Janus that started before the jcfg changed: it still gathers on every interface.
 
 ## Verify
 

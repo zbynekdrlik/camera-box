@@ -5,8 +5,6 @@ paths:
   - "vendor/obs-studio/libobs/obs.c"
   - "tests/genlock_audio_buffering_parity_1367.rs"
   - "tests/genlock_audio_buffering_wiring_1367.rs"
-  - "tests/genlock_audio_mix_guard_1381.rs"
-  - "tests/c/genlock_audio_mix_guard_1381_harness.c"
   - "vendor/obs-studio/libobs/obs-genlock-mix-guard.h"
   - "vendor/obs-studio/libobs/obs-output.c"
   - "tests/genlock_audio_buffering_freeze_wiring_1425.rs"
@@ -15,7 +13,6 @@ paths:
   - "scripts/rig-health-audit.py"
   - "scripts/launch-obs-genlock.sh"
   - "scripts/lib/obs-audio-buffering.sh"
-  - "tests/genlock_audio_buffering_box_1425.rs"
   - "tests/python/test_obs_audio_buffering_1425.py"
 ---
 
@@ -31,7 +28,7 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
 | Piece | Where |
 |---|---|
 | the box fact `STRIH_AUDIO_BUFFERING_MS` (0..960 ms, the ASCII digit set spelled out; a missing or bad value refuses by name) | `scripts/strih-boxes/<box>.env` (0 on all four boxes), `scripts/lib/strih-box-facts.sh`, accessor `strih_lx_audio_buffering_ms` |
-| the marker `~/.camera-box/genlock-audio-buffering-ms` of the OBS user (`<ms>` + newline, 0644, compare-then-write, never through a symlink, the dir via `strih_user_home_dir`) | setup-strih step 5 (one line), `obs_audio_buffering_install` in `scripts/lib/obs-audio-buffering.sh`; it never restarts OBS |
+| the marker `~/.camera-box/genlock-audio-buffering-ms` of the OBS user (`<ms>` + newline, 0644, compare-then-write, never through a symlink, the dir via `strih_user_home_dir`) | setup-strih BEFORE step 1 (right after the root check, issue 1425 28.10 fix), `obs_audio_buffering_install` in `scripts/lib/obs-audio-buffering.sh`; it never restarts OBS |
 | the read, once per audio reset (the genlock-min-latency marker pattern): ABSENT / INVALID / FIXED | obs.c `genlock_audio_buffering_read_box_ms`, BEFORE the plan block |
 | the pure parse (1..3 ASCII numerals + an optional newline, 0..960), the plan (`make_plan_box` / `plan_box`: floor = the value, `box_fixed`) and the freeze (`frozen_plan`: a fixed plan is frozen on every tick) | `obs-genlock-audio-buffering.h` <-> `vstack:rig/core/src/genlock_audio_buffering.rs`, parity gate `tests/genlock_audio_buffering_parity_1367.rs` |
 | the per-tick freeze takes `audio->genlock_buffering_box_fixed` | obs-audio.c `genlock_buffering_frozen_now(..., box_fixed)`, the call anchor in `tests/genlock_audio_buffering_freeze_wiring_1425.rs` + both windows-genlock pwsh steps |
@@ -67,19 +64,41 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
   re-sources it, ONE grep of the newest log (the FIXED line sits at the log head and the telemetry runs
   through the whole session, so no `strih-log-read.sh` tail op fits); an unreadable box FAILS, a host no
   obs-fleet row classifies FAILS, a windows-genlock box is one NOTE.
+- **The marker lands before any OBS start (28.10.2026 strih-pp, design 6757364266).** libobs reads it
+  once, at OBS start. strih-pp's OBS started 17:09:12, setup-strih wrote the marker at step 5 at
+  17:09:23, so that OBS ran `NOT deterministic` until its next restart and the deploy read-back passed.
+  - setup-strih writes it FIRST (before step 1): any OBS start during or after setup (the kiosk session
+    autostart, the panel, the deploy's start) reads the right file; a fresh box has it before its first boot.
+  - Right after it, `obs_audio_buffering_running_note HOME USER MS` (stdout, always rc 0): OBS not
+    running = it reads it at its next start; running FIXED at the fact = one ok line; anything else = a
+    loud `WARNING: OBS is running with <what> ... restart strih-obs.service`. Setup NEVER restarts OBS
+    (a hand-run setup on a live box must not cut the program; the genlock deploy owns the restart).
+  - The deploy read-back (`strih_lx_remote_abuf_state_cmd` -> field `abuf=<ms|nd|none>`, the LAST
+    `genlock-audio-buffering:` line of the OBS log newer than the start marker) is graded by
+    `strih_lx_abuf_verdict` (args 13/14 of `strih_lx_deploy_verdict`) against the box fact resolved in
+    `strih_lx_prepare` (`STRIH_LX_BOX_ABUF`): a started OBS not FIXED at it keeps the poll refusing
+    (exit 4 by name). `abuf=` sits BEFORE `jxs=` (the 1387 test pins the line ending in `jxs=`).
+  - The grade's optional 4th input LATER (`_obs_audio_buffering_later MARKER LOG`: the marker's mtime
+    after the start time in the OBS log's NAME `YYYY-MM-DD HH-MM-SS.txt`, the box's local time, the same
+    second never counts) turns a running OBS that is not FIXED at the fact into the named FAIL
+    `the running OBS started before ~/.camera-box/genlock-audio-buffering-ms was last written ...`.
+    It only words a failure, never fails a box. The E2E remote text ships the function by `declare -f`
+    (`LATER=` line), item 48 calls it locally.
+  - Tests: `tests/python/test_audio_buffering_marker_order_1425.py`, the read-back rows in
+    `tests/deploy_genlock_fleet_strih_lx_exec_1317.rs`.
 - **The known limit (the design's trade-off):** under a FIXED plan a member that KEEPS its stamp and stays
   later than the fixed window is re-anchored on every tick, i.e. never heard (the slice-2b limit, now from
   the first tick and without an encoder). The 1381 lift's `box-fixed-0` pins it: a mic 1.3 ms late at a
   0 ms box is never mixed (`mic_missed=300`). Live, a growing `#800 mix: mixed_late=` is that case; the
   cure is a larger box value, never growth.
 - **Tests:** the parity gate (`planb` / `frozenp` / `parse` lines + `a_fixed_plan_never_grows_from_its_first_tick_1425`);
-  `tests/genlock_audio_buffering_box_1425.rs` (the reader lifted verbatim, run against a tempfile HOME, +
+  `obs:tests/vendored/tests/genlock_audio_buffering_box_1425.rs` (the reader lifted verbatim, run against a tempfile HOME, +
   the wiring); the 1381 lift's `box-fixed-0` / `box-fixed-85` scenarios
   (`a_box_fixed_plan_never_grows_the_mix_1425`); `tests/python/test_obs_audio_buffering_1425.py` (the
   grade over log lines rendered from the shipped C format strings, the install, item 48, the fact, the E2E
   row against a fake sshpass that RUNS the remote text on a fake box home).
-- **Live acceptance (supervisor):** FULL-bundle deploy (libobs), re-run setup-strih (step 5 writes the
-  marker), restart strih-obs.service, then 5 OBS restarts per box (strih-snv, stream-snv): every launch logs
+- **Live acceptance (supervisor):** FULL-bundle deploy (libobs), re-run setup-strih (it writes the
+  marker before step 1), restart strih-obs.service, then 5 OBS restarts per box (strih-snv, stream-snv): every launch logs
   `genlock-audio-buffering: FIXED 0 ms (0 ticks)`, `#800 total_buffering=0 ms (ticks=0/45)` throughout,
   no `ABOVE the floor` line, `#800 mix: frozen=1`, `mixed_late=` flat; verify-strih item 48 PASS and the
   E2E `[0/8]` row ok on both boxes. Watch `mixed_late=` on the first restarts: a rising count means a
@@ -243,7 +262,7 @@ hears from causing it.
   late stamp is re-anchored on nearly every tick). It never carries the #786 `is now` text, so no
   launch gate reads it as a buffering draw; the marker is not a substring of `audio-stall #1367:` /
   `audio-telemetry #800` / `genlock audio buffering`. Both 60 s bounds are spelled
-  `(60ULL * 1000000000ULL)`: `tests/audio_telemetry_800.rs` pins the #800 rate limit by the literal
+  `(60ULL * 1000000000ULL)`: `obs:tests/vendored/tests/audio_telemetry_800.rs` pins the #800 rate limit by the literal
   `60000000000ULL`, which obs-audio.c must keep exactly once.
 
 **Known limit (reported to the supervisor, not a different shape).** The entry re-anchor's timing
@@ -258,14 +277,14 @@ call. `cut-in-kept-stamp-limit` pins the limit so a change to it is visible. A l
 shape: a direct source late when it joins (the stream ASIO startup race) is re-anchored once and
 then reaches the same upstream increase as before (`launch-late`: 128 ms).
 
-**Tests** (`tests/genlock_audio_mix_guard_1381.rs`, std-only):
+**Tests** (`obs:tests/vendored/tests/genlock_audio_mix_guard_1381.rs`, std-only):
 - Wiring anchors (8, `WIRING`: obs-audio.c, obs-internal.h, obs-genlock-mix-guard.h) + the SAME
   list in a pwsh step of both `windows-genlock*.yml`.
 - A C LIFT of the shipped `audio_callback` path, verbatim: the render-order tail (mark + catch-all
   loop), the render loop, `calc_min_ts`, the 1367 tick decision, mix + discard, and every function
   they call (`push_audio_tree`, `convert_time_to_frames`, `ignore_audio` .. `calc_min_ts` incl. the
   guard, `audio_frames_to_ns` / `ns_to_audio_frames` from audio-io.h), each lift anchor unique. They
-  are substituted into `tests/c/genlock_audio_mix_guard_1381_harness.c` (six at-sign markers, each
+  are substituted into `obs:tests/c/genlock_audio_mix_guard_1381_harness.c` (six at-sign markers, each
   checked to occur once), which `#include`s the header: a stub libobs with a real timestamp deque,
   byte-only input buffers, a render stub with process_audio_source_tick's pending rule, a mix stub
   with mix_audio's window test plus a stale-output check, and a model of source_output_audio_place
@@ -363,7 +382,7 @@ so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
 **Tests.**
 - `vstack:rig/core/src/genlock_audio_buffering.rs` unit tests + the 1367 parity gate (the action's `frozen`, the
   decision over its one input).
-- The 1381 lift (`tests/genlock_audio_mix_guard_1381.rs`; the harness stub has an encoder count
+- The 1381 lift (`obs:tests/vendored/tests/genlock_audio_mix_guard_1381.rs`; the harness stub has an encoder count
   `h_encoders`):
   - the three E1 replays with the stream's audio encoder running (a member that keeps its stamp
     delivers a backlog stamped at capture; stock libobs reproduces exactly the logged +128 / +192 /

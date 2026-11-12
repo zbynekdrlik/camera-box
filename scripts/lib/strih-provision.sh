@@ -53,6 +53,11 @@ if ! declare -F obs_box_panel_install >/dev/null; then
   # shellcheck source=scripts/lib/obs-box-panel.sh
   . "$(dirname "${BASH_SOURCE[0]}")/obs-box-panel.sh"
 fi
+# issue 1466: the ONE operator session start + the XFCE session (setup-strih steps 15 + 16h, verify item 48).
+if ! declare -F obs_box_session_install >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-xfce.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-xfce.sh"
+fi
 # issue 1399: the box's own HTTPS front end (setup-strih step 16i, verify-strih item 45).
 if ! declare -F strih_https_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-https.sh
@@ -142,6 +147,11 @@ fi
 if ! declare -F strih_vban_leg_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-vban-leg.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-vban-leg.sh"
+fi
+# issue 1499: Janus gathers ICE candidates on the LAN address only on a box with that leg (step 14, item 9).
+if ! declare -F strih_janus_ice_apply >/dev/null; then
+  # shellcheck source=scripts/lib/strih-janus-ice.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-janus-ice.sh"
 fi
 # issue 1465 item 3: the stream role's locked operator PipeWire (setup step 12 on the stream role, item 9b).
 if ! declare -F stream_operator_audio_install >/dev/null; then
@@ -381,7 +391,7 @@ strih_lx_seed_manifest_json() {
     ai="$(strih_lx_program_audio_input)" || return 1
     printf '  "camera_latency_ms": %s,\n' "$lat"
     printf '  "program_audio_input": "%s",\n' "$ai"
-    printf '  "program_audio_dante": {"device": "%s"}\n' "$STRIH_DANTE_INPUT_DEVICE"
+    printf '  "program_audio_dante": {"device": "%s"}\n' "$(strih_dante_input_device)"
   elif vban="$(strih_lx_program_audio_vban_json)"; then
     ai="$(strih_lx_program_audio_input)" || return 1
     printf '  "camera_latency_ms": %s,\n' "$lat"
@@ -1080,20 +1090,19 @@ strih_install_bundle_prefix() {
 # strih_lx_dantesync_role_ok: an ambiguous shape (server WITH args, client with master/empty args, an
 # unknown role) emits NOTHING and returns 1 -- but a plain server role is CORRECT and NEVER refused
 # (the post-M4 fact), reversing the pre-M4 "always fail-closed on server mode" behaviour.
-# Issue 1439 (1.11.2026): RIG_IP, when given, adds ONE ExecStartPre that waits up to 120 s until
-# `ip -o -4 addr show` lists the rig NIC's address; a timeout fails the start and Restart=always tries
-# again. dantesync 1.20.0 joins PTP on the first IPv4 interface it lists and never re-selects, so on
-# stream-snv a boot that addressed the VBAN-leg NIC first kept it off the Dante clock for a whole
-# event. The rig NIC has the lowest ifindex on every Linux OBS box, so once its IP exists it is the one
-# dantesync picks. No `$` in the line (systemd expands it). A malformed RIG_IP emits nothing (rc 1).
+# Issue 1439 (ROZHODNUTE 1.11.2026: the PTP NIC is set explicitly, never picked by chance): RIG_NIC,
+# when given, appends `--interface <RIG_NIC>` to ExecStart. dsync >= 1.21 waits for that NIC and
+# never falls back, so the unit needs no ExecStartPre wait (the 1.11 stopgap relied on the rig NIC
+# having the lowest ifindex). A NIC name that is not 1-15 of [A-Za-z0-9._-] emits nothing (rc 1).
 strih_dantesync_unit_text() {
   local role="${1:?dantesync role (client|server) required}"
   local args="${2-}"
-  local execargs="" waitpre=""
+  local execargs="" iface=""
   if [ "$#" -ge 3 ]; then
-    local rig_ip="${3-}" d='[0123456789]{1,3}'
-    [[ "$rig_ip" =~ ^${d}\.${d}\.${d}\.${d}$ ]] || return 1
-    waitpre="ExecStartPre=/usr/bin/timeout 120 /bin/sh -c 'until ip -o -4 addr show | grep -qF \" ${rig_ip}/\"; do sleep 1; done'"$'\n'
+    local nic="${3-}" LC_ALL=C up='ABCDEFGHIJKLMNOPQRSTUVWXYZ' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789'
+    [[ "$nic" =~ ^[-._${dg}${up}${lo}]{1,15}$ ]] || return 1
+    case "$nic" in -*) return 1 ;; esac
+    iface=" --interface ${nic}"
   fi
   case "$role" in
     server)
@@ -1115,7 +1124,7 @@ Wants=network.target
 
 [Service]
 Type=simple
-${waitpre}ExecStart=/usr/local/bin/dsync${execargs}
+ExecStart=/usr/local/bin/dsync${execargs}${iface}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -2114,8 +2123,19 @@ strih_lx_reboot_pending() {
 # alone would never fire -- imag's step-16 pattern) + the issue-1399 session apps, Companion Satellite
 # (companion-satellite.service) and its watch among them. RustDesk needs no line: its system
 # rustdesk.service serves the Xorg session itself. Needs obs-box-baseline.sh sourced.
-strih_openbox_autostart_text() {
-  local box
+# issue 1466: it IS the openbox form of the ONE session start, strih_session_start_text openbox.
+strih_openbox_autostart_text() { strih_session_start_text openbox; }
+
+# strih_session_start_text DESKTOP -> the ONE operator session start (issue 1466, the gradual move to
+# XFCE): setup-strih step 15 installs it as /usr/local/bin/obs-box-session-start (rendered for the box's
+# STRIH_DESKTOP) and writes its openbox form as ~/.config/openbox/autostart on every box (the shared
+# baseline `autostart` row grades that file, and a box moved back to openbox needs nothing else). An XFCE
+# session runs the script through the XDG entry ~/.config/autostart/obs-box-session.desktop. The only
+# per-desktop line: the tint2 panel starts under openbox only (XFCE brings xfce4-panel). DESKTOP is
+# openbox | xfce, anything else rc 1 with no output.
+strih_session_start_text() {
+  local desktop="${1-}" box
+  case "$desktop" in openbox|xfce) ;; *) echo "strih_session_start_text: DESKTOP must be openbox or xfce" >&2; return 1 ;; esac
   box="$(strih_lx_hostname)" || return 1
   printf '#!/bin/bash\n# %s OBS kiosk boot -- WRITTEN BY setup-strih.sh (issue 1357, the shared OBS-box baseline). Do not hand-edit.\n' "$box"
   cat <<'AUTOSTART_EOF'
@@ -2148,7 +2168,7 @@ AUTOSTART_EOF
     'systemctl --user start strih-bundle-state-server.service || true'
   strih_session_apps_autostart_lines
   # issue 1420: the kiosk panel (tint2), on every box the 16h-panel gate admits.
-  ! obs_box_step_applies 16h-panel >/dev/null || printf '%s\n' "systemctl --user start ${OBS_BOX_PANEL_UNIT} || true"
+  [ "$desktop" != openbox ] || ! obs_box_step_applies 16h-panel >/dev/null || printf '%s\n' "systemctl --user start ${OBS_BOX_PANEL_UNIT} || true"
   # issue 1412 (restreamer agreement 11.10.2026): the stream box runs the restreamer headless as the
   # --user unit its .deb ships; the kiosk has no tray and no XDG autostart, so start it here.
   if [ "$(strih_box_role)" = stream ]; then

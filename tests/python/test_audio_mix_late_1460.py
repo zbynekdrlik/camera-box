@@ -337,3 +337,94 @@ def test_watchdog_sends_a_time_bucketed_key(tmp_path):
     assert len(sent) == 1, sent
     assert re.search(r"--dedup-key audio-mixer-mixlate-stream-snv-\d+$", sent[0]), sent[0]
     assert "✅" not in sent[0]
+
+
+# ---------------------------------------------------------------------------------------------
+# the 28.10 review follow-ups (comment 6480741240): the audio SESSION identity, handle_arm's return
+# ---------------------------------------------------------------------------------------------
+def _reset(ts):
+    """The audio reset block's `buffering type:` line, from the shipped obs.c format string."""
+    src = (_ROOT / "vendor/obs-studio/libobs/obs.c").read_text()
+    start = src.index('"\\tbuffering type:')
+    fmt = re.findall(r'"((?:[^"\\]|\\.)*)"', src[start:src.index('",', start) + 1])[0]
+    return f"{ts}: " + fmt.replace("\\t", "\t") % 0
+
+
+def test_the_session_is_the_newest_buffering_type_stamp():
+    log = _text([_reset("11:00:00.100"), _mix("11:01:00.000", 4), _reset("12:00:00.250"),
+                 _mix("12:01:00.000", 4)])
+    assert bsg.audio_mix_session_from_log(log) == "12:00:00.250"
+
+
+def test_the_session_comes_from_the_head_slice_of_a_long_session():
+    head = _text([_reset("08:00:00.500"), _mix("08:01:00.000", 0)])
+    tail = _text([_mix("12:00:00.000", 3)])
+    assert bsg.audio_mix_session_from_log(head + SEP + tail) == "08:00:00.500"
+
+
+def test_no_reset_line_is_no_session():
+    assert bsg.audio_mix_session_from_log(_text([_mix("12:00:00.000", 3)])) == ""
+
+
+def test_the_server_serves_the_session():
+    bss = _load_server()
+    log = _text([_reset("12:00:00.250"), _mix("12:01:00.000", 2), "12:01:03.000: x"])
+    facets = bss._audio_log_facets(log, 12 * 3600 + 65, "mbc")
+    assert facets["audio_mix_session"] == "12:00:00.250"
+    assert bsg.build_bundle_state(audio_mix_session="12:00:00.250") == {"audio_mix_session": "12:00:00.250"}
+
+
+def _sbody(late, session):
+    return json.dumps({"obs_log_head_age_s": "2", "audio_mix_mixed_late": str(late),
+                       "audio_mix_frozen": "1", "audio_mix_age_s": "4", "audio_mix_session": session})
+
+
+def test_watchdog_a_new_session_with_an_equal_count_is_graded_from_zero(tmp_path):
+    # the old residual: OBS restarted and its new session reached the stored count -> read HEALTHY
+    state = tmp_path / "state"
+    _run_watchdog(tmp_path, _sbody(3, "09:00:00.000"), state)
+    log = _run_watchdog(tmp_path, _sbody(3, "10:30:00.000"), state)
+    assert "new audio session" in log and "mix_late=LATE" in log and not _pages(log), log
+    assert _stored(state) == "0"
+    log = _run_watchdog(tmp_path, _sbody(3, "10:30:00.000"), state)
+    assert len(_alerts_now(log)) == 1 and "z 0 na **3** (+3)" in log, log
+
+
+def test_watchdog_a_new_clean_session_reads_healthy(tmp_path):
+    state = tmp_path / "state"
+    _run_watchdog(tmp_path, _sbody(3, "09:00:00.000"), state)
+    log = _run_watchdog(tmp_path, _sbody(0, "10:30:00.000"), state)
+    assert "mix_late=HEALTHY" in log and not _pages(log), log
+
+
+def test_watchdog_an_absent_session_keeps_the_count_compare(tmp_path):
+    state = tmp_path / "state"
+    _run_watchdog(tmp_path, _sbody(3, "09:00:00.000"), state)
+    log = _run_watchdog(tmp_path, _body(3), state)
+    assert "new audio session" not in log and "mix_late=HEALTHY" in log, log
+
+
+def test_handle_arm_returns_whether_the_verdict_is_confirmed(tmp_path):
+    state = tmp_path / "state"
+    script = ('set -uo pipefail; f="$1"; st="$2"; set --; . "$f"; set +e; DRY_RUN=1; STATE_FILE="$st"; '
+              'handle_arm b LATE pfx key body >/dev/null 2>&1; echo "first=$?"; '
+              'handle_arm b LATE pfx key body >/dev/null 2>&1; echo "second=$?"')
+    r = subprocess.run(["bash", "-c", script, "harness", str(_SCRIPTS / "audio-mixer-alert-watchdog.sh"),
+                        str(state)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.split() == ["first=1", "second=0"], (r.stdout, r.stderr)
+
+
+def test_handle_mix_late_no_longer_reads_the_arms_confirm_key():
+    src = (_SCRIPTS / "audio-mixer-alert-watchdog.sh").read_text()
+    body = src[src.index("handle_mix_late() {"):]
+    body = body[:body.index("\n}\n")]
+    assert "_confirm_" not in body and "if handle_arm " in body, body
+
+
+def test_watchdog_a_session_change_while_a_rise_is_held_pages_the_new_sessions_count(tmp_path):
+    state = tmp_path / "state"
+    _run_watchdog(tmp_path, _sbody(3, "09:00:00.000"), state)
+    log = _run_watchdog(tmp_path, _sbody(5, "09:00:00.000"), state)     # LATE, held (confirm 1)
+    assert "mix_late=LATE" in log and not _pages(log), log
+    log = _run_watchdog(tmp_path, _sbody(5, "10:30:00.000"), state)     # restart: graded from 0, confirm 2
+    assert "new audio session" in log and len(_alerts_now(log)) == 1 and "z 0 na **5** (+5)" in log, log

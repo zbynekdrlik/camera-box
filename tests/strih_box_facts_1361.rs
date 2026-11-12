@@ -152,6 +152,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_JXS_CAMERA_PIN_MS",
     "STRIH_JXS_PROGRAM_PORT",
     "STRIH_JXS_PROGRAM_PIN_MS",
+    // issue 1466: the operator desktop session (openbox | xfce).
+    "STRIH_DESKTOP",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -224,8 +226,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_HTTPS_PUBLIC=yes",
         // issue 1462: the strih role has no stream Development scene.
         "STRIH_STREAM_DEV_SCENE=none",
-        // issue 808: cam2 has its own shading board, cam3 is the travelling cam4-shading board.
-        "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading 3=sbc-relay@register:cam4-shading",
+        // issue 808: cam2 has its own shading board; issue 1452: cam3 takes the default cambox relay.
+        "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading",
         // issue 1425: strih-snv drew 0 ms on its last 10 launches; the fact fixes it there.
         "STRIH_AUDIO_BUFFERING_MS=0",
         // issue 1387: cam2/3/5 on the JPEG XS link at their live ports, the 100 ms grid-age pin.
@@ -233,6 +235,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_JXS_CAMERA_PIN_MS=36",
         "STRIH_JXS_PROGRAM_PORT=none",
         "STRIH_JXS_PROGRAM_PIN_MS=none",
+        // issue 1466: strih-snv stays on the openbox kiosk until its turn.
+        "STRIH_DESKTOP=openbox",
         "LOADED=strih-snv",
     ] {
         assert!(
@@ -745,7 +749,7 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
             ),
             // issue 808 (owner 26.10.2026): a relay override must name one of the box's cameras.
             (
-                "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading 3=sbc-relay@register:cam4-shading",
+                "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading",
                 "STRIH_BKSHADING_RELAYS=none",
             ),
             (
@@ -916,8 +920,8 @@ fn every_fact_dependent_output_follows_a_different_box() {
             ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=1 3"),
             // issue 808: a relay override must name one of the box's cameras.
             (
-                "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading 3=",
-                "STRIH_BKSHADING_RELAYS=3=",
+                "STRIH_BKSHADING_RELAYS=2=sbc-relay@register:cam2-shading",
+                "STRIH_BKSHADING_RELAYS=1=sbc-relay@register:cam2-shading",
             ),
             // issue 1387: a JPEG XS camera must be one of the box's cameras.
             (
@@ -960,7 +964,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "STRIH-ZZ (Grading)",
         "{\"sender\": \"STRIH-ZZ (2ME PVW)\", \"input\": \"NDI 2ME PVW\", \"scene\": \"2ME PVW\"}",
         "{\"sender\": \"CAM3 (usb)\", \"input\": \"NDI cam3\", \"scene\": \"Cam 3\"}",
-        "ExecStart=/usr/local/bin/dsync --ntp-server venue-ntp.lan\n",
+        "ExecStart=/usr/local/bin/dsync --ntp-server venue-ntp.lan --interface enp7s0\n",
         "local_ip = \"10.0.0.5\"",
         "ws_ip = \"127.0.0.1\"",
         "# strih-zz OBS kiosk boot",

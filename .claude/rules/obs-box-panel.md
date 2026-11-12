@@ -22,6 +22,11 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
   never a start);
 - `obs_box_panel_grade_rows` is verify-strih item 44 (`OBS_BOX_PANEL_ROWS` rows, the count is pinned).
 
+**An xfce box (issue 1466, `STRIH_DESKTOP=xfce`) runs xfce4-panel instead:** step 16h keeps tint2's
+files, DISABLES its unit and renders the xfce4-panel from the SAME launcher list
+(`obs_box_xfce_panel_install`); item 44 grades `(panel-pkg)` / `(panel-config)` / `(panel-unit)` /
+`(panel-window)` against xfce4-panel there, the row count stays 10. `.claude/rules/obs-box-xfce.md`.
+
 ## Launchers (`obs_box_panel_launchers`, one `id|Name|Exec|Icon` per app the box has)
 
 - OBS, Shading, Restreamer start through their units, never a second copy; RustDesk, Discord where the
@@ -79,11 +84,31 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
   24.9.2026: production-only). It sits after Restreamer. It never "disappeared" on stream-snv: the
   panel never had one. Its Exec carries `--password-store=basic` (issue 1469): the kiosk autologin
   never unlocks the GNOME login keyring, so plain Chrome popped `Unlock Login Keyring`.
-- **Known limit (not fixed, issue 1464 review):** a launcher tint2 starts lives in the panel unit's cgroup,
-  so a panel restart (a tint2 crash, step 16h's try-restart after a panel file changed) ends the apps it
-  started (RustDesk, Discord, pcmanfm, now Chrome). The fix is a launch through `systemd-run --user
-  --scope` for the binary launchers, which needs a live check on a box first (tracked as issue 1465
-  item 7, comment 6363702188).
+
+## Every launcher starts its app outside the panel unit (issue 1465 item 7, design 6753269997)
+
+- tint2 is the `--user` unit `obs-box-panel.service` (default KillMode control-group, `Restart=always`),
+  so an app a launcher forked used to live in the PANEL's cgroup: step 16h's try-restart or a tint2 crash
+  killed Chrome / RustDesk / Discord / pcmanfm.
+- Every binary launcher's Exec is now `obs_box_panel_scoped_exec ID CMD` =
+  `/usr/bin/systemd-run --user --scope --collect --quiet --description=obs-box-panel-app-<id> -- CMD`:
+  - `--scope` keeps the app a direct child (the panel's DISPLAY + env) in `app.slice/run-r<id>.scope`
+    beside the panel;
+  - `--collect` drops a scope whose app exited non-zero (no pile of `failed` run-r scopes);
+  - no `--unit`: a fixed name refuses a second launch while the first runs.
+- The unit launchers (OBS, Shading, Restreamer) stay `systemctl --user start <unit>`: the app is in its unit.
+- The power dialog is scoped too: its systemctl still runs in the user manager outside a logind session, the
+  context `(panel-power)` grades. The recordings helper is the scoped command and still resolves the folder
+  at click time; pcmanfm inherits the scope.
+- xfce4-panel renders the same list (issue 1466), so the plugin files carry the same Exec.
+- `(panel-launchers)` reads each launcher file's OWN `Exec=` through `obs_box_panel_exec_scoped` and FAILs
+  `starts its app inside the panel's own unit` by name (also when the declaration itself lost the scope).
+- Test: `tests/python/test_obs_box_panel_scope_1465.py`; its last test restarts a stand-in panel unit on the
+  REAL user manager and the app lives on. CI's python job starts the runner's user manager
+  (`loginctl enable-linger`, waits for `/run/user/<uid>/systemd/private`); a host without one FAILs it.
+- **Rollout:** the first setup-strih run writes the new launcher files and try-restarts the panel ONCE, which
+  still kills the apps opened with the OLD launchers. Run it when the operator has nothing open from the
+  panel. Live check: open Chrome from the panel, `systemctl --user restart obs-box-panel`, the window stays.
 
 ## The screenshot tool (issue 1481, owner 25.10.2026: "nastroj ... podobne ako pod windows mali lightshot")
 

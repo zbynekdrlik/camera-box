@@ -32,6 +32,14 @@
 #        reapply`, a refused reapply FAILS by name, an identity change (vlan.parent, vlan.id, the interface
 #        name) and an existing INACTIVE VLAN profile are refused untouched -- arming its autoconnect would
 #        make NetworkManager activate it at once (a maintenance-window job).
+#      - mac -> vlan (issue 1495, stream-snv moved its leg from the USB-C NIC onto VLAN 70 of the rig NIC):
+#        an ETHERNET vban-dante70 bound to a physical NIC other than the rig NIC is the retired NIC leg. It is
+#        deleted only AFTER the VLAN came up and read back, then the VLAN is read back again (one reapply
+#        restores a routing rule the old profile's deactivation took). A VLAN created this run that does not
+#        read back goes down again, disarmed, so the box keeps ONE interface on the leg address (the old one).
+#        One bound to the rig NIC is never touched. verify's `(vban-leg) leftover` row FAILs what is left.
+#        The retired NIC is unmanaged + link-down, the leg address announced, a running hub restarted after a
+#        leg change: strih-vban-leg-move.sh.
 #   2. nftables `table inet vban_dante70` (the house pattern of scripts/lib/dscp-nft.sh: a dedicated
 #      table, `table` / `delete table` atomic replace, never `flush ruleset`, applied by its own boot
 #      oneshot, never the distro nftables.service): IN on the leg only the sender's VBAN + echo
@@ -66,6 +74,13 @@ STRIH_VBAN_LEG_NFT_TABLE=vban_dante70
 STRIH_VBAN_LEG_UNIT=vban-dante70-filter.service
 STRIH_VBAN_LEG_ROUTE_TABLE=70
 STRIH_VBAN_LEG_RULE_PRIORITY=100
+
+# issue 1495: the follow-ups of a leg move (the retired NIC link-down + unmanaged, the gratuitous ARP, the hub
+# restart after a leg change).
+if ! declare -F strih_vban_leg_after_change >/dev/null; then
+  # shellcheck source=scripts/lib/strih-vban-leg-move.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-vban-leg-move.sh"
+fi
 
 _strih_vban_leg_nft_file() { printf '%s' "${STRIH_VBAN_LEG_NFT_FILE:-/etc/nftables.d/vban-dante70.nft}"; }
 _strih_vban_leg_unit_file() { printf '%s' "${STRIH_VBAN_LEG_UNIT_FILE:-/etc/systemd/system/${STRIH_VBAN_LEG_UNIT}}"; }
@@ -245,6 +260,24 @@ strih_vban_leg_sysctl_text() {
   if [ "${2:-}" = yes ]; then printf 'net/ipv4/conf/%s/rp_filter = 2\n' "$ifc"; fi
 }
 
+# strih_vban_leg_wsdd_remove -> issue 1507: purge `wsdd` (Windows network browsing; gvfsd starts it in a
+# desktop session and it binds every address, the Dante leg's included). A production OBS box never browses
+# SMB. Read with `apt-get -s` first: anything else apt would take with it refuses, nothing changed.
+strih_vban_leg_wsdd_remove() {
+  local sim other
+  [ "$(dpkg-query -W -f='${Status}' wsdd 2>/dev/null || true)" = "install ok installed" ] || return 0
+  sim="$(DEBIAN_FRONTEND=noninteractive apt-get -s purge wsdd 2>/dev/null)" \
+    || { echo "strih-vban-leg: apt-get -s purge wsdd failed -- nothing changed" >&2; return 1; }
+  other="$(printf '%s\n' "$sim" | grep -E '^(Purg|Remv) ' | grep -vE '^(Purg|Remv) wsdd( |$)' || true)"
+  if [ -n "$other" ]; then
+    echo "strih-vban-leg: purging wsdd would also remove: $(printf '%s' "$other" | tr '\n' ';') -- nothing changed (issue 1507)" >&2
+    return 1
+  fi
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y wsdd >/dev/null \
+    || { echo "strih-vban-leg: apt-get purge wsdd failed (issue 1507)" >&2; return 1; }
+  echo "  wsdd purged: nothing but Dante on the Dante leg (issue 1507)"
+}
+
 # strih_vban_leg_nm_props IF ADDR [PARENT VLAN_ID] -> `property<TAB>value` lines: the profile, as
 # `nmcli -g` reads it back (the vlan kind adds vlan.parent + vlan.id after the interface name). With Dante
 # devices the address is the real /24 and ipv4.route-table holds its connected route out of main, so the
@@ -256,7 +289,11 @@ strih_vban_leg_nm_props() {
   routes="$(strih_vban_leg_net "$addr") table=${STRIH_VBAN_LEG_ROUTE_TABLE}"
   printf '%s\t%s\n' connection.id "$STRIH_VBAN_LEG_PROFILE" connection.interface-name "$ifc"
   if [ "$parent" != - ]; then printf '%s\t%s\n' vlan.parent "$parent" vlan.id "$id"; fi
-  if [ "$plen" = 24 ]; then routes=""; printf '%s\t%s\n' ipv4.route-table "$STRIH_VBAN_LEG_ROUTE_TABLE"; fi
+  # issue 1507 (dstack two-networks standard): a Dante leg's route metric is 900
+  if [ "$plen" = 24 ]; then
+    routes=""
+    printf '%s\t%s\n' ipv4.route-table "$STRIH_VBAN_LEG_ROUTE_TABLE" ipv4.route-metric 900
+  fi
   printf '%s\t%s\n' \
     connection.autoconnect yes \
     ipv4.method manual \
@@ -268,6 +305,7 @@ strih_vban_leg_nm_props() {
     ipv4.dns "" \
     ipv4.routes "$routes" \
     ipv4.routing-rules "priority ${STRIH_VBAN_LEG_RULE_PRIORITY} from ${addr} table ${STRIH_VBAN_LEG_ROUTE_TABLE}" \
+    ipv4.dad-timeout 0 \
     ipv6.method disabled
 }
 
@@ -465,7 +503,7 @@ _strih_vban_leg_rig_link_wait() {
 
 # _strih_vban_leg_vlan_warning PARENT ID -> the loud line printed before a first VLAN creation.
 _strih_vban_leg_vlan_warning() {
-  echo "  WARNING: creating VLAN ${2} on the rig NIC ${1} -- the atlantic driver resets the rig link for ~8 s the first time a VLAN enters its HW filter (issue 1439, 23.10.2026): NDI, PTP and ssh on this box drop for that time; done once, never again on a re-run"
+  echo "  WARNING: creating VLAN ${2} on the rig NIC ${1} -- a NIC driver may reset the rig link the first time a VLAN enters its HW filter (the atlantic driver does, ~8 s, issue 1439, 23.10.2026): NDI, PTP and ssh on this box drop for that time; done once, never again on a re-run"
 }
 
 # _strih_vban_leg_active_on IF -> the UUID of the profile active on IF ('' when none); rc 1 + a named
@@ -480,12 +518,109 @@ _strih_vban_leg_active_on() {
   return 0
 }
 
+STRIH_VBAN_LEG_RETIRED_PROFILE=vban-dante70-retired
+STRIH_VBAN_LEG_RETIRING_TABLE=vban_dante70_retiring
+
+# _strih_vban_leg_nic_legs -> one `UUID BOUND ACTIVE` line per ETHERNET profile named vban-dante70: a NIC leg
+# (the `mac:` kind) left behind on a box whose leg is now a VLAN (issue 1495, stream-snv). BOUND = the device it
+# is active on, else its interface-name, else the interface its MAC resolves to, else `-`; ACTIVE 1 when it is
+# active on a device. rc 1 when nmcli cannot list or a profile's name cannot be read (never "not ours").
+_strih_vban_leg_nic_legs() {
+  local rows u t dev b m id
+  rows="$(nmcli -g UUID,TYPE,DEVICE connection show </dev/null 2>/dev/null)" || return 1
+  while IFS=: read -r u t dev; do
+    [ -n "$u" ] && [ "$t" = 802-3-ethernet ] || continue
+    id="$(_strih_vban_leg_nm_get "$u" connection.id)" || return 1
+    [ "$id" = "$STRIH_VBAN_LEG_PROFILE" ] || continue
+    b="$dev"
+    [ -n "$b" ] || b="$(_strih_vban_leg_nm_get "$u" connection.interface-name || true)"
+    if [ -z "$b" ]; then
+      m="$(_strih_vban_leg_nm_get "$u" 802-3-ethernet.mac-address | tr '[:upper:]' '[:lower:]' || true)"
+      [ -z "$m" ] || b="$(strih_vban_leg_iface "$(_strih_vban_leg_sysfs)" "$m" 2>/dev/null | head -n 1 || true)"
+    fi
+    printf '%s %s %s\n' "$u" "${b:--}" "$([ -n "$dev" ] && echo 1 || echo 0)"
+  done <<<"$rows"
+}
+
+# _strih_vban_leg_carrying_nic_leg ADDR PARENT -> the device of an ACTIVE NIC leg (not the rig NIC) that carries
+# ADDR right now (rc 0), nothing + rc 1 when none does: the leg that still holds the program audio; rc 2 when
+# the profiles cannot be read (never read as "none": the caller refuses).
+_strih_vban_leg_carrying_nic_leg() {
+  local addr="$1" parent="$2" legs u b act
+  legs="$(_strih_vban_leg_nic_legs 2>/dev/null)" || return 2
+  while read -r u b act; do
+    [ -n "$u" ] && [ "$act" = 1 ] && [ "$b" != "$parent" ] && [ "$b" != - ] || continue
+    if grep -F -- " inet ${addr}/" <<<"$(ip -4 -o addr show dev "$b" 2>/dev/null || true)" >/dev/null; then
+      printf '%s\n' "$b"; return 0
+    fi
+  done <<<"$legs"
+  return 1
+}
+
+# _strih_vban_leg_retiring_filter IF SENDER PORT ADDR -> issue 1495: the leg's filter rendered for the OLD NIC
+# leg IF as its own table (`inet vban_dante70_retiring`, loaded live only), so the old leg stays filtered while
+# the main table already names the VLAN; removed once the old leg is retired. rc 1 when nft refuses it.
+_strih_vban_leg_retiring_filter() {
+  local tmp rc=0
+  tmp="$(mktemp)" || return 1
+  strih_vban_leg_nft_text "$1" "$2" "$3" "$4" "$(_strih_vban_leg_devices)" \
+    | sed "s/inet ${STRIH_VBAN_LEG_NFT_TABLE}\$/inet ${STRIH_VBAN_LEG_RETIRING_TABLE}/; s/inet ${STRIH_VBAN_LEG_NFT_TABLE} {\$/inet ${STRIH_VBAN_LEG_RETIRING_TABLE} {/" >"$tmp" || rc=1
+  [ "$rc" = 1 ] || nft -f "$tmp" || rc=1
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# _strih_vban_leg_retire_nic_legs IF ADDR PARENT -> issue 1495: after the VLAN leg IF came up and read back,
+# delete every NIC leg left behind (its device disconnected first), never one bound to the rig NIC PARENT (a
+# WARN, verify FAILs it), and retire the NIC unmanaged + link-down (strih-vban-leg-move.sh: an active parking
+# profile kept the link UP and the switch delivered to the old MAC, 9.11.2026). Then the
+# retiring filter goes and the VLAN is read back again: the old profile's deactivation may take a routing rule
+# both profiles carried with it, so one `device reapply` of IF restores it; still wrong = rc 1.
+_strih_vban_leg_retire_nic_legs() {
+  local ifc="$1" addr="$2" parent="$3" legs u b act n=0 p rd=0
+  legs="$(_strih_vban_leg_nic_legs)" || { echo "strih-vban-leg: nmcli cannot list or read the NetworkManager connections (the retired NIC leg)" >&2; return 1; }
+  while read -r u b act; do
+    [ -n "$u" ] || continue
+    if [ "$b" = "$parent" ]; then
+      echo "  WARN: an ethernet profile ${STRIH_VBAN_LEG_PROFILE} (${u}) is bound to the rig NIC ${parent} -- NOT touched (the ssh link); remove it by hand, verify-strih item 9 FAILs it"
+      continue
+    fi
+    # disconnected first: its autoconnect is blocked until the NIC is unmanaged below
+    if [ "$act" = 1 ] && [ "$b" != - ]; then
+      nmcli device disconnect "$b" </dev/null >/dev/null 2>&1 \
+        || echo "  WARN: nmcli could not disconnect ${b} before retiring its profile (it is unmanaged right after)"
+    fi
+    nmcli connection delete "$u" </dev/null >/dev/null \
+      || { echo "strih-vban-leg: nmcli could not delete the retired NIC leg ${u} on ${b} -- ${ifc} and ${b} may both carry ${addr}" >&2; return 1; }
+    echo "  the NIC leg ${STRIH_VBAN_LEG_PROFILE} (${u}) on ${b} retired: ${ifc} carries ${addr} (issue 1495)"
+    _strih_vban_leg_mark "the NIC leg on ${b} retired"
+    # a failed link-down fails the step only after the leg is restored below (the old profile is already gone)
+    _strih_vban_leg_retire_down "$b" "$parent" || rd=1
+    n=$((n + 1))
+  done <<<"$legs"
+  [ "$n" -gt 0 ] || return 0
+  nft delete table inet "$STRIH_VBAN_LEG_RETIRING_TABLE" 2>/dev/null || true
+  if p="$(_strih_vban_leg_live_problems "$ifc" "$addr")"; then
+    nmcli device reapply "$ifc" </dev/null >/dev/null 2>&1 || true
+    if p="$(_strih_vban_leg_live_problems "$ifc" "$addr")"; then
+      echo "strih-vban-leg: ${ifc} after retiring the NIC leg: $(tr '\n' ';' <<<"$p")" >&2
+      return 1
+    fi
+    echo "  ${ifc}: reapplied once after the NIC leg went (its rule / route came back)"
+  fi
+  _strih_vban_leg_announce "$ifc" "$addr" "$parent"
+  if [ "$rd" = 1 ]; then
+    echo "strih-vban-leg: a retired NIC could not be unmanaged / its link taken down (above) -- the switch keeps delivering to its old MAC" >&2
+    return 1
+  fi
+}
+
 # _strih_vban_leg_nm_apply IF ADDR MAC PARENT VLAN_ID -> the profile adopted / created, the extra ones
 # deleted, applied in place, read back (see the header for the vlan kind's rules). rc 1 on an nmcli failure
 # or a wrong read-back; an uncabled leg (activation refused) is a WARN, rc 0.
 _strih_vban_leg_nm_apply() {
   local ifc="$1" addr="$2" mac="$3" parent="$4" id="$5" scan u named on act keep="" adopt="" first=""
-  local reapply=0 diff p cc0
+  local reapply=0 diff p cc0 created=0 touched=0
   local -a extra=() kv=() addkv=() upargs=()
   scan="$(_strih_vban_leg_nm_scan "$ifc" "$mac" "$parent" "$id")" \
     || { echo "strih-vban-leg: nmcli cannot list the NetworkManager connections" >&2; return 1; }
@@ -526,6 +661,7 @@ _strih_vban_leg_nm_apply() {
     cc0="$([ "$parent" = - ] || _strih_vban_leg_carrier_changes "$parent")"
     if nmcli --wait 30 connection up "$keep" "${upargs[@]}" </dev/null >/dev/null; then
       echo "  ${ifc}: ${STRIH_VBAN_LEG_PROFILE} brought up"
+      created=1; touched=1; _strih_vban_leg_mark "${ifc} created"
     elif [ "$parent" != - ]; then
       # never armed: NetworkManager would activate it later, in the middle of the next steps
       echo "strih-vban-leg: the new VLAN profile ${keep} did not come up on ${ifc} -- left with autoconnect off (never armed: NetworkManager would activate it later, resetting the atlantic rig link ~8 s while nobody waits): nmcli connection up ${keep} in a maintenance window" >&2
@@ -572,6 +708,7 @@ _strih_vban_leg_nm_apply() {
     :
   elif [ "$act" = "$keep" ] && nmcli device reapply "$ifc" </dev/null >/dev/null 2>&1; then
     echo "  ${ifc}: the profile reapplied in place (no link bounce)"
+    touched=1; _strih_vban_leg_mark "${ifc} reapplied"
   elif [ "$parent" != - ]; then
     if [ "$act" = "$keep" ]; then
       echo "strih-vban-leg: NetworkManager refused to reapply ${STRIH_VBAN_LEG_PROFILE} on ${ifc} -- NOT re-activated (a re-activated VLAN resets the atlantic rig link ~8 s); the profile is saved, apply it by hand in a maintenance window" >&2
@@ -581,22 +718,46 @@ _strih_vban_leg_nm_apply() {
     return 1
   elif nmcli --wait 30 connection up "$keep" ifname "$ifc" </dev/null >/dev/null; then
     echo "  ${ifc}: ${STRIH_VBAN_LEG_PROFILE} brought up"
+    touched=1; _strih_vban_leg_mark "${ifc} brought up"
   else
     echo "  WARN: ${ifc} did not come up with ${STRIH_VBAN_LEG_PROFILE} (is the leg cabled to the audio VLAN?) -- the profile is saved and comes up with the link; verify-strih item 9 grades it"
     return 0
   fi
   if diff="$(_strih_vban_leg_live_problems "$ifc" "$addr")"; then
     echo "strih-vban-leg: ${ifc} after applying ${STRIH_VBAN_LEG_PROFILE}: $(tr '\n' ';' <<<"$diff")" >&2
+    [ "$created" = 0 ] || [ "$parent" = - ] || _strih_vban_leg_rollback_new_vlan "$keep" "$ifc" "$addr" "$parent"
     return 1
   fi
   echo "  ${ifc}: ${addr}/$(_strih_vban_leg_plen), no route through it but the rule ${STRIH_VBAN_LEG_RULE_PRIORITY} -> table ${STRIH_VBAN_LEG_ROUTE_TABLE}"
+  # issue 1495: a changed leg is announced only now, once it reads back
+  if [ "$touched" = 1 ]; then _strih_vban_leg_announce "$ifc" "$addr" "$parent"; fi
+  if [ "$parent" != - ]; then
+    _strih_vban_leg_retire_nic_legs "$ifc" "$addr" "$parent" || return 1
+    _strih_vban_leg_retired_upkeep "$parent" "$ifc" "$addr" || return 1
+  fi
+}
+
+# _strih_vban_leg_rollback_new_vlan UUID IF ADDR PARENT -> issue 1495: a VLAN created and brought up by THIS run
+# that does not read back is DELETED again (down first: never armed, re-created by the next run), but only while an
+# ACTIVE NIC leg still carries ADDR: the box keeps ONE interface on the leg address, the one that carried the
+# program audio before the run. With no such NIC leg the VLAN stays (it is the only leg).
+_strih_vban_leg_rollback_new_vlan() {
+  local u="$1" ifc="$2" addr="$3" parent="$4" old
+  # only a NIC leg PROVEN to carry the address lets the VLAN go (unreadable = the VLAN stays)
+  old="$(_strih_vban_leg_carrying_nic_leg "$addr" "$parent")" || return 0
+  if nmcli connection delete "$u" </dev/null >/dev/null 2>&1; then
+    echo "strih-vban-leg: the new VLAN ${ifc} did not read back -- removed again; the NIC leg on ${old} keeps the program audio (nothing retired), filtered only by the LIVE table ${STRIH_VBAN_LEG_RETIRING_TABLE}: fix the cause and re-run setup-strih step 13 BEFORE any reboot (it creates the VLAN again)" >&2
+  else
+    echo "strih-vban-leg: the new VLAN ${ifc} did not read back and could NOT be removed -- ${ifc} and the NIC leg on ${old} may both carry ${addr}: nmcli connection delete ${u}" >&2
+  fi
 }
 
 # strih_vban_leg_install -> setup-strih step 13 (every role). rc 0 (also a SKIP without a leg), rc 1 + stderr
 # naming what failed. Order: the filter, the ARP sysctls, then the profile (the leg never carries its
 # address unfiltered).
 strih_vban_leg_install() {
-  local leg addr sender port res ifc parent id mac=-
+  local leg addr sender port res ifc parent id mac=- old crc
+  STRIH_VBAN_LEG_CHANGED=""   # issue 1495: what this run changed on the leg (strih_vban_leg_after_change)
   if [ "$(strih_vban_leg_kind)" = none ]; then
     echo "  SKIP: no VBAN-only leg declared (STRIH_PROGRAM_VBAN_LEG=none) -- no audio-VLAN leg on this box"
     return 0
@@ -620,8 +781,25 @@ strih_vban_leg_install() {
   fi
   read -r ifc parent id <<<"${res##*$'\n'}"
   echo "  the leg ${leg}: ${ifc} -> ${addr}/$(_strih_vban_leg_plen), $(_strih_vban_leg_filter_words "$sender" "$port")"
+  # issue 1495: an old NIC leg still carrying the address gets its own live table BEFORE the main table moves to
+  # the VLAN, so it is never unfiltered; profiles that cannot be read refuse the step with nothing changed
+  if [ "$parent" != - ]; then
+    crc=0; old="$(_strih_vban_leg_carrying_nic_leg "$addr" "$parent")" || crc=$?
+    if [ "$crc" = 2 ]; then
+      echo "strih-vban-leg: nmcli cannot list or read the NetworkManager connections (an old NIC leg?) -- nothing changed" >&2; return 1
+    fi
+    if [ "$crc" = 0 ]; then
+      _strih_vban_leg_retiring_filter "$old" "$sender" "$port" "$addr" \
+        || { echo "strih-vban-leg: the retiring filter for the old NIC leg ${old} did not load -- nothing changed" >&2; return 1; }
+      echo "  table inet ${STRIH_VBAN_LEG_RETIRING_TABLE} keeps the old NIC leg ${old} filtered until it is retired"
+    fi
+  fi
   _strih_vban_leg_filter_apply "$ifc" "$sender" "$port" "$addr" || return 1
   _strih_vban_leg_sysctl_apply "$ifc" || return 1
+  # issue 1507: nothing but Dante on a Dante leg (wsdd binds every address, the leg's included)
+  if [ "$(_strih_vban_leg_plen)" = 24 ]; then strih_vban_leg_wsdd_remove || return 1; fi
+  # issue 1495: a `mac:` leg on a NIC a VLAN move retired (the rollback) takes it out of the unmanaged drop-in
+  if [ "$parent" = - ]; then _strih_vban_leg_unretire "$ifc" || return 1; fi
   _strih_vban_leg_nm_apply "$ifc" "$addr" "$mac" "$parent" "$id" || return 1
   # a VLAN created just now did not exist at the sysctl step above (udev applies the drop-in too)
   [ ! -e "$(_strih_vban_leg_sysfs)/class/net/${ifc}" ] || _strih_vban_leg_sysctl_apply "$ifc" >/dev/null || return 1
@@ -638,6 +816,44 @@ _strih_vban_leg_rule_packets() {
       return 0
     fi
   done <<<"$1"
+}
+
+# _strih_vban_leg_leftover_grade IF ADDR PARENT -> verify item 9's `(vban-leg) leftover` row (issue 1495): the leg
+# address on any interface but the leg, and (a VLAN leg) a NIC leg's ethernet vban-dante70 profile left behind.
+_strih_vban_leg_leftover_grade() {
+  local ifc="$1" addr="$2" parent="$3" t line dev a found="" legs u b r st downs="" parked
+  t="$(ip -o -4 addr show 2>/dev/null || true)"
+  while read -r line; do
+    dev="$(awk '{print $2}' <<<"$line")"; a="${line#*inet }"; a="${a%% *}"
+    if [ "${a%/*}" = "$addr" ] && [ "$dev" != "$ifc" ]; then found="${found}${found:+, }${addr} on ${dev}"; fi
+  done <<<"$t"
+  if [ "$parent" != - ]; then
+    # issue 1495: a retired NIC (the NetworkManager drop-in's, or a 9.11 parking profile's) must be link-DOWN, and
+    # no default route may leave through it; only those NICs are graded here (a venue WiFi is not this row's)
+    while read -r r; do
+      [ -n "$r" ] || continue
+      st="$(_strih_vban_leg_link_state "$r")"
+      if [ "$st" = down ]; then downs="${downs}${downs:+, }${r}"
+      else found="${found}${found:+, }the retired NIC ${r} link is ${st^^} (the switch keeps delivering to its old MAC)"; fi
+      while read -r line; do
+        case "$line" in *" dev ${r} "*) found="${found}${found:+, }a default route through the retired NIC ${r} (${line%% proto*})" ;; esac
+      done <<<"$(ip -4 route show default 2>/dev/null || true)"
+    done <<<"$(_strih_vban_leg_retired_ifaces "$parent")"
+    parked="$(_strih_vban_leg_nm_get "$STRIH_VBAN_LEG_RETIRED_PROFILE" connection.uuid 2>/dev/null || true)"
+    if [ -n "$parked" ]; then found="${found}${found:+, }the parking profile ${STRIH_VBAN_LEG_RETIRED_PROFILE} (${parked}): an active profile keeps the link UP"; fi
+    if ! legs="$(_strih_vban_leg_nic_legs)"; then
+      found="${found}${found:+, }the profiles are unreadable (nmcli)"
+    else
+      while read -r u b _; do
+        [ -n "$u" ] && found="${found}${found:+, }the NIC leg profile ${STRIH_VBAN_LEG_PROFILE} (${u}) on ${b}"
+      done <<<"$legs"
+    fi
+  fi
+  if [ -n "$found" ]; then
+    bad "(vban-leg) leftover: ${found} -- the leg is ${ifc} now; re-run setup-strih.sh step 13 (it retires the old NIC leg once ${ifc} reads back)"
+  else
+    ok "(vban-leg) leftover: ${addr} only on ${ifc}$([ "$parent" = - ] || echo ', no NIC leg profile left')${downs:+, the retired NIC ${downs} unmanaged + link down}"
+  fi
 }
 
 # strih_vban_leg_grade -> verify-strih item 9's `(vban-leg)` rows (through the caller's ok / bad / note).
@@ -686,6 +902,7 @@ strih_vban_leg_grade() {
       fi
     fi
   fi
+  _strih_vban_leg_leftover_grade "$ifc" "$addr" "$parent"
   # the kernel's view: the address, no route through the leg but the policy one
   if p="$(_strih_vban_leg_live_problems "$ifc" "$addr")"; then
     bad "(vban-leg) routes: $(tr '\n' ';' <<<"$p") -- only the leg's own traffic may use it (re-run setup-strih.sh step 13)"
@@ -734,7 +951,7 @@ strih_vban_leg_grade() {
       ok "(vban-leg) vban: $((a2 - a1)) packets from ${sender} to UDP ${port} on ${ifc} in ${wait} s"
     else
       if strih_program_dante_declared 2>/dev/null; then   # issue 1485: the program is on Dante, VBAN is only the hub's fallback
-        note "(vban-leg) vban: no VBAN from ${sender} on ${ifc} in ${wait} s -- this box takes its program from the Dante device strih-obs (graded by (program-dante)); the console's VBAN is not needed"
+        note "(vban-leg) vban: no VBAN from ${sender} on ${ifc} in ${wait} s -- this box takes its program from the Dante device $(strih_dante_input_device) (graded by (program-dante)); the console's VBAN is not needed"
       else
         bad "(vban-leg) vban: no VBAN from ${sender} arrived on ${ifc} in ${wait} s -- is the console ${sender} sending stream '${stream}' to ${addr}:${port}?"
       fi

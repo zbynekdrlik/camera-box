@@ -60,6 +60,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cambox-offline-ack.sh
 . "$HERE/lib/cambox-offline-ack.sh"
+# shellcheck source=scripts/lib/release-version.sh
+. "$HERE/lib/release-version.sh" # issue 1487: the ONE version-order rule for the self-upgraded rows
 
 DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # The fleet-wide pin (#862 point 3). Bumped 2026-07-30 (follow-up fix) to the supervisor's
@@ -119,7 +121,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # Bumped 2026-11-05: v1.28.0 (dsync) -- at a grandmaster change within 1 ms (each FOH reboot) the
 # ~110 us residual after relock is slewed (tau 20 s), no longer stepped; the step had re-anchored
 # SongPlayer's Dante output on resolume-snv (one lost pump block, 5.11.2026 07:35:47 UTC).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.28.0}"
+# Bumped 2026-11-11: v1.29.0 (dsync) -- PTP phase measured on the delay floor (Theil-Sen through the last
+# 10 window minima), so one-sided late receive stamps under OBS load no longer move it; strih-snv lost its
+# phase lock every 2-15 min on 1.28.0 and none in its 1.29.0 canary hour (camera-box issue 1498).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.29.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
@@ -268,6 +273,39 @@ dantesync_pin_lag_verdict() {
   fi
   printf '  %-32s OK       (pin %s is the newest published release)\n' "pin_vs_newest_release" "$pin"
   return 0
+}
+
+# --- issue 1487 REPORT-ONLY rows: the nodes dsync upgrades itself --------------------------------
+#
+# DSYNC_SELF_UPGRADED_NODES (scripts/lib/dantesync-fleet.sh) are never rolled and never pinned: dsync
+# moves them on its own cadence, and our gate must never depend on it. But a node BELOW the pin must
+# still be named (9.11.2026: mbc ran 1.27.3 vs the pin 1.28.0, its PTP lock flapped and, as the Dante
+# TX of the stream-snv program, it silenced the program for ~20 min with the version printed nowhere).
+
+# dantesync_self_upgraded_verdict NAME VERSION PIN -> one row + return code, never part of the gate
+# exit. The order is release_version_order_word's (semver, never a text compare):
+#   VERSION older than PIN        -> SELF-BEHIND  (40): a named WARNING
+#   VERSION same as / newer       -> OK           (0)
+#   VERSION empty or not X.Y.Z    -> SELF-UNKNOWN (41): a NOTE, never an OK
+# The SELF-BEHIND row text is parsed by rig_dev_handover_decision.py (issue 1487): keep its shape.
+dantesync_self_upgraded_verdict() {
+  local name="$1" version="$2" pin="$3" order="UNKNOWN"
+  if [ -n "$version" ]; then
+    order="$(release_version_order_word "$version" "$pin")"
+  fi
+  case "$order" in
+    OLDER)
+      printf '  %-14s %-12s SELF-BEHIND (version=%s pin=%s; dsync upgrades this node itself -- never rolled here)\n' \
+        "$name" "$version" "$version" "$pin"
+      return 40
+      ;;
+    SAME | NEWER)
+      printf '  %-14s %-12s OK\n' "$name" "$version"
+      return 0
+      ;;
+  esac
+  printf '  %-14s %-12s SELF-UNKNOWN (version not read -- report-only)\n' "$name" "${version:--}"
+  return 41
 }
 
 # --- source-guard: when sourced (the unit tests), stop here -----------------------------------
@@ -473,7 +511,7 @@ main() {
     shift || true
   done
 
-  local -a linux_pairs=() win_pairs=()
+  local -a linux_pairs=() win_pairs=() self_linux_pairs=() self_win_pairs=()
   local raw
   set -f
   for raw in "${linux_raw[@]}"; do
@@ -497,12 +535,18 @@ main() {
     set -f
     for fpair in $(dantesync_fleet_spec linux "$fuser" --present); do
       case "$named" in *" ${fpair%%=*} "*) continue ;; esac
-      dantesync_fleet_self_upgraded "${fpair%%=*}" && continue
+      if dantesync_fleet_self_upgraded "${fpair%%=*}"; then
+        self_linux_pairs+=("$fpair")
+        continue
+      fi
       linux_pairs+=("$fpair")
     done
     for fpair in $(dantesync_fleet_spec win "$fuser" --present); do
       case "$named" in *" ${fpair%%=*} "*) continue ;; esac
-      dantesync_fleet_self_upgraded "${fpair%%=*}" && continue
+      if dantesync_fleet_self_upgraded "${fpair%%=*}"; then
+        self_win_pairs+=("$fpair")
+        continue
+      fi
       win_pairs+=("$fpair")
     done
     for fname in $(dantesync_fleet_spec local "$fuser"); do
@@ -517,15 +561,11 @@ main() {
     # issue 1412: a `reach` node (the PP boxes) is read only while its ssh port answers. The --present
     # spec above already probed it, so a node absent from both arms is the unreachable one (no 2nd probe).
     named=" "
-    for fpair in "${linux_pairs[@]}" "${win_pairs[@]}"; do
+    for fpair in "${linux_pairs[@]}" "${win_pairs[@]}" "${self_linux_pairs[@]}" "${self_win_pairs[@]}"; do
       named="${named}${fpair%%=*} "
-    done
-    for fname in $DSYNC_SELF_UPGRADED_NODES; do
-      echo "  $fname NOT GATED on the pin (dsync upgrades it itself; its clock stays graded on :8898)"
     done
     for fname in $(dantesync_fleet_names homegate=reach); do
       case "$named" in *" $fname "*) continue ;; esac
-      dantesync_fleet_self_upgraded "$fname" && continue
       echo "  $fname SKIPPED (unreachable -- ssh :$DANTESYNC_FLEET_REACH_PORT did not answer; it is gated when reachable)"
     done
   fi
@@ -564,6 +604,31 @@ main() {
 
   local rc=0
   dantesync_fleet_report "$pin" "${entries[@]}" || rc=$?
+
+  # issue 1487 -- REPORT-ONLY: the nodes dsync upgrades itself, read with the same reader, graded on
+  # the pin by version order, NEVER touching rc and never rolled. A node named on the command line is
+  # not here: it was graded on the pin above.
+  if [ "$fleet" = 1 ]; then
+    echo
+    echo "-- nodes dsync upgrades itself (issue 1487, report-only, never blocks) --"
+    local spair sname sver svrc swin
+    for spair in "${self_linux_pairs[@]/#/0:}" "${self_win_pairs[@]/#/1:}"; do
+      swin="${spair%%:*}"
+      spair="${spair#*:}"
+      sname="${spair%%=*}"
+      if cambox_offline_ack_is_acked "$sname"; then
+        printf '  %-14s %-12s EXCLUDED (acked offline: %s)\n' "$sname" "-" "$(cambox_offline_ack_reason "$sname")"
+        continue
+      fi
+      sver="$(dantesync_version_from_version_output "$(read_dantesync_version_output "$sname" "${spair#*=}" "$swin")")"
+      svrc=0
+      dantesync_self_upgraded_verdict "$sname" "$sver" "$pin" || svrc=$?
+      case "$svrc" in
+        40) echo "!! DSYNC-SELF-UPGRADED WARNING: ${sname} runs dsync ${sver} below the fleet pin ${pin} -- dsync upgrades it itself; tell the dsync/dstack session (report-only, does NOT block this run, never rolled here)." >&2 ;;
+        41) echo "!! DSYNC-SELF-UPGRADED NOTE: ${sname} dsync version not read -- its clock stays graded on :8898 (report-only)." >&2 ;;
+      esac
+    done
+  fi
 
   # #1139 -- REPORT-ONLY orphan alarms. These SCREAM (a table row + a stderr banner) but NEVER touch
   # rc / the gate exit (see the pure-verdict headers for the ALARM-not-hard-gate justification): the

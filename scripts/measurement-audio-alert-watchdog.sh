@@ -148,6 +148,17 @@ now_epoch() { printf '%s' "${MEASUREMENT_AUDIO_NOW:-$(date +%s)}"; }
 # `test_production_critical_watchdogs_actually_bucket_their_inline_key` requires it).
 fire_alert() {
   local base="$1"; shift
+  if [ "$base" = "program-audio" ]; then
+    # issue 1495 (owner 8.11.2026): the airuleset page: class, the only one the owner policy lets
+    # through; airuleset keeps it to one message per check per 10 min.
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "[dry-run] WOULD page (page:stream-snv-program-audio): $*"
+      return 0
+    fi
+    python3 "$NOTIFY" notify --body "$*" --dedup-key "page:stream-snv-program-audio:$(watchdog_notify_key "$base" "$(now_epoch)" "$REPING_INTERVAL_S")" \
+      >/dev/null 2>&1 || log "PAGE: airuleset.py notify failed (non-fatal)"
+    return 0
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] WOULD alert (dedup base=$base, bucket=${REPING_INTERVAL_S}s): $*"
     return 0
@@ -175,9 +186,9 @@ confirm_then_alert() {
     was_alerted="$(read_state_field "alerted_${suffix}" 0)"
     if [ "$was_alerted" = "1" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then
-        log "[dry-run] WOULD send recovery: ${suffix} measurement audio present again"
+        log "[dry-run] WOULD send recovery: ${suffix} audio present again"
       else
-        log "RECOVERY: ${suffix} measurement audio PRESENT again -- machine-channel only (#1206: recovery is not a phone ping)"
+        log "RECOVERY: ${suffix} audio PRESENT again -- machine-channel only (#1206: recovery is not a phone ping)"
       fi
       write_state_field "alerted_${suffix}" 0
     fi
@@ -224,6 +235,31 @@ main() {
   rig_mode_snapshot="$(rig_mode_probe)"
   rig_mode="$(rig_mode_from_painter_snapshot "$rig_mode_snapshot")"
   log "rig mode (cam2 painter probe @ $RIG_MODE_PAINTER_IP): $rig_mode"
+
+  # -- probe the mbc peak level + the stream state off stream OBS (no recording) -------------------
+  local body reachable
+  if body="$(fetch_meter "$WS_HOST" "$WS_PORT")"; then
+    reachable=1
+  else
+    reachable=0; body=""
+  fi
+
+  # -- issue 1495: the production arm, every rig mode --------------------------------------------
+  local prod page active ppeak
+  prod="$(printf '%s' "$body" | python3 "$DECIDE" production --box-reachable "$reachable" 2>/dev/null)"
+  page="$(printf '%s\n' "$prod" | sed -n 's/^page=//p')"
+  active="$(printf '%s\n' "$prod" | sed -n 's/^stream_active=//p')"
+  ppeak="$(printf '%s\n' "$prod" | sed -n 's/^peak_db=//p')"
+  log "program audio (issue 1495): page=${page:-<none>} stream_active=${active:-} peak_db=${ppeak:-}"
+  case "$page" in
+    PAGE)
+      confirm_then_alert "program" 1 "program-audio" \
+        "🚨 STREAM BEZ ZVUKU: stream-snv vysiela, ale zvuk programu (vstup $INPUT_NAME z mbc) je digitálne ticho (${ppeak} dB). Skontroluj VBAN z mbc na stream-snv (USB sieťovka vban-dante70) a master v Ableton na mbc."
+      ;;
+    OK) confirm_then_alert "program" 0 "program-audio" ;;
+    *) log "program audio: no verdict this pass (box unreachable or decision failed) -- holding" ;;
+  esac
+
   if [ "$rig_mode" = "EVENT" ]; then
     log "rig in EVENT mode -- the QPSK marker is silent by design; TEST-premise check skipped, no page (#1290). Clearing any latch."
     confirm_then_alert "stream" 0 "measurement-audio-stream"
@@ -235,13 +271,8 @@ main() {
   # -- the -60 dB silence bar, SOURCED from the lib (issue 748), never retyped here ----------------
   threshold_db="$(audio_preflight_default_threshold_db)"
 
-  # -- probe the mbc peak level off stream OBS (no recording) --------------------------------------
-  local body reachable out verdict peak present
-  if body="$(fetch_meter "$WS_HOST" "$WS_PORT")"; then
-    reachable=1
-  else
-    reachable=0; body=""
-  fi
+  # -- grade the same probe for the TEST-mode measurement chain ------------------------------------
+  local out verdict peak present
   out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --threshold-db "$threshold_db" 2>/dev/null)"
   verdict="$(printf '%s\n' "$out" | sed -n 's/^verdict=//p')"
   peak="$(printf '%s\n' "$out" | sed -n 's/^peak_db=//p')"

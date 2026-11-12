@@ -493,6 +493,21 @@ class Op:
                 f.unlink()
             d.rmdir()
 
+    def drm(self, connector, driver, status):
+        """A DRM connector in the fake sysfs: /sys/class/drm/<card>-<conn>/status + the card's driver
+        link (strih-snv live 8.11.2026: card2-eDP-2 connected on amdgpu, card1-eDP-1 disconnected on
+        nvidia)."""
+        card = connector.split("-", 1)[0]
+        drm = self.sys / "class" / "drm"
+        (drm / connector).mkdir(parents=True, exist_ok=True)
+        (drm / connector / "status").write_text(status + "\n")
+        drv = self.sys / "bus" / "pci" / "drivers" / driver
+        drv.mkdir(parents=True, exist_ok=True)
+        dev = drm / card / "device"
+        dev.mkdir(parents=True, exist_ok=True)
+        if not (dev / "driver").is_symlink():
+            (dev / "driver").symlink_to(drv)
+
     def ws(self, cfg):
         p = self.home / ".config" / "obs-studio" / "plugin_config" / "obs-websocket" / "config.json"
         p.write_text(json.dumps(cfg))
@@ -771,6 +786,30 @@ def test_one_gpu_provider_is_a_note(op):
     (op.st / "xrandr").write_text(XR_ONE)
     st, d = op.row("panel-gpu")
     assert st == "NOTE" and "one GPU provider" in d and "NVIDIA-0" in d, d
+
+
+def test_one_provider_with_a_connected_igpu_panel_fails_1494(op):
+    """strih-snv 8.11.2026 (issue 1494): an OutputClass without a Driver line kept modesetting out of X,
+    so X listed only NVIDIA-0 while the AMD panel eDP-2 was connected and black. The row read it as
+    "one GPU provider, no PRIME" and stayed a NOTE."""
+    (op.st / "xrandr").write_text(XR_ONE)
+    op.drm("card1-eDP-1", "nvidia", "disconnected")
+    op.drm("card2-eDP-2", "amdgpu", "connected")
+    st, d = op.row("panel-gpu")
+    assert st == "FAIL" and "card2-eDP-2" in d and "amdgpu" in d and "modesetting" in d, d
+    assert "Driver" in d, d
+
+
+def test_one_provider_with_only_a_disconnected_or_nvidia_panel_stays_a_note_1494(op):
+    (op.st / "xrandr").write_text(XR_ONE)
+    op.drm("card1-eDP-1", "nvidia", "connected")
+    op.drm("card2-eDP-2", "amdgpu", "disconnected")
+    assert op.row("panel-gpu")[0] == "NOTE"
+
+
+def test_a_modesetting_sink_with_the_connected_panel_stays_ok_1494(op):
+    op.drm("card2-eDP-2", "amdgpu", "connected")
+    assert op.row("panel-gpu")[0] == "OK"
 
 
 def test_a_modesetting_panel_sink_is_ok(op):

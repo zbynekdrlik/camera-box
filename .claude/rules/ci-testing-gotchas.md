@@ -1383,6 +1383,10 @@ was written for it:
 - **`{ echo msg >&2; } 2>/dev/null` sends the message itself to /dev/null.** The group's fd 2 is
   redirected first, so the inner `>&2` follows it. The guarded form is `echo msg >&2 2>/dev/null`.
   Redirections apply left to right, so fd 1 takes the real stderr before fd 2 is dropped.
+- **The same dead terminal hits a NEW stderr line on the normal path** (issue 1452). The HUP test
+  runs `bkshading-deploy-relay.sh` with stderr = `/dev/full`; a plain `echo "WARNING ..." >&2` added
+  before the swap failed under `set -e` and ended the deploy before the scp the test waits for. Print
+  an informational NOTE to stdout, keep `>&2` for lines that end the run anyway.
 - **Clear the "box is dirty" flag only after the restore returned.** Otherwise a signal inside the
   restore leaves the trap nothing to do. Keep a separate "restore in progress" flag, and re-run the
   restore from the trap when it was interrupted. This is safe because it is idempotent: `remount,ro`
@@ -1539,7 +1543,9 @@ pytest-xdist 3.8: `python3 -m pytest -q -p no:cacheprovider -n 12 tests/python
 --ignore=tests/python/test_strih_tally_service_1417.py` runs it in minutes; the 106 files that read the
 provisioning scripts took 80 s with `-n 8`. `test_strih_tally_service_1417.py` imports `websockets`,
 which dev1 does not have (CI installs it), and a collection error stops the whole serial run before any
-test. Put the command in a script file and run `bash /abs/script.sh` from a worktree lane. Never
+test. `test_obs_box_xfconf_real_daemon_1466.py` FAILS its 2 tests on dev1 (no xfconf package; CI installs
+it) -- an environment gap, not a regression (issue 1460, 12.11.2026). The whole suite with `-n 16` takes ~5.5
+min, so a `timeout 590` wrapper is tight: a backgrounded run killed by it prints no summary. Put the command in a script file and run `bash /abs/script.sh` from a worktree lane. Never
 `pkill -f <pattern>` a run from the same shell command: the pattern is in that shell's own command
 line, so it kills itself (exit 144).
 
@@ -1890,10 +1896,12 @@ The CI lint `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` froze dev1 twi
   ```bash
   . scripts/lib/shellcheck-pin.sh
   sc="$(shellcheck_pin_install "$HOME/.cache/shellcheck-pin")"
-  systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0 "$sc" -S warning scripts/*.sh scripts/lib/*.sh
+  systemd-run --user --scope --collect -p MemoryMax=2G -p MemorySwapMax=0 "$sc" -S warning scripts/*.sh scripts/lib/*.sh
   ```
+  `--collect` (issue 1465): without it every scope whose command exited non-zero (a lint finding,
+  a kill) stays listed as a `failed` `run-r<id>.scope` in `systemctl --user` forever; dev1 had dozens.
   A killed run (exit 137 / signal 9) means a script's closure grew past the bound. Find it per file:
-  `systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 "$sc" -x -S warning <file>`
+  `systemd-run --user --scope --collect -p MemoryMax=1500M -p MemorySwapMax=0 "$sc" -x -S warning <file>`
   under `/usr/bin/time -f %M`; the file over 1 GB needs the directive.
 - **A comment line that starts with the word `shellcheck`** (`# shellcheck 0.10.0+ knows`,
   `#   shellcheck_pin_install DIR`) is parsed as a directive and fails SC1073 (an error). Reflow the

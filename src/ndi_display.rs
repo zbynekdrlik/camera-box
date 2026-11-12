@@ -14,6 +14,7 @@ use crate::preview_source::{
     pick_preview_source, preview_log_level, preview_log_line, resolve_followed_preview_source,
     strih_lan_log_line, PreviewLogLevel, PreviewResolution, STRIH_DNS_NAME,
 };
+use crate::preview_tap::{PreviewSource, PreviewTap, TapFrame};
 
 /// DRM sysfs class dir whose connector `status` files report monitor presence (#135).
 const DRM_CLASS_DIR: &str = "/sys/class/drm";
@@ -133,7 +134,53 @@ fn resolve_strih_lan() -> Option<std::net::IpAddr> {
 
 /// Run the NDI display loop with automatic reconnection
 /// This should be called from a low-priority thread
-pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> Result<()> {
+/// Issue 1501: show the local camera from `tap` while its switch says local. Returns when the
+/// switch goes back to the strih feed (or on shutdown). Renders only with a monitor present, and
+/// sleeps 10 ms when the tap holds no newer frame.
+fn render_local_preview(
+    display: &mut FramebufferDisplay,
+    tap: &PreviewTap,
+    running: &AtomicBool,
+    connector_present: &mut bool,
+    logged_connector_state: &mut Option<bool>,
+) {
+    tracing::info!("preview: showing the LOCAL camera (double press, issue 1501)");
+    let mut frame = TapFrame::default();
+    let mut shown: u64 = 0;
+    let mut last_check = std::time::Instant::now();
+    while running.load(Ordering::Relaxed) && tap.switch().source() == PreviewSource::Local {
+        if last_check.elapsed() >= std::time::Duration::from_secs(1) {
+            *connector_present = any_connector_connected(DRM_CLASS_DIR).unwrap_or(true);
+            log_connector_state(*connector_present, logged_connector_state);
+            last_check = std::time::Instant::now();
+        }
+        if !*connector_present || !tap.take_newer(&mut frame) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
+        if let Err(e) = display.display_frame(&frame.data, frame.width, frame.height, frame.fourcc)
+        {
+            if shown.is_multiple_of(300) {
+                tracing::warn!("Display write failed (monitor disconnected?): {}", e);
+            }
+        }
+        shown += 1;
+    }
+    let (stored, busy, malformed) = tap.counters();
+    tracing::info!(
+        "preview: back to the strih NDI feed after {} local frames (tap stored={} busy_skips={} malformed={})",
+        shown,
+        stored,
+        busy,
+        malformed
+    );
+}
+
+pub fn run_display_loop(
+    config: NdiDisplayConfig,
+    running: Arc<AtomicBool>,
+    tap: Arc<PreviewTap>,
+) -> Result<()> {
     tracing::info!(
         "NDI display starting, searching for source: {}",
         config.source_name
@@ -187,6 +234,17 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
 
     // Outer reconnection loop - keeps trying to connect/reconnect
     while running.load(Ordering::Relaxed) {
+        // Issue 1501: a double press put the local camera on the preview: no NDI receiver meanwhile.
+        if tap.switch().source() == PreviewSource::Local {
+            render_local_preview(
+                &mut display,
+                &tap,
+                &running,
+                &mut connector_present,
+                &mut logged_connector_state,
+            );
+            continue;
+        }
         // #528: poll connector presence BEFORE connecting the NDI receiver — a monitor-less
         // cambox must not pull+decode the interkom NDI stream at all (previously this connected
         // unconditionally and only gated the *render*, wasting network/decode on every box
@@ -284,6 +342,11 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
 
         // Inner display loop - runs until source disappears
         while running.load(Ordering::Relaxed) {
+            if tap.switch().source() == PreviewSource::Local {
+                // Issue 1501: drop the receiver (like a monitor unplug); the outer loop renders
+                // the local camera and reconnects when the switch comes back.
+                break;
+            }
             // Capture frame with 100ms timeout
             match receiver.capture_frame(100) {
                 Ok(Some(frame)) => {

@@ -247,7 +247,10 @@ def points_markdown(verdict, run_url=None, stage_attempted=False):
     lines.append(f"| strih program nahrávka | {_glyph(s_ok)} {s_txt} | — strih nemá merací zvuk | — strih nemá merací zvuk |")
     t_ok, t_txt = _node_loss(verdict, "stream")
     pa = verdict.get("program_audio_continuity") if isinstance(verdict.get("program_audio_continuity"), dict) else None
-    pa_cell = (f"{_glyph(pa.get('pass') is True)} prijímač obs-vban {pa.get('verdict')} (počítadlá; vzorková kontrola "
+    # issue 1495: a stream box on Dante grades its dante_input device, not an obs-vban receiver
+    rx = (f"dante_input ({(pa.get('stream_dante') or {}).get('device') or 'stream-obs'})"
+          if pa and isinstance(pa.get("stream_dante"), dict) else "prijímač obs-vban")
+    pa_cell = (f"{_glyph(pa.get('pass') is True)} {rx} {pa.get('verdict')} (počítadlá; vzorková kontrola "
                "nahrávky zatiaľ nie)") if pa else "❔ nemerané"
     av_ok, av_txt = _av_text(verdict)
     lines.append(f"| stream nahrávka | {_glyph(t_ok)} {t_txt} | {pa_cell} | {_glyph(av_ok)} {av_txt} |")

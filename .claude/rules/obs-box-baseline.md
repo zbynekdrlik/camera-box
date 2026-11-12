@@ -27,6 +27,12 @@ SAME OBS-only appliance: lightdm autologin into **openbox on plain Xorg** (no GN
 Wayland/XWayland), the low-latency kernel, the de-jitter masks, max-performance persistence, the
 power envelope. A difference between boxes is a defect, not a per-box feature.
 
+**Issue 1466 (the gradual move to XFCE):** the kiosk SESSION is `obs_box_kiosk`'s 4th argument
+(default openbox; setup-strih passes the box fact `STRIH_DESKTOP`, imag passes none). An xfce box also
+installs `xfce4 --no-install-recommends` and autologins into `xfce`; openbox stays installed. The
+grader's `autologin` key reads the same session, `obs_box_baseline_gather_snippet`'s 4th argument.
+Details: `.claude/rules/obs-box-xfce.md`.
+
 ## Where it lives
 
 - `scripts/lib/obs-box-baseline.sh` — the ONE entry point both setup scripts source. The system

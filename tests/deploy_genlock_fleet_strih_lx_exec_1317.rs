@@ -125,7 +125,7 @@ case "$cmd" in
     pid=4242; restarts=0
     if [ -n "${STUB_CRASHLOOP:-}" ]; then pid=$((4242 + n)); restarts="$n"; fi
     if [ -n "${STUB_LATE_CRASHLOOP:-}" ] && [ "$n" -ge 3 ]; then pid=$((4242 + n)); restarts="$n"; fi
-    printf 'installed=%s obs_tag=%s active=%s pid=%s restarts=%s lib=%s tick=%s hub=%s jxs=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_OBS_TAG:-v9.9.5}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}" "${STUB_HUB-9.9.3}" "${STUB_JXS:-off}"; exit 0 ;;
+    printf 'installed=%s obs_tag=%s active=%s pid=%s restarts=%s lib=%s tick=%s hub=%s abuf=%s jxs=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_OBS_TAG:-v9.9.5}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}" "${STUB_HUB-9.9.3}" "${STUB_ABUF-0}" "${STUB_JXS:-off}"; exit 0 ;;
   *"--user start"*) exit "${STUB_START_RC:-0}" ;;
   *) exit "${STUB_SSH_RC:-0}" ;;
 esac
@@ -658,6 +658,12 @@ fn strih_lx_readback_refuses_a_wrong_sha_dead_or_crashlooping_obs_1317() {
         // old process, 4.11.2026), and an unreadable /api/version is no pass.
         (("STUB_HUB", "9.9.2"), "intercom hub"),
         (("STUB_HUB", ""), "intercom hub"),
+        // issue 1425 (28.10.2026 strih-pp): the started OBS must hold the box's FIXED audio
+        // buffering (STRIH_AUDIO_BUFFERING_MS of strih-snv.env = 0).
+        (("STUB_ABUF", "nd"), "NOT deterministic"),
+        (("STUB_ABUF", "none"), "no genlock-audio-buffering line"),
+        (("STUB_ABUF", "85"), "FIXED at 85 ms"),
+        (("STUB_ABUF", ""), "audio buffering is <unreadable>"),
     ] {
         let r = run_exec(&[env]);
         assert_eq!(r.code, 4, "{env:?} must refuse.\nerr={}", r.err);

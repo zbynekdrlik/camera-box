@@ -123,18 +123,21 @@ obs_box_holds_generic_kernel() {
     return 1
 }
 
-# obs_box_baseline_gather_snippet BOX DESKTOP_USER OBS_UNIT -> read-only bash text that, run ON the box
+# obs_box_baseline_gather_snippet BOX DESKTOP_USER OBS_UNIT [SESSION] -> read-only bash text that, run ON the box
 # as any user (no root needed), prints one `key=value` fact per line for obs_box_baseline_verdict. The
 # detectors it needs (obs_box_has_discrete_nvidia, obs_box_crash_popup_units) are embedded from THIS lib
 # via `declare -f` -- one source of truth on the provisioning AND the grading side. Every read is `|| true`
 # guarded: a missing tool/file yields an empty value, which the verdict grades FAIL (unreadable).
 obs_box_baseline_gather_snippet() {
-    local box="${1-}" user="${2-}" unit="${3-}"
+    # issue 1466: SESSION = the lightdm autologin session the kiosk wrote (openbox, imag's only value; a strih
+    # box passes its STRIH_DESKTOP, openbox | xfce).
+    local box="${1-}" user="${2-}" unit="${3-}" session="${4:-openbox}"
+    case "$session" in openbox|xfce) ;; *) echo "obs_box_baseline_gather_snippet: SESSION must be openbox or xfce" >&2; return 1 ;; esac
     if [ -z "$box" ] || [ -z "$user" ] || [ -z "$unit" ]; then
         echo "obs_box_baseline_gather_snippet: BOX DESKTOP_USER OBS_UNIT required" >&2
         return 1
     fi
-    printf 'BOX=%q\nU=%q\nUNIT=%q\n' "$box" "$user" "$unit"
+    printf 'BOX=%q\nU=%q\nUNIT=%q\nSESSION=%q\n' "$box" "$user" "$unit" "$session"
     declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units \
         obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
         obs_box_cpu_latency_bound_us rig_timezone_read obs_box_amdgpu_ddx_package obs_box_pkg_status \
@@ -272,7 +275,7 @@ echo "openbox=$(pkg openbox)"
 echo "dm=$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null)"
 echo "dm_lightdm=$(readlink -f /lib/systemd/system/lightdm.service 2>/dev/null)"
 _al="/etc/lightdm/lightdm.conf.d/50-${BOX}-autologin.conf"
-echo "autologin=$(if grep -qxF "autologin-user=${U}" "$_al" 2>/dev/null && grep -qxF 'autologin-session=openbox' "$_al" 2>/dev/null; then echo 1; else echo 0; fi)"
+echo "autologin=$(if grep -qxF "autologin-user=${U}" "$_al" 2>/dev/null && grep -qxF "autologin-session=${SESSION}" "$_al" 2>/dev/null; then echo 1; else echo 0; fi)"
 # issue 1454: the GPU-ready wait in front of lightdm, byte-identical to the renderers, and this boot's
 # Xorg core dumps (an Xorg abort made lightdm fall back to the login screen).
 _gw="$(obs_box_gpu_ready_wait_path)"; _gd="$(obs_box_gpu_ready_dropin_path)"
@@ -479,7 +482,7 @@ obs_box_baseline_verdict() {
         && [ -n "$(_obs_box_f dm)" ] && [ "$(_obs_box_f dm)" = "$(_obs_box_f dm_lightdm)" ] && [ "$(_obs_box_f autologin)" = 1 ] \
         && [ "$(_obs_box_f gdm3)" != "install ok installed" ] && [ "$(_obs_box_f gnome_shell)" != "install ok installed" ] \
         && [ "$(_obs_box_f gpu_wait)" = 1 ] && [ "$(_obs_box_f x_core)" = 0 ] && ok=1
-    _obs_box_item kiosk "$ok" "lightdm='$(_obs_box_f lightdm)' openbox='$(_obs_box_f openbox)' display-manager=$(_obs_box_f dm) autologin->openbox=$(_obs_box_f autologin) gdm3='$(_obs_box_f gdm3)' gnome-shell='$(_obs_box_f gnome_shell)' gpu-ready wait installed=$(_obs_box_f gpu_wait) Xorg core dumps this boot=$(_obs_box_f x_core)"
+    _obs_box_item kiosk "$ok" "lightdm='$(_obs_box_f lightdm)' openbox='$(_obs_box_f openbox)' display-manager=$(_obs_box_f dm) autologin->session=$(_obs_box_f autologin) gdm3='$(_obs_box_f gdm3)' gnome-shell='$(_obs_box_f gnome_shell)' gpu-ready wait installed=$(_obs_box_f gpu_wait) Xorg core dumps this boot=$(_obs_box_f x_core)"
     # websocket -- python3-websocket installed AND importable by the system python3 (issue 1361): the
     # strih/imag OBS launchers run a websocket scene seeder and strih-obs-start.sh refuses to start OBS
     # without it

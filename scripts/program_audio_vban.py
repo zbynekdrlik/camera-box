@@ -17,7 +17,16 @@ It is pure Python with no websocket dependency; the obs-websocket helpers take a
 Replacing an input of another kind (the pulse capture, a ported Windows device) keeps everything the
 operator set on it: its place (and visibility) in every scene, volume, mute, monitoring, mixer tracks,
 balance, sync offset and its filters. obs-websocket has no "change kind" request, so the input is
-removed and re-created with the same name, and that state is put back.
+re-created with the same name and that state is put back.
+
+issue 1495 (live stream-snv 9.11.2026): the old input is never removed FIRST. A removed source stays
+listed and keeps its name until its last reference goes (obs_source_remove only marks it removed), and
+the av-sync dock looks `mbc` up BY NAME every 5 s and keeps what it finds -- a removed source too -- so
+the old `mbc` lingered until an OBS restart, CreateInput refused the name, and the program audio had
+already left every scene. Now the old input is RENAMED aside (`<name> (seed replace N)`), the new one is
+created beside it with hidden scene items and the operator state, then the old one is removed and the
+new items shown. A create OBS refuses renames the old one back; an interrupted replace leaves the aside
+input, which the next launch seed resumes from.
 """
 
 import json
@@ -147,6 +156,20 @@ def mbc_vban_transport_problem(kind, settings, muted, want_stream, want_port):
     return None
 
 
+def mbc_dante_transport_problem(kind, muted):
+    """Pure (issue 1495): rig-mode TEST's #901 item-2 decision for a Linux stream box whose program-audio
+    input (`mbc` on stream-snv) is the obs release's dante_input source (the box's Dante device stream-obs,
+    which subscribes mbc-snv's stream mix). A short problem string, or None when the input is that source,
+    unmuted. Mute is named FIRST and alone, like the other two checks. The source has no settings: which
+    transmitter it hears is the device's dante-input.toml (verify-strih item 9 grades it)."""
+    if muted:
+        return "input is MUTED (mute must be OFF for the measurement chain to be usable)"
+    if kind != DANTE_SOURCE_KIND:
+        return ("input kind is %r, expected the Dante source %r (the box's program Dante device, issue 1495)"
+                % (kind, DANTE_SOURCE_KIND))
+    return None
+
+
 def kind_available(obs, kind):
     """True when OBS has the input KIND loaded (GetInputKindList, unversioned ids). An OBS that does not
     answer reads False: never remove an input for a kind that might not be creatable."""
@@ -160,16 +183,18 @@ def _value(obs, req, data, key):
 
 def input_state_read(obs, name):
     """The operator state of input NAME that a re-create must put back: every scene holding it (in the
-    scene list's order) with the item's visibility, volume, mute, monitoring, mixer tracks, balance,
-    sync offset and filters. A value OBS does not answer is None (never restored)."""
+    scene list's order) with the item's visibility and index, volume, mute, monitoring, mixer tracks,
+    balance, sync offset and filters. A value OBS does not answer is None (never restored)."""
     who = {"inputName": name}
     scenes = []
     for sc in (obs.req("GetSceneList", ignore_err=True) or {}).get("scenes", []) or []:
         sn = sc.get("sceneName")
         items = (obs.req("GetSceneItemList", {"sceneName": sn}, ignore_err=True) or {}).get("sceneItems", [])
-        for it in items or []:
+        for pos, it in enumerate(items or []):
             if it.get("sourceName") == name:
-                scenes.append((sn, it.get("sceneItemEnabled") is not False))
+                index = it.get("sceneItemIndex")
+                scenes.append((sn, it.get("sceneItemEnabled") is not False,
+                               index if isinstance(index, int) and not isinstance(index, bool) else pos))
                 break
     filters = (obs.req("GetSourceFilterList", {"sourceName": name}, ignore_err=True) or {}).get("filters")
     return {
@@ -213,58 +238,70 @@ def _await_free(obs, name, sleep):
         sleep(CREATE_POLL_S)
 
 
-def input_create_verified(obs, scene, name, kind, settings, remove_on_retry=False, sleep=None):
-    """Create input NAME as KIND with SETTINGS in SCENE once the name is free (a bounded wait) and read
-    it back from GetInputList. When OBS does not list it as KIND, try once more: wait for the name again
-    (REMOVE_ON_RETRY first removes an input still listed under it, the old one of a re-create) and
-    create again. Returns (the last CreateInput answer, the kind GetInputList lists afterwards: KIND on
-    success, otherwise input_kind_listed's answer)."""
+def input_create_verified(obs, scene, name, kind, settings, sleep=None, enabled=True):
+    """Create input NAME as KIND with SETTINGS in SCENE (its scene item ENABLED or hidden) once the name
+    is free (a bounded wait) and read it back from GetInputList. When OBS does not list it as KIND, try
+    once more (wait for the name, create again). Never removes anything. Returns (the last CreateInput
+    answer, the kind GetInputList lists afterwards: KIND on success, otherwise input_kind_listed's
+    answer)."""
     sleep = sleep or time.sleep
     resp, listed = None, None
-    for attempt in range(2):
-        if attempt and remove_on_retry and listed not in ("", None):
-            obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
+    for _attempt in range(2):
         _await_free(obs, name, sleep)
-        resp = obs.req("CreateInput", {"sceneName": scene, "inputName": name, "inputKind": kind,
-                                       "inputSettings": settings}, ignore_err=True)
+        req = {"sceneName": scene, "inputName": name, "inputKind": kind, "inputSettings": settings}
+        if not enabled:
+            req["sceneItemEnabled"] = False
+        resp = obs.req("CreateInput", req, ignore_err=True)
         listed = input_kind_listed(obs, name)
         if listed == kind:
             break
     return resp, listed
 
 
-def _hide_item(obs, scene, resp):
+# issue 1495: the name a replace parks the old input under while the new one is created beside it.
+ASIDE_TAG = " (seed replace "
+
+
+def aside_inputs(inputs, name):
+    """Pure: the names in INPUTS (GetInputList's `inputs`) that a replace of NAME parked aside
+    (`<name> (seed replace N)`), newest (highest N) first."""
+    found = []
+    for i in inputs or []:
+        n = i.get("inputName") if isinstance(i, dict) else None
+        if isinstance(n, str) and n.startswith(name + ASIDE_TAG) and n.endswith(")"):
+            num = n[len(name) + len(ASIDE_TAG):-1]
+            if num.isascii() and num.isdigit():
+                found.append((int(num), n))
+    return [n for _num, n in sorted(found, reverse=True)]
+
+
+def _free_aside_name(obs, name):
+    inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs") or []
+    taken = {i.get("inputName") for i in inputs if isinstance(i, dict)}
+    n = 1
+    while "%s%s%d)" % (name, ASIDE_TAG, n) in taken:
+        n += 1
+    return "%s%s%d)" % (name, ASIDE_TAG, n)
+
+
+def _rename(obs, old, new):
+    """SetInputName OLD -> NEW, read back: True only when OBS lists NEW and no longer OLD."""
+    obs.req("SetInputName", {"inputName": old, "newInputName": new}, ignore_err=True)
+    return input_kind_listed(obs, new) not in ("", None) and input_kind_listed(obs, old) == ""
+
+
+def _item_id(resp):
     item_id = (resp or {}).get("sceneItemId")
-    if isinstance(item_id, int):
-        obs.req("SetSceneItemEnabled", {"sceneName": scene, "sceneItemId": item_id, "sceneItemEnabled": False},
-                ignore_err=True)
+    return item_id if isinstance(item_id, int) and not isinstance(item_id, bool) else None
 
 
-def input_recreate(obs, name, kind, settings, state, fallback_scene, sleep=None):
-    """Remove input NAME and create it again as KIND with SETTINGS (input_create_verified: a bounded
-    wait for the name, read back, one retry), then put STATE (input_state_read, read BEFORE the call)
-    back. The first scene that held it gets the new input (else FALLBACK_SCENE); every other one gets a
-    scene item. Returns (True, the number of scenes it was put back in), or (False, the kind
-    GetInputList lists for NAME) when OBS never listed it as KIND: nothing is put back then."""
-    scenes = state.get("scenes") or [(fallback_scene, True)]
-    obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
-    first, enabled = scenes[0]
-    resp, listed = input_create_verified(obs, first, name, kind, settings, remove_on_retry=True, sleep=sleep)
-    if listed != kind:
-        return False, listed
-    if not enabled:
-        _hide_item(obs, first, resp)
-    for scene, enabled in scenes[1:]:
-        resp = obs.req("CreateSceneItem", {"sceneName": scene, "sourceName": name}, ignore_err=True)
-        if not enabled:
-            _hide_item(obs, scene, resp)
+def _restore_levels(obs, name, state):
+    """The mixer state a hidden item does not make audible: volume, mute, tracks, balance, sync offset."""
     who = {"inputName": name}
     if isinstance(state.get("volume_mul"), (int, float)) and not isinstance(state.get("volume_mul"), bool):
         obs.req("SetInputVolume", dict(who, inputVolumeMul=state["volume_mul"]), ignore_err=True)
     if isinstance(state.get("muted"), bool):
         obs.req("SetInputMute", dict(who, inputMuted=state["muted"]), ignore_err=True)
-    if isinstance(state.get("monitor"), str) and state["monitor"]:
-        obs.req("SetInputAudioMonitorType", dict(who, monitorType=state["monitor"]), ignore_err=True)
     if isinstance(state.get("tracks"), dict) and state["tracks"]:
         obs.req("SetInputAudioTracks", dict(who, inputAudioTracks=state["tracks"]), ignore_err=True)
     if isinstance(state.get("balance"), (int, float)) and not isinstance(state.get("balance"), bool):
@@ -272,14 +309,195 @@ def input_recreate(obs, name, kind, settings, state, fallback_scene, sleep=None)
     offset = state.get("sync_offset")
     if isinstance(offset, int) and not isinstance(offset, bool) and offset:
         obs.req("SetInputAudioSyncOffset", dict(who, inputAudioSyncOffset=offset), ignore_err=True)
+
+
+def _is_headphone_filter(f):
+    return f.get("filterKind") == AUDIO_MONITOR_FILTER_KIND
+
+
+def _restore_filters(obs, name, state, headphones):
+    """The filters in index order: HEADPHONES False = every filter but the audio monitor ones (they shape
+    the program sound, so they are on before the new items are shown), True = only the audio monitor
+    ones (they play to the operator's headphones whatever the scene items show, so they come only once
+    the old input is gone: never the old and the new input together, issue 1495 review round 1)."""
     for f in state.get("filters") or []:
+        if _is_headphone_filter(f) != headphones:
+            continue
         obs.req("CreateSourceFilter", {"sourceName": name, "filterName": f["filterName"],
                                        "filterKind": f.get("filterKind"),
                                        "filterSettings": f.get("filterSettings") or {}}, ignore_err=True)
         if f.get("filterEnabled") is False:
             obs.req("SetSourceFilterEnabled", {"sourceName": name, "filterName": f["filterName"],
                                                "filterEnabled": False}, ignore_err=True)
-    return True, len(scenes)
+
+
+def _restore_filter_order(obs, name, state):
+    """The audio monitor filters were created last: move them back to their index (after the show; the
+    order is the headphones' tap point only)."""
+    for f in state.get("filters") or []:
+        index = f.get("filterIndex")
+        if _is_headphone_filter(f) and isinstance(index, int) and not isinstance(index, bool):
+            obs.req("SetSourceFilterIndex", {"sourceName": name, "filterName": f["filterName"],
+                                             "filterIndex": index}, ignore_err=True)
+
+
+def _swap_in(obs, name, aside, state, items, sleep, also_remove=None):
+    """The end of a replace, once NAME exists with a HIDDEN item per ITEMS entry (scene, the new item's id,
+    the old item's index, the old item's visibility): the levels and the program filters, each new item
+    at the old index, the old input removed, the items that were visible shown at once (a one-request
+    gap), then monitoring + the audio monitor filters (the operator's headphones play whatever the items
+    show, so they never overlap the old input). ALSO_REMOVE: a second old input the STATE came from (an
+    interrupted replace's aside, review round 3), removed together with ASIDE before the show. Returns
+    the old input's name when OBS still lists it after a bounded wait (a holder keeps it), else None."""
+    _restore_levels(obs, name, state)
+    _restore_filters(obs, name, state, headphones=False)
+    for scene, item_id, index, _enabled in items:
+        if item_id is not None and isinstance(index, int):
+            obs.req("SetSceneItemIndex", {"sceneName": scene, "sceneItemId": item_id, "sceneItemIndex": index},
+                    ignore_err=True)
+    for old in (aside, also_remove) if also_remove and also_remove != aside else (aside,):
+        obs.req("RemoveInput", {"inputName": old}, ignore_err=True)
+    for scene, item_id, _index, enabled in items:
+        if item_id is not None and enabled:
+            obs.req("SetSceneItemEnabled", {"sceneName": scene, "sceneItemId": item_id,
+                                            "sceneItemEnabled": True}, ignore_err=True)
+    if isinstance(state.get("monitor"), str) and state["monitor"]:
+        obs.req("SetInputAudioMonitorType", {"inputName": name, "monitorType": state["monitor"]}, ignore_err=True)
+    _restore_filters(obs, name, state, headphones=True)
+    _restore_filter_order(obs, name, state)
+    left = []
+    for old in (aside, also_remove) if also_remove and also_remove != aside else (aside,):
+        _await_free(obs, old, sleep)
+        if input_kind_listed(obs, old) not in ("", None):
+            left.append(old)
+    return "', '".join(left) or None
+
+
+def input_recreate(obs, name, kind, settings, state, fallback_scene, sleep=None, source=None, also_remove=None):
+    """Re-create input NAME as KIND with SETTINGS keeping STATE (input_state_read of the old input, read
+    BEFORE the call), never removing the old input before the new one exists (issue 1495):
+
+      1. the old input (NAME, or SOURCE: the aside input an interrupted replace left) is renamed aside
+         and read back -- a by-name holder of the old source (the av-sync dock) then finds the new input
+         or nothing, and lets the old one go;
+      2. NAME is created as KIND (input_create_verified: read back, one retry) with a HIDDEN item in the
+         first scene that held the old input and in every other one (a hidden item is not mixed: no
+         double sound);
+      3. _swap_in: the levels, the old indexes, the old input removed, monitoring + filters, the items
+         that were visible shown.
+
+    An old input in no scene: the new one is created in FALLBACK_SCENE and its item removed again, so it
+    never enters a scene the old one was not in. Returns (True, (scenes kept, the old input's name when
+    OBS still lists it after a bounded wait, else None)), or (False, the reason): the old input is then
+    never removed, and renamed back to NAME whenever OBS lets it."""
+    sleep = sleep or time.sleep
+    if source is None or source == name:
+        aside = _free_aside_name(obs, name)
+        if not _rename(obs, name, aside):
+            return False, ("OBS did not rename '%s' to '%s' (SetInputName): nothing removed, kept the old "
+                           "input" % (name, aside))
+    else:
+        aside = source
+    scenes = state.get("scenes") or []
+    first = scenes[0][0] if scenes else fallback_scene
+    resp, listed = input_create_verified(obs, first, name, kind, settings, sleep=sleep, enabled=False)
+    if listed != kind:
+        why = listed_text(name, listed) + " after two CreateInput"
+        if listed == "" and _rename(obs, aside, name):
+            return False, why + "; kept the old input (renamed back to '%s', in every scene)" % name
+        return False, (why + "; kept the old input as '%s' in every scene -- rename it back to '%s' by hand "
+                       "(the next launch seed resumes from it)" % (aside, name))
+    items = []   # (scene, the new item's id, the old item's index, the old item's visibility)
+    if scenes:
+        items.append((first, _item_id(resp), scenes[0][2], scenes[0][1]))
+        for scene, enabled, index in scenes[1:]:
+            r = obs.req("CreateSceneItem", {"sceneName": scene, "sourceName": name, "sceneItemEnabled": False},
+                        ignore_err=True)
+            items.append((scene, _item_id(r), index, enabled))
+    elif _item_id(resp) is not None:
+        obs.req("RemoveSceneItem", {"sceneName": first, "sceneItemId": _item_id(resp)}, ignore_err=True)
+    return True, (len(scenes), _swap_in(obs, name, aside, state, items, sleep, also_remove=also_remove))
+
+
+def _scene_item_of(obs, scene, name):
+    for it in (obs.req("GetSceneItemList", {"sceneName": scene}, ignore_err=True) or {}).get("sceneItems") or []:
+        if it.get("sourceName") == name:
+            return it
+    return None
+
+
+def resumable_aside(obs, asides):
+    """The aside input an interrupted replace left that still holds scene items (its old input's place
+    and state), newest first, or None. A removed aside a holder keeps is listed but in no scene: never a
+    resume source (issue 1495 review round 1)."""
+    for aside in asides:
+        if input_state_read(obs, aside).get("scenes"):
+            return aside
+    return None
+
+
+def finish_interrupted_replace(obs, name, aside, sleep=None):
+    """NAME already has the wanted kind but ASIDE still holds scene items: the replace died after its
+    create (the new items hidden, the state maybe missing). Give NAME an item in every scene ASIDE is in
+    (an existing one is hidden first where ASIDE's was hidden), then _swap_in. Returns (scenes kept,
+    the lingering aside name or None)."""
+    state = input_state_read(obs, aside)
+    items = []
+    for scene, enabled, index in state.get("scenes") or []:
+        it = _scene_item_of(obs, scene, name)
+        if it is None:
+            r = obs.req("CreateSceneItem", {"sceneName": scene, "sourceName": name, "sceneItemEnabled": False},
+                        ignore_err=True)
+            item_id = _item_id(r)
+        else:
+            item_id = _item_id(it)
+            if not enabled and it.get("sceneItemEnabled") is not False and item_id is not None:
+                obs.req("SetSceneItemEnabled", {"sceneName": scene, "sceneItemId": item_id,
+                                                "sceneItemEnabled": False}, ignore_err=True)
+        items.append((scene, item_id, index, enabled))
+    return len(items), _swap_in(obs, name, aside, state, items, sleep or time.sleep)
+
+
+def replace_keeping_state(obs, name, kind, settings, fallback_scene, source, source_kind, state_from=None):
+    """The launch seed's replace of input NAME as KIND (input_recreate from SOURCE: NAME itself, or the
+    aside input of an interrupted replace, of kind SOURCE_KIND), with the state read first from
+    STATE_FROM (default SOURCE: an interrupted replace's aside when NAME exists only half made, review
+    round 2; it is removed with the old input, before the show: never played beside the new one, round 3).
+    Returns the status line: `replaced (...)`, or a loud `replace FAILED (...)`."""
+    state = input_state_read(obs, state_from or source)
+    ok, info = input_recreate(obs, name, kind, settings, state, fallback_scene, source=source,
+                              also_remove=state_from if state_from != source else None)
+    was = "was %s" % (source_kind or "absent")
+    if source != name:
+        was = "resumed the interrupted replace of '%s', %s" % (source, was)
+    if not ok:
+        return "replace FAILED (%s): %s -- restart OBS (the launch seed runs again)" % (was, info)
+    kept, lingering = info
+    return "replaced (%s; kept in %d scene(s))%s" % (was, kept, _lingering_text(lingering))
+
+
+def _lingering_text(lingering):
+    if not lingering:
+        return ""
+    return (" -- the old input still lingers as '%s' (another holder keeps a reference, e.g. the av-sync "
+            "dock until its next lookup)" % lingering)
+
+
+def settle_aside_inputs(obs, name, asides, finish=True):
+    """The aside inputs left beside a program-audio input NAME of the wanted kind: the newest one that
+    still holds scene items is FINISHED (finish_interrupted_replace; FINISH False: a replace just ran, so
+    every aside is stale), every other one removed. Returns the status suffix naming them ('' when none)."""
+    out, finished = "", False
+    for aside in asides:
+        if finish and not finished and input_state_read(obs, aside).get("scenes"):
+            kept, lingering = finish_interrupted_replace(obs, name, aside)
+            finished = True
+            out += " (finished the interrupted replace of '%s': kept in %d scene(s))%s" % (
+                aside, kept, _lingering_text(lingering))
+            continue
+        obs.req("RemoveInput", {"inputName": aside}, ignore_err=True)
+        out += " (removed the leftover '%s' of an interrupted replace)" % aside
+    return out
 
 
 # --- issue 1465 item 3: no pulse capture input on the stream role ----------------------------------------

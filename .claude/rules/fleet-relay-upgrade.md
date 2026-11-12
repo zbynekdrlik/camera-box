@@ -17,8 +17,10 @@ values. Now ONE fleet upgrade brings camera-box AND the pinned relay (issue 1487
 
 ## What `deploy-fleet.sh` does with the relay
 
-- **Source = the shading pin.** `shading_release_relay` before any box is touched, whatever the
-  camera-box source (`--run`, `--binary`). No verified relay = nothing deployed; `--no-relay` deploys
+- **Source = each box's shading pin** (issue 1452: `scripts/shading-release-boxes.txt`, the REST relay
+  only where the camera serves REST). Every pin the set needs is fetched before any box is touched,
+  whatever the camera-box source (`--run`, `--binary`); each box is graded against its own pin and the
+  relay deploy gets `--box camN`. No verified relay = nothing deployed; `--no-relay` deploys
   camera-box alone and needs no release.
 - **The swap is `scripts/bkshading-deploy-relay.sh --host <ip> --binary <relay>`, per box, as a
   subprocess.** Never a copy of it: it owns the rig-lease preflight, the rig-busy guard, the relay

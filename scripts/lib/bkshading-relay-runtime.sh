@@ -101,3 +101,21 @@ BKSHADING_REGISTER_URL=$(bkshading_relay_register_url)
 BKSHADING_RELAY_ID=$relay_id
 EOF
 }
+
+# bkshading_relay_box_always_on BOX -> rc 0 when BOX's relay must run in EVERY rig mode: its pin is the
+# REST relay v0.2.x (scripts/shading-release-boxes.txt, issue 1452). Owner 10.11.2026 ("relay ma stale
+# bezat no matter what ... su to produkcne zariadenia"): a v0.2.x relay opens no PTP / gphoto2 session,
+# it only speaks HTTP over the camera's cdc_ncm link, which the kernel enumerates whether the relay runs
+# or not, so the issue-1311 premise (a PTP session/power change on the shared xHCI hub) does not hold for
+# it. TEST mode and the E2E pause (issue 808) leave such a box enabled and running. rc 1 for a gphoto2-pin
+# box, an unknown name or an unreadable map (fail-safe: the old stop/pause applies).
+bkshading_relay_box_always_on() {
+  local box="${1:-}" root pin
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)" || return 1
+  if ! declare -F shading_pin_file_for_box >/dev/null; then
+    # shellcheck source=scripts/lib/shading-release.sh
+    . "$root/scripts/lib/shading-release.sh" || return 1
+  fi
+  pin="$(shading_pin_file_for_box "$root" "$box" 2>/dev/null)" || return 1
+  [ "$(SHADING_RELEASE_PIN_FILE="$pin" shading_pin_transport "$root")" = rest ]
+}

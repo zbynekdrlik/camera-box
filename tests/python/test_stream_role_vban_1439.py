@@ -27,6 +27,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vban_leg_fakes_1439 as fk  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from strih_pp_hub_fed_1439 import hub_fed_boxes  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -120,7 +123,7 @@ def test_every_box_fact_file_loads(box):
     assert r.returncode == 0, r.stderr
 
 
-@pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "stream|6980|80"),
+@pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "none|none|none"),   # stream-snv: Dante, issue 1495
                                       ("strih-snv", "none|none|none"), ("strih-pp", "strih-obs|6981|40")])   # strih-snv: Dante, issue 1485
 def test_each_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s" "$(strih_lx_program_vban_streams)" '
@@ -135,7 +138,9 @@ def test_each_box_declares_its_program_vban(box, want):
 # production load, lv1 (stream-pp, 256-frame packets) 26-29 ms.
 @pytest.mark.parametrize("box,frames,worst_gap_ms", [("stream-snv", 239, 52), ("stream-pp", 256, 29)])
 def test_each_stream_box_r_sits_above_its_senders_worst_gap(box, frames, worst_gap_ms):
-    r = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_vban_reserve_ms)"', box)
+    # stream-snv: its VBAN rollback shape (issue 1495 moved the program to Dante, the R stays the rollback's)
+    r = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_vban_reserve_ms)"', box,
+              env={"STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()})
     assert r.returncode == 0, r.stderr
     reserve_ms = int(r.stdout)
     budget_ms = reserve_ms - frames * 1000.0 / 48_000 - _header_define("VBAN_RECV_DEADLINE_MARGIN_MS")
@@ -235,8 +240,21 @@ def test_the_stream_manifest_carries_the_vban_source_settings():
     assert PAV.parse_program_audio_vban(text) == PAV.vban_source_settings(6980, "stream", 40)
 
 
-def test_the_stream_snv_manifest_names_mbc_on_the_same_vban_source():
-    d = json.loads(_manifest("stream-snv"))
+def test_the_stream_snv_manifest_switches_mbc_to_its_dante_device():
+    # issue 1495: the program over Dante (the device stream-obs), the input keeps its name `mbc`
+    text = _manifest("stream-snv")
+    d = json.loads(text)
+    assert d["program_audio_input"] == "mbc"
+    assert d["program_audio_dante"] == {"device": "stream-obs"} and "program_audio_vban" not in d
+    assert PAV.parse_program_audio_vban(text) == PAV.DANTE_SEED
+    assert PAV.program_audio_want(PAV.parse_program_audio_vban(text), "x", {})[0] == PAV.DANTE_SOURCE_KIND
+
+
+def test_the_stream_snv_vban_rollback_manifest_names_mbc_on_the_vban_source():
+    r = _bash('strih_box_load "$1"\nobs_box_seed_manifest_json', "stream-snv",
+              env={"STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()})
+    assert r.returncode == 0, r.stderr
+    d = json.loads(r.stdout)
     assert d["program_audio_input"] == "mbc"
     # R 80 ms: mbc's gaps reached 52 ms under production load (issue 1439 finding 6348583939)
     assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 80}
@@ -264,28 +282,39 @@ def test_a_malformed_vban_block_raises_never_reads_as_pulse(text):
 class FakeObs:
     """An OBS with one program-audio input of KIND in scenes PRO (visible) and POST (hidden).
 
-    RemoveInput and CreateInput change what GetInputList lists, like OBS: after a RemoveInput the name
-    stays listed (and taken: CreateInput refuses it) for REMOVAL_LAG more GetInputList reads, and the
-    first REFUSE_CREATE CreateInput calls are refused (an error answer, nothing created)."""
+    SetInputName, RemoveInput and CreateInput change what GetInputList lists, like OBS: a replace renames
+    the old input aside (issue 1495); after a RemoveInput of it the aside input stays listed for
+    REMOVAL_LAG more GetInputList reads (a holder still has a reference), and the first REFUSE_CREATE
+    CreateInput calls are refused (an error answer, nothing created)."""
 
     def __init__(self, kind="pulse_input_capture", kinds=(VBAN_KIND,), settings=None, present=True,
                  removal_lag=0, refuse_create=0):
         self.calls = []
         self.kind, self.kinds, self.settings, self.present = kind, list(kinds), settings or {}, present
         self.removal_lag, self.refuse_create, self.still_listed = removal_lag, refuse_create, 0
+        self.aside, self.aside_kind, self.aside_removed = None, None, False
 
     def req(self, t, d=None, ignore_err=False):
         self.calls.append((t, d))
         if t == "GetInputList":
-            listed = self.present
-            if self.still_listed:
-                self.still_listed -= 1
-                self.present = self.still_listed > 0
-            return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if listed else []}
+            inputs = [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.present else []
+            if self.aside:
+                inputs.append({"inputName": self.aside, "inputKind": self.aside_kind})
+                if self.aside_removed:
+                    if self.still_listed:
+                        self.still_listed -= 1
+                    else:
+                        self.aside = None
+            return {"inputs": inputs}
+        if t == "SetInputName":
+            if d["inputName"] == "Zvuk z mixu" and self.present and not self.aside:
+                self.aside, self.aside_kind, self.present = d["newInputName"], self.kind, False
+            elif d["inputName"] == self.aside and d["newInputName"] == "Zvuk z mixu" and not self.present:
+                self.present, self.kind, self.aside = True, self.aside_kind, None
+            return {}
         if t == "RemoveInput":
-            if self.present:
-                self.still_listed = self.removal_lag
-                self.present = self.still_listed > 0
+            if d["inputName"] == self.aside and not self.aside_removed:
+                self.aside_removed, self.still_listed = True, self.removal_lag
             return {}
         if t == "CreateInput":
             if self.present or self.refuse_create:
@@ -333,15 +362,22 @@ def test_a_pulse_input_becomes_the_vban_source_keeping_the_operator_state():
     kinds = [t for t, _ in obs.calls]
     for t in ("GetSceneItemList", "GetInputVolume", "GetInputMute", "GetInputAudioMonitorType",
               "GetInputAudioTracks", "GetInputAudioBalance", "GetInputAudioSyncOffset", "GetSourceFilterList"):
-        assert kinds.index(t) < kinds.index("RemoveInput"), t
+        assert kinds.index(t) < kinds.index("SetInputName"), t
     w = obs.writes()
-    assert w[0] == ("RemoveInput", {"inputName": "Zvuk z mixu"})
+    # issue 1495: the old input is renamed aside first, never removed before the new one exists
+    assert w[0] == ("SetInputName", {"inputName": "Zvuk z mixu", "newInputName": "Zvuk z mixu (seed replace 1)"})
     assert w[1] == ("CreateInput", {"sceneName": "POST", "inputName": "Zvuk z mixu", "inputKind": VBAN_KIND,
-                                    "inputSettings": VBAN})
-    # POST's item was hidden: it stays hidden; PRO gets a visible item
-    assert w[2] == ("SetSceneItemEnabled", {"sceneName": "POST", "sceneItemId": 7, "sceneItemEnabled": False})
-    assert w[3] == ("CreateSceneItem", {"sceneName": "PRO", "sourceName": "Zvuk z mixu"})
-    rest = w[4:]
+                                    "inputSettings": VBAN, "sceneItemEnabled": False})
+    assert w[2] == ("CreateSceneItem", {"sceneName": "PRO", "sourceName": "Zvuk z mixu", "sceneItemEnabled": False})
+    # the old input goes only after the new one carries the state; then PRO's item is shown, POST's
+    # (hidden before) stays hidden
+    removed = w.index(("RemoveInput", {"inputName": "Zvuk z mixu (seed replace 1)"}))
+    assert w[removed + 1] == ("SetSceneItemEnabled", {"sceneName": "PRO", "sceneItemId": 9,
+                                                      "sceneItemEnabled": True}), "shown right after the remove"
+    assert [t for t, _ in w[removed + 2:]] == ["SetInputAudioMonitorType"], \
+        "only the headphone outputs (monitoring, audio monitor filters) wait for the old input to go"
+    assert not any(t == "SetSceneItemEnabled" and d["sceneName"] == "POST" for t, d in w)
+    rest = w[3:removed] + w[removed + 2:]
     assert ("SetInputVolume", {"inputName": "Zvuk z mixu", "inputVolumeMul": 0.5}) in rest
     assert ("SetInputMute", {"inputName": "Zvuk z mixu", "inputMuted": True}) in rest
     assert ("SetInputAudioMonitorType", {"inputName": "Zvuk z mixu", "monitorType": "OBS_MONITORING_TYPE_NONE"}) in rest
@@ -408,15 +444,16 @@ def _restored(obs):
                                              "CreateSourceFilter", "CreateSceneItem")]
 
 
-def test_a_name_obs_still_holds_after_remove_is_waited_for(monkeypatch):
-    # review round 1: CreateInput right after RemoveInput can meet the old name still taken
+def test_an_old_input_that_lingers_a_moment_after_its_remove_is_waited_for(monkeypatch):
+    # review round 1 / issue 1495: a removed source can stay listed for a moment; the replace no longer
+    # needs its name (it was renamed aside), the seed only waits, bounded, to report it gone
     s = _scenes()
     slept = _no_sleep(monkeypatch)
     obs = FakeObs(removal_lag=3)
     res = s.seed_program_audio_input(obs, "Zvuk z mixu", VBAN)
     assert res == "replaced (was pulse_input_capture; kept in 2 scene(s))"
-    assert obs.present and obs.kind == VBAN_KIND
-    assert [t for t, _ in obs.calls].count("CreateInput") == 1, "created once, after the name was free"
+    assert obs.present and obs.kind == VBAN_KIND and obs.aside is None
+    assert [t for t, _ in obs.calls].count("CreateInput") == 1, "created once"
     assert slept and sum(slept) <= 3.0
     assert "SetInputVolume" in _restored(obs)
 
@@ -438,20 +475,24 @@ def test_a_create_obs_keeps_refusing_is_a_loud_failure_never_replaced(monkeypatc
     res = s.seed_program_audio_input(obs, "Zvuk z mixu", VBAN)
     assert res.startswith("replace FAILED (was pulse_input_capture)"), res
     assert "no 'Zvuk z mixu' input" in res and "restart OBS" in res
+    assert "kept the old input (renamed back" in res, res
     assert [t for t, _ in obs.calls].count("CreateInput") == 2, "one retry, never a loop"
     assert _restored(obs) == [], "nothing is put back onto an input that does not exist"
+    assert "RemoveInput" not in [t for t, _ in obs.calls], "the old input is never removed"
+    assert obs.present and obs.kind == "pulse_input_capture" and obs.aside is None
 
 
 def test_a_removal_obs_never_applies_is_bounded_and_named(monkeypatch):
+    # issue 1495: the new input already carries the state; an old one a holder keeps is only named
     s = _scenes()
     slept = _no_sleep(monkeypatch)
     obs = FakeObs(removal_lag=10_000)
     res = s.seed_program_audio_input(obs, "Zvuk z mixu", VBAN)
-    assert res.startswith("replace FAILED (was pulse_input_capture)"), res
-    assert "still lists 'Zvuk z mixu' as pulse_input_capture" in res
-    assert sum(slept) <= 6.5, "two bounded waits for the name, never an endless one"
-    assert [t for t, _ in obs.calls].count("RemoveInput") == 2, "the retry removes the old input again"
-    assert _restored(obs) == []
+    assert res.startswith("replaced (was pulse_input_capture; kept in 2 scene(s))"), res
+    assert "still lingers as 'Zvuk z mixu (seed replace 1)'" in res
+    assert sum(slept) <= 3.5, "one bounded wait, never an endless one"
+    assert [t for t, _ in obs.calls].count("RemoveInput") == 1
+    assert obs.present and obs.kind == VBAN_KIND
 
 
 def test_an_absent_input_obs_refuses_to_create_is_named(monkeypatch):
@@ -705,6 +746,7 @@ def _line(received, port=6980, stream="stream", r=40, lost=0, re_anchors=0, sour
 
 
 def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None, box="stream-pp"):
+    # stream-snv: its VBAN rollback shape (issue 1495)
     log = tmp_path / "obs.txt"
     log.write_text(log_text)
     kf = tmp_path / "kind"
@@ -716,7 +758,8 @@ def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None, box="stream-pp"):
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
             'strih_box_load "$3"\n' + later + 'strih_program_vban_grade /nonexistent 127.0.0.1 "$1"\nwait')
     r = _bash(body, log, tmp_path / "later.txt", box,
-              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "1" if append else "0"})
+              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "1" if append else "0",
+                   "STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()})
     assert r.returncode == 0, r.stderr
     return r.stdout.splitlines()
 

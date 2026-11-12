@@ -3,7 +3,6 @@ paths:
   - "vendor/obs-studio/frontend/widgets/OBSBasic.cpp"
   - "vendor/obs-studio/frontend/widgets/NewlevelBuildSha.hpp"
   - "tests/obs_titlebar_newlevel.rs"
-  - "tests/obs_titlebar_newlevel_sha_parse.rs"
 ---
 
 # OBS window-title build identity (#152 / #313 / #1018)
@@ -26,7 +25,7 @@ build stamp in the vendored OBS frontend** — they cannot carry a real value he
 The source of truth for "what build is deployed" is **`GENLOCK_BUILD_SHA.txt`** at the OBS
 install root — every deploy (full obs64.exe swap AND fast obs.dll hot-swap) writes it. The
 title reads it and shows the short SHA (`newlevel_short_sha()` in `NewlevelBuildSha.hpp`, a
-pure OBS/Qt-free formatter, unit-tested off-rig by `tests/obs_titlebar_newlevel_sha_parse.rs`).
+pure OBS/Qt-free formatter, unit-tested off-rig by `obs:tests/vendored/tests/obs_titlebar_newlevel_sha_parse.rs`).
 
 ## Resolve install-root files from the EXE dir, never the process cwd (#1018)
 
@@ -79,5 +78,5 @@ another reason the title must read the SHA file, not the exe's own compile ident
 ## Frontend/vendored code — the Windows C++ glue's first compile is CI
 
 Get RED→GREEN on the PURE header off-rig by compiling the standalone harness with plain `c++`
-directly (what `tests/obs_titlebar_newlevel_sha_parse.rs` does at runtime); the vendored C++ glue
+directly (what `obs:tests/vendored/tests/obs_titlebar_newlevel_sha_parse.rs` does at runtime); the vendored C++ glue
 itself is first type-checked on the 150-min `windows-genlock.yml`.

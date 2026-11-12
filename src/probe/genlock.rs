@@ -1111,7 +1111,7 @@ pub fn genlock_ts_audit_sample(
 /// exceeds the budget every tick, so a budget-only skip froze the strih Multiview solid for a
 /// whole live event). The full, OBS-dependency-free decision now lives in
 /// `vendor/obs-studio/libobs/obs-display-budget.h` as `obs_display_should_skip(...)` and is
-/// directly unit-tested by `tests/obs_display_budget.rs` (a standalone C harness over that
+/// directly unit-tested by `obs:tests/vendored/tests/obs_display_budget.rs` (a standalone C harness over that
 /// real header). `render_display()` calls it BEFORE `render_display_begin()` (skipping there
 /// is ~0 cost — no clear/present — and leaves the last presented frame, so no flicker):
 /// ```c

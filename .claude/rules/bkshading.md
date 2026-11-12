@@ -294,6 +294,19 @@ business running (and polling the shared bus) while measurements run.
   service, not a development-time one.
 
 
+### A box on the REST relay pin is never stopped (issue 1452, owner 10.11.2026)
+
+The lifecycle above is the gphoto2 relay's. Owner 10.11.2026: "relay ma stale bezat no matter what ... su
+to produkcne zariadenia". The REST relay v0.2.x opens no PTP / gphoto2 session (HTTP over the camera's
+cdc_ncm link only), so the issue-1311 premise does not hold for it. ONE predicate,
+`bkshading_relay_box_always_on BOX` (`bkshading-relay-runtime.sh`, read from
+`scripts/shading-release-boxes.txt`): `rig-mode.sh test` runs the EVENT enable+start on such a box
+("kept enabled+running"), the E2E pause returns was-active 0 with no ssh call (the restore stays a
+no-op), and `bkshading_relay_expected_enable_state` reads `enabled` in every mode (setup-device, (ao)).
+A gphoto2 box keeps stop+disable / pause. Moving a box to the REST pin changes its lifecycle with no other
+edit. The issue-808 gaps tests pin a gphoto2-only map (autouse fixture); the REST cases are
+`tests/python/test_bkshading_relay_always_on_1452.py`.
+
 ## A manual interim `systemctl stop bkshading-relay` is NEVER auto-restored — not even by `Restart=on-failure` (issue 1228 TERM-origin finding)
 
 **Root cause of the 29.8.-30.8. cam1 incident (relay found dead a full day after it was stopped):**
@@ -388,6 +401,14 @@ from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It i
   `scripts/camera-test-baseline.json`, and aborts on a read-back MISMATCH. It uses the relay's own
   key names, pinned by pytest against `CORE_CONFIG_KEYS` + `plan_writes`, so renaming a relay key
   breaks that test first. See `.claude/rules/camera-test-settings.md`.
+
+## shading v0.2.x = the REST relay, chosen per box (issue 1452)
+
+The relay drives the camera over the Blackmagic REST API on the camera's USB-C link (CDC-NCM); the
+gphoto2 text above is the v0.1.x relay, still the fleet default. Which box runs which, the camera link
+file and the service's pin: `.claude/rules/shading-pinned-release.md`. The issue-1238 preflight prints
+`focusNorm` (lens/focus normalised) from a REST relay, whose `focusDistance` is always null. The E2E
+test-camera step speaks REST too (`.claude/rules/camera-test-settings.md`).
 
 ## The fleet upgrade carries the relay (issue 1452)
 

@@ -86,7 +86,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson; libsimde-dev: issue 1439, the obs-vban source lift includes libobs's util/sse-intrin.h
+          sudo apt-get install -y libv4l-dev libasound2-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libsimde-dev: issue 1439, the obs-vban source lift includes libobs's util/sse-intrin.h
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
@@ -152,7 +152,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
+          sudo apt-get install -y libv4l-dev libasound2-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       # ffmpeg/ffprobe for the #106 recorded-file analysis path covered by the
       # recording_decode integration test (run under llvm-cov here too).
@@ -214,7 +214,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
+          sudo apt-get install -y libv4l-dev libasound2-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@cargo-mutants
@@ -354,6 +354,28 @@ jobs:
           mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
           sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
+
+      # xfconf: the issue-1466 live xfconf apply is measured against the REAL xfconfd on a private
+      # session bus (tests/python/test_obs_box_xfconf_real_daemon_1466.py), never only a fake.
+      - name: Install xfconf
+        run: |
+          sudo apt-get update -q
+          # Ubuntu's xfconf package only RECOMMENDS its own library, so libxfconf-0-3 is named explicitly
+          # (without it xfconf-query exits 127 and the real-daemon test fails by name, run 42615136396).
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xfconf libxfconf-0-3 dbus
+          xfconf-query --version > /tmp/xfconf-version.txt
+          head -1 /tmp/xfconf-version.txt
+
+      # issue 1465 item 7: tests/python/test_obs_box_panel_scope_1465.py restarts a stand-in panel unit on
+      # the REAL systemd --user manager and checks the app a launcher started lives on in its own scope.
+      # A hosted runner has no user manager until linger starts user@<uid>; wait for its private socket.
+      - name: Start the runner's systemd user manager
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sock="/run/user/$(id -u)/systemd/private"
+          for _ in $(seq 1 60); do [ -S "$sock" ] && break; sleep 1; done
+          [ -S "$sock" ] || { echo "no systemd --user manager: $sock missing after 60 s" >&2; exit 1; }
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
 
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party

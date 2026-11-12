@@ -5,8 +5,6 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output-logcap.h"
   - "src/drm_output_retry.rs"
   - "tests/drm_output_retry_1424.rs"
-  - "tests/drm_output_retry_supervisor_1424.rs"
-  - "tests/drm_output_vk_park_1424.rs"
   - "scripts/lib/obs-box-panel.sh"
   - "scripts/strih_display_watch.py"
   - "systemd/strih-display-watch.service"
@@ -46,6 +44,15 @@ design 6386467303 (Approach 1, three layers); finding 6386340389; validation 638
 - NVIDIA connector names = one word + a number (`DP-0`, `HDMI-1`); a sink output carries a provider
   suffix (`eDP-1-2`, `DP-1-5`) and is left out. The NVIDIA README (Display Device Names) accepts connector
   names in MetaModes; an OutputClass carries a Screen option (the package's own AllowEmpty works that way).
+- **Every xorg.conf.d `OutputClass` names its `Driver` (issue 1494, strih-snv 8.11.2026).** The class
+  first shipped with `MatchDriver "nvidia-drm"` and no `Driver` line. Xorg then adds a `(null)` entry
+  to its autoconfigured driver list (`loading driver: (null)`, `Matched (null) as autoconfigured driver
+  1`); the list stops at the first NULL, so `modesetting` never loaded, the iGPU panel sink never
+  came up and the panel was black from the first X start after the file landed (24.10 -> the 4.11
+  boot). The class now carries `Driver "nvidia"`. verify item 43's `(panel-gpu)` FAILs one X provider
+  beside a connected non-NVIDIA eDP connector (`strih_operator_igpu_panel`), so it never reads as
+  "one provider, no PRIME" again. strih-pp / stream-pp kept the old file until setup step 6 rewrites
+  it; the fix applies at their next X start.
 - Written by setup-strih step 6 (`strih_x_display_provision`, called at the end of
   `strih_drm_output_provision`, AFTER the config): write-if-changed, removed when nothing is armed, a
   loud SKIP when xrandr names no output, and NEVER an X restart -- it applies at the next X start.
@@ -118,7 +125,7 @@ design 6386467303 (Approach 1, three layers); finding 6386340389; validation 638
     building a Vulkan instance every 5 s all night; an X RandR change event is the cure if it bites).
 - **A display torn down beside a live one is PARKED, never released (review finding):**
   `drm_output_vk_destroy_display` asks the pure `drm_output_vk_park_choice` (lift-tested in
-  `tests/drm_output_vk_park_1424.rs`): while another display is open the acquisition stays on the shared
+  `obs:tests/vendored/tests/drm_output_vk_park_1424.rs`): while another display is open the acquisition stays on the shared
   device (`display '<c>' kept acquired`), a re-open of the same output takes it back after the RandR
   lookup and before any new acquire (`display re-used`), and the device releases every parked display
   before it destroys the instance (never on a wedged device). So a retried open that acquired and then
@@ -164,10 +171,10 @@ design 6386467303 (Approach 1, three layers); finding 6386340389; validation 638
   re-used` followed by `program scanout LIVE`.
 - **Tests:** `tests/drm_output_retry_1424.rs` (anchors + the C-vs-Rust parity over scripted supervisor
   scenarios; a scratch mutation run of the header killed 10/10 mutants),
-  `tests/drm_output_retry_supervisor_1424.rs` (the supervisor's own code lifted verbatim and RUN against
+  `obs:tests/vendored/tests/drm_output_retry_supervisor_1424.rs` (the supervisor's own code lifted verbatim and RUN against
   stand-in registry steps: one line per cause, the cause = the first warning, the flush on success, the
   release of a dead loop), `tests/python/test_drm_output_retry_grade_1424.py` (item 4c).
-- **Count pins that bite a new path in the vk core:** `tests/drm_output_vk_deadline_1424.rs` pins exactly TWO
+- **Count pins that bite a new path in the vk core:** `obs:tests/vendored/tests/drm_output_vk_deadline_1424.rs` pins exactly TWO
   `drm_output_vk_mark_disruption(d->dev);` in vk-setup.c (before the settle wait, after the acquire), so a new
   acquire path (the parked-display reuse) goes through the acquire's ONE mark, never a mark of its own; and a
   new std-only lift test (`{tag}-{pid}-{counter}` temp dir) needs its line on the

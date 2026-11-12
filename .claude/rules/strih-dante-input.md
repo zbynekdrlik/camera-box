@@ -8,6 +8,8 @@ paths:
   - "tests/python/test_strih_dante_cpu_leftovers_1485.py"
   - "scripts/lib/strih-dante-ptp.sh"
   - "tests/python/test_strih_dante_ptp_1485.py"
+  - "tests/python/test_stream_snv_dante_1495.py"
+  - "scripts/strih-boxes/stream-snv.env"
 ---
 
 # strih-snv's program audio over Dante: the obs release's `dante_input` source (issue 1485)
@@ -16,6 +18,28 @@ Owner 2.11.2026: each application is its own Dante device; strih-snv only, PP an
 obs-vban. The FOH program (TX `master-asio-dante`, stereo, L then R) reaches the strih OBS through the
 Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's dlink).
 
+- **The stream role too (issue 1495, owner 9.11.2026: "prechod stream na dlink v obs"):** the program device
+  is `<STRIH_ROLE>-obs` (`strih_dante_input_device`): `strih-obs` on a strih box, `stream-obs` on a stream
+  box (stream-snv; dstack: distinct from mbc's own device `mbc-snv`). The loader takes it on either role.
+  stream-snv keeps its input NAME `mbc` (the measurement watchdog's meter, the av-sync dock, rig-mode's
+  `MBC_INPUT_NAME` key on it); the stream manifest carries `program_audio_dante` instead of
+  `program_audio_vban` and the role-free seeder switches the kind. Its own consumers:
+  - rig-mode TEST #901 item 2: `stream_program_dante_input HOST` (`stream-box.sh`, facts in a subshell,
+    `<device> <input>`) -> `obs_phase2.py mbc-input-check --dante-device stream-obs`: kind `dante_input` +
+    unmuted (pure `program_audio_vban.mbc_dante_transport_problem`);
+  - the E2E continuity gate: the stream log graded `--no-vban` (guard + ASRC + mixed_late on `mbc`) and the
+    SAME slice folded through `dante_input_continuity.py --box stream --device stream-obs` (`stream_dante`,
+    `stream Dante:`; the strih defaults byte-identical);
+  - the site file names the stream mix's transmitter and channels (never in the repo); verify item 9 and
+    the TOML follow the device name. Tests: `tests/python/test_stream_snv_dante_1495.py`.
+  - verify item 9's per-channel meter row (`strih_program_vban_channels_row`, OBS's own meter of the
+    input) runs in the Dante grade too, tagged `(program-dante)` (strih-snv gets it as well). Its verdict
+    assumes a stereo input: both site files subscribe 2 channels today; a site file with more RX channels
+    needs the row re-checked on the box first (an unused subscription would read as an empty channel).
+  - The per-point E2E report names the source `dante_input (stream-obs)` when the block carries
+    `stream_dante` (`e2e_report_youtube.py`).
+  - Before the first deploy, read `ss -lntup` on stream-snv: the box-wide `ip_unprivileged_port_start =
+    319` lets every unprivileged process bind 319-1023 there too (strih-snv's read was 6629102078).
 - **Which box:** the fact `STRIH_DANTE_DEVICES` names `strih-obs=arc:cmc:flows:rxfirst-rxlast`
   (`strih_program_dante_declared`). The loader then requires the VBAN program facts `none` and keeps
   `STRIH_PROGRAM_AUDIO_INPUT` (`ASIO zvuk`) as the input's name; a box with both is refused. The leg's

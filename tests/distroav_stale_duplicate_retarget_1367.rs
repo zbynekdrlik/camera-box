@@ -24,7 +24,7 @@
 //! (revert protection against a `git subtree pull`; mirrored as pwsh checks in BOTH
 //! `windows-genlock*.yml`), and (B) LIFTS the pure helper blocks VERBATIM and runs truth tables over
 //! them. (C), the sequence replay of sender port moves through a C model whose every decision is a
-//! SHIPPED helper, lives in `tests/distroav_stale_duplicate_replay_1367.rs`; the shared lift helpers
+//! SHIPPED helper, lives in `obs:tests/vendored/tests/distroav_stale_duplicate_replay_1367.rs`; the shared lift helpers
 //! in `tests/support/ndi_source_lift_1367.rs`. The live cure is confirmed only by the supervisor's
 //! post-deploy SongPlayer restart. The lift-compile FAILS LOUDLY without a C compiler, never skips.
 

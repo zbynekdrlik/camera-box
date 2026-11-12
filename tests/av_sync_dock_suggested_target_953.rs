@@ -15,7 +15,7 @@
 //! `act.new_delay_ms` — a limiter that only makes sense for a closed-loop actuator that converges
 //! over many ticks, meaningless for a value nothing ever applies (#942).
 //!
-//! Same twin-harness pattern as `tests/av_sync_dock_audit_log.rs` (#634) /
+//! Same twin-harness pattern as `obs:tests/vendored/tests/av_sync_dock_audit_log.rs` (#634) /
 //! `tests/av_sync_dock_lock_926.rs` (#926) / `tests/av_sync_dock_outcome_955.rs` (#955) — compile +
 //! run a tiny real C++ program against the real production header, off-rig.
 //!

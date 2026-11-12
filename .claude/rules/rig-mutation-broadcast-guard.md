@@ -69,6 +69,15 @@ accepted risk in its lib header). The test seam is `STRIH_LX_OBS_PHASE2_DIR` (a 
 like `BKSHADING_DEPLOY_OBS_PHASE2_DIR`; its `live-after-stage` mode drives the pre-stop refusal); the
 test harness also drops `OBS_PASSWORD`, because the guard passes it as an argv the fake logs.
 
+**The guard reads the boxes of the VENUE being touched (issue 1506).** A caller that mutates a
+cambox resolves the guard's strih/stream with `stray_session_hosts_for_camera CAM` (same lib): the
+camera's venue from the strih fact files (`remote_log_camera_venue`) and that venue's boxes from the
+obs fleet list (`obs_fleet_host strih-/stream-<venue>`). An unresolvable venue REFUSES the box, never
+an SNV fallback. `cambox-ro-units-apply.sh` resolves it per box, `bkshading-deploy-relay.sh` from
+`--box` (no `--box` = the SNV pair, the handheld SBC case); a caller-set `STRIH_HOST`/`STREAM_HOST`
+pair still wins (deploy-fleet `--venue` passes its venue's pair). On 11.11.2026 both scripts guarded
+PP cameras with the SNV boxes and restarted dsync + the relay while stream-pp streamed.
+
 - It does NOT re-define "REAL broadcast" — it CALLS the shared `rig-busy-check` (streaming and/or
   recording on strih/stream), reads `busy`, refuses on `busy=true`. Never duplicate the per-box loop.
 - SEMANTICS: fail-OPEN (WARN + proceed) ONLY when NO readable box is busy. On a partial outage

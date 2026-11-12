@@ -1099,7 +1099,7 @@ mod vendored_source {
     // #276/#278 multiview render-divisor: libobs render path + frontend projector + the burn renderer.
     pub const OBS_DISPLAY: &str = "vendor/obs-studio/libobs/obs-display.c";
     // #293: the pure, OBS-dependency-free skip decision (with the anti-starvation floor) that
-    // render_display() calls — extracted so it is unit-testable (tests/obs_display_budget.rs).
+    // render_display() calls — extracted so it is unit-testable (obs:tests/vendored/tests/obs_display_budget.rs).
     pub const OBS_DISPLAY_BUDGET: &str = "vendor/obs-studio/libobs/obs-display-budget.h";
     // #278: the graphics-thread loop publishes the per-tick start used by the adaptive skip.
     pub const OBS_VIDEO: &str = "vendor/obs-studio/libobs/obs-video.c";
