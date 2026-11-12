@@ -28,6 +28,7 @@ WATCHDOG_TIMERS=(
   render-freeze-alert-watchdog.timer:core       # issue 1320 -- PROGRAM render freeze / relock storm
   audio-mixer-alert-watchdog.timer:core         # issue 1381 -- audio mixer off real time / VBAN pacer loss
   obs-handles-alert-watchdog.timer:core         # issue 1406 -- OBS process handle leak (growth / ceiling)
+  stream-output-stuck-alert-watchdog.timer:core # issue 1460 -- stream output stuck during a production
   av-step-alert-watchdog.timer:core             # issue 1319 -- absolute A/V-offset STEP + BAND arm
   avsync-lineup-alert-watchdog.timer:core       # issue 1319 -- A/V line-up
   avsync-heartbeat-alert-watchdog.timer:core    # issue 812  -- A/V-sync heartbeat stale

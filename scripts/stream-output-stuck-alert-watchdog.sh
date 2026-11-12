@@ -17,8 +17,10 @@ set -euo pipefail
 #   * the output is stuck: over a few seconds the program render (GetStats.renderTotalFrames), the
 #     stream frames (outputTotalFrames) or the bytes sent (outputBytes) stood still, or the output is
 #     reconnecting -- confirmed over 2 consecutive passes.
-# Outside that state it never pages. An unreachable box is SKIP (network-reach owns that page), an
-# unread fact is UNKNOWN (never a guessed production).
+# Outside that state it never pages. An unreachable box (SKIP) or an unread fact (UNKNOWN) is never a
+# guessed production -- EXCEPT within STREAM_OUTPUT_STUCK_CARRY_S (600 s) of a pass that PROVED
+# production + streaming: then a stream OBS that stops answering is a stuck output too (a frozen OBS
+# answers nothing, and network-reach sees a box that still pings), reason `unresponsive`.
 #
 # HOW: every 60 s the READ-ONLY probe scripts/stream_output_stuck_probe.py takes two snapshots ~3 s
 # apart in one obs-websocket session (through obs_phase2's client, so it never selects a scene), the
@@ -55,7 +57,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '9,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '8,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -70,6 +72,7 @@ WINDOW_S="${STREAM_OUTPUT_STUCK_WINDOW_S:-3}"
 PRODUCTION_SCENE="${STREAM_OUTPUT_STUCK_PRODUCTION_SCENE:-$STREAM_PRODUCTION_SCENE_DEFAULT}"
 CONFIRM_THRESHOLD="${STREAM_OUTPUT_STUCK_CONFIRM_THRESHOLD:-2}"
 REPING_INTERVAL_S="${STREAM_OUTPUT_STUCK_REPING_INTERVAL_S:-600}"
+CARRY_S="${STREAM_OUTPUT_STUCK_CARRY_S:-600}"
 
 DECIDE="${STREAM_OUTPUT_STUCK_DECIDE:-$HERE/stream_output_stuck_decision.py}"
 PROBE="${STREAM_OUTPUT_STUCK_PROBE:-$HERE/stream_output_stuck_probe.py}"
@@ -94,7 +97,7 @@ fetch_probe() {
     "$STREAM_OUTPUT_STUCK_FETCH_CMD" "$WS_HOST" "$WS_PORT"
     return $?
   fi
-  timeout 30 python3 "$PROBE" "$WS_HOST" "$WS_PORT" --window-s "$WINDOW_S"
+  timeout 45 python3 "$PROBE" "$WS_HOST" "$WS_PORT" --window-s "$WINDOW_S"
 }
 
 # fire_page <body...> -- the ONE page seam: the airuleset page: class, time-bucketed by the shared
@@ -150,6 +153,10 @@ require_tools() {
     log "FATAL: decision module not readable: $DECIDE -- refusing to run"
     return 1
   fi
+  if ! [[ "$BOX" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789.-]*$ ]]; then
+    log "FATAL: box name '$BOX' is not a valid airuleset page check name (lower-case letters, digits, '.', '-') -- the page would be suppressed; refusing to run"
+    return 1
+  fi
   if [ -z "$WS_HOST" ]; then
     log "FATAL: no host for box '$BOX' in the obs fleet list -- refusing to run (set STREAM_OUTPUT_STUCK_WS_HOST)"
     return 1
@@ -161,25 +168,41 @@ main() {
   log "pass start (dry_run=$DRY_RUN, box=$BOX ws=${WS_HOST}:${WS_PORT}, production scene='$PRODUCTION_SCENE', window=${WINDOW_S}s, confirm=$CONFIRM_THRESHOLD)"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
 
-  local body reachable out verdict reasons scene rd ed bd
+  local body reachable out verdict reasons scene rd ed bd now last_prod age=""
   if body="$(fetch_probe)"; then reachable=1; else reachable=0; body=""; fi
+  now="$(now_epoch)"
+  last_prod="$(read_state_field "last_production_${BOX}" "")"
+  [[ "$last_prod" =~ ^[0123456789]+$ ]] && age=$(( now - last_prod ))
+  # the decision's stderr reaches the journal (a traceback must never read as a silent verdict)
   out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" \
-    --production-scene "$PRODUCTION_SCENE" 2>/dev/null)"
+    --production-scene "$PRODUCTION_SCENE" ${age:+--last-production-age-s "$age"} --carry-s "$CARRY_S")"
   verdict="$(printf '%s\n' "$out" | sed -n 's/^verdict=//p')"
   reasons="$(printf '%s\n' "$out" | sed -n 's/^reasons=//p')"
   scene="$(printf '%s\n' "$out" | sed -n 's/^scene=//p')"
   rd="$(printf '%s\n' "$out" | sed -n 's/^render_delta=//p')"
   ed="$(printf '%s\n' "$out" | sed -n 's/^encode_delta=//p')"
   bd="$(printf '%s\n' "$out" | sed -n 's/^bytes_delta=//p')"
-  log "$BOX: reachable=$reachable verdict=${verdict:-<none>} reasons=${reasons:-} scene='${scene}' render+${rd} frames+${ed} bytes+${bd} over ${WINDOW_S}s"
+  log "$BOX: reachable=$reachable verdict=${verdict:-<none>} reasons=${reasons:-} scene='${scene}' render+${rd} frames+${ed} bytes+${bd} over ${WINDOW_S}s (last proven production ${age:-never}s ago)"
+
+  # A pass that READ production + streaming is the proof the unresponsive carry keys on; a pass that
+  # read another scene or no stream drops it.
+  case "$verdict:$reasons" in
+    OK:* | STUCK:render* | STUCK:encode* | STUCK:bytes* | STUCK:reconnecting*) write_state_field "last_production_${BOX}" "$now" ;;
+    NOT_PRODUCTION:*) write_state_field "last_production_${BOX}" "" ;;
+  esac
 
   case "$verdict" in
     STUCK)
-      confirm_then_page 1 \
+      if [ "$reasons" = "unresponsive" ]; then
+        confirm_then_page 1 \
+          "🚨 ZASEKNUTÝ VÝSTUP: stream OBS na $BOX neodpovedá (pred ${age} s vysielal scénu $PRODUCTION_SCENE), potvrdené ${CONFIRM_THRESHOLD}x po minúte. Skontroluj stream OBS na $BOX."
+      else
+        confirm_then_page 1 \
         "🚨 ZASEKNUTÝ VÝSTUP: $BOX vysiela scénu $PRODUCTION_SCENE, ale výstup stojí (${reasons}: obraz +${rd}, snímky streamu +${ed}, bajty +${bd} za ${WINDOW_S} s, potvrdené ${CONFIRM_THRESHOLD}x po minúte). Skontroluj stream OBS na $BOX (obraz programu, stav streamu)."
+      fi
       ;;
     OK | NOT_PRODUCTION) confirm_then_page 0 ;;
-    SKIP) log "$BOX not reachable on :$WS_PORT -- the network-reach watchdog's page, holding" ;;
+    SKIP) log "$BOX not reachable on :$WS_PORT and no production proven in the last ${CARRY_S}s -- the network-reach watchdog's page, holding" ;;
     UNKNOWN) log "$BOX: a fact was unread (${reasons}) -- no verdict, holding, no page" ;;
     *) log "$BOX: unexpected verdict '${verdict:-<empty>}' (decision failed?) -- holding, no page" ;;
   esac

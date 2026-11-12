@@ -8,7 +8,7 @@ výstup"*.
 OBS (`stream-snv`, address from `scripts/lib/obs-fleet.sh`, obs-websocket :4455):
 
 1. the **program scene** is the production scene (`STREAM_PRODUCTION_SCENE_DEFAULT` in
-   `scripts/lib/stream-dev-scene.sh` = `PRO`);
+   `scripts/lib/stream-dev-scene.sh` = `PRO`), read before AND after the window;
 2. the **stream output is active** (`GetStreamStatus.outputActive`);
 3. the **output is stuck** — over a ~3 s window inside one WS session:
    - `render`: `GetStats.renderTotalFrames` did not advance (the program picture froze),
@@ -17,9 +17,12 @@ OBS (`stream-snv`, address from `scripts/lib/obs-fleet.sh`, obs-websocket :4455)
    - `reconnecting`: `GetStreamStatus.outputReconnecting` is true;
 4. … and that was seen on **2 consecutive passes** (60 s apart).
 
-Outside that state it never pages: a development stream on `Development`, a stopped stream, an
-unreachable box (SKIP — `network-reach-alert-watchdog` owns that page) or an unread fact (UNKNOWN)
-only log. A silent program while streaming is the separate issue-1495 page
+Outside that state it never pages: a development stream on `Development` or a stopped stream only
+log. An unreachable box (SKIP) or an unread fact (UNKNOWN, e.g. a request timed out) is never a
+guessed production, with ONE exception: within `STREAM_OUTPUT_STUCK_CARRY_S` (600 s) of a pass that
+PROVED production + streaming, a stream OBS that stops answering reads STUCK `unresponsive` and pages
+after the same 2-pass confirm -- a frozen OBS answers nothing, and the network-reach watchdog still
+sees a box that pings. A silent program while streaming is the separate issue-1495 page
 (`measurement-audio-alert-watchdog.sh`, `page:stream-snv-program-audio`).
 
 ## Pieces
@@ -58,8 +61,8 @@ The units are committed but NOT installed or enabled by this change.
    ```
 4. Read the first pass: `journalctl --user -u stream-output-stuck-alert-watchdog.service --since -5min`
    must show the script's own `pass end` line, never `status=203/EXEC`.
-5. Add `stream-output-stuck-alert-watchdog.timer:core` to `scripts/lib/watchdog-roster.sh` in the same
-   sitting, so the development-handover check grades it.
+5. The timer is already on `scripts/lib/watchdog-roster.sh`, so until step 3 the development-handover
+   check reports it as not enabled -- that is the reminder, by design.
 
 ## Known limits
 
@@ -68,4 +71,8 @@ The units are committed but NOT installed or enabled by this change.
   territory.
 - `bytes` advances as long as OBS writes to its local RTMP target (the restreamer on the box); a dead
   YouTube egress behind the restreamer is the restreamer's own alarm.
-- Only `stream-snv`; another stream box is `STREAM_OUTPUT_STUCK_BOX=<box>` in a second unit.
+- Only `stream-snv`; another stream box is `STREAM_OUTPUT_STUCK_BOX=<box>` in a second unit (the
+  page key carries the box name, which must be a valid airuleset check name; the script refuses
+  anything else).
+- The `unresponsive` carry stops 600 s after the last proven production pass; a box frozen longer
+  than that stays paged only through the confirm already latched, not re-proven.

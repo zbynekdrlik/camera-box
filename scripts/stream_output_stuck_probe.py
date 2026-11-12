@@ -4,7 +4,7 @@ OBS: the program scene, the stream output state and the render/output counters, 
 `--window-s` apart inside ONE session, printed as `key=value` lines for the pure
 scripts/stream_output_stuck_decision.py:
 
-    scene=PRO
+    scene0=PRO  scene1=PRO   (read before the first and after the second snapshot)
     active0=1  render0=...  frames0=...  bytes0=...  reconnecting0=0
     active1=1  render1=...  frames1=...  bytes1=...  reconnecting1=0
     window_s=3.0
@@ -28,7 +28,8 @@ import obs_phase2  # noqa: E402  (the sibling WS client; websocket-client is its
 
 DEFAULT_PORT = 4455
 DEFAULT_WINDOW_S = float(os.environ.get("STREAM_OUTPUT_STUCK_WINDOW_S", "3.0"))
-REQUEST_TIMEOUT_S = float(os.environ.get("STREAM_OUTPUT_STUCK_REQUEST_TIMEOUT_S", "5"))
+# 7 requests x 3 s + the window + the 10 s obs_phase2 connect stay inside the watchdog's 45 s bound.
+REQUEST_TIMEOUT_S = float(os.environ.get("STREAM_OUTPUT_STUCK_REQUEST_TIMEOUT_S", "3"))
 _WS_PASSWORD = os.environ.get("STREAM_OUTPUT_STUCK_WS_PASSWORD", "")
 
 
@@ -76,9 +77,10 @@ def program_scene(ws):
     return str(d.get("currentProgramSceneName") or d.get("sceneName") or "")
 
 
-def format_lines(scene, s0, s1, window_s):
-    """Pure: the printed key=value lines (scene, the two snapshots, the window)."""
-    lines = [f"scene={scene}"]
+def format_lines(scenes, s0, s1, window_s):
+    """Pure: the printed key=value lines (the program scene before + after, the two snapshots, the
+    window)."""
+    lines = [f"scene0={scenes[0]}", f"scene1={scenes[1]}"]
     for i, s in ((0, s0), (1, s1)):
         for k in ("active", "render", "frames", "bytes", "reconnecting"):
             lines.append(f"{k}{i}={s.get(k, '')}")
@@ -98,16 +100,17 @@ def _main(argv):
         print(f"stream-output-stuck probe: WS connect to {ns.host}:{ns.port} failed: {e}", file=sys.stderr)
         return 1
     try:
-        scene = program_scene(ws)
+        scene0 = program_scene(ws)
         s0 = snapshot(ws)
         time.sleep(max(0.0, ns.window_s))
         s1 = snapshot(ws)
+        scene1 = program_scene(ws)
     finally:
         try:
             ws.close()
         except OSError as e:
             print(f"stream-output-stuck probe: ws.close() failed (ignored): {e}", file=sys.stderr)
-    print("\n".join(format_lines(scene, s0, s1, ns.window_s)))
+    print("\n".join(format_lines((scene0, scene1), s0, s1, ns.window_s)))
     return 0
 
 

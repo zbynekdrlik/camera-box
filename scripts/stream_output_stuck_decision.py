@@ -19,11 +19,13 @@ A live stream advances every counter many times over in a few seconds (12.11.202
 BACKWARDS is a new stream session started between the snapshots, never a stall.
 
 Verdicts:
-  SKIP           -- the stream OBS was not reachable (the network-reach watchdog owns that page).
+  SKIP           -- the stream OBS was not reachable (no WS handshake).
   UNKNOWN        -- a fact needed to decide is missing (scene, stream state or a counter unread).
-                    Never a page: an unreadable state is never a guessed production.
-  NOT_PRODUCTION -- the program scene is not the production scene, or the stream is not active in
-                    both snapshots. Never a page (the owner's rule).
+                    Neither SKIP nor UNKNOWN is a guessed production; both turn into STUCK
+                    `unresponsive` ONLY within --carry-s of a pass that proved production +
+                    streaming (`carry_unresponsive`: a frozen OBS answers nothing).
+  NOT_PRODUCTION -- the program scene is not the production scene in either snapshot, or the stream
+                    is not active in both snapshots. Never a page (the owner's rule).
   OK             -- production, streaming, every counter advanced, no reconnect.
   STUCK          -- production, streaming, and at least one reason above. The watchdog pages it after
                     its 2-pass confirm.
@@ -69,10 +71,10 @@ def classify(p, box_reachable, production_scene):
         return "SKIP", []
     if not production_scene:
         return "UNKNOWN", ["no production scene name"]
-    scene = p.get("scene", "")
-    if scene == "":
+    scenes = (p.get("scene0", ""), p.get("scene1", ""))
+    if "" in scenes:
         return "UNKNOWN", ["program scene unread"]
-    if scene != production_scene:
+    if scenes[0] != production_scene or scenes[1] != production_scene:
         return "NOT_PRODUCTION", []
     a0, a1 = _flag(p, "active0"), _flag(p, "active1")
     if a0 is None or a1 is None:
@@ -92,18 +94,34 @@ def classify(p, box_reachable, production_scene):
     return ("STUCK" if reasons else "OK"), reasons
 
 
-def analyze(text, box_reachable, production_scene):
+def carry_unresponsive(verdict, reasons, last_production_age_s, carry_s):
+    """A stream OBS that stops ANSWERING (SKIP: no WS handshake; UNKNOWN: a request timed out)
+    within `carry_s` of a pass that PROVED production + streaming is a stuck output too: a frozen OBS
+    answers nothing, and the network-reach watchdog sees a live box that still pings. Such a pass
+    reads STUCK with reason `unresponsive`. Without a recent proof (None / older / negative age) the
+    verdict is unchanged, so an unreadable box is never a guessed production."""
+    if verdict not in ("SKIP", "UNKNOWN") or last_production_age_s is None:
+        return verdict, reasons
+    if 0 <= last_production_age_s <= carry_s:
+        return "STUCK", ["unresponsive"]
+    return verdict, reasons
+
+
+def analyze(text, box_reachable, production_scene, last_production_age_s=None, carry_s=0):
     """Fetch result -> dict with verdict, reasons, scene and the three counter deltas (None when
-    unread). An unreachable box returns SKIP without parsing the (empty) body."""
+    unread). An unreachable box parses no body (SKIP), then `carry_unresponsive` applies."""
     if box_reachable != 1:
-        return {"verdict": "SKIP", "reasons": [], "scene": "", "deltas": {}}
+        verdict, reasons = carry_unresponsive("SKIP", [], last_production_age_s, carry_s)
+        return {"verdict": verdict, "reasons": reasons, "scene": "", "deltas": {}}
     p = parse_probe(text)
     verdict, reasons = classify(p, box_reachable, production_scene)
+    verdict, reasons = carry_unresponsive(verdict, reasons, last_production_age_s, carry_s)
     deltas = {}
     for name, key in COUNTERS:
         v0, v1 = _int(p, key + "0"), _int(p, key + "1")
         deltas[name] = None if v0 is None or v1 is None else v1 - v0
-    return {"verdict": verdict, "reasons": reasons, "scene": p.get("scene", ""), "deltas": deltas}
+    return {"verdict": verdict, "reasons": reasons, "scene": p.get("scene1", "") or p.get("scene0", ""),
+            "deltas": deltas}
 
 
 def _main(argv):
@@ -113,9 +131,13 @@ def _main(argv):
     a.add_argument("--box-reachable", type=int, required=True)
     # REQUIRED -- the production scene comes from scripts/lib/stream-dev-scene.sh, never a default here.
     a.add_argument("--production-scene", required=True)
+    a.add_argument("--last-production-age-s", type=int, default=None,
+                   help="seconds since a pass proved production + streaming (absent = never)")
+    a.add_argument("--carry-s", type=int, default=0,
+                   help="an unanswering box within this many seconds of that proof reads STUCK")
     ns = ap.parse_args(argv)
     text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    res = analyze(text, ns.box_reachable, ns.production_scene)
+    res = analyze(text, ns.box_reachable, ns.production_scene, ns.last_production_age_s, ns.carry_s)
     print(f"verdict={res['verdict']}")
     print(f"reasons={','.join(res['reasons'])}")
     print(f"scene={res['scene']}")

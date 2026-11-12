@@ -12,8 +12,10 @@ import importlib.util
 import os
 import pathlib
 import stat
+import re
 import subprocess
 import sys
+import types
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 _WATCHDOG = _REPO / "scripts" / "stream-output-stuck-alert-watchdog.sh"
@@ -45,9 +47,10 @@ PRO = _production_scene()
 
 
 def _body(scene=None, a0=1, a1=1, render=(100, 190), frames=(50, 140), bytes_=(1000, 900000),
-          rec=(0, 0)):
+          rec=(0, 0), scene1=None):
     scene = PRO if scene is None else scene
-    lines = [f"scene={scene}"]
+    scene1 = scene if scene1 is None else scene1
+    lines = [f"scene0={scene}", f"scene1={scene1}"]
     for i in (0, 1):
         lines += [f"active{i}={(a0, a1)[i]}", f"render{i}={render[i]}", f"frames{i}={frames[i]}",
                   f"bytes{i}={bytes_[i]}", f"reconnecting{i}={rec[i]}"]
@@ -80,6 +83,12 @@ def test_another_program_scene_never_pages_even_when_stuck():
     assert _verdict(_body(scene=PRO.lower(), **stuck))[0] == "NOT_PRODUCTION"
 
 
+def test_a_cut_away_from_production_inside_the_window_never_pages():
+    stuck = dict(render=(1, 1), frames=(2, 2), bytes_=(3, 3))
+    assert _verdict(_body(scene1="Development", **stuck))[0] == "NOT_PRODUCTION"
+    assert _verdict(_body(scene="POST", scene1=PRO, **stuck))[0] == "NOT_PRODUCTION"
+
+
 def test_not_streaming_in_either_snapshot_never_pages():
     stuck = dict(render=(1, 1), frames=(2, 2), bytes_=(3, 3))
     assert _verdict(_body(a0=0, a1=0, **stuck))[0] == "NOT_PRODUCTION"
@@ -93,7 +102,7 @@ def test_a_counter_that_went_backwards_is_a_new_session_not_a_stall():
 
 def test_unread_facts_are_unknown_never_a_page():
     p = sod.parse_probe(_body())
-    for key in ("scene", "active0", "active1", "render0", "frames1", "bytes0"):
+    for key in ("scene0", "scene1", "active0", "active1", "render0", "frames1", "bytes0"):
         q = dict(p)
         q[key] = ""
         assert sod.classify(q, 1, PRO)[0] == "UNKNOWN", key
@@ -104,6 +113,23 @@ def test_unread_facts_are_unknown_never_a_page():
 def test_an_unreachable_box_skips():
     assert sod.classify(sod.parse_probe(_body(render=(1, 1))), 0, PRO) == ("SKIP", [])
     assert sod.analyze("", 0, PRO)["verdict"] == "SKIP"
+
+
+def test_an_unanswering_box_soon_after_a_proven_production_is_stuck():
+    # a frozen OBS answers nothing: SKIP / UNKNOWN within the carry window of a proven production
+    assert sod.analyze("", 0, PRO, 60, 600)["verdict"] == "STUCK"
+    assert sod.analyze("", 0, PRO, 60, 600)["reasons"] == ["unresponsive"]
+    unread = _body().replace(f"scene1={PRO}", "scene1=")
+    assert sod.analyze(unread, 1, PRO, 120, 600)["verdict"] == "STUCK"
+
+
+def test_no_recent_proof_keeps_an_unanswering_box_unpaged():
+    assert sod.analyze("", 0, PRO, None, 600)["verdict"] == "SKIP"
+    assert sod.analyze("", 0, PRO, 601, 600)["verdict"] == "SKIP"
+    assert sod.analyze("", 0, PRO, -5, 600)["verdict"] == "SKIP"
+    assert sod.analyze("", 0, PRO, 60, 0)["verdict"] == "SKIP"
+    # a box that answered "not production" is never carried
+    assert sod.analyze(_body(scene="Development"), 1, PRO, 60, 600)["verdict"] == "NOT_PRODUCTION"
 
 
 def test_cli_prints_verdict_reasons_and_deltas():
@@ -122,17 +148,35 @@ def test_cli_requires_the_production_scene_argument():
 
 # --- the probe's printed lines (no network) -------------------------------------------------------
 
-def test_probe_lines_round_trip_through_the_decision():
+def _load_probe():
+    """The probe with a stub `websocket` module when websocket-client is missing on this runner, so
+    the test always runs (never a skip): format_lines needs no socket."""
+    saved = sys.modules.get("websocket")
+    if saved is None:
+        try:
+            import websocket  # noqa: F401
+        except ImportError:
+            stub = types.ModuleType("websocket")
+            stub.create_connection = lambda *a, **k: None
+            stub.WebSocketTimeoutException = type("WebSocketTimeoutException", (Exception,), {})
+            sys.modules["websocket"] = stub
+    sys.path.insert(0, str(_PROBE.parent))
     try:
-        probe = _load("stream_output_stuck_probe_1460", _PROBE)
-    except SystemExit:  # websocket-client missing on this runner: the format is still pinned below
-        return
+        return _load("stream_output_stuck_probe_1460", _PROBE)
+    finally:
+        sys.path.remove(str(_PROBE.parent))
+
+
+def test_probe_lines_round_trip_through_the_decision():
+    probe = _load_probe()
     s0 = {"active": "1", "render": "10", "frames": "20", "bytes": "30", "reconnecting": "0"}
     s1 = {"active": "1", "render": "10", "frames": "25", "bytes": "40", "reconnecting": "0"}
-    text = "\n".join(probe.format_lines(PRO, s0, s1, 3.0)) + "\n"
+    text = "\n".join(probe.format_lines((PRO, PRO), s0, s1, 3.0)) + "\n"
     assert _verdict(text) == ("STUCK", ["render"])
+    text = "\n".join(probe.format_lines((PRO, "Development"), s0, s1, 3.0)) + "\n"
+    assert _verdict(text)[0] == "NOT_PRODUCTION"
     s_unread = {"active": "", "render": "", "frames": "", "bytes": "", "reconnecting": ""}
-    text = "\n".join(probe.format_lines(PRO, s_unread, s1, 3.0)) + "\n"
+    text = "\n".join(probe.format_lines((PRO, PRO), s_unread, s1, 3.0)) + "\n"
     assert _verdict(text)[0] == "UNKNOWN"
 
 
@@ -152,7 +196,9 @@ def _exe(path, text):
     return path
 
 
-def _passes(tmp_path, bodies, rc=0):
+def _passes(tmp_path, bodies, rc=0, dry=True, extra_env=None, start=1_700_000_000):
+    """Run the watchdog once per body (a 60 s pass apart on an injected clock). `rc` is the fetch's
+    exit code (an int, or a list per pass)."""
     fetch_dir = tmp_path / "fetch"
     fetch_dir.mkdir(exist_ok=True)
     outs = []
@@ -162,13 +208,16 @@ def _passes(tmp_path, bodies, rc=0):
         "STREAM_OUTPUT_STUCK_WS_HOST": "192.0.2.1",
         "AIRULESET_NOTIFY": str(tmp_path / "no-notify.py"),
     })
+    env.update(extra_env or {})
     for i, body in enumerate(bodies):
         data = fetch_dir / f"body{i}.txt"
         data.write_text(body)
-        fetch = _exe(fetch_dir / f"fetch{i}.sh", f"#!/usr/bin/env bash\ncat '{data}'\nexit {rc}\n")
+        code = rc[i] if isinstance(rc, list) else rc
+        fetch = _exe(fetch_dir / f"fetch{i}.sh", f"#!/usr/bin/env bash\ncat '{data}'\nexit {code}\n")
         env["STREAM_OUTPUT_STUCK_FETCH_CMD"] = str(fetch)
-        r = subprocess.run(["bash", str(_WATCHDOG), "--dry-run"], capture_output=True, text=True,
-                           env=env, timeout=60)
+        env["STREAM_OUTPUT_STUCK_NOW"] = str(start + 60 * i)
+        args = ["bash", str(_WATCHDOG)] + (["--dry-run"] if dry else [])
+        r = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
         assert r.returncode == 0, r.stderr
         outs.append(r.stdout + r.stderr)
     return outs
@@ -201,6 +250,46 @@ def test_an_unreachable_box_never_pages(tmp_path):
     outs = _passes(tmp_path, ["", ""], rc=1)
     assert not any("WOULD page" in o for o in outs), outs
     assert "SKIP" in outs[-1], outs[-1]
+
+
+def test_a_production_obs_that_stops_answering_pages(tmp_path):
+    outs = _passes(tmp_path, [_body(), "", ""], rc=[0, 1, 1])
+    assert "WOULD page" not in outs[1], outs[1]
+    assert "WOULD page" in outs[2] and "neodpovedá" in outs[2], outs[2]
+
+
+def test_an_unanswering_box_with_no_proven_production_never_pages(tmp_path):
+    outs = _passes(tmp_path, [_body(scene="Development"), "", "", ""], rc=[0, 1, 1, 1])
+    assert not any("WOULD page" in o for o in outs), outs
+
+
+def test_the_real_page_call_carries_a_valid_page_key_and_the_body(tmp_path):
+    log = tmp_path / "notify-args.txt"
+    notify = tmp_path / "notify.py"
+    notify.write_text("import sys\nopen(%r, 'a').write('\\x1f'.join(sys.argv[1:]) + '\\n')\n" % str(log))
+    stuck = _body(bytes_=(9, 9))
+    _passes(tmp_path, [stuck, stuck], dry=False, extra_env={"AIRULESET_NOTIFY": str(notify)})
+    calls = log.read_text().splitlines()
+    assert len(calls) == 1, calls
+    argv = calls[0].split("\x1f")
+    assert argv[0] == "notify"
+    key = argv[argv.index("--dedup-key") + 1]
+    assert re.fullmatch(r"page:[a-z0-9][a-z0-9.-]{0,63}(:\S*)?", key), key
+    assert key.startswith("page:stream-snv-output-stuck:"), key
+    assert "ZASEKNUTÝ VÝSTUP" in argv[argv.index("--body") + 1]
+
+
+def test_an_invalid_box_name_refuses_to_run(tmp_path):
+    env = dict(os.environ, STREAM_OUTPUT_STUCK_BOX="Stream_SNV", STREAM_OUTPUT_STUCK_WS_HOST="192.0.2.1",
+               STREAM_OUTPUT_STUCK_ALERT_STATE_DIR=str(tmp_path))
+    r = subprocess.run(["bash", str(_WATCHDOG), "--dry-run"], capture_output=True, text=True, env=env,
+                       timeout=60)
+    assert r.returncode == 3 and "not a valid airuleset page check name" in r.stderr, r.stderr
+
+
+def test_the_timer_is_on_the_watchdog_roster():
+    roster = (_REPO / "scripts" / "lib" / "watchdog-roster.sh").read_text()
+    assert "stream-output-stuck-alert-watchdog.timer:core" in roster
 
 
 def test_recovery_after_a_page_is_a_log_line_only(tmp_path):
