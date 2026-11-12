@@ -159,8 +159,13 @@ designs 6338127636 and 6338457001.
     the first 60 s, one placement at the lock (an unscheduled silence + a timeline move), then a
     1000 ppm recovery slew for about 20 s. The measured rate averages that transient in (p4: -42.3
     against a steady -53.4 / -51.5), which the 60 s settle does not cover.
-  - **An unscheduled concealed loss** (the receiver's `missing N packet(s) ... concealed` line, a
-    real network loss) reads as an in-run "phase step" of +2..+6 samples: check the OBS log for it.
+  - **An unscheduled concealed loss** (the receiver's `missing N packet(s) before frame F -- concealed`
+    line, a real network loss) is matched since 12.11.2026: `--obs-log` + `--input-name` (the bench
+    passes the profile's log) turn each such run into a `network` loss at packet
+    (F - N - start_frame) mod 2^32 (`network_losses`, `with_network_losses`), measured by the bridge
+    across it like a scheduled one: timeline held = a NOTE, moved = FAIL. Without the log it reads as
+    an in-run "phase step" of +2..+6 samples. An unreadable log is a WARNING, never an exit 3. The log
+    grade's packet count still shows the extra packets. Tests: `tests/python/test_vban_network_loss_1460.py`.
 
 ## The OBS log rows (`vban_bench_log.py`, the issue-1439 acceptance of designs 6338127636 + 6338457001)
 
