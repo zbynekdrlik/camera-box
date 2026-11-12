@@ -24,11 +24,17 @@ vtedy má prísť správa do discordu, že sa zasekol výstup". Page ONLY in tha
   (`outputTotalFrames` still), `bytes` (`outputBytes` still), `reconnecting`. A counter that went
   BACKWARDS is a new stream session, never a stall. The production scene is passed in from
   `scripts/lib/stream-dev-scene.sh` (`STREAM_PRODUCTION_SCENE_DEFAULT`), never retyped.
-- **The `unresponsive` carry:** a frozen OBS answers nothing (SKIP / UNKNOWN), and network-reach still
-  sees a box that pings, so neither watchdog would page. `carry_unresponsive` turns SKIP / UNKNOWN into
-  STUCK `unresponsive` ONLY within `--carry-s` (600 s) of a pass that PROVED production + streaming;
-  the watchdog stores that proof as `last_production_<box>` (set by OK and counter-STUCK, cleared by
-  NOT_PRODUCTION, never refreshed by a carried pass). No proof = never a guessed production.
+- **The `unresponsive` carry -- HUNG, never ABSENT (review round 2):** a frozen OBS answers nothing
+  and network-reach still sees a box that pings, so neither watchdog would page. The probe first does a
+  plain TCP connect (5 s): refused / no route / timeout = exit 1 ABSENT; TCP up but the obs-websocket
+  handshake times out = exit 2 HUNG; after the handshake the socket timeout is 3 s and every request
+  that times out (`TimeoutError` / `WebSocketTimeoutException`, never a closed connection or an error
+  reply) counts in `timeouts=`. `carry_unresponsive` turns SKIP (exit 2, or 124/137 = killed by the
+  45 s bound) / UNKNOWN with `timeouts>0` into STUCK `unresponsive` ONLY within `--carry-s` (600 s) of
+  a pass that PROVED production + streaming; the watchdog stores that proof as `last_production_<box>`
+  (set by OK and counter-STUCK, cleared by NOT_PRODUCTION, never refreshed by a carried pass).
+  A first cut carried a refused connection too and paged after an ordinary "stop stream, close OBS"
+  end of show -- never carry an absence. Accepted gap: an OBS crash (port refused) is not this page.
 - Live read 12.11.2026 (stream-snv not streaming): `render+90 frames+0 bytes+0` over 3 s: an idle
   stream's counters stand still, which is why the gate on `outputActive` in both snapshots matters.
 

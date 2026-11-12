@@ -21,8 +21,9 @@ BACKWARDS is a new stream session started between the snapshots, never a stall.
 Verdicts:
   SKIP           -- the stream OBS was not reachable (no WS handshake).
   UNKNOWN        -- a fact needed to decide is missing (scene, stream state or a counter unread).
-                    Neither SKIP nor UNKNOWN is a guessed production; both turn into STUCK
-                    `unresponsive` ONLY within --carry-s of a pass that proved production +
+                    Neither SKIP nor UNKNOWN is a guessed production; they turn into STUCK
+                    `unresponsive` ONLY on evidence of a HANG (a timed-out handshake or request,
+                    never a refused connection) within --carry-s of a pass that proved production +
                     streaming (`carry_unresponsive`: a frozen OBS answers nothing).
   NOT_PRODUCTION -- the program scene is not the production scene in either snapshot, or the stream
                     is not active in both snapshots. Never a page (the owner's rule).
@@ -94,28 +95,37 @@ def classify(p, box_reachable, production_scene):
     return ("STUCK" if reasons else "OK"), reasons
 
 
-def carry_unresponsive(verdict, reasons, last_production_age_s, carry_s):
-    """A stream OBS that stops ANSWERING (SKIP: no WS handshake; UNKNOWN: a request timed out)
-    within `carry_s` of a pass that PROVED production + streaming is a stuck output too: a frozen OBS
-    answers nothing, and the network-reach watchdog sees a live box that still pings. Such a pass
-    reads STUCK with reason `unresponsive`. Without a recent proof (None / older / negative age) the
-    verdict is unchanged, so an unreadable box is never a guessed production."""
-    if verdict not in ("SKIP", "UNKNOWN") or last_production_age_s is None:
+def carry_unresponsive(verdict, reasons, hung, last_production_age_s, carry_s):
+    """A HUNG stream OBS within `carry_s` of a pass that PROVED production + streaming is a stuck
+    output too: a frozen OBS answers nothing, and the network-reach watchdog sees a live box that
+    still pings. Such a pass reads STUCK with reason `unresponsive`.
+
+    `hung` is the EVIDENCE of a hang, never just "no data" (issue 1460 review round 2): the port took
+    the TCP connect but the handshake timed out, the probe was killed by its bound, or a request got
+    no answer in time. An ABSENT OBS (connection refused: an operator closed OBS or powered the box off
+    after the show) is never hung, so a normal end of show never pages. Without a recent proof (None /
+    older / negative age) nothing is carried either."""
+    if not hung or verdict not in ("SKIP", "UNKNOWN") or last_production_age_s is None:
         return verdict, reasons
     if 0 <= last_production_age_s <= carry_s:
         return "STUCK", ["unresponsive"]
     return verdict, reasons
 
 
-def analyze(text, box_reachable, production_scene, last_production_age_s=None, carry_s=0):
+def analyze(text, box_reachable, production_scene, last_production_age_s=None, carry_s=0,
+            box_hung=0):
     """Fetch result -> dict with verdict, reasons, scene and the three counter deltas (None when
-    unread). An unreachable box parses no body (SKIP), then `carry_unresponsive` applies."""
+    unread). An unreachable box parses no body (SKIP); `carry_unresponsive` then applies to a HUNG
+    box (`box_hung`) or to an UNKNOWN pass whose probe counted request timeouts."""
     if box_reachable != 1:
-        verdict, reasons = carry_unresponsive("SKIP", [], last_production_age_s, carry_s)
+        verdict, reasons = carry_unresponsive("SKIP", [], box_hung == 1, last_production_age_s,
+                                              carry_s)
         return {"verdict": verdict, "reasons": reasons, "scene": "", "deltas": {}}
     p = parse_probe(text)
     verdict, reasons = classify(p, box_reachable, production_scene)
-    verdict, reasons = carry_unresponsive(verdict, reasons, last_production_age_s, carry_s)
+    timed_out = (_int(p, "timeouts") or 0) > 0 and bool(production_scene)
+    verdict, reasons = carry_unresponsive(verdict, reasons, timed_out, last_production_age_s,
+                                          carry_s)
     deltas = {}
     for name, key in COUNTERS:
         v0, v1 = _int(p, key + "0"), _int(p, key + "1")
@@ -134,10 +144,13 @@ def _main(argv):
     a.add_argument("--last-production-age-s", type=int, default=None,
                    help="seconds since a pass proved production + streaming (absent = never)")
     a.add_argument("--carry-s", type=int, default=0,
-                   help="an unanswering box within this many seconds of that proof reads STUCK")
+                   help="a HUNG box within this many seconds of that proof reads STUCK")
+    a.add_argument("--box-hung", type=int, default=0,
+                   help="1 = the box took the TCP connect but never answered (probe rc 2 / killed)")
     ns = ap.parse_args(argv)
     text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    res = analyze(text, ns.box_reachable, ns.production_scene, ns.last_production_age_s, ns.carry_s)
+    res = analyze(text, ns.box_reachable, ns.production_scene, ns.last_production_age_s, ns.carry_s,
+                  ns.box_hung)
     print(f"verdict={res['verdict']}")
     print(f"reasons={','.join(res['reasons'])}")
     print(f"scene={res['scene']}")

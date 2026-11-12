@@ -20,9 +20,11 @@ OBS (`stream-snv`, address from `scripts/lib/obs-fleet.sh`, obs-websocket :4455)
 Outside that state it never pages: a development stream on `Development` or a stopped stream only
 log. An unreachable box (SKIP) or an unread fact (UNKNOWN, e.g. a request timed out) is never a
 guessed production, with ONE exception: within `STREAM_OUTPUT_STUCK_CARRY_S` (600 s) of a pass that
-PROVED production + streaming, a stream OBS that stops answering reads STUCK `unresponsive` and pages
-after the same 2-pass confirm -- a frozen OBS answers nothing, and the network-reach watchdog still
-sees a box that pings. A silent program while streaming is the separate issue-1495 page
+PROVED production + streaming, a HUNG stream OBS (the port takes the TCP connect but the handshake or
+a request times out, probe exit 2, or the probe is killed by its 45 s bound) reads STUCK
+`unresponsive` and pages after the same 2-pass confirm -- a frozen OBS answers nothing, and the
+network-reach watchdog still sees a box that pings. A REFUSED connection (probe exit 1: OBS closed,
+box off) is never carried, so stopping the stream and closing OBS after a show never pages. A silent program while streaming is the separate issue-1495 page
 (`measurement-audio-alert-watchdog.sh`, `page:stream-snv-program-audio`).
 
 ## Pieces
@@ -74,5 +76,7 @@ The units are committed but NOT installed or enabled by this change.
 - Only `stream-snv`; another stream box is `STREAM_OUTPUT_STUCK_BOX=<box>` in a second unit (the
   page key carries the box name, which must be a valid airuleset check name; the script refuses
   anything else).
+- An OBS CRASH during a production (the process gone, the port refuses) cannot be told apart from a
+  deliberate close, so it is not this watchdog's page (accepted, review round 2).
 - The `unresponsive` carry stops 600 s after the last proven production pass; a box frozen longer
   than that stays paged only through the confirm already latched, not re-proven.

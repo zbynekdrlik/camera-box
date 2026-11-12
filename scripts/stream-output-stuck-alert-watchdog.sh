@@ -18,9 +18,11 @@ set -euo pipefail
 #     stream frames (outputTotalFrames) or the bytes sent (outputBytes) stood still, or the output is
 #     reconnecting -- confirmed over 2 consecutive passes.
 # Outside that state it never pages. An unreachable box (SKIP) or an unread fact (UNKNOWN) is never a
-# guessed production -- EXCEPT within STREAM_OUTPUT_STUCK_CARRY_S (600 s) of a pass that PROVED
-# production + streaming: then a stream OBS that stops answering is a stuck output too (a frozen OBS
-# answers nothing, and network-reach sees a box that still pings), reason `unresponsive`.
+# guessed production -- EXCEPT a HUNG OBS (the port takes the TCP connect but the handshake or a
+# request times out, or the probe is killed by its bound) within STREAM_OUTPUT_STUCK_CARRY_S (600 s)
+# of a pass that PROVED production + streaming: a frozen OBS answers nothing and network-reach sees a
+# box that still pings, so that is a stuck output, reason `unresponsive`. A REFUSED connection (OBS
+# closed, box off -- a normal end of show, or a crash) is never carried: not this watchdog's page.
 #
 # HOW: every 60 s the READ-ONLY probe scripts/stream_output_stuck_probe.py takes two snapshots ~3 s
 # apart in one obs-websocket session (through obs_phase2's client, so it never selects a scene), the
@@ -89,7 +91,8 @@ log() { printf '%s [stream-output-stuck-alert-watchdog] %s\n' "$(date '+%Y-%m-%d
 # now_epoch -> seconds since the epoch (injectable for tests via STREAM_OUTPUT_STUCK_NOW).
 now_epoch() { printf '%s' "${STREAM_OUTPUT_STUCK_NOW:-$(date +%s)}"; }
 
-# fetch_probe -> the probe's key=value stdout; rc 0 iff the WS connected (box reachable).
+# fetch_probe -> the probe's key=value stdout; rc 0 = WS answered, 1 = absent (refused / no route),
+# 2 = hung (TCP connected, no handshake), 124/137 = killed by the bound (hung).
 # STREAM_OUTPUT_STUCK_FETCH_CMD (test seam): an executable run as `<cmd> <host> <port>` in place of
 # the real probe, so a --dry-run replays a fixture with no live box.
 fetch_probe() {
@@ -168,21 +171,27 @@ main() {
   log "pass start (dry_run=$DRY_RUN, box=$BOX ws=${WS_HOST}:${WS_PORT}, production scene='$PRODUCTION_SCENE', window=${WINDOW_S}s, confirm=$CONFIRM_THRESHOLD)"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
 
-  local body reachable out verdict reasons scene rd ed bd now last_prod age=""
-  if body="$(fetch_probe)"; then reachable=1; else reachable=0; body=""; fi
+  local body reachable=0 hung=0 rc out verdict reasons scene rd ed bd now last_prod age=""
+  body="$(fetch_probe)"
+  rc=$?
+  case "$rc" in
+    0) reachable=1 ;;
+    2 | 124 | 137) hung=1; body="" ;;   # TCP took the connect but no answer / killed by the bound
+    *) body="" ;;                        # refused / no route: OBS absent
+  esac
   now="$(now_epoch)"
   last_prod="$(read_state_field "last_production_${BOX}" "")"
   [[ "$last_prod" =~ ^[0123456789]+$ ]] && age=$(( now - last_prod ))
   # the decision's stderr reaches the journal (a traceback must never read as a silent verdict)
   out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" \
-    --production-scene "$PRODUCTION_SCENE" ${age:+--last-production-age-s "$age"} --carry-s "$CARRY_S")"
+    --production-scene "$PRODUCTION_SCENE" ${age:+--last-production-age-s "$age"} --carry-s "$CARRY_S" --box-hung "$hung")"
   verdict="$(printf '%s\n' "$out" | sed -n 's/^verdict=//p')"
   reasons="$(printf '%s\n' "$out" | sed -n 's/^reasons=//p')"
   scene="$(printf '%s\n' "$out" | sed -n 's/^scene=//p')"
   rd="$(printf '%s\n' "$out" | sed -n 's/^render_delta=//p')"
   ed="$(printf '%s\n' "$out" | sed -n 's/^encode_delta=//p')"
   bd="$(printf '%s\n' "$out" | sed -n 's/^bytes_delta=//p')"
-  log "$BOX: reachable=$reachable verdict=${verdict:-<none>} reasons=${reasons:-} scene='${scene}' render+${rd} frames+${ed} bytes+${bd} over ${WINDOW_S}s (last proven production ${age:-never}s ago)"
+  log "$BOX: probe rc=$rc reachable=$reachable hung=$hung verdict=${verdict:-<none>} reasons=${reasons:-} scene='${scene}' render+${rd} frames+${ed} bytes+${bd} over ${WINDOW_S}s (last proven production: ${age:-never}${age:+ s ago})"
 
   # A pass that READ production + streaming is the proof the unresponsive carry keys on; a pass that
   # read another scene or no stream drops it.
@@ -202,7 +211,7 @@ main() {
       fi
       ;;
     OK | NOT_PRODUCTION) confirm_then_page 0 ;;
-    SKIP) log "$BOX not reachable on :$WS_PORT and no production proven in the last ${CARRY_S}s -- the network-reach watchdog's page, holding" ;;
+    SKIP) log "$BOX not answering on :$WS_PORT (hung=$hung; a refused connection is never carried, nor anything without a production proven in the last ${CARRY_S}s) -- holding, no page" ;;
     UNKNOWN) log "$BOX: a fact was unread (${reasons}) -- no verdict, holding, no page" ;;
     *) log "$BOX: unexpected verdict '${verdict:-<empty>}' (decision failed?) -- holding, no page" ;;
   esac

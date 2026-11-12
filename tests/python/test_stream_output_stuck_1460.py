@@ -115,21 +115,35 @@ def test_an_unreachable_box_skips():
     assert sod.analyze("", 0, PRO)["verdict"] == "SKIP"
 
 
-def test_an_unanswering_box_soon_after_a_proven_production_is_stuck():
-    # a frozen OBS answers nothing: SKIP / UNKNOWN within the carry window of a proven production
-    assert sod.analyze("", 0, PRO, 60, 600)["verdict"] == "STUCK"
-    assert sod.analyze("", 0, PRO, 60, 600)["reasons"] == ["unresponsive"]
-    unread = _body().replace(f"scene1={PRO}", "scene1=")
+def test_a_hung_box_soon_after_a_proven_production_is_stuck():
+    # a frozen OBS answers nothing: a timed-out handshake within the carry window of a proven production
+    res = sod.analyze("", 0, PRO, 60, 600, box_hung=1)
+    assert (res["verdict"], res["reasons"]) == ("STUCK", ["unresponsive"])
+    # a request that timed out inside an answering session is hang evidence too
+    unread = _body().replace(f"scene1={PRO}", "scene1=") + "timeouts=1\n"
     assert sod.analyze(unread, 1, PRO, 120, 600)["verdict"] == "STUCK"
 
 
-def test_no_recent_proof_keeps_an_unanswering_box_unpaged():
-    assert sod.analyze("", 0, PRO, None, 600)["verdict"] == "SKIP"
-    assert sod.analyze("", 0, PRO, 601, 600)["verdict"] == "SKIP"
-    assert sod.analyze("", 0, PRO, -5, 600)["verdict"] == "SKIP"
-    assert sod.analyze("", 0, PRO, 60, 0)["verdict"] == "SKIP"
+def test_an_absent_obs_after_a_normal_end_of_show_never_pages():
+    # review round 2: the operator stops the stream and closes OBS (refused connection) right after a
+    # proven production pass -- never a page
+    assert sod.analyze("", 0, PRO, 60, 600, box_hung=0)["verdict"] == "SKIP"
+    # an unread fact with no timeout (a closed connection, an error reply) is not carried either
+    unread = _body().replace(f"scene1={PRO}", "scene1=") + "timeouts=0\n"
+    assert sod.analyze(unread, 1, PRO, 60, 600)["verdict"] == "UNKNOWN"
+    assert sod.analyze(_body().replace(f"scene1={PRO}", "scene1="), 1, PRO, 60, 600)["verdict"] == "UNKNOWN"
+    # a config fault (no production scene name) is never a hang
+    assert sod.analyze(_body() + "timeouts=2\n", 1, "", 60, 600)["verdict"] == "UNKNOWN"
+
+
+def test_no_recent_proof_keeps_a_hung_box_unpaged():
+    assert sod.analyze("", 0, PRO, None, 600, box_hung=1)["verdict"] == "SKIP"
+    assert sod.analyze("", 0, PRO, 601, 600, box_hung=1)["verdict"] == "SKIP"
+    assert sod.analyze("", 0, PRO, -5, 600, box_hung=1)["verdict"] == "SKIP"
+    assert sod.analyze("", 0, PRO, 60, 0, box_hung=1)["verdict"] == "SKIP"
     # a box that answered "not production" is never carried
-    assert sod.analyze(_body(scene="Development"), 1, PRO, 60, 600)["verdict"] == "NOT_PRODUCTION"
+    assert sod.analyze(_body(scene="Development") + "timeouts=3\n", 1, PRO, 60, 600)["verdict"] == \
+        "NOT_PRODUCTION"
 
 
 def test_cli_prints_verdict_reasons_and_deltas():
@@ -178,6 +192,49 @@ def test_probe_lines_round_trip_through_the_decision():
     s_unread = {"active": "", "render": "", "frames": "", "bytes": "", "reconnecting": ""}
     text = "\n".join(probe.format_lines((PRO, PRO), s_unread, s1, 3.0)) + "\n"
     assert _verdict(text)[0] == "UNKNOWN"
+    text = "\n".join(probe.format_lines((PRO, PRO), s_unread, s1, 3.0, 2)) + "\n"
+    assert "timeouts=2" in text and sod.analyze(text, 1, PRO, 60, 600)["verdict"] == "STUCK"
+
+
+def test_probe_tells_a_hang_from_an_absence():
+    probe = _load_probe()
+    assert probe.is_timeout(TimeoutError("no answer"))
+    assert probe.is_timeout(probe.obs_phase2.WebSocketTimeoutException("no frame"))
+    assert not probe.is_timeout(ConnectionRefusedError("refused"))
+    assert not probe.is_timeout(RuntimeError("GetStats failed: {}"))
+    assert not probe.is_timeout(ConnectionResetError("closed"))
+
+
+def test_probe_refuses_a_closed_port_as_absent_rc1(tmp_path):
+    import socket as _s
+    sock = _s.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()  # nothing listens there: refused
+    r = subprocess.run([sys.executable, str(_PROBE), "127.0.0.1", str(port), "--window-s", "0"],
+                       capture_output=True, text=True, timeout=30)
+    # CI installs websocket-client (ci.yml python-tests); its absence is a FAIL here, never a skip
+    assert "missing dep" not in r.stderr, r.stderr
+    assert r.returncode == 1, (r.returncode, r.stderr)
+    assert "absent" in r.stderr
+
+
+def test_probe_reads_a_silent_listener_as_hung_rc2(tmp_path):
+    import socket as _s
+    srv = _s.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)  # accepts the TCP connect (backlog) but never speaks
+    try:
+        port = srv.getsockname()[1]
+        env = dict(os.environ)
+        r = subprocess.run([sys.executable, str(_PROBE), "127.0.0.1", str(port), "--window-s", "0"],
+                           capture_output=True, text=True, timeout=60, env=env)
+    finally:
+        srv.close()
+    # CI installs websocket-client (ci.yml python-tests); its absence is a FAIL here, never a skip
+    assert "missing dep" not in r.stderr, r.stderr
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "hung" in r.stderr
 
 
 def test_probe_sends_only_read_requests():
@@ -252,14 +309,25 @@ def test_an_unreachable_box_never_pages(tmp_path):
     assert "SKIP" in outs[-1], outs[-1]
 
 
-def test_a_production_obs_that_stops_answering_pages(tmp_path):
-    outs = _passes(tmp_path, [_body(), "", ""], rc=[0, 1, 1])
+def test_a_production_obs_that_hangs_pages(tmp_path):
+    outs = _passes(tmp_path, [_body(), "", ""], rc=[0, 2, 2])
     assert "WOULD page" not in outs[1], outs[1]
     assert "WOULD page" in outs[2] and "neodpovedá" in outs[2], outs[2]
 
 
-def test_an_unanswering_box_with_no_proven_production_never_pages(tmp_path):
-    outs = _passes(tmp_path, [_body(scene="Development"), "", "", ""], rc=[0, 1, 1, 1])
+def test_a_probe_killed_by_its_bound_counts_as_hung(tmp_path):
+    outs = _passes(tmp_path, [_body(), "", ""], rc=[0, 124, 124])
+    assert "WOULD page" in outs[2], outs[2]
+
+
+def test_closing_obs_after_a_normal_end_of_show_never_pages(tmp_path):
+    # review round 2: production proven, then the operator stops + closes OBS (refused = rc 1)
+    outs = _passes(tmp_path, [_body(), "", "", ""], rc=[0, 1, 1, 1])
+    assert not any("WOULD page" in o for o in outs), outs
+
+
+def test_a_hung_box_with_no_proven_production_never_pages(tmp_path):
+    outs = _passes(tmp_path, [_body(scene="Development"), "", "", ""], rc=[0, 2, 2, 2])
     assert not any("WOULD page" in o for o in outs), outs
 
 

@@ -11,8 +11,13 @@ scripts/stream_output_stuck_decision.py:
 
 A request that fails or times out leaves its keys EMPTY (the decision reads unknown, never a page).
 
-EXIT CODE = the box-reachable signal: 0 iff the WS connected and identified; non-zero on a
-connect/handshake failure (-> SKIP, the network-reach watchdog's page, never ours).
+EXIT CODE (issue 1460 review round 2: only a HUNG OBS may be carried as `unresponsive`, never an
+ABSENT one -- an operator closing OBS or powering the box off after a show must never page):
+  0 -- the WS connected and identified; the lines above are printed. `timeouts=<n>` counts the
+       requests that got NO answer in time (a closed connection or an error reply is not a timeout).
+  1 -- ABSENT: the TCP connect to the port was refused / had no route / timed out (OBS not running,
+       box off). Never carried.
+  2 -- HUNG: the TCP connect succeeded but the obs-websocket hello/identify never came in time.
 
 It sends only GetCurrentProgramScene / GetStreamStatus / GetStats through obs_phase2's own client
 (`_conn` / `_rpc`), so it never selects a scene: the issue-1380 production-scene guard stays the one
@@ -20,6 +25,7 @@ choke point and is never bypassed. No recording, no disk, no rig mutation.
 """
 import argparse
 import os
+import socket
 import sys
 import time
 
@@ -28,16 +34,29 @@ import obs_phase2  # noqa: E402  (the sibling WS client; websocket-client is its
 
 DEFAULT_PORT = 4455
 DEFAULT_WINDOW_S = float(os.environ.get("STREAM_OUTPUT_STUCK_WINDOW_S", "3.0"))
-# 7 requests x 3 s + the window + the 10 s obs_phase2 connect stay inside the watchdog's 45 s bound.
+# The socket timeout is set to this right after the handshake, so every recv (and _rpc's own
+# deadline) is bounded by it: 7 requests x 3 s + the 3 s window + a 5 s TCP probe + the 10 s
+# obs_phase2 handshake stay inside the watchdog's 45 s bound.
 REQUEST_TIMEOUT_S = float(os.environ.get("STREAM_OUTPUT_STUCK_REQUEST_TIMEOUT_S", "3"))
+TCP_CONNECT_TIMEOUT_S = float(os.environ.get("STREAM_OUTPUT_STUCK_TCP_TIMEOUT_S", "5"))
+_TIMEOUTS = [0]
 _WS_PASSWORD = os.environ.get("STREAM_OUTPUT_STUCK_WS_PASSWORD", "")
 
 
+def is_timeout(exc):
+    """Pure: True when `exc` means "no answer in time" (a hung peer), False for a refused / closed
+    connection or an error reply (an absent or answering peer)."""
+    return isinstance(exc, (TimeoutError, obs_phase2.WebSocketTimeoutException))
+
+
 def _request(ws, rtype):
-    """One read request -> its responseData dict, or None on any failure (logged, never raised)."""
+    """One read request -> its responseData dict, or None on any failure (logged, never raised). A
+    timeout is also counted in _TIMEOUTS (the decision's `unresponsive` evidence)."""
     try:
         return obs_phase2._rpc(ws, rtype, timeout_s=REQUEST_TIMEOUT_S) or {}
     except Exception as e:  # noqa: BLE001 -- a failed read is an unread fact, never a crash
+        if is_timeout(e):
+            _TIMEOUTS[0] += 1
         print(f"stream-output-stuck probe: {rtype} failed: {e}", file=sys.stderr)
         return None
 
@@ -77,7 +96,7 @@ def program_scene(ws):
     return str(d.get("currentProgramSceneName") or d.get("sceneName") or "")
 
 
-def format_lines(scenes, s0, s1, window_s):
+def format_lines(scenes, s0, s1, window_s, timeouts=0):
     """Pure: the printed key=value lines (the program scene before + after, the two snapshots, the
     window)."""
     lines = [f"scene0={scenes[0]}", f"scene1={scenes[1]}"]
@@ -85,6 +104,7 @@ def format_lines(scenes, s0, s1, window_s):
         for k in ("active", "render", "frames", "bytes", "reconnecting"):
             lines.append(f"{k}{i}={s.get(k, '')}")
     lines.append(f"window_s={window_s}")
+    lines.append(f"timeouts={timeouts}")
     return lines
 
 
@@ -95,10 +115,19 @@ def _main(argv):
     ap.add_argument("--window-s", type=float, default=DEFAULT_WINDOW_S)
     ns = ap.parse_args(argv)
     try:
-        ws = obs_phase2._conn(ns.host, _WS_PASSWORD, ns.port)
-    except Exception as e:  # noqa: BLE001 -- any connect/handshake failure = box unreachable = SKIP
-        print(f"stream-output-stuck probe: WS connect to {ns.host}:{ns.port} failed: {e}", file=sys.stderr)
+        socket.create_connection((ns.host, ns.port), timeout=TCP_CONNECT_TIMEOUT_S).close()
+    except OSError as e:  # refused / no route / TCP timeout = OBS not running or box off: ABSENT
+        print(f"stream-output-stuck probe: TCP connect to {ns.host}:{ns.port} failed (absent): {e}",
+              file=sys.stderr)
         return 1
+    try:
+        ws = obs_phase2._conn(ns.host, _WS_PASSWORD, ns.port)
+    except Exception as e:  # noqa: BLE001 -- the port answered TCP; classify the handshake failure
+        hung = is_timeout(e)
+        print(f"stream-output-stuck probe: WS handshake with {ns.host}:{ns.port} failed "
+              f"({'hung' if hung else 'absent'}): {e}", file=sys.stderr)
+        return 2 if hung else 1
+    ws.settimeout(REQUEST_TIMEOUT_S)
     try:
         scene0 = program_scene(ws)
         s0 = snapshot(ws)
@@ -110,7 +139,7 @@ def _main(argv):
             ws.close()
         except OSError as e:
             print(f"stream-output-stuck probe: ws.close() failed (ignored): {e}", file=sys.stderr)
-    print("\n".join(format_lines((scene0, scene1), s0, s1, ns.window_s)))
+    print("\n".join(format_lines((scene0, scene1), s0, s1, ns.window_s, _TIMEOUTS[0])))
     return 0
 
 
