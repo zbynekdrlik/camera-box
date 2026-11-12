@@ -19,7 +19,7 @@ set -euo pipefail
 #     reconnecting -- confirmed over 2 consecutive passes.
 # Outside that state it never pages. An unreachable box (SKIP) or an unread fact (UNKNOWN) is never a
 # guessed production -- EXCEPT a HUNG OBS (the port takes the TCP connect but the handshake or a
-# request times out, or the probe is killed by its bound) within STREAM_OUTPUT_STUCK_CARRY_S (180 s)
+# request times out, or the probe is killed by its bound) within STREAM_OUTPUT_STUCK_CARRY_S (300 s)
 # of a pass that PROVED production + streaming: a frozen OBS answers nothing and network-reach sees a
 # box that still pings, so that is a stuck output, reason `unresponsive`. A REFUSED connection (OBS
 # closed, box off -- a normal end of show, or a crash) is never carried: not this watchdog's page.
@@ -74,9 +74,12 @@ WINDOW_S="${STREAM_OUTPUT_STUCK_WINDOW_S:-3}"
 PRODUCTION_SCENE="${STREAM_OUTPUT_STUCK_PRODUCTION_SCENE:-$STREAM_PRODUCTION_SCENE_DEFAULT}"
 CONFIRM_THRESHOLD="${STREAM_OUTPUT_STUCK_CONFIRM_THRESHOLD:-2}"
 REPING_INTERVAL_S="${STREAM_OUTPUT_STUCK_REPING_INTERVAL_S:-600}"
-# ~3 passes: only a hang close to a live, MOVING production is carried (review round 3: an OBS that
-# hangs while QUITTING right after a show is indistinguishable from a hang mid-show).
-CARRY_S="${STREAM_OUTPUT_STUCK_CARRY_S:-180}"
+# Sized from the confirm count (review round 4): the timer spaces passes 60-90 s apart
+# (OnUnitActiveSec 1 min + RandomizedDelaySec + AccuracySec) and `now` is read BEFORE the probe, so
+# the 2nd hung pass after a proof reads at most 2 x 90 = 180 s; 300 s keeps a margin while still
+# only carrying a hang close to a live, MOVING production (an OBS that hangs while QUITTING right
+# after a show is indistinguishable from a hang mid-show: it pages at most within ~5 min of the end).
+CARRY_S="${STREAM_OUTPUT_STUCK_CARRY_S:-300}"
 
 DECIDE="${STREAM_OUTPUT_STUCK_DECIDE:-$HERE/stream_output_stuck_decision.py}"
 PROBE="${STREAM_OUTPUT_STUCK_PROBE:-$HERE/stream_output_stuck_probe.py}"
@@ -175,6 +178,9 @@ main() {
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
 
   local body reachable=0 hung=0 rc out verdict reasons scene rd ed bd now last_prod age=""
+  # `now` is read BEFORE the probe: a hung probe runs up to its 45 s bound, which must never count
+  # against the carry window (review round 4).
+  now="$(now_epoch)"
   body="$(fetch_probe)"
   rc=$?
   case "$rc" in
@@ -182,7 +188,6 @@ main() {
     2 | 124) hung=1; body="" ;;   # TCP took the connect but no answer / killed by `timeout 45`
     *) body="" ;;                        # refused / no route: OBS absent
   esac
-  now="$(now_epoch)"
   last_prod="$(read_state_field "last_production_${BOX}" "")"
   [[ "$last_prod" =~ ^[0123456789]+$ ]] && age=$(( now - last_prod ))
   # the decision's stderr reaches the journal (a traceback must never read as a silent verdict)

@@ -253,8 +253,8 @@ def _exe(path, text):
     return path
 
 
-def _passes(tmp_path, bodies, rc=0, dry=True, extra_env=None, start=1_700_000_000):
-    """Run the watchdog once per body (a 60 s pass apart on an injected clock). `rc` is the fetch's
+def _passes(tmp_path, bodies, rc=0, dry=True, extra_env=None, start=1_700_000_000, step=60):
+    """Run the watchdog once per body (`step` s apart on an injected clock). `rc` is the fetch's
     exit code (an int, or a list per pass)."""
     fetch_dir = tmp_path / "fetch"
     fetch_dir.mkdir(exist_ok=True)
@@ -272,7 +272,7 @@ def _passes(tmp_path, bodies, rc=0, dry=True, extra_env=None, start=1_700_000_00
         code = rc[i] if isinstance(rc, list) else rc
         fetch = _exe(fetch_dir / f"fetch{i}.sh", f"#!/usr/bin/env bash\ncat '{data}'\nexit {code}\n")
         env["STREAM_OUTPUT_STUCK_FETCH_CMD"] = str(fetch)
-        env["STREAM_OUTPUT_STUCK_NOW"] = str(start + 60 * i)
+        env["STREAM_OUTPUT_STUCK_NOW"] = str(start + step * i)
         args = ["bash", str(_WATCHDOG)] + (["--dry-run"] if dry else [])
         r = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
         assert r.returncode == 0, r.stderr
@@ -327,9 +327,22 @@ def test_a_probe_killed_by_something_else_is_not_hang_evidence(tmp_path):
 
 
 def test_a_hang_long_after_the_last_proven_production_never_pages(tmp_path):
-    # the default carry is ~3 passes (180 s): passes 4+ minutes after the proof are not carried
-    outs = _passes(tmp_path, [_body(), "", "", "", "", ""], rc=[0, 1, 1, 1, 2, 2])
+    # the default carry is 300 s: hung passes 6+ minutes after the proof are not carried
+    outs = _passes(tmp_path, [_body()] + [""] * 7, rc=[0, 1, 1, 1, 1, 1, 2, 2])
     assert not any("WOULD page" in o for o in outs), outs
+
+
+def test_a_mid_show_hang_pages_at_the_timers_slowest_spacing(tmp_path):
+    # review round 4: passes land 60-90 s apart (+ a slow pass); the 2nd hung pass after the proof
+    # reads ~220 s here -- a 180 s window would never confirm it
+    outs = _passes(tmp_path, [_body(), "", ""], rc=[0, 124, 124], step=110)
+    assert "WOULD page" in outs[2], outs[2]
+
+
+def test_the_clock_is_read_before_the_probe():
+    text = _WATCHDOG.read_text()
+    main = text[text.index("main() {"):]
+    assert main.index('now="$(now_epoch)"') < main.index('body="$(fetch_probe)"')
 
 
 def test_closing_obs_after_a_normal_end_of_show_never_pages(tmp_path):
