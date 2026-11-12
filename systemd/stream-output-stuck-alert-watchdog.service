@@ -1,0 +1,20 @@
+[Unit]
+# issue 1460 (owner ROZHODNUTÉ 12.11.2026): dev1-side page when the stream OBS output is STUCK during
+# a production. ONE probe -> decide -> page pass: read-only obs-websocket snapshots of the stream OBS
+# (program scene, stream state, render/output counters ~3 s apart); pages through the airuleset
+# page: class ONLY while the program scene is the production scene AND the stream is active AND the
+# output stood still, confirmed over 2 passes. DETECTION ONLY -- restarting the production OBS is the
+# owner's call. Ships DISABLED (stream-output-stuck-alert-watchdog.README.md).
+Description=camera-box stream-output stuck page (issue 1460) — one probe/decide/page pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/stream-output-stuck-alert-watchdog.sh
+# Per pass: one WS session (two snapshots ~3 s apart, the probe bounded by `timeout 30`) + a local
+# python decision.
+TimeoutStartSec=90
+
+[Install]
+WantedBy=default.target

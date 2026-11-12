@@ -1543,7 +1543,9 @@ pytest-xdist 3.8: `python3 -m pytest -q -p no:cacheprovider -n 12 tests/python
 --ignore=tests/python/test_strih_tally_service_1417.py` runs it in minutes; the 106 files that read the
 provisioning scripts took 80 s with `-n 8`. `test_strih_tally_service_1417.py` imports `websockets`,
 which dev1 does not have (CI installs it), and a collection error stops the whole serial run before any
-test. Put the command in a script file and run `bash /abs/script.sh` from a worktree lane. Never
+test. `test_obs_box_xfconf_real_daemon_1466.py` FAILS its 2 tests on dev1 (no xfconf package; CI installs
+it) -- an environment gap, not a regression (issue 1460, 12.11.2026). The whole suite with `-n 16` takes ~5.5
+min, so a `timeout 590` wrapper is tight: a backgrounded run killed by it prints no summary. Put the command in a script file and run `bash /abs/script.sh` from a worktree lane. Never
 `pkill -f <pattern>` a run from the same shell command: the pattern is in that shell's own command
 line, so it kills itself (exit 144).
 
