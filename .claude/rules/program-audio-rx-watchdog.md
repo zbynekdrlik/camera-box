@@ -69,11 +69,16 @@ a loss during a production was invisible until someone heard it (owner: zero aud
   over: `pairs == 0`, `rebases > 0`), review round 3. Residual (review round 4): a slower restart
   loop that still writes two or more status lines per start, with audio flowing and no fault outside
   the start grace, reads HEALTHY; its `rebases=` count is on every machine-channel `program_rx` line. `analyze(..., rx_key=)`, CLI `--rx-key`, prints `rx_*`.
-- **SILENT is never paged (a stated residual, review round 1):** a dead sender, a dropped NIC or a down
-  leg (the 8.11.2026 stream-snv USB NIC class) reads SILENT on the machine channel only, because a
-  console switched off overnight reads exactly the same; paging silence needs a production gate (the
-  venue streams / rig EVENT mode, `scripts/lib/avsync-production.sh`), an owner decision recorded on
-  issue 1460 as a follow-up candidate.
+- **SILENT pages only during a production (owner ruling 12.11.2026, design 6836485361):** a dead sender,
+  a dropped NIC or a down leg reads SILENT, and so does a console switched off overnight. So on SILENT
+  `handle_program_rx_silent` reads the venue's STREAM box (`program_audio_rx_stream_box`: the
+  stream-role box with the same `STRIH_VENUE`, from the facts; dialled at its row in the pass's roster)
+  through the read-only `stream_output_stuck_probe.py --window-s 0.5`: both scene reads `PRO` and
+  `active0=1` = production -> with `AUDIO_MIXER_PROGRAM_RX_PAGE=1` the `program-rx` arm pages after a
+  2-pass confirm. An absent OBS (probe rc 1) = no, hung / unreadable / no stream box in the roster =
+  unknown: both stay machine-channel only and reset the arm's confirm. This is NOT the A/V alarms' rule
+  (`scripts/lib/avsync-production.sh`: rig EVENT mode, unknown counts as a production). Test seam
+  `AUDIO_MIXER_PRODUCTION_CMD` (`tests/python/test_program_rx_silent_production_1460.py`).
 - **The receiver comes from the box FACTS, never a literal:** `scripts/lib/program-audio-rx.sh`
   `program_audio_rx_key NAME` (facts in a subshell): `STRIH_PROGRAM_VBAN_STREAMS != none` ->
   `obs-vban:<STRIH_PROGRAM_AUDIO_INPUT>`; a declared Dante program device -> `dante`; no fact file ->
