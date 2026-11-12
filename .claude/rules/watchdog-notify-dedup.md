@@ -85,6 +85,7 @@ production without, invisible without a page:
 | `measurement-audio-alert-watchdog.sh` | #1310 | mbc measurement-audio chain digital-silent (TEST-gated) |
 | `audio-mixer-alert-watchdog.sh` | issue 1381 | an OBS audio mixer off real time (BEHIND / OVERLOADED), an obs-vban sender losing audio (VBAN_LOSS) or the mix buffering ratcheted above its start (RAISED) -- audible on air |
 | `obs-handles-alert-watchdog.sh` | issue 1406 | an OBS process leaking handles (GROWING over 3 passes / over the CEILING) -- it freezes at the per-process cap mid-production |
+| `stream-output-stuck-alert-watchdog.sh` | issue 1460 | the stream OBS output stuck (render / stream frames / bytes still, or reconnecting) while the program is `PRO` and streaming -- delivered through the airuleset `page:` class (`page:<box>-output-stuck`), the one class the owner policy lets through, ships DISABLED |
 
 (`measurement-audio-alert-watchdog.sh` is EVENT-gated on `rig-mode-state.sh` like splitter-port #1290
 — the QPSK marker only sounds in TEST — but its FAULT is production-critical: a silent measurement

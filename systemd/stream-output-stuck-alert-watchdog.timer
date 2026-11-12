@@ -1,0 +1,17 @@
+[Unit]
+# issue 1460: the stuck-output check every 60 s (dev1-side), the cadence of the issue-1495 program
+# audio page on the same box. A stuck output during a production pages within ~2-3 min (2-pass
+# confirm); airuleset's page: class then repeats it at most once per 10 min while it lasts.
+Description=Run the camera-box stream-output stuck check every 60s (issue 1460)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+# issue 1387: never at one instant with the other dev1 watchdogs
+RandomizedDelaySec=20s
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
