@@ -471,7 +471,7 @@ def test_rx_reordered_is_reported_never_graded_1508():
     """obs v0.4.29 (dstack #278): a reorder is not a loss; its count is shown, never a failure."""
     w = [l + " rx_reordered=%d" % (10 * n) if "dante-input status:" in l else l for n, l in enumerate(_window())]
     r = CONT.decide(w, 1, 3)
-    assert r["verdict"] == "PASS" and r["counters"]["rx_reordered"]["delta"] == 40, r
+    assert r["verdict"] == "PASS" and r["counters"]["rx_reordered"]["delta"] == 50, r  # opening line n=0 (0) to closing n=5 (50)
 
 
 def test_a_line_without_rx_reordered_is_not_unknown_1508():
