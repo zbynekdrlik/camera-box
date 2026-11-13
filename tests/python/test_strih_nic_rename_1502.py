@@ -401,7 +401,7 @@ SWITCH_ARGS = ["enp56s0", "rig0", "stream-lan", "vban-dante70", "70", "10.77.8.1
 
 
 def _switch(tmp_path, healthy, new_present=True, retired=None, wait="1", arping=ARPING,
-            fail_ups_after=None):
+            fail_ups_after=None, ping_works=True):
     state = tmp_path / "nm"
     state.mkdir()
     if fail_ups_after is not None:
@@ -412,7 +412,7 @@ def _switch(tmp_path, healthy, new_present=True, retired=None, wait="1", arping=
         _nic(sysroot, "rig0", MAC)
     bin_dir = tmp_path / "bin"
     _stub(bin_dir, "nmcli", NMCLI)
-    _stub(bin_dir, "ping", '[ "$FAKE_HEALTHY" = 1 ]\n')
+    _stub(bin_dir, "ping", '[ "$FAKE_HEALTHY" = 1 ]\n' if ping_works else 'exit 1\n')
     _stub(bin_dir, "arping", arping)
     _stub(bin_dir, "ip", 'printf "%s\\n" "$*" >> "$FAKE_NM/ip.log"\n')
     conf = tmp_path / "90-retired.conf"
@@ -480,6 +480,28 @@ def test_switch_rolls_back_when_the_new_nic_does_not_answer(tmp_path):
     assert log.index("device set rig0 managed no") < log.index("connection modify stream-lan connection.interface-name enp56s0")
     assert _log(st, "ip.log") == ["link set dev rig0 down"]
     assert not any(" -U " in " %s " % x for x in _log(st, "arping.log"))
+
+
+def test_the_gateway_is_proved_by_arp_on_the_new_nic_never_an_icmp_ping_1502(tmp_path):
+    """Live stream-snv 13.11.2026 11:36Z: the switch rolled back although rig0 had carrier at 2500. While
+    both NICs hold 10.77.9.204 the gateway's ARP entry still names the onboard NIC's MAC, so the reply to
+    `ping -I rig0 10.77.8.1` arrives on enp56s0 and the bound ping never sees it. An ARP request from rig0
+    is answered to rig0's own MAC and proves the new port."""
+    r, st, _, res = _switch(tmp_path, healthy=True, ping_works=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert res.read_text().startswith("ok ")
+    probes = [x for x in _log(st, "arping.log") if " -U " not in " %s " % x]
+    assert "-q -c 1 -w 2 -I rig0 10.77.8.1" in probes, probes
+    assert "-q -c 1 -w 2 -I rig0.70 10.77.7.232" in probes, probes
+
+
+def test_a_rollback_takes_the_rig_address_off_the_new_nic_1502(tmp_path):
+    """Live 13.11.2026: after the rollback rig0 (down) still held 10.77.9.204/23."""
+    r, st, _, res = _switch(tmp_path, healthy=False)
+    assert r.returncode == 1
+    ip = _log(st, "ip.log")
+    assert "addr flush dev rig0" in ip, ip
+    assert ip.index("addr flush dev rig0") < ip.index("link set dev rig0 down"), ip
 
 
 def test_a_rollback_that_cannot_bring_the_old_nic_up_says_so(tmp_path):
