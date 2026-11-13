@@ -298,6 +298,10 @@ if a[:1] == ["-D"]:
         block = nft_render(text).replace("$dante_leg", '"%s"' % iface)
     s.setdefault(tk, {})[m.group(1)] = block
     save(); sys.exit(0)
+if a == ["list", "ruleset"] and not ns:
+    # issue 1519: the whole ruleset = a scripted extra (another firewall's NAT) + every loaded table
+    sys.stdout.write(s.get("nft_ruleset_extra", "") + "".join(s.get("nft_other", {}).values())
+                     + (s.get("nft_render") or "")); save(); sys.exit(0)
 if a[:3] == ["list", "table", "inet"] and a[3] in s.get(tk, {}):
     sys.stdout.write(s[tk][a[3]]); save(); sys.exit(0)
 if ns:

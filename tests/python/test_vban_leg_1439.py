@@ -63,7 +63,7 @@ LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NT
          "STRIH_VBAN_LEG_SYSFS", "STRIH_VBAN_LEG_PROC_SYS", "STRIH_VBAN_LEG_NFT_FILE", "STRIH_VBAN_LEG_UNIT_FILE",
          "STRIH_VBAN_LEG_SYSCTL_FILE", "STRIH_VBAN_LEG_WAIT_S", "STRIH_VBAN_LEG_NM_CONF_FILE", "STRIH_DANTE_LEG_URL",
          "STRIH_DANTE_LEG_CACHE", "STRIH_DANTE_LEG_ETC", "STRIH_DANTE_LEG_UNIT_FILE", "STRIH_DANTE_AVAHI_CONF",
-         "STRIH_DANTE_LEG_ROOT", "STRIH_DANTE_LEG_PIN_FILE")
+         "STRIH_DANTE_LEG_ROOT", "STRIH_DANTE_LEG_PIN_FILE", "STRIH_DANTE_UFW_CONF")
 GRADE_FNS = 'ok() { printf "OK|%s\\n" "$*"; }\nbad() { printf "BAD|%s\\n" "$*"; }\nnote() { printf "NOTE|%s\\n" "$*"; }\n'
 
 
@@ -286,7 +286,8 @@ class Box:
                          "STRIH_DANTE_LEG_URL": "file://%s" % (tmp_path / "dstack-mirror"),
                          "STRIH_DANTE_LEG_CACHE": str(tmp_path / "dstack-cache"),
                          "STRIH_DANTE_LEG_ETC": str(self.dstack_dir), "STRIH_DANTE_LEG_UNIT_FILE": str(self.dstack_unit),
-                         "STRIH_DANTE_AVAHI_CONF": str(self.etc / "avahi" / "avahi-daemon.conf")})
+                         "STRIH_DANTE_AVAHI_CONF": str(self.etc / "avahi" / "avahi-daemon.conf"),
+                         "STRIH_DANTE_UFW_CONF": str(self.etc / "ufw" / "ufw.conf")})
         self.nic(RIG_IF, "a8:a1:59:00:00:01")
 
     def nic(self, name, mac, driver=None, physical=True):

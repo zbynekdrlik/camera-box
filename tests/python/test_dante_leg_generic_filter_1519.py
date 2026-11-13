@@ -343,14 +343,74 @@ def test_grade_fails_avahi_without_the_deny(tmp_path):
     assert any(x.startswith("BAD|(dante-leg) avahi") and STRIH_VLAN_IF in x for x in bad), bad
 
 
-def test_grade_notes_an_avahi_that_started_before_the_deny(tmp_path):
+def test_grade_fails_an_avahi_that_started_before_the_deny(tmp_path):
+    """Review round 1: our table's avahi uid drop went; until avahi restarts it still announces on the leg."""
     b = _installed(tmp_path)
     s = b.st()
     s["show"]["avahi-daemon.service"] = "@%d\n" % (int(b.avahi.stat().st_mtime) - 600)
     fk.write_state(b.state, s)
     rows = _graded(b)
-    assert any(x.startswith("NOTE|(dante-leg) avahi") and "restart" in x for x in rows), rows
-    assert not any(x.startswith("BAD|(dante-leg) avahi") for x in rows), rows
+    assert any(x.startswith("BAD|(dante-leg) avahi") and "restart avahi-daemon" in x for x in rows), rows
+
+
+# --- review round 1: dstack's notrack file only on a box with no NAT and no other stateful firewall -------
+
+NAT = "table ip nat {\n\tchain POSTROUTING {\n\t\toifname \"docker0\" masquerade\n\t}\n}\n"
+
+
+@pytest.mark.parametrize("kind", ["nat", "ufw", "firewalld"])
+def test_install_refuses_a_box_with_nat_or_another_firewall_and_changes_nothing(tmp_path, kind):
+    b = _dante_box(tmp_path)
+    s = b.st()
+    if kind == "nat":
+        s["nft_ruleset_extra"] = NAT
+    elif kind == "firewalld":
+        s["units"]["firewalld"] = {"enabled": True, "active": True}
+    fk.write_state(b.state, s)
+    if kind == "ufw":
+        (b.etc / "ufw").mkdir(parents=True)
+        (b.etc / "ufw" / "ufw.conf").write_text("# ufw\nENABLED=yes\nLOGLEVEL=low\n")
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode != 0 and "notrack" in r.stderr and "nothing changed" in r.stderr, r.stdout + r.stderr
+    s = b.st()
+    assert not b.dstack_unit.exists() and not (b.dstack_dir / "dante-leg.nft").exists()
+    assert s["nft_render"] is not None and b.nft_file.exists(), "our old table stays"
+
+
+def test_a_disabled_ufw_and_dstacks_own_tables_never_count_as_nat(tmp_path):
+    b = _dante_box(tmp_path)
+    (b.etc / "ufw").mkdir(parents=True)
+    (b.etc / "ufw" / "ufw.conf").write_text("ENABLED=no\n")
+    assert b.run("strih_vban_leg_install", box="strih-snv").returncode == 0
+    rows = _graded(b)
+    assert any(x.startswith("OK|(dante-leg) nat") for x in rows), rows
+
+
+def test_grade_fails_nat_that_appeared_later(tmp_path):
+    b = _installed(tmp_path)
+    s = b.st()
+    s["nft_ruleset_extra"] = NAT
+    fk.write_state(b.state, s)
+    bad = [x for x in _graded(b) if x.startswith("BAD|")]
+    assert any(x.startswith("BAD|(dante-leg) nat") and "masquerade" in x for x in bad), bad
+
+
+def test_an_empty_render_never_reads_as_the_live_tables():
+    """Review round 1: two empty strings must never compare equal; the render needs both pipeline stages."""
+    src = (REPO / "scripts" / "lib" / "strih-dante-leg-filter.sh").read_text()
+    assert src.count('[ "${PIPESTATUS[0]}${PIPESTATUS[1]}" = 00 ]') == 2
+    assert '&& [ -n "$want" ]' in src and '|| [ -z "$want" ]' in src
+
+
+def test_an_unreadable_avahi_conf_is_never_overwritten(tmp_path):
+    b = _dante_box(tmp_path)
+    b.avahi.chmod(0o000)
+    try:
+        r = b.run("strih_vban_leg_install", box="strih-snv")
+    finally:
+        b.avahi.chmod(0o644)
+    assert r.returncode != 0 and "avahi-daemon.conf" in r.stderr, r.stdout + r.stderr
+    assert b.avahi.read_text() == AVAHI_CONF
 
 
 def test_grade_fails_a_disabled_loader_unit(tmp_path):

@@ -100,7 +100,7 @@ def test_the_device_follows_the_role():
 def test_a_device_of_the_other_role_is_no_program_device(tmp_path):
     # strih-obs named on the stream box is not its program device: with the VBAN program facts none the load
     # refuses (the stream role needs ONE program source)
-    d = _boxes_with(tmp_path, "stream-snv", {"STRIH_DANTE_DEVICES": "strih-obs=4440:8800:4455:30000-30031"})
+    d = _boxes_with(tmp_path, "stream-snv", {"STRIH_DANTE_DEVICES": "strih-obs=4440:8800:4455"})
     r = _bash('strih_box_load stream-snv', env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode != 0 and "STRIH_PROGRAM_VBAN_STREAMS" in r.stderr, r.stderr
 
