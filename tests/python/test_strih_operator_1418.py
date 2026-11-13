@@ -807,6 +807,18 @@ def test_one_provider_with_only_a_disconnected_or_nvidia_panel_stays_a_note_1494
     assert op.row("panel-gpu")[0] == "NOTE"
 
 
+def test_a_single_gpu_box_whose_panel_card_drives_x_is_a_note_1494(op):
+    """stream-pp 13.11.2026: one AMD GPU (Barcelo), no NVIDIA. X runs on that card and the panel `eDP` is
+    connected primary on it, so there is no PRIME sink to miss. The row FAILed it as the strih-snv black
+    panel. That panel FAIL applies only when an NVIDIA card drives the X screen."""
+    (op.st / "xrandr").write_text("Providers: number : 1\nProvider 0: id: 0x55 cap: 0x9, Source Output, "
+                                  "Sink Offload crtcs: 4 outputs: 3 associated providers: 0 "
+                                  "name:AMD Radeon Graphics @ pci:0000:04:00.0\n")
+    op.drm("card1-eDP-1", "amdgpu", "connected")
+    st, d = op.row("panel-gpu")
+    assert st == "NOTE" and "one GPU provider" in d and "AMD Radeon Graphics" in d, d
+
+
 def test_a_modesetting_sink_with_the_connected_panel_stays_ok_1494(op):
     op.drm("card2-eDP-2", "amdgpu", "connected")
     assert op.row("panel-gpu")[0] == "OK"
