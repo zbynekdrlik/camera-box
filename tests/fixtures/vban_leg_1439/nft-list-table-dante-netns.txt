@@ -7,6 +7,7 @@ table inet vban_dante70 {
 		iifname "enp7s0.70" ip saddr 10.77.7.0/24 udp sport { 4440-4486, 5353, 8700, 8800-8831 } udp dport 32768-60999 counter packets 0 bytes 0 accept
 		iifname "enp7s0.70" ip saddr 10.77.7.0/24 ip daddr 224.0.1.129 udp dport { 319, 320 } counter packets 0 bytes 0 accept
 		iifname "enp7s0.70" ip protocol igmp counter packets 0 bytes 0 accept
+		iifname "enp7s0.70" ip saddr 10.77.7.0/24 tcp dport { 22, 8092 } counter packets 0 bytes 0 accept
 		iifname "enp7s0.70" counter packets 0 bytes 0 drop
 		iifname != "enp7s0.70" iifname != "lo" ip saddr 10.77.7.30 udp dport { 6980, 6981 } counter packets 0 bytes 0
 	}
@@ -17,6 +18,7 @@ table inet vban_dante70 {
 		oifname "enp7s0.70" meta skuid 111 counter packets 0 bytes 0 drop
 		oifname "enp7s0.70" ip protocol igmp counter packets 0 bytes 0 accept
 		oifname "enp7s0.70" ip saddr 10.77.7.202 ip daddr { 10.77.7.0/24, 224.0.0.231, 224.0.0.233, 224.0.0.251 } meta l4proto udp counter packets 0 bytes 0 accept
+		oifname "enp7s0.70" ip saddr 10.77.7.202 ip daddr 10.77.7.0/24 tcp sport { 22, 8092 } counter packets 0 bytes 0 accept
 		oifname "enp7s0.70" counter packets 0 bytes 0 drop
 	}
 }
