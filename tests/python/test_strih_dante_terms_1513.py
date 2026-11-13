@@ -130,7 +130,8 @@ def test_every_dante_controller_latency_loads(tmp_path, value):
     assert r.returncode == 0, r.stderr
 
 
-@pytest.mark.parametrize("value", ["0", "0.0", "51", "12.0416666", "12.", ".5", "1e3", "12,04", "١٢"])
+# review round 1: a leading zero renders `05.0`, which TOML refuses (OBS would not load the file)
+@pytest.mark.parametrize("value", ["0", "0.0", "51", "12.0416666", "12.", ".5", "1e3", "12,04", "١٢", "05", "00.5", "05.5"])
 def test_a_malformed_receive_buffer_is_refused(tmp_path, value):
     r = _load(tmp_path, "strih-snv", {"STRIH_DANTE_RECEIVE_BUFFER_MS": value})
     assert r.returncode != 0 and "STRIH_DANTE_RECEIVE_BUFFER_MS" in r.stderr, r.stderr
@@ -142,6 +143,7 @@ def test_a_malformed_receive_buffer_is_refused(tmp_path, value):
     ({"STRIH_DANTE_TX": "a,"}, "two"),
     ({"STRIH_DANTE_TX": " a,b"}, "two"),
     ({"STRIH_DANTE_TX": "a" * 32 + ",b"}, "two"),
+    ({"STRIH_DANTE_TX": "x,x"}, "two different"),   # review round 1: the obs config refuses equal names
     ({"STRIH_DANTE_TX_TRACK": "none"}, "STRIH_DANTE_TX_TRACK"),
     ({"STRIH_DANTE_TX_TRACK": "7"}, "STRIH_DANTE_TX_TRACK"),
     ({"STRIH_DANTE_TX_TRACK": "0"}, "STRIH_DANTE_TX_TRACK"),
@@ -150,6 +152,14 @@ def test_a_malformed_receive_buffer_is_refused(tmp_path, value):
 def test_a_malformed_tx_is_refused(tmp_path, pairs, word):
     r = _load(tmp_path, "stream-snv", pairs)
     assert r.returncode != 0 and word in r.stderr, r.stderr
+
+
+# review round 1: the fact parser already refuses a quote / backslash, the validator refuses them too
+# (a label lands raw in a TOML basic string)
+@pytest.mark.parametrize("tx", ['a"b,c', 'a\\b,c'])
+def test_the_validator_refuses_a_quote_or_backslash_in_a_label(tx):
+    r = _bash('_strih_box_dante_terms_ok box 1 1 12.041666 "$1" 1', tx)
+    assert r.returncode != 0 and "STRIH_DANTE_TX" in r.stderr, r.stderr
 
 
 def test_the_bracket_sets_are_spelled_out_never_a_locale_range():
@@ -180,6 +190,17 @@ def test_strih_snv_toml_states_both_terms_and_no_tx(tmp_path):
     assert d["network_latency_ms"] == 1.0 and d["receive_buffer_ms"] == 12.041666
     assert isinstance(d["network_latency_ms"], float) and isinstance(d["receive_buffer_ms"], float)
     assert "tx" not in d and "tx_track" not in d and "latency_ms" not in d
+
+
+# review round 1: the renderer runs inside obs_box_write_if_changed_rendered with errexit off, so a failed
+# fact read must fail the render, never write a file without the terms
+def test_a_failed_fact_read_fails_the_render(tmp_path):
+    s = tmp_path / "site.conf"
+    s.write_text(SITE)
+    r = _bash('strih_box_load stream-snv >/dev/null; rows="$(strih_dante_input_site_rows "$1")"; set +e\n'
+              'strih_box_fact() { [ "$1" != STRIH_DANTE_TX ] || return 1; printf "%s" "${STRIH_BOX_FACTS[$1]}"; }\n'
+              'strih_dante_input_toml enp56s0.70 "4440 8800 4455 30000" "$rows"; echo "rc=$?"', s)
+    assert r.stdout.strip().endswith("rc=1"), r.stdout + r.stderr
 
 
 def test_stream_snv_toml_sends_the_program_and_keeps_the_rx_latency(tmp_path):
@@ -306,6 +327,14 @@ def test_item9_notes_a_tx_rate_off_48000(tmp_path):
     r = _stream(tmp_path, l2_kw={"tx_played": "200000"})   # 104000 in 10 s = 10400/s
     assert "BAD" not in r.stdout, r.stdout
     assert "NOTE (program-dante) tx rate 10400 frames/s" in r.stdout, r.stdout
+
+
+def test_item9_takes_the_rate_across_midnight(tmp_path):
+    # review round 1: 23:59:55 -> 00:00:05 is 10 s, 480000 frames = 48000/s, no rate NOTE
+    lines = [_start("stream-obs", 1), SPLIT, TXLINE, NETLAT, _status("23:59:55.000", 4800)]
+    nxt = _status("00:00:05.000", 484800, tx_played="576000")
+    r = _grade(tmp_path, "stream-snv", lines, nxt, TOML_STREAM)
+    assert "BAD" not in r.stdout and "tx rate" not in r.stdout, r.stdout
 
 
 def test_item9_fails_a_tx_device_whose_line_has_no_tx(tmp_path):
