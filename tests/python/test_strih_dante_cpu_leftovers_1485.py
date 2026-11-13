@@ -319,7 +319,9 @@ def test_the_dante_input_toml_follows_dlinks_default_latency(tmp_path):
     r = _bash('strih_box_load strih-snv >/dev/null; strih_dante_input_toml enp7s0.70 "4440 8800 4455 47200" '
               '"$(strih_dante_input_site_rows "$1")"', s)
     assert r.returncode == 0, r.stderr
-    assert "latency_ms" not in r.stdout, r.stdout
+    # obs v0.4.27 refuses latency_ms; the named terms (network_latency_ms / receive_buffer_ms, issues 1510 +
+    # 1513) are the latency now
+    assert not any(line.startswith("latency_ms") for line in r.stdout.splitlines()), r.stdout
     assert "STRIH_DANTE_INPUT_LATENCY_MS" not in (SCRIPTS / "lib" / "strih-dante-input.sh").read_text()
 
 
