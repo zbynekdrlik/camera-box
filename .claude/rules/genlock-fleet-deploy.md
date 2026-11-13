@@ -284,7 +284,10 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    the repo rsync protects `/shading-release/` `/intercom-release/` `/obs-release/` from `--delete`
    (`strih_lx_repo_rsync_filters`; without it: rc 23, live 13.11.2026), and the root child hands
    `repo/` back with `chown -R --reference=<stage>` before `setup-strih.rc`, so the operator's sweep
-   can remove the stage later. A pytest of rsync behaviour needs stand-in files of DIFFERENT lengths:
+   can remove the stage later. A MANUAL `sudo verify-strih.sh` from the stage tree must run as
+   `sudo env PYTHONDONTWRITEBYTECODE=1 ./scripts/verify-strih.sh --box <box>` (the deploy's own does):
+   without it root writes `scripts/__pycache__` into the stage and the next same-pin deploy fails at
+   `[stage]` rc 23 again (live stream-snv 13.11.2026). A pytest of rsync behaviour needs stand-in files of DIFFERENT lengths:
    rsync's quick check skips equal size + same-second mtime, and a same-user 0555 dir is no stand-in for
    root ownership (rsync makes a dir it owns writable before deleting in it).
 5. **stop** — delegated to `/usr/local/bin/strih-obs-stop.sh` (plain mode = `systemctl --user stop`,
