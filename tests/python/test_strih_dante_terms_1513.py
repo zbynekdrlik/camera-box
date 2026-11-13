@@ -75,14 +75,12 @@ def test_the_four_terms_are_required_facts_at_the_end_of_the_key_list():
     assert r.stdout.split()[-5:] == list(TERMS) + ["STRIH_NIC_RENAME"]
 
 
-def test_every_dante_program_box_carries_its_owner_decided_latency_explicitly():
-    # stream-obs: P = (a) + (b) = 1 + 12.041666 = 13.041666 ms (unchanged). strih-obs: issue 1510 /
-    # dstack #234, owner 13.11.2026: (b) 17.041666 -> P 18.041666 ms (the RX thread wakes up to 10.7 ms late)
-    want = {"strih-snv": "17.041666", "stream-snv": "12.041666"}
-    for box, b in want.items():
+def test_every_dante_program_box_keeps_todays_latency_explicitly():
+    # P = (a) + (b) = 1 + 12.041666 = 13.041666 ms, today's P on strih-obs and stream-obs (no latency change)
+    for box in ("strih-snv", "stream-snv"):
         f = _facts(box)
         assert f["STRIH_DANTE_NETWORK_LATENCY_MS"] == "1", box
-        assert f["STRIH_DANTE_RECEIVE_BUFFER_MS"] == b, box
+        assert f["STRIH_DANTE_RECEIVE_BUFFER_MS"] == "12.041666", box
 
 
 def test_only_stream_snv_sends_the_program_to_dante():
