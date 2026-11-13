@@ -93,7 +93,7 @@ def test_strih_snv_has_no_vban_program_and_keeps_its_input_name():
     f = dict(l.split("=", 1) for l in (BOXES / "strih-snv.env").read_text().splitlines() if l and l[0] != "#")
     assert (f["STRIH_PROGRAM_VBAN_STREAMS"], f["STRIH_PROGRAM_VBAN_PORT"], f["STRIH_PROGRAM_VBAN_RESERVE_MS"]) == ("none",) * 3
     assert f["STRIH_PROGRAM_AUDIO_INPUT"] == "ASIO zvuk"
-    assert "strih-obs=4440:8800:4455:30000-30031" in f["STRIH_DANTE_DEVICES"].split()
+    assert "strih-obs=4440:8800:4455" in f["STRIH_DANTE_DEVICES"].split()   # issue 1519: no RX range
     assert "master-asio-dante" not in (BOXES / "strih-snv.env").read_text(), "site data never in the public repo"
 
 
@@ -146,7 +146,7 @@ def test_the_toml_is_the_example_format_from_the_facts_and_the_site_file(tmp_pat
     d = tomllib.loads(r.stdout)
     assert d == {"name": "strih-obs", "iface": "enp7s0.70", "network_rate": 96000,
                  "rx": ["Program L", "Program R"], "arc_port": 4440, "cmc_port": 8800, "flows_port": 4455,
-                 "rx_port_base": 30000,
+                 # issue 1519: no rx_port_base (obs v0.4.28: unset = the slot's fixed block)
                  # issues 1510 + 1513: the named latency terms, P = 1 + 12.041666 = today's 13.041666 ms
                  "network_latency_ms": 1.0, "receive_buffer_ms": 12.041666,
                  "subscribe": [{"rx": 1, "tx_channel": "MASTER-L", "tx_device": "foh-tx"},
@@ -369,7 +369,7 @@ def test_verify_strih_dispatches_item9_to_the_dante_grade():
     v = (SCRIPTS / "verify-strih.sh").read_text()
     assert 'if strih_program_audio_declared; then' in v and 'strih_program_audio_grade "$SCN_BIN" "$WS_HOST" "$LOG"' in v
     leg = (SCRIPTS / "lib" / "strih-vban-leg.sh").read_text()
-    assert "graded by (program-dante)" in leg
+    assert "strih_dante_leg_filter_grade" in leg   # issue 1519: a Dante leg is graded as dstack's filter
 
 
 def test_setup_strih_writes_the_toml_after_the_leg():
@@ -541,15 +541,16 @@ def test_the_strih_snv_manifest_parses_to_the_dante_seed():
         PAV.parse_program_audio_vban('{"program_audio_dante": 1}')
 
 
-def test_every_dante_rx_port_range_lies_below_the_os_ephemeral_range():
-    # dstack 5.11.2026: a fixed RX flow port inside Linux's ephemeral range (32768-60999) can be taken
-    # by any socket the OS numbers itself; strih-snv's OBS Dante device failed to start on it
-    # ("RX flow port 47217: Address already in use") and the program stayed silent.
+def test_every_dante_device_takes_its_flow_ports_from_its_arc_slot():
+    # dstack 5.11.2026: a fixed RX flow port inside Linux's ephemeral range (32768-60999) can be taken by any
+    # socket the OS numbers itself ("RX flow port 47217: Address already in use"). Issue 1519 (dstack >=
+    # 0.6.117): every device binds the fixed block of its slot in 29800-31847, from its ARC port in 4440-4471,
+    # so a box declares no RX range at all and the ARC port must sit in the slots.
     for env in sorted(BOXES.glob("*.env")):
         f = dict(l.split("=", 1) for l in env.read_text().splitlines() if l and l[0] != "#" and "=" in l)
         for dev in f.get("STRIH_DANTE_DEVICES", "none").split():
             name, _, ports = dev.partition("=")
             if not ports:   # `none`: the box declares no Dante device
                 continue
-            first, last = (int(p) for p in ports.split(":")[3].split("-"))
-            assert last < 32768, f"{env.name}: {name} RX ports {first}-{last} reach the ephemeral range"
+            arc, cmc, flows = (int(p) for p in ports.split(":"))
+            assert 4440 <= arc <= 4471, f"{env.name}: {name} ARC port {arc} outside dstack's slots"

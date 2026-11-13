@@ -53,7 +53,10 @@ def _vban_era_boxes():
     for old, new in (("STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n"),
                      ("STRIH_PROGRAM_VBAN_PORT=none\n", "STRIH_PROGRAM_VBAN_PORT=6981\n"),
                      ("STRIH_PROGRAM_VBAN_RESERVE_MS=none\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=30\n"),
-                     (" strih-obs=4440:8800:4455:30000-30031\n", "\n"),
+                     # issue 1519: the VBAN rollback shape has no Dante device and the console's VBAN on the leg
+                     ("STRIH_DANTE_DEVICES=strih-snv-intercom=4441:8801:4456 strih-obs=4440:8800:4455\n",
+                      "STRIH_DANTE_DEVICES=none\n"),
+                     ("STRIH_PROGRAM_VBAN_SENDER=none\n", "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,6981\n"),
                      # issues 1510 + 1513: no program Dante device = the four latency / TX facts none
                      ("STRIH_DANTE_NETWORK_LATENCY_MS=1\n", "STRIH_DANTE_NETWORK_LATENCY_MS=none\n"),
                      ("STRIH_DANTE_RECEIVE_BUFFER_MS=12.041666\n", "STRIH_DANTE_RECEIVE_BUFFER_MS=none\n")):

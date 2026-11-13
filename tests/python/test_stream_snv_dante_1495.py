@@ -82,7 +82,8 @@ def test_stream_snv_is_one_nic_and_dante():
     assert f["STRIH_PROGRAM_VBAN_LEG_ADDR"] == "10.77.7.204"
     assert (f["STRIH_PROGRAM_VBAN_STREAMS"], f["STRIH_PROGRAM_VBAN_PORT"], f["STRIH_PROGRAM_VBAN_RESERVE_MS"]) == ("none",) * 3
     assert f["STRIH_PROGRAM_AUDIO_INPUT"] == "mbc", "the SNV stream tooling keys on the name"
-    assert f["STRIH_DANTE_DEVICES"] == "stream-obs=4440:8800:4455:30000-30031"
+    assert f["STRIH_DANTE_DEVICES"] == "stream-obs=4440:8800:4455"   # issue 1519: no RX range
+    assert f["STRIH_PROGRAM_VBAN_SENDER"] == "none", "issue 1519: no VBAN on the Dante leg"
     # issue 1502: the ONE rig NIC is now the USB 2.5 GbE adapter (r8152) renamed rig0; still one NIC
     assert f["STRIH_NIC_DRIVER"] == "r8152" and f["STRIH_NIC_RENAME"] == "00:e0:4c:68:01:85=rig0"
     text = (BOXES / "stream-snv.env").read_text()
@@ -142,7 +143,8 @@ def test_the_stream_box_toml_names_its_own_device_on_the_vlan(tmp_path):
     assert r.returncode == 0, r.stderr
     d = tomllib.loads(r.stdout)
     assert d["name"] == "stream-obs" and d["iface"] == "enp56s0.70" and d["network_rate"] == 96000
-    assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["rx_port_base"]) == (4440, 8800, 4455, 30000)
+    assert (d["arc_port"], d["cmc_port"], d["flows_port"]) == (4440, 8800, 4455)
+    assert "rx_port_base" not in d and "tx_port_base" not in d   # issue 1519: the fixed slot block
     assert [x["tx_channel"] for x in d["subscribe"]] == ["MIX-L", "MIX-R"]
     assert "sample_rate" not in d and "latency_ms" not in d
     # issues 1510 + 1513: the named terms (P kept at 13.041666 ms) + the program TX to mbc

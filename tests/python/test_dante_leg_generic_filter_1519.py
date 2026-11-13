@@ -272,7 +272,8 @@ def test_a_non_dante_leg_keeps_its_table_and_loses_a_leftover_generic_filter(tmp
     s = b.st()
     assert "dstack_dante_leg" not in s.get("nft_other", {})
     assert not b.dstack_unit.exists() and not (b.dstack_dir / "dante-leg.nft").exists()
-    assert s["nft_render"] is not None and "dante" not in b.nft_file.read_text().split("delete table", 1)[1].lower()
+    rules = b.nft_file.read_text().split("delete table", 1)[1]
+    assert s["nft_render"] is not None and "4440" not in rules and "skuid" not in rules and "10.77.7.0/24" not in rules
 
 
 # --- verify: item 9 on a Dante box -----------------------------------------------------------------------

@@ -42,6 +42,7 @@ SETUP = SCRIPTS / "setup-strih.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
 BOXES = SCRIPTS / "strih-boxes"
 FIX = REPO / "tests" / "fixtures" / "vban_leg_1439"
+DSTACK_FIX = REPO / "tests" / "fixtures" / "dstack_leg_1519"
 
 LEG_MAC = "00:e0:4c:68:01:85"
 LEG_IF = "enx00e04c680185"
@@ -52,12 +53,17 @@ RIG_UUID = "872cb3ca-c619-31f0-b224-66ef70bbeab0"
 STRIH_RIG = "enp7s0"
 STRIH_VLAN_IF = "enp7s0.70"
 STRIH_LEG_ADDR = "10.77.7.202"
-STRIH_DEVICES = "strih-snv-intercom=4441:8801:4456:30100-30131 strih-obs=4440:8800:4455:30000-30031"
-STRIH_SENDER = "10.77.7.30:6980,6981"  # Ableton-FOH: the hub's fohabl-strih + the OBS strih-obs (owner 23.10.2026)
+# issue 1519: no RX range (the fixed slot blocks), and no VBAN on a Dante leg
+STRIH_DEVICES = "strih-snv-intercom=4441:8801:4456 strih-obs=4440:8800:4455"
+STRIH_SENDER = "none"
+# the two-port sender of the VBAN era (owner 23.10.2026: Ableton-FOH feeds the hub 6980 + the OBS 6981)
+FOH_SENDER = "10.77.7.30:6980,6981"
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
          "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "NDI_DISCOVERY_SENDER_HOSTS",
          "STRIH_VBAN_LEG_SYSFS", "STRIH_VBAN_LEG_PROC_SYS", "STRIH_VBAN_LEG_NFT_FILE", "STRIH_VBAN_LEG_UNIT_FILE",
-         "STRIH_VBAN_LEG_SYSCTL_FILE", "STRIH_VBAN_LEG_WAIT_S", "STRIH_VBAN_LEG_NM_CONF_FILE")
+         "STRIH_VBAN_LEG_SYSCTL_FILE", "STRIH_VBAN_LEG_WAIT_S", "STRIH_VBAN_LEG_NM_CONF_FILE", "STRIH_DANTE_LEG_URL",
+         "STRIH_DANTE_LEG_CACHE", "STRIH_DANTE_LEG_ETC", "STRIH_DANTE_LEG_UNIT_FILE", "STRIH_DANTE_AVAHI_CONF",
+         "STRIH_DANTE_LEG_ROOT", "STRIH_DANTE_LEG_PIN_FILE")
 GRADE_FNS = 'ok() { printf "OK|%s\\n" "$*"; }\nbad() { printf "BAD|%s\\n" "$*"; }\nnote() { printf "NOTE|%s\\n" "$*"; }\n'
 
 
@@ -114,7 +120,7 @@ LEG_BODY = ('strih_box_load "$1" || exit 9\n'
 def test_stream_snv_and_strih_snv_have_the_vlan_leg_every_other_box_none():
     # the REAL facts: issue 1495 put stream-snv's leg on VLAN 70 of its rig NIC (the USB-C NIC retired)
     real = {"STRIH_BOXES_DIR": str(BOXES)}
-    assert _bash(LEG_BODY, "stream-snv", env=real).stdout.strip() == "vlan:70|%s|%s:6980" % (LEG_ADDR, SENDER)
+    assert _bash(LEG_BODY, "stream-snv", env=real).stdout.strip() == "vlan:70|%s|none" % LEG_ADDR   # issue 1519
     assert _bash(LEG_BODY, "strih-snv", env=real).stdout.strip() == "vlan:70|%s|%s" % (STRIH_LEG_ADDR, STRIH_SENDER)
     # the pre-1495 shape the `mac:` tests below run on
     assert _bash(LEG_BODY, "stream-snv").stdout.strip() == "mac:%s|%s|%s" % (LEG_MAC, LEG_ADDR, SENDER)
@@ -136,14 +142,11 @@ def test_stream_snv_and_strih_snv_have_the_vlan_leg_every_other_box_none():
     ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:0")], "VLAN"),
     ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:4095")], "VLAN"),
     ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:070")], "VLAN"),
-    # a bare-IP sender on a box whose program port is none (issue 1485: strih-snv's program is on Dante, so
-    # its program facts are none and only the sender changes)
-    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.232")],
-     "STRIH_PROGRAM_VBAN_PORT"),
-    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:80")], "port"),
-    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,")],
+    # the sender's own port list, on the pre-1495 stream-snv (a VBAN box; issue 1519: a Dante box takes none)
+    ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:80")], "port"),
+    ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,")],
      "ports"),
-    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.8.30:6980")], "/24"),
+    ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.8.30:6980")], "/24"),
     ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG_ADDR=" + LEG_ADDR, "STRIH_PROGRAM_VBAN_LEG_ADDR=10.77.7.256")], "IPv4"),
     ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.8.232")], "/24"),
     ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=" + LEG_ADDR)], "differ"),
@@ -165,11 +168,13 @@ def test_the_strih_role_takes_a_leg_of_either_kind(tmp_path):
     assert r.stdout.strip() == "mac:%s|%s|%s" % (LEG_MAC, STRIH_LEG_ADDR, STRIH_SENDER)
 
 
-def test_a_sender_may_name_its_own_ports_and_the_filter_matches_them_as_a_set():
+def test_a_sender_may_name_its_own_ports_and_the_filter_matches_them_as_a_set(tmp_path):
     # 23.10.2026: strih-snv's setup replaced the live table and dropped the hand rule for the intercom hub's
     # fohabl-strih VBAN on 6980 (the hub lost FOH for ~2 min). One console feeds the hub (6980) AND the strih
     # OBS (6981) on the leg, so the sender carries its own port list and both rules match the set.
-    sender = _bash('strih_box_load strih-snv || exit 9\n. "%s"\n_strih_vban_leg_sender' % LEG_LIB)
+    d = _boxes_with(tmp_path, "stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=" + FOH_SENDER)])
+    sender = _bash('strih_box_load stream-snv || exit 9\n. "%s"\n_strih_vban_leg_sender' % LEG_LIB,
+                   env={"STRIH_BOXES_DIR": str(d)})
     assert sender.returncode == 0, sender.stderr
     assert sender.stdout.strip() == "10.77.7.30 6980,6981"
     text = _render("strih_vban_leg_nft_text", STRIH_VLAN_IF, "10.77.7.30", "6980,6981")
@@ -258,6 +263,17 @@ class Box:
         self.sysctl_file = self.etc / "sysctl.d" / "60-vban-dante70.conf"
         state.setdefault("unit_runs_nft", str(self.nft_file))
         state.setdefault("sysfs", str(self.sysfs))
+        # issue 1519: a Dante box loads dstack's pinned generic filter -- a file:// mirror of the pinned files,
+        # the oneshot that runs its ExecStart lines through the fake nft, the real netns render they list as
+        self.dstack_dir = self.etc / "dstack"
+        self.dstack_unit = self.etc / "systemd" / "system" / "dstack-dante-leg-filter.service"
+        mirror = tmp_path / "dstack-mirror" / "v0.6.119" / "tools" / "linux"
+        mirror.mkdir(parents=True, exist_ok=True)
+        for f in ("dante-leg.nft", "dante-leg-notrack.nft"):
+            (mirror / f).write_bytes((DSTACK_FIX / f).read_bytes())
+        state.setdefault("unit_files", {"dstack-dante-leg-filter.service": str(self.dstack_unit)})
+        state.setdefault("nft_fixture", str(DSTACK_FIX / "netns-render-zzleg0.70.txt"))
+        state.setdefault("nft_fixture_files", [str(DSTACK_FIX / "dante-leg.nft"), str(DSTACK_FIX / "dante-leg-notrack.nft")])
         fk.new_state(self.state, **state)
         self.env = fk.install(self.bin, self.state, self.proc)
         self.env.update({"STRIH_VBAN_LEG_SYSFS": str(self.sysfs), "STRIH_VBAN_LEG_PROC_SYS": str(self.proc),
@@ -266,7 +282,11 @@ class Box:
                          "STRIH_VBAN_LEG_SYSCTL_FILE": str(self.sysctl_file), "STRIH_VBAN_LEG_WAIT_S": "0",
                          "STRIH_VBAN_LEG_NM_CONF_FILE": str(self.etc / "NetworkManager" / "conf.d"
                                                             / "90-vban-dante70-retired.conf"),
-                         "STRIH_VBAN_LEG_RESET_SEEN_S": "2", "STRIH_DANTE_AVAHI_UID": "111"})
+                         "STRIH_VBAN_LEG_RESET_SEEN_S": "2",
+                         "STRIH_DANTE_LEG_URL": "file://%s" % (tmp_path / "dstack-mirror"),
+                         "STRIH_DANTE_LEG_CACHE": str(tmp_path / "dstack-cache"),
+                         "STRIH_DANTE_LEG_ETC": str(self.dstack_dir), "STRIH_DANTE_LEG_UNIT_FILE": str(self.dstack_unit),
+                         "STRIH_DANTE_AVAHI_CONF": str(self.etc / "avahi" / "avahi-daemon.conf")})
         self.nic(RIG_IF, "a8:a1:59:00:00:01")
 
     def nic(self, name, mac, driver=None, physical=True):
@@ -510,203 +530,42 @@ def _strih_box(tmp_path, vlan_props=None, vlan_active=True, **over):
     return b
 
 
+def _strih_vban_rollback(tmp_path):
+    """strih-snv with no Dante device (its VBAN rollback shape, issue 1519): the VBAN program facts back."""
+    return _boxes_with(tmp_path, "strih-snv", [
+        ("STRIH_DANTE_DEVICES=" + STRIH_DEVICES, "STRIH_DANTE_DEVICES=none"),
+        ("STRIH_PROGRAM_VBAN_STREAMS=none", "STRIH_PROGRAM_VBAN_STREAMS=strih-obs"),
+        ("STRIH_PROGRAM_VBAN_PORT=none", "STRIH_PROGRAM_VBAN_PORT=6981"),
+        ("STRIH_PROGRAM_VBAN_RESERVE_MS=none", "STRIH_PROGRAM_VBAN_RESERVE_MS=30"),
+        ("STRIH_DANTE_NETWORK_LATENCY_MS=1", "STRIH_DANTE_NETWORK_LATENCY_MS=none"),
+        ("STRIH_DANTE_RECEIVE_BUFFER_MS=12.041666", "STRIH_DANTE_RECEIVE_BUFFER_MS=none")])
+
+
 def _mutations(s):
     return [c for c in fk.calls(s, "nmcli") if c[:1] != ["-g"]]
 
 
 # --- issue 1485: the Dante variant of the leg -------------------------------------------------------------
 
-# ROZHODNUTE 6628785864: the leg's PTP rule exists once a pinned device's dstack follows PTP in process
-# (strih_dante_ptp_leg_open); the pins come from STRIH_DANTE_PTP_*_PIN files, ready by default.
-def _pin_env(tmp_dir, intercom="v0.6.23", obs="v0.6.23"):
-    ic, ob = Path(tmp_dir) / "intercom.pin", Path(tmp_dir) / "obs.pin"
-    ic.write_text("INTERCOM_RELEASE_DSTACK_VERSION=%s\n" % intercom)
-    ob.write_text("OBS_RELEASE_DSTACK_VERSION=%s\n" % obs)
-    return {"STRIH_DANTE_PTP_INTERCOM_PIN": str(ic), "STRIH_DANTE_PTP_OBS_PIN": str(ob)}
-
-
-def _dante_text(sender="10.77.7.30", port="6980,6981", intercom="v0.6.23", obs="v0.6.23"):
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        r = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, STRIH_VLAN_IF, sender, port, STRIH_LEG_ADDR,
-                  STRIH_DEVICES, env=dict(_pin_env(d, intercom, obs), STRIH_DANTE_AVAHI_UID="111"))
-    assert r.returncode == 0, r.stderr
-    return r.stdout
-
 
 def test_only_the_snv_boxes_declare_dante_devices():
     """Owner 2.11.2026: PP gets no Dante, and VBAN stays. issue 1495: stream-snv's own device stream-obs."""
-    want = {"strih-snv": STRIH_DEVICES, "stream-snv": "stream-obs=4440:8800:4455:30000-30031"}
+    want = {"strih-snv": STRIH_DEVICES, "stream-snv": "stream-obs=4440:8800:4455"}
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
         r = _bash('strih_box_load "$1" || exit 9\nstrih_lx_dante_devices', box, env={"STRIH_BOXES_DIR": str(BOXES)})
         assert r.returncode == 0, (box, r.stderr)
         assert r.stdout.strip() == want.get(box, "none"), box
 
 
-def test_the_dante_ruleset_is_the_real_nft_render():
-    """tests/fixtures/vban_leg_1439/nft-list-table-dante-netns.txt = this text through nft 1.0.9 in a netns."""
-    body = _dante_text().split("delete table inet vban_dante70\n", 1)[1]
-    assert _norm(re.sub(r"(?m)^\s*#.*$", "", body)) == _norm((FIX / "nft-list-table-dante-netns.txt").read_text())
-
-
-def test_the_fake_nft_lists_the_dante_ruleset_like_the_real_one():
-    assert _norm(fk.nft_render(_dante_text())) == _norm((FIX / "nft-list-table-dante-netns.txt").read_text())
-
-
-def test_the_dante_rules_admit_both_devices_and_keep_the_vban_and_ping():
-    t = _dante_text()
-    for want in ("4440-4441", "4455-4456", "5353", "8700", "8702", "8708", "8800-8801", "30000-30031", "30100-30131"):
-        assert re.search(r"udp dport \{[^}]*\b%s\b[^}]*\} counter accept" % want, t), want
-    assert 'ip saddr 10.77.7.30 udp dport { 6980, 6981 } counter accept' in t
-    assert 'icmp type echo-request counter accept' in t and 'icmp type echo-reply counter accept' in t
-    assert 'iifname "enp7s0.70" ip protocol igmp counter accept' in t
-    assert 'oifname "enp7s0.70" ip protocol igmp counter accept' in t
-
-
-def test_a_peers_reply_to_an_ephemeral_client_socket_is_admitted_by_its_source_port():
-    """dstack's ARC, flow and mDNS instance clients bind port 0: a dport list alone would drop every reply."""
-    assert re.search(r"ip saddr 10\.77\.7\.0/24 udp sport \{ 4440-4486, 5353, 8700, 8800-8831 \} "
-                     r"udp dport 32768-60999 counter accept", _dante_text())
-
-
-def _dante_tx_text(tx):
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        r = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, "enp56s0.70", "none", "none", "10.77.7.204",
-                  "stream-obs=4440:8800:4455:30000-30031", tx,
-                  env=dict(_pin_env(d, "v0.6.23", "v0.6.23"), STRIH_DANTE_AVAHI_UID="111"))
-    assert r.returncode == 0, r.stderr
-    return r.stdout
-
-
 TX_KEEPALIVE = 'iifname "enp56s0.70" ip saddr 10.77.7.0/24 udp dport 32768-60999 counter accept'
-
-
-def test_a_tx_box_admits_its_receivers_keepalives_to_the_ephemeral_tx_flow_sockets_1513():
-    """Issue 1513 (dstack, 13.11.2026 09:51Z): stream-obs's TX flow sockets bind ephemeral ports (47533,
-    52825); mbc's receiver keepalives come from ITS ephemeral ports (60170/60171), so neither the device
-    dports nor the peer-sport rule admits them. They fell to the leg's drop, the TX flow expired after 4 s
-    and mbc re-requested it every ~9 s. A box whose facts declare a program TX admits UDP from the Dante
-    /24 to the ephemeral range (the stopgap until dstack's fixed TX flow port range)."""
-    t = _dante_tx_text("OBS program L,OBS program R")
-    assert TX_KEEPALIVE in t, t
-    assert t.index(TX_KEEPALIVE) < t.index('iifname "enp56s0.70" counter drop'), t
-
-
-def test_a_receive_only_box_keeps_the_ephemeral_range_shut_to_any_source_port_1513():
-    t = _dante_tx_text("none")
-    assert TX_KEEPALIVE not in t, t
-    assert "udp dport 32768-60999 counter accept" in t  # the peer-sport reply rule stays
-
-
-def test_the_filter_install_and_its_grade_pass_the_box_tx_fact_1513():
-    text = LEG_LIB.read_text()
-    for call in ('strih_vban_leg_nft_text "$ifc" "$sender" "$port" "$addr" "$dev" "$tx"',
-                 'strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$dev" "$tx"'):
-        assert call in text, call
-    assert "_strih_vban_leg_tx()" in text
-
-
-MGMT_IN = 'iifname "enp56s0.70" ip saddr 10.77.7.0/24 tcp dport { 22, 8092 } counter accept'
-MGMT_OUT = 'oifname "enp56s0.70" ip saddr 10.77.7.204 ip daddr 10.77.7.0/24 tcp sport { 22, 8092 } counter accept'
-
-
-def test_a_dante_leg_admits_ssh_and_the_mcp_agent_from_its_subnet_1517():
-    """Owner 13.11.2026 (airuleset#1313): ssh and the remoteos MCP agent may be reached on both
-    interfaces. The leg dropped all TCP, so 22 and 8092 were dead on the Dante address while the LAN leg
-    was down, and every setup-strih run dropped remoteos's live patch (remoteos-mcp#96)."""
-    t = _dante_tx_text("none")
-    assert MGMT_IN in t, t
-    assert MGMT_OUT in t, t
-    assert t.index(MGMT_IN) < t.index('iifname "enp56s0.70" counter drop'), t
-    assert t.index(MGMT_OUT) < t.index('oifname "enp56s0.70" counter drop'), t
-    assert "tcp dport 80" not in t and "tcp dport { 80" not in t
-
-
-def test_a_peer_device_in_a_higher_slot_is_admitted_1508():
-    """Issue 1508 (12.11.2026): a dstack device on a peer PC sits in slot k above the base (ARC 4440+k,
-    flows 4455+k, CMC 8800+k, k = 0..31). mbc-snv answered from 4456 after mbc's restart and the base-only
-    set dropped it: stream-snv's program audio had ~2 % holes for 18 h. Every slot port must pass, on a
-    box whose own devices sit only in slot 0 too."""
-    one = _bash('. "%s"\nstrih_dante_peer_ports "$1"' % LEG_LIB, "stream-obs=4440:8800:4455:30000-30031")
-    assert one.stdout.strip() == "4440-4486, 5353, 8700, 8800-8831", one.stdout
-
-
-def test_a_peers_source_port_opens_only_the_ephemeral_range():
-    """A sender on 5353 must not reach 319 or the VBAN ports: both sit below the ephemeral range."""
-    t = _dante_text()
-    line = next(x for x in t.splitlines() if "udp sport" in x)
-    low = int(re.search(r"udp dport (\d+)-", line).group(1))
-    assert low > 6981 and low > 319
-
-
-def test_a_range_touching_a_common_port_is_never_lost():
-    r = _bash('. "%s"\nstrih_dante_in_ports "$1"' % LEG_LIB, "a=4440:8800:4455:8700-8710")
-    assert "8700-8710" in r.stdout, r.stdout
-
-
-def test_dsyncs_own_port_stays_shut():
-    """dsync's own 31900 never passes the leg (only the PTP group's 319/320 since ROZHODNUTE 6628785864)."""
-    rules = "\n".join(x for x in _dante_text().splitlines() if not x.lstrip().startswith("#"))
-    assert not re.search(r"\b31900\b", rules)
-
-
-def test_the_ptp_group_reaches_the_in_process_follower():
-    """ROZHODNUTE 6628785864 (owner 4.11.2026; this test replaced `test_the_ptp_ports_stay_shut`, whose
-    premise "dantesync is the only PTP owner" the owner superseded): every dstack device follows Dante PTP
-    in process, dsync's follower binds 319 + 320 and joins 224.0.1.129 on the leg. Exactly that group,
-    from the audio /24, to exactly those two ports; nothing else names 319 or 320, and nothing goes out."""
-    rules = [x for x in _dante_text().splitlines() if not x.lstrip().startswith("#")]
-    ptp = [x for x in rules if re.search(r"\b(319|320)\b", x)]
-    assert ptp == ['        iifname "enp7s0.70" ip saddr 10.77.7.0/24 ip daddr 224.0.1.129 udp dport { 319, 320 } '
-                   'counter accept'], ptp
-    drop = next(i for i, x in enumerate(rules) if x.strip() == 'iifname "enp7s0.70" counter drop')
-    assert rules.index(ptp[0]) < drop, "the accept sits before the leg's drop"
-
-
-@pytest.mark.parametrize("intercom,obs,opened", [("v0.6.19", "v0.6.19", False), ("v0.6.23", "v0.6.19", True),
-                                                 ("v0.6.19", "v0.6.23", True), ("", "garbage", False)])
-def test_the_ptp_rule_follows_the_pins(intercom, obs, opened):
-    """Review round 1 (🔴): below dstack v0.6.23 a device that could reach 319 would start its old follower
-    beside dsync, so the rule appears only once either pinned device follows PTP in process."""
-    t = _dante_text(intercom=intercom, obs=obs)
-    assert bool(re.search(r"udp dport \{ 319, 320 \}", t)) is opened, t
-
-
-def test_a_box_without_devices_never_opens_the_ptp_ports():
-    t = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, LEG_IF, SENDER, "6980", LEG_ADDR, "none").stdout
-    assert not re.search(r"\b(319|320)\b", t)
-
-
-def test_avahi_is_dropped_before_the_output_accept():
-    lines = _dante_text().splitlines()
-    drop = next(i for i, x in enumerate(lines) if "meta skuid 111 counter drop" in x)
-    acc = next(i for i, x in enumerate(lines) if "meta l4proto udp counter accept" in x)
-    assert drop < acc
-
-
-def test_the_output_accept_is_only_the_legs_address_to_its_subnet_and_the_three_groups():
-    assert ('ip saddr 10.77.7.202 ip daddr { 10.77.7.0/24, 224.0.0.231, 224.0.0.233, 224.0.0.251 } '
-            'meta l4proto udp counter accept') in _dante_text()
-
-
-def test_no_conntrack_in_the_filter():
-    """Conntrack's hooks would see every NDI packet of this box."""
-    assert not re.search(r"\bct\b", _dante_text())
-
-
-def test_a_box_without_devices_renders_byte_identically_to_issue_1439():
-    assert _render("strih_vban_leg_nft_text", LEG_IF, SENDER, "6980") \
-        == _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, LEG_IF, SENDER, "6980", LEG_ADDR, "none").stdout
 
 
 @pytest.mark.parametrize("value,word", [
     ("strih-obs", "name=arc"),
-    ("x=1:2:3:4-5", "name=arc"),
+    ("x=1:2:3", "name=arc"),
     ("strih-obs=4440:8800:4455:47200", "name=arc"),
-    ("strih-obs=4440:8800:4455:47231-47200", "backwards"),
-    ("strih-obs=4440:8800:4455:47200-70000", "1024..65535"),
-    ("a=4440:8800:4455:47100-47131 b=4441:8801:4456:47131-47140", "used twice"),
+    ("strih-obs=4440:8800:70000", "1024..65535"),
+    ("a=4440:8800:4455 b=4441:8801:4455", "used twice"),
 ])
 def test_the_loader_refuses_malformed_or_overlapping_devices(tmp_path, value, word):
     d = _boxes_with(tmp_path, "strih-snv", [("STRIH_DANTE_DEVICES=" + STRIH_DEVICES, "STRIH_DANTE_DEVICES=" + value)])
@@ -750,22 +609,18 @@ def test_the_grade_passes_the_converged_dante_leg_and_fails_the_old_32(tmp_path)
 
 
 def test_vlan_install_without_a_sender_never_touches_the_link(tmp_path):
-    b = _strih_box(tmp_path, VLAN_PROPS)
-    # the ping-only path (a VLAN leg with no sender declared), on a strih-snv fact copy: the live strih-snv has
-    # carried Ableton-FOH's VBAN on 6980 + 6981 since 23.10.2026
-    b.env["STRIH_BOXES_DIR"] = str(_boxes_with(tmp_path, "strih-snv",
-                                               [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=none")]))
+    b = _strih_box(tmp_path, VLAN_PROPS_1439)  # the VBAN rollback shape: the /32 leg
+    # the ping-only path (a VLAN leg with no sender declared) on strih-snv's VBAN rollback shape (issue 1519)
+    b.env["STRIH_BOXES_DIR"] = str(_strih_vban_rollback(tmp_path))
     r = b.run("strih_vban_leg_install", box="strih-snv")
     assert r.returncode == 0, r.stdout + r.stderr
     s = b.st()
     assert _mutations(s) == [], _mutations(s)
     assert "WARNING" not in r.stdout
-    r2 = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, STRIH_VLAN_IF, "none", "none", STRIH_LEG_ADDR,
-               STRIH_DEVICES, env={"STRIH_DANTE_AVAHI_UID": "111"})
+    r2 = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, STRIH_VLAN_IF, "none", "none")
     assert b.nft_file.read_text() == r2.stdout
     lines = [x for x in b.sysctl_file.read_text().splitlines() if not x.startswith("#")]
-    assert lines == ["net/ipv4/conf/enp7s0.70/arp_ignore = 1", "net/ipv4/conf/enp7s0.70/arp_announce = 2",
-                     "net/ipv4/conf/enp7s0.70/rp_filter = 2"]
+    assert lines == ["net/ipv4/conf/enp7s0.70/arp_ignore = 1", "net/ipv4/conf/enp7s0.70/arp_announce = 2"]
 
 
 def test_vlan_first_creation_warns_of_the_link_reset_and_activates_once(tmp_path):
@@ -882,11 +737,9 @@ def test_vlan_needs_the_rig_nic(tmp_path):
 
 
 def test_vlan_grade_passes_a_leg_without_a_sender_with_a_ping_only_note(tmp_path):
-    b = _strih_box(tmp_path, VLAN_PROPS)
-    # the ping-only path (a VLAN leg with no sender declared), on a strih-snv fact copy: the live strih-snv has
-    # carried Ableton-FOH's VBAN on 6980 + 6981 since 23.10.2026
-    b.env["STRIH_BOXES_DIR"] = str(_boxes_with(tmp_path, "strih-snv",
-                                               [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=none")]))
+    b = _strih_box(tmp_path, VLAN_PROPS_1439)  # the VBAN rollback shape: the /32 leg
+    # the ping-only path (a VLAN leg with no sender declared) on strih-snv's VBAN rollback shape (issue 1519)
+    b.env["STRIH_BOXES_DIR"] = str(_strih_vban_rollback(tmp_path))
     assert b.run("strih_vban_leg_install", box="strih-snv").returncode == 0
     before = len(fk.calls(b.st(), "systemctl", "restart"))
     rows = _rows(b.run("strih_vban_leg_grade", box="strih-snv"))

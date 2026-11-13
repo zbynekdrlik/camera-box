@@ -200,7 +200,7 @@ def test_a_failed_fact_read_fails_the_render(tmp_path):
     s.write_text(SITE)
     r = _bash('strih_box_load stream-snv >/dev/null; rows="$(strih_dante_input_site_rows "$1")"; set +e\n'
               'strih_box_fact() { [ "$1" != STRIH_DANTE_TX ] || return 1; printf "%s" "${STRIH_BOX_FACTS[$1]}"; }\n'
-              'strih_dante_input_toml enp56s0.70 "4440 8800 4455 30000" "$rows"; echo "rc=$?"', s)
+              'strih_dante_input_toml enp56s0.70 "4440 8800 4455" "$rows"; echo "rc=$?"', s)
     assert r.stdout.strip().endswith("rc=1"), r.stdout + r.stderr
 
 
