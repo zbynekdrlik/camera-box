@@ -129,8 +129,8 @@ fn the_hub_default_receiver_name_is_strih_snv() {
 }
 
 /// Issue 1485: the Dante device the hub declares at the tag is the one the box facts declare. Issue 1519:
-/// the facts carry no RX range any more (dstack's fixed slot blocks); the hub's own `rx_port_base` leaves
-/// its TOML with intercom 1.9.23 (intercom#28), whose pin bump is a separate step, so it is not graded here.
+/// no RX range on either side any more (dstack's fixed slot blocks, intercom 1.9.23 dropped `rx_port_base`;
+/// a TOML that still carries it is refused by that hub at load).
 #[test]
 fn the_hubs_dante_ports_are_the_ones_the_leg_declares() {
     let toml = read(&checkout().join("intercom.strih-snv.toml"));
@@ -143,6 +143,7 @@ fn the_hubs_dante_ports_are_the_ones_the_leg_declares() {
     ] {
         assert!(toml.contains(want), "the hub TOML must carry `{want}`");
     }
+    assert!(!toml.contains("rx_port_base"), "the fixed slot block, never a base");
     let env = read(&root().join("scripts/strih-boxes/strih-snv.env"));
     assert!(env.contains("strih-snv-intercom=4441:8801:4456 "));
 }
