@@ -61,7 +61,7 @@ _strih_box_dante_devices_ok() {
 }
 
 # _strih_box_dante_terms_ok NAME PROG NET RBUF TX TRACK -> issues 1510 + 1513 (obs v0.4.27): PROG=1 needs NET (a: 0.25/0.5/1/2/5)
-# + RBUF (b: 0 < ms <= 50, <= 6 decimals) explicit, TX none or `L,R` (1..31 chars) + TRACK 1..6, never without RBUF; PROG=0: all none.
+# + RBUF (b: 0 < ms <= 50, <= 6 decimals, no leading 0) explicit, TX none or `L,R` (two labels) + TRACK 1..6, never without RBUF; PROG=0 all none.
 _strih_box_dante_terms_ok() {
   local n="strih-box $1:" prog="$2" net="$3" rb="$4" tx="$5" tr="$6" rc=0 d='[0123456789]' l r k
   if [ "$prog" = 0 ]; then
@@ -69,12 +69,12 @@ _strih_box_dante_terms_ok() {
       [ "${k#*:}" = none ] || { echo "$n STRIH_DANTE_${k%%:*} must be none: no <role>-obs program device in STRIH_DANTE_DEVICES" >&2; rc=1; }
     done; return "$rc"; fi
   case "$net" in 0.25 | 0.5 | 1 | 2 | 5) ;; *) echo "$n STRIH_DANTE_NETWORK_LATENCY_MS '${net}' must be explicit for the program device: Dante Controller's 0.25, 0.5, 1, 2 or 5 ms (issue 1510)" >&2; rc=1 ;; esac
-  if [[ ! "$rb" =~ ^${d}{1,2}(\.${d}{1,6})?$ ]] || [[ "$rb" =~ ^[0.]+$ ]] || [ "$((10#${rb%%.*}))" -gt 50 ] || [[ "$rb" =~ ^50\.0*[123456789] ]]; then
+  if [[ ! "$rb" =~ ^(0|[123456789]${d}?)(\.${d}{1,6})?$ ]] || [[ "$rb" =~ ^[0.]+$ ]] || [ "$((10#${rb%%.*}))" -gt 50 ] || [[ "$rb" =~ ^50\.0*[123456789] ]]; then
     echo "$n STRIH_DANTE_RECEIVE_BUFFER_MS '${rb}' must be explicit for the program device: ms above 0 and at most 50, up to 6 decimals (issue 1510)" >&2; rc=1; fi
   [ "$tx" != none ] || { [ "$tr" = none ] || { echo "$n STRIH_DANTE_TX_TRACK must be none without STRIH_DANTE_TX" >&2; rc=1; }; return "$rc"; }
   l="${tx%%,*}"; r="${tx#*,}"
-  if [ "$l" = "$tx" ] || [[ "$r" == *,* || -z "$l" || -z "$r" || "$l$r" == " "* || "$l" == *" " || "$r" == [\ ]* || "$r" == *" " ]] || [ "${#l}" -gt 31 ] || [ "${#r}" -gt 31 ]; then
-    echo "$n STRIH_DANTE_TX '${tx}' must be two channel labels 'L,R' (1..31 characters each, no space first or last)" >&2; rc=1; fi
+  if [ "$l" = "$tx" ] || [[ "$r" == *,* || -z "$l" || -z "$r" || "$l$r" == " "* || "$l" == *" " || "$r" == [\ ]* || "$r" == *" " ]] || [ "$l" = "$r" ] || [[ "$l$r" == *[\"\\]* ]] || [ "${#l}" -gt 31 ] || [ "${#r}" -gt 31 ]; then
+    echo "$n STRIH_DANTE_TX '${tx}' must be two different channel labels 'L,R' (1..31 characters each, no quote or backslash, no space first or last)" >&2; rc=1; fi
   [[ "$tr" =~ ^[123456]$ ]] || { echo "$n STRIH_DANTE_TX_TRACK '${tr}' must be the OBS track sent, 1..6" >&2; rc=1; }
   [ "$rb" != none ] || { echo "$n STRIH_DANTE_TX needs an explicit STRIH_DANTE_RECEIVE_BUFFER_MS: a TX without it lowers the RX latency to 8.365 ms (issue 1513)" >&2; rc=1; }
   return "$rc"

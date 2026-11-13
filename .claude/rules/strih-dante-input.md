@@ -54,8 +54,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
 - **The named latency terms + the program TX (issues 1510 + 1513, obs v0.4.27 / dstack 244).** Four
   required facts, the last of the key list: `STRIH_DANTE_NETWORK_LATENCY_MS` (a, one of Dante Controller's
   0.25 / 0.5 / 1 / 2 / 5) -> `network_latency_ms`, `STRIH_DANTE_RECEIVE_BUFFER_MS` (b, 0 < ms <= 50, up to 6
-  decimals) -> `receive_buffer_ms` (both written as TOML floats), `STRIH_DANTE_TX` (`none` or the two labels
-  `L,R`, 1..31 characters each) + `STRIH_DANTE_TX_TRACK` (1..6) -> `tx = ["L", "R"]` + `tx_track`
+  decimals, no leading zero: TOML refuses `05.0`) -> `receive_buffer_ms` (both written as TOML floats), `STRIH_DANTE_TX` (`none` or two DIFFERENT labels
+  `L,R`, 1..31 characters each, no quote or backslash) + `STRIH_DANTE_TX_TRACK` (1..6) -> `tx = ["L", "R"]` + `tx_track`
   (`strih_dante_input_terms_toml`, before the `[[subscribe]]` tables). The loader
   (`_strih_box_dante_terms_ok`): a program device needs (a) and (b) explicit; a TX needs both labels, a
   track and an explicit (b) (without it dlink lowers P to 8.365 ms); a box without a program device sets all
@@ -80,12 +80,14 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   grandmaster, delivered_frames advancing; any of the gate's loss counters GROWING between the two lines
   FAILs, a total since the start that holds still is only named). Since obs v0.4.27 (issues 1510 +
   1513, `strih_dante_input_terms_toml_grade` + `strih_dante_input_tx_grade`): `latency terms` (the TOML
-  carries exactly the facts' term + tx lines), `dante latency` (the last `dante-input start: latency split
+  carries every term + tx line the facts declare, and no tx they do not), `dante latency` (the last `dante-input start: latency split
   dante_latency_ns=` within 1 us of (a) + (b); a missing line FAILs), on a TX device the `dante-input start:
   TX of OBS track N` line and the status TX tokens over the same window (`tx_track` = the fact's,
   `tx_priming=0`, `tx_played` advancing, `tx_underruns` / `tx_recentres` / `tx_overflows` not growing; a
   rate off 48000/s +-10 % is a NOTE), on an RX-only device `tx_track=0` (absent on an older line = NOTE),
-  and a report-only NOTE with the newest `network_latency_min_us` / `_p99_us` / `_max_us`. The
+  and a report-only NOTE with the newest `network_latency_min_us` / `_p99_us` / `_max_us` found on any
+  OBS log line (UNVERIFIED where they appear: dstack names them per-flow status fields, and whether dlink's
+  log lines forwarded into the OBS log carry them is read on the box after the deploy; absent = a NOTE). The
   `(vban-leg) vban` arrival row is a NOTE on a Dante box. PipeWire stays purged (`dante:strih-obs` counts as a direct program).
 - **The E2E gate:** `program-audio-continuity.sh` also marks the strih OBS log (through `strih-log-read.sh`)
   when `$STRIH` is a Dante box, and folds `scripts/dante_input_continuity.py`'s window result into the

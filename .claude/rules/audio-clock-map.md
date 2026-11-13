@@ -206,7 +206,8 @@ terms, and no buffer or latency change without consent. dstack 244 (owner-approv
 
 - P is exactly the RX latency both devices ran with before the terms (no latency change). Sizing (b)
   from measurement comes later, from the status line's `wake_delay_*` and the per-flow
-  `network_latency_min_us` / `_p99_us` / `_max_us` (verify item 9 NOTEs them, report-only); any change
+  `network_latency_min_us` / `_p99_us` / `_max_us` (verify item 9 NOTEs them, report-only, wherever
+  the OBS log carries them: not yet read on a box); any change
   of (a) or (b) is an owner decision.
 - **stream-obs's TX (issue 1513):** OBS's program mix (track 1, the YouTube mix, on FLEET) -> the TX
   FIFO = the app buffer **22.667 ms** (OBS's 1024-frame chunk 21.333 ms + one pump block 1.333 ms) ->

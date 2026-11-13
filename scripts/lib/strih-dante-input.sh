@@ -141,7 +141,7 @@ strih_dante_input_toml() {
   printf 'name = "%s"\niface = "%s"\nnetwork_rate = %s\nrx = [%s]\n' \
     "$(strih_dante_input_device)" "$iface" "$STRIH_DANTE_INPUT_NETWORK_RATE" "$rx"
   printf 'arc_port = %s\ncmc_port = %s\nflows_port = %s\nrx_port_base = %s\n' "$arc" "$cmc" "$flows" "$base"
-  strih_dante_input_terms_toml
+  strih_dante_input_terms_toml || return 1   # a failed fact read never writes a file without the terms
   printf '%s' "$subs"
 }
 
