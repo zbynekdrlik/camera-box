@@ -193,6 +193,13 @@ strih_dante_media_clock_verdict() {
       from = "-"; if (match($0, /from=[^ \t]+/)) from = substr($0, RSTART + 5, RLENGTH - 5)
       next
     }
+    /media clock: a first source is ready[^=]*source=/ {
+      # dstack v0.6.112 (live stream-snv, 13.11.2026): the line of the FIRST source; a device that never
+      # switched has no other source line.
+      v = $0; sub(/.*a first source is ready/, "", v); sub(/^[^=]*source=/, "", v); split(v, a, /[ \t]/); last = a[1]
+      from = "-"; if (match($0, /from=[^ \t]+/)) from = substr($0, RSTART + 5, RLENGTH - 5)
+      next
+    }
     /media clock: no source ready/ { last = "None"; from = "-"; next }
     /in-process follower did not start/ {
       why = "-"; if (match($0, /reason="[^"]*"/)) why = substr($0, RSTART + 8, RLENGTH - 9)

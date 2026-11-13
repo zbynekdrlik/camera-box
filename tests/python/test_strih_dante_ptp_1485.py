@@ -107,6 +107,15 @@ def test_the_real_pins_are_read():
       "source=Internal from=Service offset_ns=Some(-441612)",
       "x INFO dstack::clock::linked: media clock source changed with a re-align source=Internal from=Service "
       "offset_ns=Some(-455303) waited=60"], "internal Service -"),
+    # dstack v0.6.112 (live stream-snv OBS log, 13.11.2026): the FIRST source line is
+    # `media clock: a first source is ready source=X from=None`; a device that never switched has no other.
+    (["10:00:12.903: dante-input dlink:  INFO dstack::clock::linked: media clock: a first source is ready "
+      "source=Internal from=None"], "internal None -"),
+    (["x INFO dstack::clock::linked: media clock: a first source is ready source=Service from=None"],
+     "service None -"),
+    (["x INFO dstack::clock::linked: media clock: a first source is ready source=Service from=None",
+      "x INFO dstack::clock::linked: media clock source handed over, no re-align source=Internal "
+      "from=Service offset_ns=Some(26397)"], "internal Service -"),
     # dstack v0.6.33 (live strih-snv OBS log, 5.11.2026): the seamless switch line.
     ([SERVICE, "04:52:02.662: dante-input dlink:  INFO dstack::clock::linked: media clock source handed over, "
       "no re-align source=Internal from=Service offset_ns=Some(-23454)"], "internal Service -"),
