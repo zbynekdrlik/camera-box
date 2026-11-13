@@ -1,6 +1,9 @@
 ---
 paths:
   - "scripts/lib/strih-dante-leg.sh"
+  - "scripts/lib/strih-dante-leg-filter.sh"
+  - "scripts/dstack-leg-filter.pin"
+  - "tests/python/test_dante_leg_generic_filter_1519.py"
   - "scripts/lib/strih-janus-ice.sh"
   - "scripts/janus_ice_cfg.py"
   - "tests/python/test_vban_leg_nic_to_vlan_1495.py"
@@ -755,10 +758,11 @@ USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `
 
 ## The Dante variant of the leg (issue 1485, strih-snv; stream-snv since issue 1495)
 
-Owner 2.11.2026: each application is its own Dante device; PP gets no Dante; VBAN stays. Fact
-`STRIH_DANTE_DEVICES` = `none` everywhere but strih-snv (`name=arc:cmc:flows:rxfirst-rxlast`, space-joined;
-the loader refuses malformed ports, a port used twice, devices without a leg). A box with `none` renders
-byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`.
+Owner 2.11.2026: each application is its own Dante device; PP gets no Dante. Fact
+`STRIH_DANTE_DEVICES` = `none` everywhere but strih-snv + stream-snv (`name=arc:cmc:flows`, space-joined; issue
+1519 dropped the `rxfirst-rxlast` part). The loader refuses malformed ports, a port used twice, an ARC port
+outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender on a Dante box. A box with
+`none` renders byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`.
 
 - **The address:** a real `/24` with `ipv4.route-table=70`: NetworkManager puts the connected route in table
   70, so only sockets bound to the leg's address reach it (`from <addr> lookup 70`), and main stays free of
@@ -766,21 +770,64 @@ byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`
   address) onto the leg, into the output drop. The explicit `ipv4.routes` goes.
 - **Applied live** by `connection modify` + `device reapply`, like every profile change: no VLAN create, no
   link change, a refused reapply fails by name (`test_the_live_32_moves_to_the_24_by_reapply_...`).
-- **The filter:** read from dstack's sockets: bound to the interface address, its ARC / flow / mDNS instance
-  CLIENT sockets on port 0, so a peer's reply is admitted by its SOURCE port, to the ephemeral range only
-  (never 319 or the VBAN ports). The peer ports are dstack's SLOT RANGES (ARC 4440-4471, flows 4455-4486, CMC 8800-8831: a peer PC's device sits in any slot, base + k) + this box's devices, merged as nft prints them. Issue 1508: the base-only set dropped mbc-snv's slot-1 reply (from 4456) after mbc's restart 11.11.2026 12:05Z, and stream-snv's program audio had ~2 % holes for 18 h (flow request, no answer, every ~6 s). Stateless on purpose (no conntrack); dstack's two-networks standard names the same ranges. Input from the /24 to the
-  devices' ports + 5353, 8700, 8702, 8708; output from the leg's address to the /24 and 224.0.0.231, .233,
-  .251. IGMP both ways: without it a snooping switch ages the groups out.
-- **Traps:** `nft list` prints touching ports of an interval set merged (`4440-4441`) and a `skuid` as a
-  number, and the read-back compares text: the render merges them and resolves avahi's uid. No conntrack
-  (its hooks would see every NDI packet). avahi is dropped by uid, never configured (an avahi restart risks
-  the NDI announcement). dsync's own 31900 stays shut.
+- **The filter = dstack's GENERIC Dante-leg filter, a pinned artifact (issue 1519, dstack #264, the owner's
+  decision relayed 13.11.2026: "Dante works on switch-on, one identical filter on every PC").**
+  `scripts/lib/strih-dante-leg-filter.sh`. Every dstack device binds fixed ports from its slot (dstack >=
+  0.6.117: slot k receives on 29800+64k..+31, sends from the next 32), so the file names no device.
+  - **The pin** `scripts/dstack-leg-filter.pin`: the tag (v0.6.119), its COMMIT (0da2241608ed: `58f7fa9e1a`
+    is the annotated TAG object, not a commit), the sha256 of `tools/linux/dante-leg.nft` and
+    `tools/linux/dante-leg-notrack.nft`. `strih_dante_leg_filter_ensure ROOT` fetches both by the exact tag
+    (raw.githubusercontent) into `<tree>/dstack-release/<tag>/` (git-ignored), proves each against the pin,
+    no fallback; a `file://` base is copied (tests, a local mirror). The strih deploy fills it in its staged
+    tree on dev1 (`strih-snv-deploy.sh`, rsync-protected like the other release caches), so the box needs no
+    network.
+  - **setup step 13** (`strih_dante_leg_filter_apply`, from `_strih_vban_leg_filter_apply` on a Dante box):
+    both files to `/etc/dstack/` (0644, read back against the pin), ONE oneshot `dstack-dante-leg-filter.service`
+    (before network-pre) loading them in dstack's order (`nft -D dante_leg=<leg> -f dante-leg.nft`, then the
+    notrack file), the live tables read back against a render of the same files in a throwaway network
+    namespace (`unshare -n`, as root; `nft list` normalized: trimmed, counters dropped). THEN our old
+    `inet vban_dante70` table, its unit and its file go (`_strih_dante_leg_old_table_remove`; a failed
+    generic load leaves ours, the leg is never unfiltered). Then avahi's `deny-interfaces=<leg>` in
+    `/etc/avahi/avahi-daemon.conf` `[server]` (an active list is extended, else one line after the header).
+  - **avahi is never restarted by setup** (the NDI announcement): the deny takes effect at avahi's next start
+    (the supervisor restarts avahi-daemon with OBS stopped, or the box reboots). The old table's avahi uid drop
+    went with the table; deny-interfaces replaces it.
+  - **Stateful, but conntrack only on the leg:** dante-leg.nft uses `ct state established,related`; the
+    notrack file's raw chains (priority -300) mark every packet NOT on the leg untracked, so the NDI / JPEG XS
+    on the rig NIC never enter conntrack. Load the notrack file only on a box with no NAT and no other
+    stateful firewall (both SNV boxes checked 13.11.2026: no docker / libvirt / firewalld / ufw rules, no
+    masquerade; nf_conntrack was not even loaded).
+  - **What it admits on the leg:** Dante's ports + the flow range 29800-31847 (incl. PTP 319/320, 4321,
+    4440-4486, 5353, 8700-8708, 8800-8831, 14336-14591), the multicast groups, mDNS answers to the ephemeral
+    ports, DHCP answers, icmp/igmp, ssh + the MCP agent (22, 8092: issue 1517 covered), established
+    replies; everything else dropped. Out: established, udp/icmp/igmp, tcp to 22/8092.
+  - **VBAN on the Dante leg is retired:** a drop in any nft table is final, so no VBAN accept of ours could
+    pass; the loader refuses a leg VBAN sender on a Dante box (strih-snv measured 0 packets from 10.77.7.30
+    on its leg).
+  - **verify item 9** (`strih_dante_leg_filter_grade`, called by `strih_vban_leg_grade` after the rp_filter
+    row, which then returns: no VBAN counter rows on a Dante leg): `(dante-leg) files` (the two installed
+    files = the pin), `(dante-leg) filter` (both live tables = the netns render of the installed files, the
+    unit = its render, enabled + active; run as root), `(dante-leg) avahi` (the deny; a NOTE while avahi
+    runs from before the file), `(dante-leg) old table` (FAIL on a live `vban_dante70`, its unit enabled, or
+    either file left).
+  - **A box that drops its Dante devices** (a VBAN rollback) loads the issue-1439 table again and removes
+    a leftover generic filter (`strih_dante_leg_filter_remove`: unit, both tables, both files).
+  - **The issue-1495 retiring filter** (an old NIC leg during a NIC-to-VLAN move) renders the plain
+    ping-only table: the generic table is keyed on ONE leg name.
+  - **Tests:** `tests/python/test_dante_leg_generic_filter_1519.py`. The fake nft of
+    `vban_leg_fakes_1439.py` loads `-D dante_leg=<iface>` from the real nft 1.0.9 netns render
+    `tests/fixtures/dstack_leg_1519/netns-render-zzleg0.70.txt` (made with `sudo -n unshare -n` on dev1,
+    leg `zzleg0.70`, substituted per test); a fake `unshare -n` gives the fake nft an empty netns; a unit
+    listed in the state's `unit_files` runs its ExecStart lines through the fake nft. Bump the pin: the
+    tag, the commit, both sha256, re-render the fixture the same way.
+- **History (issues 1485-1517, replaced by issue 1519):** the per-box stateless `inet vban_dante70` rules:
+  the devices' ports + the RX range, the peers' slot ranges by SOURCE port to the ephemeral range (issue
+  1508), the TX ephemeral keepalive rule (issue 1513), ssh/MCP from the /24 (issue 1517), the PTP group rule
+  behind `strih_dante_ptp_leg_open`, the avahi uid drop. "No conntrack, its hooks would see every NDI
+  packet" is answered by the notrack file.
 - **PTP in process (ROZHODNUTÉ 6628785864, owner 4.11.2026):** the dstack devices follow Dante PTP themselves
   (dsync's follower in dstack v0.6.23: UDP 319 + 320 on INADDR_ANY, joined to 224.0.1.129 on the leg, receive
-  only). One input rule admits exactly that group to 319/320 from the /24 (`STRIH_DANTE_PTP_GROUP` /
-  `_PORTS`), before the drop, rendered only once the intercom or the obs pin carries dstack v0.6.23
-  (`strih_dante_ptp_leg_open`; before that a device that reached 319 would run its old follower beside
-  dsync); no output rule (it never sends; IGMP already passes). The dsync service stays the only writer
+  only). dstack's generic filter admits 319/320 on the leg. The dsync service stays the only writer
   of the system clock. Linux's default `IP_MULTICAST_ALL` also hands the group to dsync's own
   INADDR_ANY:319 sockets; by its config its gm_allowlist keeps it on video-clock.lan (NOT measured with the
   audio grandmaster's packets arriving: read dsync's `/status` grandmaster after the first deploy; the clock

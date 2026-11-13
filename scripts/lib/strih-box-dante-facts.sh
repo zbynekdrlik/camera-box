@@ -5,32 +5,36 @@
 # strih_box_validate. Moved verbatim out of the loader (issue 1502) so the loader stays under its
 # 1000-line budget.
 
-# _strih_box_dante_devices_ok NAME VALUE LEG -> rc 0 for `none`, or for `name=arc:cmc:flows:rxfirst-rxlast`
-# devices (space-joined) on a box with a leg, every port 1024..65535 and no two devices sharing one
-# (issue 1485: each device binds its own ports on the leg's one address). rc 1 + a named line otherwise.
+# _strih_box_dante_devices_ok NAME VALUE LEG SENDER -> rc 0 for `none`, or for `name=arc:cmc:flows` devices
+# (space-joined) on a box with a leg and no leg VBAN sender, every port 1024..65535, the ARC port in dstack's
+# slot range 4440-4471 and no two devices sharing one. Issue 1519 (dstack #264): a device's flow ports are the
+# fixed block of its slot (29800-31847, from the ARC port), so no RX range is declared; VBAN on a Dante leg is
+# retired (dstack's generic filter admits no VBAN). rc 1 + a named line otherwise.
 _strih_box_dante_devices_ok() {
-  local name="$1" v="$2" leg="$3" d dev ports arc cmc flows rx first last p seen=" " rc=0 dg='[0123456789]'
+  local name="$1" v="$2" leg="$3" sender="${4:-none}" d dev ports arc cmc flows p seen=" " rc=0 dg='[0123456789]'
   [ "$v" != none ] || return 0
   if [ "$leg" = none ]; then
     echo "strih-box ${name}: STRIH_DANTE_DEVICES needs a leg on the audio VLAN (STRIH_PROGRAM_VBAN_LEG is none)" >&2; return 1
   fi
+  if [ "$sender" != none ]; then
+    echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER must be none on a Dante leg: dstack's generic filter admits no VBAN (issue 1519)" >&2; rc=1
+  fi
   for d in $v; do
     dev="${d%%=*}"; ports="${d#*=}"
     if [ "$d" = "$dev" ] || [[ ! "$dev" =~ ^[abcdefghijklmnopqrstuvwxyz][abcdefghijklmnopqrstuvwxyz0123456789-]*$ ]] \
-       || [[ ! "$ports" =~ ^${dg}{4,5}:${dg}{4,5}:${dg}{4,5}:${dg}{4,5}-${dg}{4,5}$ ]]; then
-      echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}' must be name=arc:cmc:flows:rxfirst-rxlast" >&2; rc=1; continue
+       || [[ ! "$ports" =~ ^${dg}{4,5}:${dg}{4,5}:${dg}{4,5}$ ]]; then
+      echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}' must be name=arc:cmc:flows (issue 1519: no RX range)" >&2; rc=1; continue
     fi
-    IFS=: read -r arc cmc flows rx <<<"$ports"
-    first="${rx%%-*}"; last="${rx##*-}"
-    for p in "$arc" "$cmc" "$flows" "$first" "$last"; do
+    IFS=: read -r arc cmc flows <<<"$ports"
+    for p in "$arc" "$cmc" "$flows"; do
       if [ "$((10#$p))" -lt 1024 ] || [ "$((10#$p))" -gt 65535 ]; then
         echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}': port '${p}' must be 1024..65535" >&2; rc=1; continue 2
       fi
     done
-    if [ "$((10#$first))" -gt "$((10#$last))" ]; then
-      echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}': the RX range runs backwards" >&2; rc=1; continue
+    if [ "$((10#$arc))" -lt 4440 ] || [ "$((10#$arc))" -gt 4471 ]; then
+      echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}': the ARC port must sit in dstack's slots 4440-4471 (no rx/tx port base is written, issue 1519)" >&2; rc=1; continue
     fi
-    for p in "$arc" "$cmc" "$flows" $(seq "$((10#$first))" "$((10#$last))"); do
+    for p in "$arc" "$cmc" "$flows"; do
       case "$seen" in *" ${p} "*) echo "strih-box ${name}: STRIH_DANTE_DEVICES: port ${p} is used twice" >&2; rc=1 ;; esac
       seen="${seen}${p} "
     done

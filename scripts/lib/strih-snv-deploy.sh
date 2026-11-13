@@ -123,6 +123,10 @@ if ! declare -F shading_release_service >/dev/null; then
   # shellcheck source=scripts/lib/shading-release.sh
   . "$(dirname "${BASH_SOURCE[0]}")/shading-release.sh"
 fi
+if ! declare -F strih_dante_leg_filter_ensure >/dev/null; then   # issue 1519: dstack's pinned leg filter
+  # shellcheck source=scripts/lib/strih-dante-leg-filter.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-leg-filter.sh"
+fi
 if ! declare -p STRIH_PROGRAM_AUDIO_FILES >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/strih-program-audio.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-program-audio.sh"
@@ -575,7 +579,8 @@ _strih_lx_rsync() {  # SRC_DIR/ DEST_DIR/ [RSYNC_ARG...] -- --timeout=120 is rsy
 # `--delete` must never remove those: they are root-owned (rc 23 before any stop, 13.11.2026) and
 # sha-verified against the pin by the box's release step on every setup run. dev1's files still arrive.
 strih_lx_repo_rsync_filters() {
-  printf '%s\n' "--filter=P /shading-release/***" "--filter=P /intercom-release/***" "--filter=P /obs-release/***"
+  printf '%s\n' "--filter=P /shading-release/***" "--filter=P /intercom-release/***" "--filter=P /obs-release/***" \
+    "--filter=P /dstack-release/***"
 }
 
 _strih_lx_field() {  # KEY LINE -> the value of KEY=<value> in a read-back line
@@ -688,6 +693,8 @@ strih_lx_prepare() {
     || { _strih_lx_fail tree 1 3 "the pinned intercom release (above)"; return; }
   shading_release_service "$w/repo" >/dev/null \
     || { _strih_lx_fail tree 1 3 "the pinned shading release (above)"; return; }
+  strih_dante_leg_filter_ensure "$w/repo" >/dev/null \
+    || { _strih_lx_fail tree 1 3 "dstack's pinned Dante-leg filter, issue 1519 (above)"; return; }
   local hub_tag; hub_tag="$(strih_intercom_pin_tag "$w/repo")" || { _strih_lx_fail tree 1 3 "the intercom pin has no tag (above)"; return; }
   for b in "${box_list[@]}"; do
     STRIH_LX_BOX="$b"

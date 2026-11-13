@@ -9,12 +9,11 @@
 # falls back to the dsync service's clock when the follower cannot start. The dsync service stays the
 # ONLY writer of the system clock and the fallback for the rest of the box.
 #
-# What this lib holds (the leg filter's PTP rule is strih_dante_nft_input in strih-dante-leg.sh):
+# What this lib holds (since issue 1519 the leg filter is dstack's generic file, which admits 319/320):
 #   - the pin threshold: STRIH_DANTE_PTP_FIRST_DSTACK, the first dstack whose devices follow in process;
 #     a component (intercom | obs) is READY when its release pin's DSTACK_VERSION is at or above it
-#     (strih_dante_ptp_pin_ready). Until then nothing opens 319 (the leg rule needs one, the box-wide
-#     sysctl both: strih_dante_ptp_leg_open / strih_dante_ptp_all_ready) and the rows
-#     below are NOTEs: the threshold follows the pins.
+#     (strih_dante_ptp_pin_ready). Until then nothing may bind 319 (the box-wide sysctl needs both:
+#     strih_dante_ptp_all_ready) and the rows below are NOTEs: the threshold follows the pins.
 #   - the right of the desktop-user OBS to bind 319 (design 6629112890): the box-wide sysctl
 #     `net.ipv4.ip_unprivileged_port_start = 319` in /etc/sysctl.d/60-strih-dante-ptp-port.conf on a box
 #     whose program comes from Dante (strih_program_dante_declared). Not a file capability on /usr/bin/obs
@@ -74,12 +73,6 @@ strih_dante_ptp_pin_dstack() {
 strih_dante_ptp_pin_ready() {
   strih_dante_ptp_version_ge "$(strih_dante_ptp_pin_dstack "${1-}")" "$STRIH_DANTE_PTP_FIRST_DSTACK"
 }
-
-# strih_dante_ptp_leg_open -> rc 0 iff either pinned device (the hub, the OBS) follows PTP in process, so
-# the leg admits the PTP group (strih_dante_nft_input). Before that nothing on the leg binds 319 on
-# purpose: a dstack below the threshold that could bind it would start its old follower beside dsync
-# (the dantesync#109 port collision the earlier rule guarded against).
-strih_dante_ptp_leg_open() { strih_dante_ptp_pin_ready intercom || strih_dante_ptp_pin_ready obs; }
 
 # strih_dante_ptp_all_ready -> rc 0 iff EVERY dstack consumer on the box (the hub AND the OBS) is READY.
 # The 319 bind right (the sysctl) is box-wide: the hub, an unprivileged operator process
