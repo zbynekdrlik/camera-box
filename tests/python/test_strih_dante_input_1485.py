@@ -474,6 +474,14 @@ def test_rx_reordered_is_reported_never_graded_1508():
     assert r["verdict"] == "PASS" and r["counters"]["rx_reordered"]["delta"] == 50, r  # opening line n=0 (0) to closing n=5 (50)
 
 
+def test_start_holes_is_reported_never_graded_1508():
+    """obs v0.4.30 (dstack v0.6.126): the OBS-start burst moved out of rx_holes into start_holes."""
+    w = [l + " rx_reordered=0 start_holes=%d" % (100 * n) if "dante-input status:" in l else l
+         for n, l in enumerate(_window())]
+    r = CONT.decide(w, 1, 3)
+    assert r["verdict"] == "PASS" and r["counters"]["start_holes"]["delta"] == 500, r
+
+
 def test_a_line_without_rx_reordered_is_not_unknown_1508():
     r = CONT.decide(_window(), 1, 3)
     assert r["verdict"] == "PASS" and "rx_reordered" not in r["counters"], r
