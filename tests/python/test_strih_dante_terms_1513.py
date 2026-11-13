@@ -231,7 +231,10 @@ def _start(dev, track):
             "rx_port_base=Some(30000) subscriptions=2 state_file=x" % (dev, track))
 
 
-SPLIT = "12:00:00.001: dante-input start: latency split dante_latency_ns=13041666 rx_path_ns=13666666 tx_path_ns=19677083"
+# the live v0.4.27 shapes read on stream-snv (13.11.2026, before the terms were written: None / (default))
+SPLIT = "12:00:00.001: dante-input start: latency split dante_latency_ns=13041666 rx_path_ns=14999999 tx_path_ns=28677082"
+DLINK_DEFAULT = ("12:00:00.001: dante-input dlink:  INFO dstack::link: dlink latency: Dante latency P 13.041666 ms = "
+                 "network latency (a) 1 ms (default) + receive buffer (b) 12.041666 ms (default)")
 TXLINE = ("12:00:00.002: dante-input start: TX of OBS track 1 on [\"OBS program L\", \"OBS program R\"]: OBS 48000 Hz into "
           "a FIFO held at 22.667 ms (the app buffer) by dlink's ASRC player, read at 48000 Hz; tx_path_ns=19677083 "
           "obs_to_wire_ns=42343749")
@@ -367,6 +370,21 @@ def test_item9_fails_a_start_without_the_latency_split(tmp_path):
 def test_item9_fails_a_toml_whose_terms_differ_from_the_facts(tmp_path, toml):
     r = _stream(tmp_path, toml=toml)
     assert "BAD (program-dante) latency terms" in r.stdout and "setup-strih" in r.stdout, r.stdout
+
+
+def test_item9_names_dlinks_own_latency_line(tmp_path):
+    line = DLINK_DEFAULT.replace(" (default)", "")
+    r = _stream(tmp_path, extra=(SPLIT, line, TXLINE, NETLAT))
+    assert "BAD" not in r.stdout, r.stdout
+    assert ("NOTE (program-dante) dlink latency: Dante latency P 13.041666 ms = network latency (a) 1 ms + "
+            "receive buffer (b) 12.041666 ms") in r.stdout, r.stdout
+
+
+def test_item9_names_a_default_term_while_the_facts_declare_it(tmp_path):
+    # the live 13.11.2026 shape: OBS started before the TOML carried the terms
+    r = _stream(tmp_path, extra=(SPLIT, DLINK_DEFAULT, TXLINE, NETLAT))
+    assert "NOTE (program-dante) dlink latency:" in r.stdout and "(default)" in r.stdout, r.stdout
+    assert "a term reads (default) while the box facts declare it: restart OBS" in r.stdout, r.stdout
 
 
 def test_item9_notes_a_log_without_network_latency_fields(tmp_path):

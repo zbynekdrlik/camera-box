@@ -232,7 +232,7 @@ START = ("12:00:00.000: dante-input start: config=/home/newlevel/.camera-box/dan
          "iface=enp7s0.70 latency_ms=10 obs_rate=48000 sample_rate=48000 device_rate=96000 halved=true rx=[] "
          "ports=Some(4440)/Some(8800)/Some(4455) rx_port_base=Some(47200) subscriptions=2 state_file=x\n"
          # issues 1510 + 1513: the obs v0.4.27 split line, item 9 grades it against the facts' (a) + (b)
-         "12:00:00.001: dante-input start: latency split dante_latency_ns=13041666 rx_path_ns=13666666 tx_path_ns=0")
+         "12:00:00.001: dante-input start: latency split dante_latency_ns=13041666 rx_path_ns=14999999 tx_path_ns=28677082")
 
 
 def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=None, user=None):
