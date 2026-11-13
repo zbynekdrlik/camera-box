@@ -71,7 +71,8 @@ def _load(tmp_path, box, pairs):
 def test_the_four_terms_are_required_facts_at_the_end_of_the_key_list():
     r = _bash("strih_box_fact_keys")
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split()[-4:] == list(TERMS)
+    # issue 1502 appended the rig-NIC rename after them
+    assert r.stdout.split()[-5:] == list(TERMS) + ["STRIH_NIC_RENAME"]
 
 
 def test_every_dante_program_box_keeps_todays_latency_explicitly():

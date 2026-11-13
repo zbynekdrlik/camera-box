@@ -378,6 +378,13 @@ STREAM_SNV_PRE_1495 = {
     "STRIH_DANTE_NETWORK_LATENCY_MS": "none", "STRIH_DANTE_RECEIVE_BUFFER_MS": "none",
     "STRIH_DANTE_TX": "none", "STRIH_DANTE_TX_TRACK": "none",
 }
+# issue 1502 moved stream-snv's rig NIC to a USB 2.5 GbE adapter renamed rig0; the issue-1439 / 1495 tests
+# replay the boxes BEFORE that move, on the onboard r8169 rig NIC enp56s0.
+STREAM_SNV_PRE_1502_NIC = {
+    "STRIH_NIC_DRIVER": "r8169", "STRIH_NIC_OOT_DRIVER": "none", "STRIH_NIC_MIN_USB_MBPS": "none",
+    "STRIH_NIC_MIN_LINK_MBPS": "1000", "STRIH_NIC_RENAME": "none",
+}
+STREAM_SNV_PRE_1495.update(STREAM_SNV_PRE_1502_NIC)
 BOXES = Path(__file__).resolve().parent.parent.parent / "scripts" / "strih-boxes"
 
 

@@ -40,6 +40,8 @@ def _facts(tmp_path, **kv):
     f = d / "stream-snv.env"
     t = f.read_text()
     kv.setdefault("STRIH_PROGRAM_VBAN_LEG", "vlan:70")
+    for k, v in fk.STREAM_SNV_PRE_1502_NIC.items():  # the 9.11 box: the onboard rig NIC, before issue 1502
+        kv.setdefault(k, v)
     for k, v in kv.items():
         t, n = re.subn(r"(?m)^%s=.*$" % k, "%s=%s" % (k, v), t)
         assert n == 1, k
