@@ -78,9 +78,9 @@ strih_nic_rename_apply_hint() {
   usb="$(dirname "${dev:-/}")"
   if [ -n "$dev" ] && [ -f "${usb}/idVendor" ]; then
     usb="${usb##*/}"
-    printf "echo %s > /sys/bus/usb/drivers/usb/unbind && echo %s > /sys/bus/usb/drivers/usb/bind (or re-plug it)" "$usb" "$usb"
+    printf "sudo sh -c 'echo %s > /sys/bus/usb/drivers/usb/unbind && echo %s > /sys/bus/usb/drivers/usb/bind' (or re-plug it)" "$usb" "$usb"
   else
-    printf 'udevadm trigger --action=add --settle /sys/class/net/%s (with its link down)' "$ifc"
+    printf 'sudo udevadm trigger --action=add --settle /sys/class/net/%s (with its link down)' "$ifc"
   fi
 }
 
@@ -195,19 +195,27 @@ strih_nic_rename_grade_rows() {
   return 0
 }
 
-# strih_nic_rename_switch_program OLD NEW LAN_PROFILE LEG_PROFILE VLAN_ID GATEWAY PEER [WAIT_S] -> a
-# self-contained bash program (stdout) that moves the box's rig LAN profile (connection.interface-name)
-# and its VLAN leg profile (vlan.parent + connection.interface-name NEW.VLAN_ID) from OLD onto NEW,
-# takes NEW's MAC out of the issue-1495 retired-NIC drop-in, brings both up, then waits up to WAIT_S
-# (60) for the gateway to answer a ping on NEW AND the leg peer an ARP on NEW.VLAN_ID. Without both it
-# puts everything back on OLD (the drop-in restored too). The outcome lands in RIG_NIC_SWITCH_RESULT
-# (/run/rig-nic-switch.result: `ok` | `rolled-back <why>` | `refused <why>`). It refuses before any
-# change when NEW is absent. Run it DETACHED (systemd-run): the ssh session rides OLD.
+# strih_nic_rename_switch_program OLD NEW LAN_PROFILE LEG_PROFILE VLAN_ID GATEWAY PEER RIG_ADDR LEG_ADDR
+# [WAIT_S] -> a self-contained bash program (stdout) that moves the box's rig LAN profile
+# (connection.interface-name) and its VLAN leg profile (vlan.parent + connection.interface-name
+# NEW.VLAN_ID) from OLD onto NEW, takes NEW's MAC out of the issue-1495 retired-NIC drop-in, brings both
+# up, then waits up to WAIT_S (60) for the gateway to answer a ping on NEW AND the leg peer an ARP on
+# NEW.VLAN_ID (ARP: the leg's nft filter drops inbound echo replies; ARP is not IP).
+#   * ok: OLD is disconnected + link down (it would answer ARP for RIG_ADDR on the same L2, and
+#     NetworkManager could put a DHCP profile on it), and RIG_ADDR / LEG_ADDR are announced (unsolicited
+#     ARP) on NEW / NEW.VLAN_ID so no neighbour keeps the old MAC.
+#   * no answer: NEW goes unmanaged again (when it was retired) + link down, the drop-in is restored, both
+#     profiles go back to OLD and up; a rollback that cannot bring OLD up is `rollback-FAILED` (exit 2).
+# It refuses before any change when NEW is absent, when arping is not iputils' (other builds take other
+# flags), or when the drop-in has more than one match-device line. The outcome lands in
+# RIG_NIC_SWITCH_RESULT (/run/rig-nic-switch.result: `ok ...` | `rolled-back ...` | `rollback-FAILED ...` |
+# `refused ...`). Run it DETACHED (systemd-run): the ssh session rides OLD.
 strih_nic_rename_switch_program() {
   local old="${1:?old NIC}" new="${2:?new NIC}" lan="${3:?LAN profile}" leg="${4:?leg profile}"
-  local vid="${5:?VLAN id}" gw="${6:?gateway}" peer="${7:?leg peer}" wait="${8:-60}" a
+  local vid="${5:?VLAN id}" gw="${6:?gateway}" peer="${7:?leg peer}" rig="${8:?rig address}"
+  local legaddr="${9:?leg address}" wait="${10:-60}" a
   local LC_ALL=C up='ABCDEFGHIJKLMNOPQRSTUVWXYZ' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789'
-  for a in "$old" "$new" "$lan" "$leg" "$vid" "$gw" "$peer" "$wait"; do
+  for a in "$old" "$new" "$lan" "$leg" "$vid" "$gw" "$peer" "$rig" "$legaddr" "$wait"; do
     case "$a" in '' | -* | *[!${up}${lo}${dg}._:-]*)
       echo "strih-nic-rename: '${a}' is not a plain name / address" >&2; return 1 ;;
     esac
@@ -215,10 +223,12 @@ strih_nic_rename_switch_program() {
   for a in "$vid" "$wait"; do
     [[ "$a" =~ ^[123456789][0123456789]*$ ]] || { echo "strih-nic-rename: '${a}' is not a whole number" >&2; return 1; }
   done
+  [ "$vid" -le 4094 ] || { echo "strih-nic-rename: VLAN id ${vid} is over 4094" >&2; return 1; }
   printf '%s\n' '#!/usr/bin/env bash' \
     "# issue 1502: the rig NIC switch ${old} -> ${new} (scripts/lib/strih-nic-rename.sh). Run detached." \
     'set -uo pipefail' \
-    "OLD=${old} NEW=${new} LAN=${lan} LEG=${leg} VID=${vid} GW=${gw} PEER=${peer} WAIT=${wait}"
+    "OLD=${old} NEW=${new} LAN=${lan} LEG=${leg} VID=${vid} GW=${gw} PEER=${peer}" \
+    "RIG_ADDR=${rig} LEG_ADDR=${legaddr} WAIT=${wait}"
   cat <<'PROGRAM'
 RESULT="${RIG_NIC_SWITCH_RESULT:-/run/rig-nic-switch.result}"
 RETIRED="${RIG_NIC_SWITCH_RETIRED:-/etc/NetworkManager/conf.d/90-vban-dante70-retired.conf}"
@@ -235,22 +245,30 @@ up() {
 healthy() {
   ping -c 1 -W 1 -I "$NEW" "$GW" >/dev/null 2>&1 && arping -q -c 1 -w 2 -I "$NEW.$VID" "$PEER" >/dev/null 2>&1
 }
+announce() {
+  arping -q -U -c 2 -I "$1" "$2" >/dev/null 2>&1 || log "WARNING: the unsolicited ARP for $2 on $1 failed -- neighbours wait for their entry to expire"
+}
 [ -e "${SYSROOT}/class/net/${NEW}" ] || finish "refused ${NEW} does not exist (rename it first) -- nothing changed" 1
+case "$(arping -V 2>&1 || true)" in *iputils*) ;; *) finish "refused arping is missing or not iputils' (apt-get install iputils-arping) -- nothing changed" 1 ;; esac
 [ -e "${SYSROOT}/class/net/${OLD}" ] || log "WARNING: ${OLD} is gone -- a rollback cannot restore the link"
 MAC="$({ tr '[:upper:]' '[:lower:]' <"${SYSROOT}/class/net/${NEW}/address"; } 2>/dev/null || true)"
 BACKUP=""
 if [ -n "$MAC" ] && [ -f "$RETIRED" ]; then
+  [ "$(grep -c '^match-device=' "$RETIRED" || true)" -le 1 ] || finish "refused ${RETIRED} has more than one match-device line -- edit it by hand; nothing changed" 1
   keep=""; hit=""
   while read -r m; do
     [ -n "$m" ] || continue
     lm="$(tr '[:upper:]' '[:lower:]' <<<"$m")"
     case "$lm" in "mac:${MAC}" | "interface-name:${NEW}" | "interface-name:enx${MAC//:/}") hit=1 ;; *) keep="${keep}${keep:+;}${m}" ;; esac
-  done < <(sed -n 's/^match-device=//p' "$RETIRED" | head -n 1 | tr ';,' '\n\n')
+  done < <(sed -n 's/^match-device=//p' "$RETIRED" | tr ';,' '\n\n')
   if [ -n "$hit" ]; then
     BACKUP="${RETIRED}.rig-nic-switch.bak"
     cp -p -- "$RETIRED" "$BACKUP" || finish "refused could not back up ${RETIRED} -- nothing changed" 1
     if [ -n "$keep" ]; then
-      sed -i "s/^match-device=.*/match-device=${keep}/" "$RETIRED" || finish "refused could not rewrite ${RETIRED}" 1
+      tmp="${RETIRED}.rig-nic-switch.new"
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in match-device=*) printf 'match-device=%s\n' "$keep" ;; *) printf '%s\n' "$line" ;; esac
+      done <"$RETIRED" >"$tmp" && mv -f -- "$tmp" "$RETIRED" || finish "refused could not rewrite ${RETIRED}" 1
     else
       rm -f -- "$RETIRED" || finish "refused could not remove ${RETIRED}" 1
     fi
@@ -263,15 +281,23 @@ rollback() {
   log "rolling back to ${OLD}: $1"
   if [ -n "$BACKUP" ]; then
     mv -f -- "$BACKUP" "$RETIRED" && nmcli general reload conf </dev/null >/dev/null 2>&1
+    nmcli device set "$NEW" managed no </dev/null >/dev/null 2>&1 || log "WARNING: ${NEW} stays managed until NetworkManager's next start"
   fi
-  point "$OLD" && up
+  ip link set dev "$NEW" down || log "WARNING: could not take ${NEW}'s link down"
+  { point "$OLD" && up; } || finish "rollback-FAILED $1 -- ${OLD} did not come back up: the box may be off the network (console needed)" 2
   finish "rolled-back $1" 1
 }
 point "$NEW" || rollback "nmcli could not point the profiles at ${NEW}"
 up || log "a connection up on ${NEW} failed -- checking reachability anyway"
 end=$(( $(date +%s) + WAIT ))
 while :; do
-  if healthy; then finish "ok ${LAN} on ${NEW}, ${LEG} on ${NEW}.${VID}: ${GW} pings, ${PEER} answers ARP" 0; fi
+  if healthy; then
+    nmcli device disconnect "$OLD" </dev/null >/dev/null 2>&1 || log "WARNING: nmcli could not disconnect ${OLD}"
+    ip link set dev "$OLD" down || log "WARNING: could not take ${OLD}'s link down -- it may still answer ARP for ${RIG_ADDR}"
+    announce "$NEW" "$RIG_ADDR"
+    announce "$NEW.$VID" "$LEG_ADDR"
+    finish "ok ${LAN} on ${NEW}, ${LEG} on ${NEW}.${VID}: ${GW} pings, ${PEER} answers ARP; ${OLD} down, ${RIG_ADDR} + ${LEG_ADDR} announced" 0
+  fi
   [ "$(date +%s)" -lt "$end" ] || break
   sleep 2
 done
@@ -283,6 +309,6 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -euo pipefail
   case "${1-}" in
     --switch-program) shift; strih_nic_rename_switch_program "$@" ;;
-    *) echo "usage: $0 --switch-program OLD NEW LAN_PROFILE LEG_PROFILE VLAN_ID GATEWAY PEER [WAIT_S]" >&2; exit 2 ;;
+    *) echo "usage: $0 --switch-program OLD NEW LAN_PROFILE LEG_PROFILE VLAN_ID GATEWAY PEER RIG_ADDR LEG_ADDR [WAIT_S]" >&2; exit 2 ;;
   esac
 fi

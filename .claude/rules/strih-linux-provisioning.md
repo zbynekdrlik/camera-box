@@ -1482,18 +1482,25 @@ Keep the onboard cable plugged in until step 6 (the rollback needs it); off-prod
    printed unbind + bind (or ask the owner to re-plug it), then read `ip -br link show rig0` and
    `cat /sys/class/net/rig0/address` = `00:e0:4c:68:01:85`.
 3. **Generate the switch program:** `bash scripts/lib/strih-nic-rename.sh --switch-program enp56s0 rig0
-   stream-lan vban-dante70 70 10.77.8.1 10.77.7.232 60 | sudo tee /root/rig-nic-switch.sh >/dev/null`.
-   It refuses unless `rig0` exists; it takes the adapter out of the retired drop-in (a backup beside it),
-   points `stream-lan` at `rig0` and `vban-dante70` at `rig0` / `rig0.70`, brings both up, then waits up
-   to 60 s for `10.77.8.1` to answer a ping on rig0 AND `10.77.7.232` (mbc) an ARP on rig0.70 (ARP: the
-   leg's nft filter drops inbound echo replies). Without both it points both profiles back at enp56s0,
-   restores the drop-in and brings them up. The outcome: `/run/rig-nic-switch.result` (`ok ...` /
-   `rolled-back ...` / `refused ...`) and the unit's journal.
-4. **Run it detached:** `sudo systemd-run --unit=rig-nic-switch --collect /bin/bash /root/rig-nic-switch.sh`.
+   stream-lan vban-dante70 70 10.77.8.1 10.77.7.232 10.77.9.204 10.77.7.204 60 | sudo tee /root/rig-nic-switch.sh >/dev/null`.
+   It refuses (nothing changed) unless `rig0` exists, arping is iputils' and the retired drop-in has one
+   `match-device=` line; it takes the adapter out of that drop-in (a backup beside it), points `stream-lan`
+   at `rig0` and `vban-dante70` at `rig0` / `rig0.70`, brings both up, then waits up to 60 s for
+   `10.77.8.1` to answer a ping on rig0 AND `10.77.7.232` (mbc) an ARP on rig0.70 (ARP: the leg's nft
+   filter drops inbound echo replies; ARP is not IP, and it proves VLAN 70 is tagged on the new port).
+   On success it disconnects enp56s0 and takes its link down (left up on the same L2 it would answer ARP
+   for 10.77.9.204, and NetworkManager could DHCP it onto the rig subnet), then announces 10.77.9.204 on
+   rig0 and 10.77.7.204 on rig0.70 (unsolicited ARP). Without both answers it puts rig0 back unmanaged +
+   down, restores the drop-in and brings both profiles up on enp56s0. The outcome:
+   `/run/rig-nic-switch.result` (`ok ...` / `rolled-back ...` / `rollback-FAILED ...` = console needed /
+   `refused ...`) and the unit's journal.
+4. **Stop OBS** (`systemctl --user stop strih-obs.service` as the operator: its Dante device `stream-obs`
+   does not survive its address moving, the issue-1495 reapply finding), then **run it detached:**
+   `sudo systemd-run --unit=rig-nic-switch --collect /bin/bash /root/rig-nic-switch.sh`.
    The ssh session drops when `stream-lan` leaves enp56s0. Reconnect to 10.77.9.204 after ~30-70 s and read
    `cat /run/rig-nic-switch.result` + `journalctl -u rig-nic-switch`. A rollback = the box is back on
    enp56s0; read the journal's reason before any retry.
-5. **Re-run setup-strih** (OBS stopped): step 2 rewrites dsync's unit to `--interface rig0` (one dsync
+5. **Re-run setup-strih** (OBS still stopped): step 2 rewrites dsync's unit to `--interface rig0` (one dsync
    restart of a client), step 11b installs the xhci IRQ unit for the USB NIC, step 13 re-renders the leg
    filter / sysctls / dante-input TOML for `rig0.70` and restarts nothing it does not own. Then start OBS.
 6. **Verify:** `sudo ./scripts/verify-strih.sh --box stream-snv`: item 36 (`(nic-rename)` x2, `(nic-usb)`
@@ -1506,6 +1513,11 @@ Keep the onboard cable plugged in until step 6 (the rollback needs it); off-prod
 Rollback after a successful switch: the same program with the two NICs swapped
 (`--switch-program rig0 enp56s0 ...`, the onboard cable back in), then `STRIH_NIC_RENAME=none` + the old
 four NIC facts and a setup-strih run (the .link is removed; the adapter keeps `rig0` until it is re-added).
+
+.link notes: `MACAddress=` (not `PermanentMACAddress=`: some USB NICs report an all-zero permanent
+address, and nothing clones this one's MAC). Ubuntu's initramfs copies `/etc/systemd/network/*.link`
+only at its next `update-initramfs`; until then an r8152 loaded in the initramfs keeps its predictable
+name there and is renamed at the root-fs coldplug, which works because its link is still down then.
 
 ## A verify item for a supervised service grades the RUNNING process, not only the files (issue 1399)
 
