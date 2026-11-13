@@ -8,6 +8,8 @@ paths:
   - "scripts/lib/ndi-runtime.sh"
   - "scripts/genlock-runtime-packages.sh"
   - "systemd/strih-obs.service"
+  - "scripts/strih-obs-start.sh"
+  - "tests/python/test_strih_obs_shutdown_bound_1512.py"
   - "systemd/strih-bundle-state-server.service"
   - "tests/strih_provision_pure_functions.rs"
   - "tests/ndi_runtime_lib.rs"
@@ -1693,3 +1695,16 @@ a file (`< "$f"`) or a `while ... done < <(producer)` whose BODY calls `ok`/`bad
 grader`, `$(grader)` or `producer | while ... bad ...`. `tests/python/test_verify_fail_counted_1485.py`
 sweeps every function that reaches `bad` (transitively, heredoc bodies skipped) in scripts/lib/*.sh +
 verify-strih.sh for those shapes; a new row printer is covered with no test edit.
+
+## A GUI close that hangs is bounded by the wrapper (issue 1512)
+
+On 12.11.2026 the strih OBS hung after `==== Shutting down` (last line `[obs-vban] plugin unloaded`,
+the live receive load still running). The unit's own stop is bounded (TimeoutStopSec 90 s), but a GUI
+close runs no unit stop, so the unit stayed active and the panel's `systemctl --user start` did
+nothing. `strih-obs-start.sh` now watches this session's log while it waits (`strih_obs_shutdown_watch`):
+`STRIH_OBS_SHUTDOWN_BOUND_S` (60) after the shutdown line it dumps threads, per-task `wchan`, the
+children and a best-effort gdb backtrace into `~/.camera-box/obs-hang-<stamp>/` (obs#40 asked for
+them), SIGKILLs OBS and exits 0, so `Restart=on-failure` leaves the asked-for close alone. gdb usually
+fails there: `ptrace_scope` 1 and gdb is not OBS's ancestor; the bt file then says so. Send a dump to
+the obs project (obs#40) when one appears.
+

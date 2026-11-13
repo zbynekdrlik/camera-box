@@ -1,7 +1,7 @@
 """Issue 1487 -- the nodes dsync upgrades itself get a REPORT-ONLY version row.
 
-`DSYNC_SELF_UPGRADED_NODES` (companion-snv mbc fohabl iem-snv alex-nb) are never rolled and never
-pinned. On 9.11.2026 mbc ran dsync 1.27.3 below the fleet pin 1.28.0, its PTP lock flapped and, as
+`DSYNC_SELF_UPGRADED_NODES` (mbc fohabl since 12.11.2026; iem-snv + companion-snv left the fleet
+table for dsync, alex-nb is rolled here again) are never rolled and never pinned. On 9.11.2026 mbc ran dsync 1.27.3 below the fleet pin 1.28.0, its PTP lock flapped and, as
 the Dante TX of the stream-snv program, it silenced the program for ~20 min; the version was printed
 nowhere. Now:
   - `dantesync-version-gate.sh --fleet` reads each of them with the ONE version reader and grades it
@@ -31,8 +31,7 @@ import rig_dev_handover_decision as d  # noqa: E402
 
 _PIN = re.search(r'DANTESYNC_VERSION_PIN="\$\{DANTESYNC_VERSION_PIN:-([0-9.]+)\}"',
                  _GATE.read_text()).group(1)
-_SELF = {"mbc": "10.77.7.232", "fohabl": "10.77.7.30", "iem-snv": "iem-snv.lan",
-         "companion-snv": "companion-snv.lan"}
+_SELF = {"mbc": "10.77.7.232", "fohabl": "10.77.7.30"}
 _ROLLED = {"cam2": "10.77.9.62", "cam3": "10.77.9.63", "cam5": "10.77.9.65",
            "strih-snv": "10.77.9.202", "stream-snv": "10.77.9.204", "resolume-snv": "resolume.lan"}
 
@@ -123,12 +122,11 @@ def _fleet(tmp_path, self_versions, extra=(), **over):
 
 def test_fleet_names_a_self_upgraded_node_behind_the_pin_and_still_passes(tmp_path):
     old = _older(_PIN)
-    r = _fleet(tmp_path, {"mbc": old, "fohabl": _PIN, "iem-snv": _newer(_PIN), "companion-snv": _PIN})
+    r = _fleet(tmp_path, {"mbc": old, "fohabl": _newer(_PIN)})
     assert r.returncode == 0, r.stdout + r.stderr
     assert re.search(rf"^\s+mbc\s+{re.escape(old)}\s+SELF-BEHIND \(version={re.escape(old)} "
                      rf"pin={re.escape(_PIN)};", r.stdout, re.M), r.stdout
-    for n in ("fohabl", "iem-snv", "companion-snv"):
-        assert re.search(rf"^\s+{n}\s+\S+\s+OK", r.stdout, re.M), (n, r.stdout)
+    assert re.search(r"^\s+fohabl\s+\S+\s+OK", r.stdout, re.M), r.stdout
     assert "DSYNC-SELF-UPGRADED WARNING: mbc" in r.stderr and old in r.stderr and _PIN in r.stderr
     # a self-upgraded node is never part of the pinned roll-up
     assert "GATE PASS" in r.stdout
@@ -136,21 +134,24 @@ def test_fleet_names_a_self_upgraded_node_behind_the_pin_and_still_passes(tmp_pa
 
 
 def test_fleet_an_unread_self_upgraded_node_is_a_note_and_the_gate_passes(tmp_path):
-    r = _fleet(tmp_path, {"mbc": _PIN, "fohabl": _PIN, "iem-snv": None, "companion-snv": _PIN},
-               DANTESYNC_FOHABL_SSH_PASS="")
+    r = _fleet(tmp_path, {"mbc": None, "fohabl": _PIN}, DANTESYNC_FOHABL_SSH_PASS="")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert re.search(r"^\s+iem-snv\s+-\s+SELF-UNKNOWN", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+mbc\s+-\s+SELF-UNKNOWN", r.stdout, re.M), r.stdout
     assert re.search(r"^\s+fohabl\s+-\s+SELF-UNKNOWN", r.stdout, re.M), r.stdout
-    assert "DSYNC-SELF-UPGRADED NOTE: iem-snv" in r.stderr
+    assert "DSYNC-SELF-UPGRADED NOTE: mbc" in r.stderr
 
 
-def test_fleet_an_unreachable_self_upgraded_reach_node_is_skipped_by_name(tmp_path):
-    r = _fleet(tmp_path, {"mbc": _PIN, "fohabl": _PIN, "iem-snv": _PIN, "companion-snv": _PIN})
+def test_alex_nb_is_rolled_and_pinned_here_again(tmp_path):
+    """issue 1487 (12.11.2026): dsync cannot log in to alex-nb, so camera-box rolls it again -- an
+    away alex-nb is skipped by name in the PINNED section, never in the self-upgraded one."""
+    r = _fleet(tmp_path, {"mbc": _PIN, "fohabl": _PIN})
     assert "  alex-nb SKIPPED (unreachable" in r.stdout, r.stdout
+    self_section = r.stdout[r.stdout.index("-- nodes dsync upgrades itself"):]
+    assert "alex-nb" not in self_section, r.stdout
 
 
 def test_fleet_an_acked_offline_self_upgraded_node_is_excluded_never_dialled(tmp_path):
-    r = _fleet(tmp_path, {"mbc": _older(_PIN), "fohabl": _PIN, "iem-snv": _PIN, "companion-snv": _PIN},
+    r = _fleet(tmp_path, {"mbc": _older(_PIN), "fohabl": _PIN},
                CAMBOX_OFFLINE_ACK="mbc:moved to the bench")
     assert r.returncode == 0, r.stdout + r.stderr
     assert re.search(r"^\s+mbc\s+-\s+EXCLUDED \(acked offline", r.stdout, re.M), r.stdout
@@ -159,7 +160,7 @@ def test_fleet_an_acked_offline_self_upgraded_node_is_excluded_never_dialled(tmp
 
 
 def test_fleet_a_named_self_upgraded_node_is_graded_on_the_pin_not_in_the_self_section(tmp_path):
-    r = _fleet(tmp_path, {"mbc": _older(_PIN), "fohabl": _PIN, "iem-snv": _PIN, "companion-snv": _PIN},
+    r = _fleet(tmp_path, {"mbc": _older(_PIN), "fohabl": _PIN},
                DANTESYNC_TRAY_SHA_MBC="a" * 64, extra=["--win", "mbc=newlevel@10.77.7.232"])
     assert r.returncode == 20, r.stdout + r.stderr
     assert re.search(r"^\s+mbc\s+\S+\s+DRIFT", r.stdout, re.M), r.stdout

@@ -74,6 +74,48 @@ strih_wait_rig_address() {
   return 1
 }
 
+# strih_obs_shutdown_watch PID LOGDIR SINCE_EPOCH BOUND_S DUMP_DIR -> issue 1512: while OBS (PID) lives,
+# watch this session's log (the newest *.txt in LOGDIR written since SINCE_EPOCH, never an older
+# session's). Once it carries `==== Shutting down` and OBS is still alive BOUND_S later, write a dump
+# for the obs project (obs#40: threads, per-task wait channels, children, a best-effort gdb backtrace)
+# into DUMP_DIR, then SIGKILL OBS. rc 0 always; DUMP_DIR exists only when it killed.
+strih_obs_shutdown_watch() {
+  local pid="$1" logdir="$2" since="$3" bound="$4" dump="$5" log="" seen="" t off=0 size
+  [[ "$bound" =~ ^[0123456789]{1,4}$ ]] && [ "$bound" -gt 0 ] || bound=60
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ -z "$log" ]; then
+      log="$(find "$logdir" -maxdepth 1 -name '*.txt' -newermt "@${since}" -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | head -n 1 | cut -d' ' -f2- || true)"
+    fi
+    # only what was appended since the last look (+ 64 bytes, so a line written in two pieces is
+    # still read whole): a multi-day OBS log is hundreds of MB, never re-read every second
+    if [ -z "$seen" ] && [ -n "$log" ]; then
+      size="$(stat -c %s "$log" 2>/dev/null || echo 0)"
+      if [ "$size" -gt "$off" ]; then
+        if tail -c "+$(( off > 64 ? off - 63 : 1 ))" "$log" 2>/dev/null | grep -qF '==== Shutting down'; then
+          seen="$SECONDS"
+        fi
+        off="$size"
+      fi
+    fi
+    if [ -n "$seen" ] && [ $((SECONDS - seen)) -ge "$bound" ]; then
+      echo "WARN issue 1512: obs (pid ${pid}) still alive ${bound} s after '==== Shutting down' -- dumping to ${dump}, then SIGKILL"
+      mkdir -p "$dump"
+      top -H -b -n 1 -p "$pid" >"${dump}/obs-hang-threads.txt" 2>&1 || true
+      for t in /proc/"$pid"/task/*; do
+        echo "$t $(cat "$t/comm" 2>/dev/null) $(cat "$t/wchan" 2>/dev/null)"
+      done >"${dump}/obs-hang-tasks.txt" 2>&1 || true
+      ps -o pid,stat,wchan:32,etime,cmd --ppid "$pid" >"${dump}/obs-hang-children.txt" 2>&1 || true
+      timeout 30 gdb -p "$pid" -batch -ex 'set pagination off' -ex 'thread apply all bt' \
+        >"${dump}/obs-hang-bt.txt" 2>&1 || echo "gdb backtrace not taken (rc $?; ptrace_scope or no gdb)" >>"${dump}/obs-hang-bt.txt"
+      kill -KILL "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 1
+  done
+  return 0
+}
+
 # --- source-guard: when sourced (the unit tests), define funcs only -- never run the launch flow ---
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0 2>/dev/null || true
@@ -182,6 +224,7 @@ else
   "$OBS_BIN" "${OBS_ARGS[@]}" &
 fi
 OBS_PID=$!
+OBS_LAUNCH_EPOCH="$(( $(date +%s) - 2 ))"
 echo "obs launched (pid $OBS_PID)"
 
 deadline=$((SECONDS + 90))
@@ -235,8 +278,17 @@ fi
 # #882: BLOCK until obs itself exits, then propagate ITS exit status -- makes obs (not this wrapper)
 # the process a Type=simple unit tracks. A signal death (segfault) reports non-zero and
 # Restart=on-failure relaunches; a clean exit(0) (operator quit) reports 0 and is left alone.
+# issue 1512: a GUI close that hangs after `==== Shutting down` is bounded; the operator asked for
+# the close, so after that kill the wrapper exits 0 and Restart=on-failure leaves OBS closed.
 echo "supervising obs (pid $OBS_PID) -- exit propagated to systemd for Restart=on-failure (#882)"
-wait "$OBS_PID"
-OBS_EXIT=$?
+HANG_DUMP="${HOME}/.camera-box/obs-hang-$(date +%Y%m%d-%H%M%S)"
+strih_obs_shutdown_watch "$OBS_PID" "${HOME}/.config/obs-studio/logs" "$OBS_LAUNCH_EPOCH" \
+  "${STRIH_OBS_SHUTDOWN_BOUND_S:-60}" "$HANG_DUMP"
+OBS_EXIT=0
+wait "$OBS_PID" || OBS_EXIT=$?
 echo "=== $(date '+%F %T') obs exited (code $OBS_EXIT) ==="
+if [ -d "$HANG_DUMP" ]; then
+  echo "issue 1512: obs was killed in its hung shutdown (dump ${HANG_DUMP}) -- exit 0, the close was asked for"
+  exit 0
+fi
 exit "$OBS_EXIT"

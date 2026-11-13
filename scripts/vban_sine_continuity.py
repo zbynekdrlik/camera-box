@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import subprocess
 import sys
 
@@ -378,6 +379,43 @@ def _match_losses(analysis, schedule, ratio, align_search, align_tol, r0=None):
     return pairs, r0
 
 
+# issue 1460: the receiver's own line for a run of lost packets it concealed
+# (vendor/obs-vban/src/vban-source.c vban_src_loss_flush). F = the nuFrame of the packet after the run.
+_NETWORK_RE = re.compile(r"source '(?P<name>[^']*)': missing (?P<n>\d+) packet\(s\) before frame (?P<nu>\d+) -- concealed")
+
+
+def network_losses(lines, input_name, schedule):
+    """The concealed runs the receiver logged that are NOT scheduled losses (a loss the network made),
+    as schedule-shaped loss entries tagged `network`. The run's first packet is (F - N - start_frame)
+    mod 2^32: the packet index the scheduled losses use. Pure."""
+    schedule = schedule or {}
+    fpp = schedule.get("frames_per_packet", FRAMES_PER_PACKET)
+    rate = schedule.get("sample_rate", FS)
+    start = int(schedule.get("start_frame", 0))
+    planned = {(lo["packet"], lo["count"]) for lo in schedule.get("losses") or []}
+    out, seen = [], set()
+    for raw in lines:
+        m = _NETWORK_RE.search(raw)
+        if not m or m.group("name") != input_name:
+            continue
+        n = int(m.group("n"))
+        packet = (int(m.group("nu")) - n - start) % (1 << 32)
+        if n > CONCEAL_MAX_SLOTS or (packet, n) in seen \
+                or any(packet < p + c and p < packet + n for p, c in planned):
+            continue  # a scheduled loss, or a network loss merged with one into one logged run
+        seen.add((packet, n))
+        out.append({"packet": packet, "count": n, "sample": packet * fpp, "time_s": packet * fpp / rate,
+                    "network": True})
+    return out
+
+
+def with_network_losses(schedule, losses):
+    """The schedule with the network losses added, every loss in packet order (the grade maps them all)."""
+    s = dict(schedule or {})
+    s["losses"] = sorted(list(s.get("losses") or []) + list(losses), key=lambda lo: lo["packet"])
+    return s
+
+
 def conceal_windows(analysis, schedule, hold_frames=DEFAULT_HOLD_FRAMES, pad=CONCEAL_PAD,
                     align_search=ALIGN_SEARCH, align_tol=ALIGN_TOL, expect_ppm=None):
     """The recording-sample windows of every scheduled loss the receiver may conceal (count <=
@@ -450,7 +488,8 @@ def grade(analysis, schedule=None, ppm_bound=PPM_BOUND, expect_ppm=None, len_tol
     slots = analysis["silence_slots"]
     loss_rows = []
     for i, lo in enumerate(schedule.get("losses") or []):
-        row = {"packet": lo["packet"], "count": lo["count"], "time_s": lo.get("time_s")}
+        row = {"packet": lo["packet"], "count": lo["count"], "time_s": lo.get("time_s"),
+               "network": bool(lo.get("network"))}
         want_len = lo["count"] * fpp / ratio
         j = pairs.get(i)
         across = [b for b in analysis["bridges"] if i in (b.get("conceal_windows") or ())]
@@ -458,12 +497,20 @@ def grade(analysis, schedule=None, ppm_bound=PPM_BOUND, expect_ppm=None, len_tol
             # concealed (the previous packet repeated): no silence, and the timeline must hold
             moved = [b for b in across if abs(b["size_samples"]) >= analysis["min_jump_samples"]]
             row["bridge_samples"] = (moved or across)[0]["size_samples"]
+            what = "network loss" if lo.get("network") else "concealed loss"
             if moved:
                 row["result"] = "timeline moved"
-                reasons.append("across the concealed loss of %d packet(s) at %.3f s the timeline moved by "
-                               "%+.2f samples" % (lo["count"], lo.get("time_s") or 0.0, moved[0]["size_samples"]))
+                reasons.append("across the %s of %d packet(s) at %.3f s the timeline moved by "
+                               "%+.2f samples" % (what, lo["count"], lo.get("time_s") or 0.0, moved[0]["size_samples"]))
             else:
                 row["result"] = "concealed"
+                if lo.get("network"):
+                    notes.append("network loss of %d packet(s) at %.3f s, concealed by the receiver, timeline held "
+                                 "(%+.2f samples)" % (lo["count"], lo.get("time_s") or 0.0, row["bridge_samples"]))
+        elif j is None and lo.get("network"):
+            row["result"] = "not placed"
+            notes.append("network loss of %d packet(s) at %.3f s (receiver log) could not be placed on the "
+                         "recording" % (lo["count"], lo.get("time_s") or 0.0))
         elif j is None:
             row["result"] = "no silence slot"
             reasons.append("the loss of %d packet(s) at %.3f s has no silence slot at its place (a dropped "
@@ -521,6 +568,10 @@ def _args(argv):
                          "frame=N` line), default %d" % DEFAULT_HOLD_FRAMES)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--ffmpeg", default="ffmpeg")
+    ap.add_argument("--obs-log", default=None,
+                    help="the profile's OBS log: the receiver's `missing N packet(s) before frame F -- concealed` "
+                         "lines that are not scheduled are graded as network losses (issue 1460)")
+    ap.add_argument("--input-name", default=None, help="the test input's name in that log")
     return ap.parse_args(argv)
 
 
@@ -531,6 +582,18 @@ def main(argv=None):
         if a.schedule:
             with open(a.schedule) as fh:
                 schedule = json.load(fh)
+        if a.obs_log:
+            if not a.input_name:
+                raise ValueError("--obs-log needs --input-name")
+            try:
+                with open(a.obs_log, encoding="utf-8", errors="replace") as fh:
+                    log_lines = fh.read().split("\n")
+            except OSError as e:
+                # supplementary: without the log an unscheduled concealed loss stays a bare phase step
+                print("vban-sine-continuity: WARNING: the OBS log is not readable (%s) -- network losses "
+                      "are not matched" % e, file=sys.stderr)
+            else:
+                schedule = with_network_losses(schedule, network_losses(log_lines, a.input_name, schedule))
         pilot = a.pilot_hz or (schedule or {}).get("pilot_hz") or 997.0
         if a.stream < 0 or a.channel < 0 or a.min_jump <= 0 or a.hold_frames < 0:
             raise ValueError("--stream / --channel / --hold-frames must be >= 0 and --min-jump > 0")

@@ -357,6 +357,58 @@ analyze_body() {
     --vban-stale-after-s "$VBAN_STALE_AFTER_S" --log-live-s "$LOG_LIVE_S" "$@" 2>/dev/null
 }
 
+# program_rx_production <box> -> stdout: yes | no | unknown, then the stream box read (issue 1460,
+# owner 12.11.2026): the venue's stream box (from the box facts) programs `PRO` before AND after the
+# read and its output is active. Its address is its row in this pass's roster; no stream box / not in
+# the roster / unreadable / hung = unknown, an absent OBS (probe rc 1) = no. Test seam
+# AUDIO_MIXER_PRODUCTION_CMD: an executable run as `<cmd> <host> 4455` in place of the probe.
+program_rx_production() {
+  local box="$1" sb pair sip="" out rc=0 s0 s1 a0 a1
+  sb="$(program_audio_rx_stream_box "$box")"
+  for pair in $BOXES; do [ "${pair%%|*}" = "$sb" ] && sip="${pair##*|}"; done
+  if [ -z "$sb" ] || [ -z "$sip" ]; then printf 'unknown stream_box=%s\n' "${sb:-<none>}"; return 0; fi
+  if ! obs_fleet_poll_now "$sb"; then printf 'unknown stream_box=%s (away, not probed)\n' "$sb"; return 0; fi
+  if [ -n "${AUDIO_MIXER_PRODUCTION_CMD:-}" ]; then
+    out="$("$AUDIO_MIXER_PRODUCTION_CMD" "$sip" 4455 2>/dev/null)" || rc=$?
+  else
+    out="$(timeout 45 python3 "$HERE/stream_output_stuck_probe.py" "$sip" 4455 --window-s 0.5 2>/dev/null)" || rc=$?
+  fi
+  s0="$(field "$out" scene0)"; s1="$(field "$out" scene1)"; a0="$(field "$out" active0)"; a1="$(field "$out" active1)"
+  if [ "$rc" -eq 1 ]; then printf 'no stream_box=%s (OBS absent)\n' "$sb"
+  elif [ "$rc" -ne 0 ] || [ -z "$s0" ] || [ -z "$s1" ] || [ -z "$a0" ] || [ -z "$a1" ]; then
+    printf 'unknown stream_box=%s (probe rc %s)\n' "$sb" "$rc"
+  elif [ "$s0" = PRO ] && [ "$s1" = PRO ] && [ "$a0" = 1 ] && [ "$a1" = 1 ]; then printf 'yes stream_box=%s\n' "$sb"
+  else printf "no stream_box=%s (scene '%s'/'%s', streaming %s/%s)\n" "$sb" "$s0" "$s1" "$a0" "$a1"
+  fi
+  return 0
+}
+
+# handle_program_rx_silent <box> <ip> <rx-key> <age> -- issue 1460: SILENT pages only during a
+# production (program_rx_production yes) and with AUDIO_MIXER_PROGRAM_RX_PAGE=1, confirmed over two
+# passes (a silence is a state, never one counter delta); otherwise machine channel only, and the
+# arm's confirm resets so a later production starts from zero.
+handle_program_rx_silent() {
+  local box="$1" ip="$2" key="$3" age="$4" prod what
+  prod="$(program_rx_production "$box")"
+  log "$box program_rx: SILENT -- ${key} delivers no program audio (no status line for ${age}s, or no Dante frames delivered in the window) while OBS keeps logging; production=${prod}"
+  if [ "${prod%% *}" != yes ]; then
+    log "$box program_rx: SILENT outside a proven production -- machine channel only, no page"
+    reset_arm_confirm "$box" "program-rx"
+    return 0
+  fi
+  if [ "$PROGRAM_RX_PAGE" != "1" ]; then
+    log "$box program_rx: SILENT during a production -- paging is DISABLED (AUDIO_MIXER_PROGRAM_RX_PAGE=0): machine channel only, no page"
+    return 0
+  fi
+  case "$key" in
+    dante) what="Dante vstup OBS (zariadenie dante-input)" ;;
+    *) what="VBAN vstup OBS '${key#obs-vban:}'" ;;
+  esac
+  handle_arm "$box" "SILENT" "program-rx" "program-rx" \
+    "🚨 Programový zvuk ($REPO_SLUG): **$box** ($ip) — ${what} počas produkcie nedostáva žiadny zvuk (${age} s bez zvuku, OBS beží). Odosielateľ, jeho sieťovka alebo zvuková sieť vypadli. Potvrdené počas 2 kontrol." 2
+  return 0
+}
+
 # handle_program_rx <box> <ip> <verdict> <rx-key> <analyze-output> -- issue 1460, the PROGRAM-RX arm
 # (prefix + key base `program-rx`, PRODUCTION-CRITICAL time-bucketed). LOSS pages on its FIRST pass
 # (review round 1: a counter delta is a fact, and with the timer's 300-420 s pass gap only one pass
@@ -374,7 +426,7 @@ handle_program_rx() {
     FACTS)   log "$box program_rx: the box facts did not load -- cannot tell which receiver to grade, holding, no page" ;;
     UNKNOWN) log "$box program_rx: no audio_rx entry for ${key} (older gather / no status line yet) -- holding, no page" ;;
     STALE)   log "$box program_rx: STALE -- no status line of ${key} for $(field "$out" rx_age_s)s and no proof the OBS log is live (frozen log / older gather) -- machine channel only, no page" ;;
-    SILENT)  log "$box program_rx: SILENT -- ${key} delivers no program audio (no status line for $(field "$out" rx_age_s)s, or no Dante frames delivered in the window) while OBS keeps logging: the sender, its NIC or the leg stopped -- machine channel only (paging silence outside a production is an owner decision, issue 1460), no page" ;;
+    SILENT)  handle_program_rx_silent "$box" "$ip" "$key" "$(field "$out" rx_age_s)" ;;
     HEALTHY) handle_healthy_arm "$box" "program-rx" ;;
     LOSS)
       if [ "$PROGRAM_RX_PAGE" != "1" ]; then

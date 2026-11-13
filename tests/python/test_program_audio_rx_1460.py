@@ -312,7 +312,17 @@ def _body(events, age=4, head=2, key="obs-vban:Zvuk z mixu", gap=10):
         "gap_max_s": gap, "age_s": age}}})
 
 
-def _run(tmp_path, body, state, box="stream-pp|stream-pp.lan", dry_run=True, notify=None, page="1"):
+def _run(tmp_path, body, state, box="stream-pp|stream-pp.lan", dry_run=True, notify=None, page="1",
+         production=None, production_rc=1, extra_env=None):
+    """`production` = the stuck-output probe's key=value lines for the venue's stream box (the SILENT
+    page's production read); None = the stream OBS is absent (rc 1), never a live box."""
+    prod = tmp_path / "production.sh"
+    prod_out = tmp_path / "production.out"
+    prod_out.write_text(production or "", encoding="utf-8")
+    prod.write_text(f"#!/usr/bin/env bash\necho \"$*\" >> '{tmp_path / 'production.args'}'\n"
+                    f"cat '{prod_out}'\nexit {0 if production is not None else production_rc}\n",
+                    encoding="utf-8")
+    prod.chmod(prod.stat().st_mode | stat.S_IEXEC)
     body_file = tmp_path / "body.json"
     body_file.write_text(body, encoding="utf-8")
     fetch = tmp_path / "fetch.sh"
@@ -320,9 +330,11 @@ def _run(tmp_path, body, state, box="stream-pp|stream-pp.lan", dry_run=True, not
     fetch.chmod(fetch.stat().st_mode | stat.S_IEXEC)
     env = dict(os.environ)
     env.update({"AUDIO_MIXER_FETCH_CMD": str(fetch), "AUDIO_MIXER_BOXES": box,
+                "AUDIO_MIXER_PRODUCTION_CMD": str(prod),
                 "OBS_FLEET_HOME": "stream-pp strih-pp resolume-snv",
                 "AUDIO_MIXER_ALERT_STATE_FILE": str(state),
                 "AIRULESET_NOTIFY": notify or "/nonexistent/airuleset.py"})
+    env.update(extra_env or {})
     env.pop("AUDIO_MIXER_PROGRAM_RX_PAGE", None)
     if page is not None:
         env["AUDIO_MIXER_PROGRAM_RX_PAGE"] = page

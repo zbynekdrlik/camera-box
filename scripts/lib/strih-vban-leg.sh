@@ -263,9 +263,27 @@ strih_vban_leg_sysctl_text() {
 # strih_vban_leg_wsdd_remove -> issue 1507: purge `wsdd` (Windows network browsing; gvfsd starts it in a
 # desktop session and it binds every address, the Dante leg's included). A production OBS box never browses
 # SMB. Read with `apt-get -s` first: anything else apt would take with it refuses, nothing changed.
+# _strih_vban_leg_wsdd_stop -> a wsdd still running (gvfsd starts it; its package purged or not) is
+# stopped and waited for: it catches SIGTERM and needs a few seconds (live stream-snv 12.11.2026), so
+# SIGTERM, up to 10 s, then SIGKILL. rc 0 always; one line when it stopped one.
+_strih_vban_leg_wsdd_stop() {
+  local pids i
+  pids="$(pgrep -f '/usr/bin/wsdd( |$)' 2>/dev/null | tr '\n' ' ' || true)"
+  [ -n "${pids// /}" ] || return 0
+  # shellcheck disable=SC2086  # the pids, one word each
+  env kill $pids 2>/dev/null || true
+  for ((i = 0; i < 20; i++)); do
+    pgrep -f '/usr/bin/wsdd( |$)' >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  # shellcheck disable=SC2086
+  if pgrep -f '/usr/bin/wsdd( |$)' >/dev/null 2>&1; then env kill -KILL $pids 2>/dev/null || true; fi
+  echo "  wsdd stopped (pid ${pids% }): nothing but Dante on the Dante leg (issue 1507)"
+}
+
 strih_vban_leg_wsdd_remove() {
   local sim other
-  [ "$(dpkg-query -W -f='${Status}' wsdd 2>/dev/null || true)" = "install ok installed" ] || return 0
+  [ "$(dpkg-query -W -f='${Status}' wsdd 2>/dev/null || true)" = "install ok installed" ] || { _strih_vban_leg_wsdd_stop; return 0; }
   sim="$(DEBIAN_FRONTEND=noninteractive apt-get -s purge wsdd 2>/dev/null)" \
     || { echo "strih-vban-leg: apt-get -s purge wsdd failed -- nothing changed" >&2; return 1; }
   other="$(printf '%s\n' "$sim" | grep -E '^(Purg|Remv) ' | grep -vE '^(Purg|Remv) wsdd( |$)' || true)"
@@ -276,6 +294,20 @@ strih_vban_leg_wsdd_remove() {
   DEBIAN_FRONTEND=noninteractive apt-get purge -y wsdd >/dev/null \
     || { echo "strih-vban-leg: apt-get purge wsdd failed (issue 1507)" >&2; return 1; }
   echo "  wsdd purged: nothing but Dante on the Dante leg (issue 1507)"
+  _strih_vban_leg_wsdd_stop
+}
+
+# _strih_vban_leg_wsdd_grade ADDR -> verify item 9's `(vban-leg) wsdd` row (issue 1507): no WS-Discovery
+# socket (UDP 3702) on the Dante address.
+_strih_vban_leg_wsdd_grade() {
+  local hit
+  hit="$(ss -Hulnp 2>/dev/null | awk -v a="$1" '{ l = $4; sub(/%[^:]*:/, ":", l)
+    if (l == a ":3702" || l == "0.0.0.0:3702" || l == "*:3702" || l == "[::]:3702") print }' || true)"
+  if [ -n "$hit" ]; then
+    bad "(vban-leg) wsdd: UDP 3702 bound on ${1} ($(grep -oE 'pid=[0-9]+' <<<"$hit" | sort -u | tr '\n' ' ')) -- re-run setup-strih.sh step 13"
+  else
+    ok "(vban-leg) wsdd: no WS-Discovery socket on ${1}"
+  fi
 }
 
 # strih_vban_leg_nm_props IF ADDR [PARENT VLAN_ID] -> `property<TAB>value` lines: the profile, as
@@ -903,6 +935,7 @@ strih_vban_leg_grade() {
     fi
   fi
   _strih_vban_leg_leftover_grade "$ifc" "$addr" "$parent"
+  if [ "$(_strih_vban_leg_plen)" = 24 ]; then _strih_vban_leg_wsdd_grade "$addr"; fi
   # the kernel's view: the address, no route through the leg but the policy one
   if p="$(_strih_vban_leg_live_problems "$ifc" "$addr")"; then
     bad "(vban-leg) routes: $(tr '\n' ';' <<<"$p") -- only the leg's own traffic may use it (re-run setup-strih.sh step 13)"

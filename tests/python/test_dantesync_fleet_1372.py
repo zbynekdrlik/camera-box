@@ -65,7 +65,7 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     assert r.returncode == 0, r.stderr
     names = [ln.split("|")[0] for ln in r.stdout.split()]
     assert names == ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "dev1", "strih-snv",
-                     "stream-snv", "resolume-snv", "mbc", "fohabl", "iem-snv", "companion-snv",
+                     "stream-snv", "resolume-snv", "mbc", "fohabl",
                      "strih-pp", "stream-pp", "resolume-pp", "alex-nb"]
     rows = {ln.split("|")[0]: ln for ln in r.stdout.split()}
     assert rows["mbc"] == "mbc|10.77.7.232|windows|audio|always|-|"
@@ -74,11 +74,9 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     assert rows["strih-snv"] == "strih-snv|10.77.9.202|linux|ntp-master|obsfleet|-|"
     assert rows["resolume-snv"] == "resolume-snv|resolume.lan|windows|video|obsfleet|-|"
     assert rows["dev1"] == "dev1|local|linux|video|local|-|"
-    # owner 13.10.2026 ("ako to ze na iem pc nei je upgradovany dantesync?!!!"): the SNV IEM mixing PC
-    # (Windows) and the SNV Companion box (Linux) run dantesync on the video clock and were outside the
-    # table, so no roll ever reached them (1.8.28 / 1.8.20 against the 1.17.0 pin).
-    assert rows["iem-snv"] == "iem-snv|iem-snv.lan|windows|audio|always|-|"  # on the audio VLAN since the IEM role moved (4.11.2026)
-    assert rows["companion-snv"] == "companion-snv|companion-snv.lan|linux|video|always|-|"
+    # issue 1487: the SNV IEM PC and the SNV Companion box are dsync's now (dsync grades + upgrades
+    # both), so they are no rows here any more; DSYNC_FLEET_HANDED_OVER keeps the scan quiet on them.
+    assert "iem-snv" not in rows and "companion-snv" not in rows
     # issue 1468 (owner 23.10.2026: "zaradil ho medzi udrziavanu flotilu dantesyncov"): the Alex
     # notebook on the audio VLAN, a `reach` node (read only while its ssh answers), login alexnb
     # with the fleet default password (no credvar).
@@ -101,9 +99,9 @@ def test_cameras_come_from_the_camera_resolve_walk_not_a_literal_range(tmp_path)
     home = re.search(r"^STRIH_CAMERAS=(.+)$", (_ROOT / "scripts" / "strih-boxes" / "strih-snv.env").read_text(),
                      re.MULTILINE).group(1).split()
     r = _bash(tmp_path, "dantesync_fleet_names homegate=always os=linux")
-    # the always-home Linux rows are the home cameras + the SNV Companion box (13.10.2026)
+    # the always-home Linux rows are the home cameras (issue 1487: the SNV Companion box is dsync's)
     assert [n for n in r.stdout.split() if n.startswith("cam")] == [a for a in arms if a[3:] in home]
-    assert [n for n in r.stdout.split() if not n.startswith("cam")] == ["companion-snv"]
+    assert [n for n in r.stdout.split() if not n.startswith("cam")] == []
     rows = _bash(tmp_path, "dantesync_fleet_rows").stdout.split()
     assert [ln.split("|")[0] for ln in rows if ln.startswith("cam")] == arms  # every camera has a venue today
     assert "cam1 cam2 cam3" not in _LIB.read_text()  # no literal camera range in the lib
@@ -166,11 +164,11 @@ def test_version_gate_arms(tmp_path):
     # issue 1413: the SNV cameras at their rig address, the Poprad ones at the dev1-side 10.76.9.x
     assert out["L"].split() == [f"cam{n}=root@{'10.77.9' if n in (2, 3, 5) else '10.76.9'}.6{n}"
                                 for n in range(1, 8)] + [
-        "strih-snv=op@10.77.9.202", "stream-snv=op@10.77.9.204", "companion-snv=op@companion-snv.lan",
+        "strih-snv=op@10.77.9.202", "stream-snv=op@10.77.9.204",
         "strih-pp=op@strih-pp.lan", "stream-pp=op@stream-pp.lan"]
     # issue 1462: stream-snv is a Linux box since 22.10.2026
     assert out["W"].split() == ["resolume-snv=op@resolume.lan",
-                                "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30", "iem-snv=op@iem-snv.lan",
+                                "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30",
                                 "resolume-pp=op@resolume-pp.lan", "alex-nb=alexnb@10.77.7.109"]
     assert out["D"] == "dev1"
 

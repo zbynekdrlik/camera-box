@@ -36,6 +36,10 @@ import re
 import sys
 
 STATUS_MARKER = "dante-input status:"
+# Report-only timing signals (issue 1485): the device's re-anchor after a late wake, and dlink's
+# once-a-second pump WARN (dstack v0.6.25+). A WARN that lost blocks also raises `rebootstraps` (gated).
+TIMING_MARKER = "dante-input timing:"
+PUMP_WARN_MARKER = "engine pump lost or overran blocks"
 GATED = ("rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps", "rx_written_late",
          "re_anchors", "obs_dropped")
 NAMED = ("rx_late", "overruns", "late_blocks", "rx_packets", "blocks", "delivered_frames")
@@ -83,9 +87,14 @@ def decide(lines, start_idx, end_idx, device="strih-obs"):
     c_i, closing = after[1]
     res = {"verdict": "PASS", "pass": True, "device": device, "counters": {}, "failures": [],
            "unknown_reasons": [], "retryable": False, "error_lines": [],
-           "interval": {"from": _text(lines[o_i])[:12], "to": _text(lines[c_i])[:12]}}
+           "interval": {"from": _text(lines[o_i])[:12], "to": _text(lines[c_i])[:12]},
+           "report_only": {"timing_lines": 0, "pump_warn_lines": 0}}
     for i in range(o_i + 1, c_i + 1):
         t = _text(lines[i])
+        if TIMING_MARKER in t:
+            res["report_only"]["timing_lines"] += 1
+        if PUMP_WARN_MARKER in t:
+            res["report_only"]["pump_warn_lines"] += 1
         if "dante-input start:" in t:
             res["unknown_reasons"].append(f"the device restarted inside the window: {t}")
         if "dante-input error:" in t:
@@ -147,6 +156,10 @@ def summary_lines(res, box="strih"):
     c = res.get("counters") or {}
     if c:
         out.append("  deltas: " + " ".join(f"{k}={v['delta']}" for k, v in c.items()))
+    ro = res.get("report_only")
+    if ro:
+        out.append(f"  timing (report-only): {ro.get('timing_lines', 0)} `dante-input timing:` line(s), "
+                   f"{ro.get('pump_warn_lines', 0)} pump WARN line(s)")
     for l in (res.get("error_lines") or [])[:10]:
         out.append(f"  error: {l}")
     out += [f"  FAIL: {f}" for f in res.get("failures") or []]

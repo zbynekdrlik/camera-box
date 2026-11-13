@@ -33,6 +33,14 @@ RIG_TEST_FEED_INTERCOM_DROPIN="${RIG_TEST_FEED_INTERCOM_DROPIN:-/etc/systemd/sys
 RIG_TEST_FEED_PAINTER_DROPIN_LEGACY="${RIG_TEST_FEED_PAINTER_DROPIN_LEGACY:-/run/systemd/system/cam2-painter.service.d/zz-rig-direct-marker.conf}"
 RIG_TEST_FEED_INTERCOM_DROPIN_LEGACY="${RIG_TEST_FEED_INTERCOM_DROPIN_LEGACY:-/run/systemd/system/camera-box.service.d/zz-rig-direct-intercom-off.conf}"
 
+# rig_test_feed_dropin_paths -> every direct-feed drop-in path, one per line (the /etc pair, then the legacy /run
+# pair): the EVENT contract's item 8 lists them as cam2 test artifacts, so a drop-in a failed EVENT removal left
+# behind (cam2's intercom kept OFF on air) fails the contract by name.
+rig_test_feed_dropin_paths() {
+  printf '%s\n' "$RIG_TEST_FEED_PAINTER_DROPIN" "$RIG_TEST_FEED_INTERCOM_DROPIN" \
+    "$RIG_TEST_FEED_PAINTER_DROPIN_LEGACY" "$RIG_TEST_FEED_INTERCOM_DROPIN_LEGACY"
+}
+
 # The verified close of an rw window (issue 1407). Lazy-sourced, the cam2-painter-ro-persist.sh pattern.
 command -v ro_window_close_cmds >/dev/null 2>&1 \
   || . "${BASH_SOURCE[0]%/*}/ro-window.sh"
@@ -202,3 +210,26 @@ rig_test_feed_skips_test_camera() {
   [ "$(rig_test_feed 2>/dev/null)" = direct ] || return 1
   echo "[0/8] test-camera exposure enforce SKIPPED: RIG_TEST_FEED=direct -- cam2's HDMI goes straight into the splitter, no camera in the path (issue 1482)"
 }
+
+# rig_test_feed_dropin_reload_cmds DROPIN... -> remote bash (cam2, root): for every unit whose drop-in
+# dir one of DROPIN sits in, when systemd still has a removed / changed drop-in loaded
+# (NeedDaemonReload=yes): ONE daemon-reload, then try-restart of exactly those units. The EVENT purge
+# removes a leftover drop-in with a plain rm; without this, systemd keeps the loaded override (cam2's
+# intercom stays OFF on air) while the contract reads the file gone. Nothing changes when no unit needs
+# it. Never fatal.
+rig_test_feed_dropin_reload_cmds() {
+  local p d units="" u
+  for p in "$@"; do
+    d="${p%/*}"; u="${d##*/}"; u="${u%.d}"
+    case " $units " in *" $u "*) ;; *) units="${units}${units:+ }${u}" ;; esac
+  done
+  printf 'stale="";
+'
+  for u in $units; do
+    printf '[ "$(systemctl show -p NeedDaemonReload --value %s 2>/dev/null)" = yes ] && stale="$stale %s";
+' "$u" "$u"
+  done
+  printf 'if [ -n "$stale" ]; then systemctl daemon-reload || true; for u in $stale; do systemctl try-restart "$u" || true; echo "drop-in reload: $u restarted onto its current drop-ins"; done; fi;
+'
+}
+

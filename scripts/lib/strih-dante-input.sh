@@ -277,6 +277,11 @@ strih_dante_input_grade() {
     *) bad "(program-dante) ${v#bad }" ;;
   esac
   strih_dante_media_clock_grade "(program-dante)" obs < "$log"
+  # issue 1485: timing signals, report-only (a pump WARN that lost blocks also raises the gated rebootstraps)
+  local tl pw
+  tl="$(LC_ALL=C grep -a -c 'dante-input timing:' "$log" || true)"
+  pw="$(LC_ALL=C grep -a -c 'engine pump lost or overran blocks' "$log" || true)"
+  note "(program-dante) timing (report-only): ${tl:-0} 'dante-input timing:' line(s), ${pw:-0} pump WARN line(s) in this OBS log"
   return 0
 }
 

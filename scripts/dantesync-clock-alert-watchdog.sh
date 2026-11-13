@@ -95,7 +95,7 @@ esac
 # the HOME venue's cameras (the strih-snv.env STRIH_CAMERAS list, `always` rows); a camera that moved to
 # Poprad is a `reach` row of the fleet and is watched once, through DANTE_CLOCK_REACH_NODES below, at
 # its dev1-reachable PP address against the PP grandmaster.
-DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_camera_names)}"
+DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_graded_here "$(dantesync_fleet_camera_names)")}"
 # The OBS-box dantesync nodes (space-separated NAMES); IPs + the resolume home-gate come from
 # obs-fleet.sh. imag(-nb) IS a dantesync node; resolume is the traveling CG box.
 # issue 1316: `imag` DROPPED from the default — imag-nb was returned to the owner (dark), so it is
@@ -106,15 +106,17 @@ DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_camera_names)}"
 # old `strih` name would resolve to nothing and silently drop the strih from clock paging.
 # issue 1372: derived from the dantesync fleet (its obsfleet-gated rows; a `retired` obs-fleet box
 # drops out there).
-DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-$(dantesync_fleet_names homegate=obsfleet)}"
+DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-$(dantesync_fleet_graded_here "$(dantesync_fleet_names homegate=obsfleet)")}"
+# issue 1487: every default below drops the nodes dsync grades itself (DSYNC_GRADED_NODES in
+# dantesync-fleet.sh: alex-nb, resolume-pp) -- one grader per node; an explicit override is kept as given.
 # issue 1372: the FIXED non-camera nodes -- the audio-VLAN PCs mbc + fohabl (Windows, always home).
 # Probed like any remote node; box-up = ssh :22; graded against their role's grandmaster.
-DANTE_CLOCK_FIXED_NODES="${DANTE_CLOCK_FIXED_NODES-$(dantesync_fleet_fixed_names)}"
+DANTE_CLOCK_FIXED_NODES="${DANTE_CLOCK_FIXED_NODES-$(dantesync_fleet_graded_here "$(dantesync_fleet_fixed_names)")}"
 # issue 1412: the `reach` nodes -- the Poprad (PP) boxes, read only while their ssh port answers
 # (dantesync_fleet_present: dev1 reaches them only through the companion-pp subnet route). An
 # unreachable one is skipped (no fetch, no page); a reachable one is graded like a fixed node
 # (box-up = ssh :22) against ITS venue's grandmaster, never video-clock.lan.
-DANTE_CLOCK_REACH_NODES="${DANTE_CLOCK_REACH_NODES-$(dantesync_fleet_names homegate=reach)}"
+DANTE_CLOCK_REACH_NODES="${DANTE_CLOCK_REACH_NODES-$(dantesync_fleet_graded_here "$(dantesync_fleet_names homegate=reach)")}"
 # #1313: the LOCAL node(s) -- dev1 itself. dev1 runs dantesync too (its clock feeds every dev1-hosted
 # gate: clock-offset-painter-gate.sh, the recording-verdict wall references, every date-stamped gate
 # window), yet it is NOT a probed cam/obs node -- so on 14.9.2026 it silently sat NTP-only for ~a day
@@ -122,7 +124,7 @@ DANTE_CLOCK_REACH_NODES="${DANTE_CLOCK_REACH_NODES-$(dantesync_fleet_names homeg
 # would have paged it runs ON dev1 and never looked at 127.0.0.1:8898. A local node is probed on the
 # loopback :8898 with NO ssh/TCP reach probe (the box is by definition up -- the watchdog runs on it),
 # graded with the SAME verdicts (analyze_local / the DECIDE --local flag). Space-separated NAMES.
-DANTE_CLOCK_LOCAL_NODES="${DANTE_CLOCK_LOCAL_NODES-$(dantesync_fleet_names homegate=local)}"
+DANTE_CLOCK_LOCAL_NODES="${DANTE_CLOCK_LOCAL_NODES-$(dantesync_fleet_graded_here "$(dantesync_fleet_names homegate=local)")}"
 # The loopback address the local node's :8898 is probed on (override for Tier-0 fixtures).
 DANTE_CLOCK_LOCAL_IP="${DANTE_CLOCK_LOCAL_IP:-127.0.0.1}"
 

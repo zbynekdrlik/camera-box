@@ -132,7 +132,7 @@ def test_the_cam_arm_is_the_home_venue_and_the_pp_cameras_are_reach_nodes(tmp_pa
     out = dict(ln.split("=", 1) for ln in r.stdout.splitlines())
     assert out["C"].split() == SNV_CAMS
     assert out["R"].split()[:4] == PP_CAMS
-    assert out["F"] == "mbc fohabl iem-snv companion-snv"  # a camera is never a fixed node, whatever its venue
+    assert out["F"] == "mbc fohabl"  # a camera is never a fixed node, whatever its venue (issue 1487: no iem/companion)
 
 
 def test_a_pp_camera_locks_to_the_pp_grandmaster(tmp_path, monkeypatch):
@@ -204,7 +204,7 @@ def _stub_bin(tmp_path, versions):
 
 _HOSTS = (["10.77.9.6%d" % n for n in (2, 3, 5)] + ["10.76.9.6%d" % n for n in (1, 4, 6, 7)]
           + ["10.77.9.202", "10.77.9.204", "resolume.lan", "10.77.7.232", "10.77.7.30",
-             "iem-snv.lan", "companion-snv.lan", "strih-pp.lan", "stream-pp.lan", "resolume-pp.lan"])
+             "strih-pp.lan", "stream-pp.lan", "resolume-pp.lan"])
 
 
 def _gate(tmp_path, versions, home):
@@ -232,7 +232,7 @@ def test_version_gate_reads_a_reachable_pp_camera_at_its_pp_address(tmp_path):
     dials = (tmp_path / "dials.log").read_text().split()
     assert "root@10.76.9.67" in dials
     assert not any(d.endswith(("@10.77.9.61", "@10.77.9.64", "@10.77.9.66", "@10.77.9.67")) for d in dials)
-    assert "GATE PASS — 12 box(es)" in r.stdout  # cam2 cam3 cam5 cam7 + dev1 + 5 SNV boxes + iem-snv, companion-snv
+    assert "GATE PASS — 10 box(es)" in r.stdout  # cam2 cam3 cam5 cam7 + dev1 + 5 SNV boxes (issue 1487: no iem/companion)
 
 
 def test_version_gate_drifts_on_a_stale_pp_camera(tmp_path):

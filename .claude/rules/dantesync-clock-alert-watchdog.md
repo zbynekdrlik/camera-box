@@ -68,7 +68,11 @@ production-critical watchdog class (umbrella **#1308**).
   page. Roster lines are `NAME|IP|HOMEGATE[|ROLE]`; an **audio** node is graded against the audio
   grandmaster (`DANTESYNC_AUDIO_GM_HOST`, 10.77.7.104 since 25.9.2026; earlier 10.77.7.106) with an audio remedy text, every other node
   against video-clock.lan. A 3-field `DANTE_CLOCK_NODES` override still parses (role = video).
-  **Issue 1412:** the Poprad boxes (strih-pp, stream-pp, resolume-pp) are the `reach` arm
+  **Issue 1487 (12.11.2026):** every default roster drops the nodes dsync grades itself
+  (`DSYNC_GRADED_NODES` = alex-nb resolume-pp, through `dantesync_fleet_graded_here`; an explicit
+  `DANTE_CLOCK_*_NODES` override is kept as given), and iem-snv + companion-snv are no fleet rows any
+  more (`dantesync-fleet.md`, "The nodes dsync owns"). FIXED is `mbc fohabl`.
+  **Issue 1412:** the Poprad boxes (strih-pp, stream-pp; resolume-pp until issue 1487) are the `reach` arm
   (`DANTE_CLOCK_REACH_NODES`): skipped with an `away (unreachable` line while ssh :22 does not
   answer (no fetch, no page), otherwise graded like a fixed node against their VENUE grandmaster
   (role `video-pp` / `ntp-master-pp` → the PP GM from strih-pp.env, resolved once per pass), with a
