@@ -89,6 +89,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/stray-session-check.sh
 # the ONE shared rig-busy guard strih_lx_apply runs before its first mutation (rig-mutation-broadcast-guard.md).
 . "$HERE/lib/stray-session-check.sh"
+# shellcheck source=scripts/lib/genlock-windows-pin.sh
+# issue 1505: a Windows box takes the pinned obs release's Windows zip once the pin carries it.
+. "$HERE/lib/genlock-windows-pin.sh"
 
 GENLOCK_REPO="zbynekdrlik/camera-box"
 FLEET_LOG_DEFAULT="${HOME}/.camera-box/genlock-fleet-deploy.log"
@@ -730,7 +733,7 @@ emit_windows_plan() {
   local box="$1" mode="$2" stage="$3" gsha="$4" dsha="$5" confirm="${6:-0}" abi="${7:-}"
   local mcp ip has_ahk win_stage program artifact
   mcp="$(fleet_box_mcp "$box")"; ip="$(fleet_box_ip "$box")"; has_ahk="$(fleet_box_ahk_mode "$box")"
-  artifact="$(fleet_windows_artifact "$mode")"
+  artifact="$(fleet_win_bundle_label "$HERE/.." "$mode")"
   win_stage="C:\\stage-genlock-${gsha}"
   program="$(build_windows_deploy_program "$box" "$mode" "$win_stage" 'C:\Program Files\obs-studio' "$has_ahk" 'C:\obs-backup' "$RETENTION_KEEP" "$gsha" "$dsha" "$confirm" "$abi")"
   echo "# ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} ================="
@@ -816,15 +819,21 @@ main() {
   { read -r lx_boxes; read -r rest; } < <(fleet_split_setup_strih "$boxes")   # issue 1426: every setup-strih box
   # issue 1487: the setup-strih (Linux OBS) boxes take the pinned obs release, never an anchor build.
   lx_sha="$(obs_pin_commit "$HERE/..")" || exit 3
-  [ -n "$run_id" ] || [ -n "$rest" ] || run_id="obs-$(obs_pin_tag "$HERE/..")"
+  # issue 1505: with the pin's Windows zip a Windows box takes the pinned release too (lx_sha, full only).
+  local anchor_rest win_boxes win_split win_sha="" win_abi=""
+  win_split="$(fleet_win_split "$HERE/.." "$rest")" || exit 3
+  { read -r anchor_rest || true; read -r win_boxes || true; } <<<"$win_split"   # $() ate the empty 2nd line
+  [ -z "$win_boxes" ] || { fleet_win_pin_mode_ok "$mode" || exit 2; win_sha="$lx_sha"; }
+  [ -n "$run_id" ] || [ -n "$anchor_rest" ] || run_id="obs-$(obs_pin_tag "$HERE/..")"
   [ -n "$run_id" ] || { echo "ERROR: --run-id is required (a Windows / imag box is in the list)" >&2; usage >&2; exit 2; }
 
   if [ "$plan" = 1 ]; then
     [ -n "$stage" ] || { echo "ERROR: --plan requires --stage (no network in plan mode)" >&2; exit 2; }
-    [ -n "$sha_override" ] || [ -n "$rest" ] || sha_override="$lx_sha"
+    [ -n "$sha_override" ] || [ -n "$anchor_rest" ] || sha_override="$lx_sha"
     [ -n "$sha_override" ] || { echo "ERROR: --plan requires --sha (no network in plan mode)" >&2; exit 2; }
     local sha="$sha_override" stats_abi=""
-    [ -z "$rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")")" || exit 3
+    [ -z "$anchor_rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")")" || exit 3
+    if [ -n "$win_sha" ]; then win_abi="$(fleet_win_pin_stats_abi "$HERE/.." "$stage")"; else win_sha="$sha"; win_abi="$stats_abi"; fi
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
@@ -833,7 +842,7 @@ main() {
       # 1426: so does every setup-strih box (strih-pp, stream-pp), routed by the predicate execute uses.
       if fleet_box_runs_setup_strih "$b"; then emit_strih_lx_plan "$stage" "$lx_sha" "$run_id" "$b"; continue; fi
       case "$b" in
-        stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
+        stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$stage" "$win_sha" "$win_sha" 0 "$win_abi" ;;
         imag)            emit_imag_plan "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
       esac
     done )
@@ -856,12 +865,13 @@ main() {
   command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI required for execute mode" >&2; exit 3; }
   command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required for execute mode" >&2; exit 3; }
   local sha="$lx_sha" stats_abi=""
-  if [ -n "$rest" ]; then
+  if [ -n "$anchor_rest" ]; then
     sha="$(gh run view "$run_id" --repo "$GENLOCK_REPO" --json headSha -q .headSha 2>/dev/null)" \
       || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
     [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
-    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")" 1)" || exit 3
+    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")" 1)" || exit 3
   fi
+  [ -n "$win_sha" ] || { win_sha="$sha"; win_abi="$stats_abi"; }
   echo "# anchor run $run_id -> canonical SHA $sha (the Linux OBS boxes: the pinned obs release $lx_sha); deploying: $boxes (mode $mode; retention --yes=$yes)"
 
   local workdir; workdir="$(mktemp -d)"
@@ -882,7 +892,10 @@ main() {
   fi
 
   # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
-  if [ "$want_win" = 1 ]; then
+  if [ -n "$win_boxes" ]; then
+    obs_release_windows_bundle "$HERE/.." "$workdir/win" || { echo "ERROR: the pinned obs release's Windows bundle did not verify -- never another build" >&2; exit 3; }
+    win_abi="$(fleet_win_pin_stats_abi "$HERE/.." "$workdir/win")"
+  elif [ "$want_win" = 1 ]; then
     local win_wf win_art win_run
     win_wf="$(fleet_windows_workflow "$mode")"; win_art="$(fleet_windows_artifact "$mode")"
     win_run="$(gh run list --repo "$GENLOCK_REPO" --workflow "$win_wf" --json databaseId,headSha,conclusion --limit 50 2>/dev/null | fleet_pick_run_at_sha "$sha")" || true
@@ -933,11 +946,11 @@ main() {
   # --- Windows: the paste-programs, printed only now (after a verified strih-snv), so no operator
   # pastes stream while the strih apply can still fail.
   if [ "$want_win" = 1 ]; then
-    echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
+    echo "# Upload it to each box at C:\\stage-genlock-$win_sha (win-* MCP FileUpload / scp), then paste each program:"
     # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
     # issue 1474: a box that took the Linux (setup-strih) arm above gets no Windows program -- the plan
     # arm's own routing predicate, so the two arms can never disagree.
-    ( IFS=','; for b in $boxes; do fleet_box_runs_setup_strih "$b" && continue; case "$b" in stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" "$stats_abi" ;; esac; done )
+    ( IFS=','; for b in $boxes; do fleet_box_runs_setup_strih "$b" && continue; case "$b" in stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$workdir/win" "$win_sha" "$win_sha" "$yes" "$win_abi" ;; esac; done )
   fi
 
   # --- imag: the ssh deploy of the bundle prepared above --------------------------------------------
@@ -958,7 +971,8 @@ main() {
   # --- durable fleet-deploy log line ---------------------------------------------------------------
   if [ -n "$rest" ]; then
     mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
-    fleet_log_line "$run_id" "$sha" "$rest" "$mode" >> "$FLEET_LOG_DEFAULT"
+    [ -z "$anchor_rest" ] || fleet_log_line "$run_id" "$sha" "$anchor_rest" "$mode" >> "$FLEET_LOG_DEFAULT"
+    [ -z "$win_boxes" ] || fleet_log_line "obs-$(obs_pin_tag "$HERE/..")" "$win_sha" "$win_boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
   fi
   echo "# fleet-deploy log appended: $FLEET_LOG_DEFAULT"
   exit 0
