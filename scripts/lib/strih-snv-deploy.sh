@@ -559,9 +559,19 @@ _strih_lx_ssh() {
     "${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}" "$1"
 }
 
-_strih_lx_rsync() {  # SRC_DIR/ DEST_DIR/ -- --timeout=120 is rsync's own I/O-stall bound
-  sshpass -p "$STRIH_LX_PREP_PW" rsync -a --delete --timeout=120 -e "ssh $STRIH_LX_SSH_OPTS" \
-    "$1" "${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$2"
+_strih_lx_rsync() {  # SRC_DIR/ DEST_DIR/ [RSYNC_ARG...] -- --timeout=120 is rsync's own I/O-stall bound
+  local src="$1" dest="$2"; shift 2
+  sshpass -p "$STRIH_LX_PREP_PW" rsync -a --delete --timeout=120 "$@" -e "ssh $STRIH_LX_SSH_OPTS" \
+    "$src" "${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$dest"
+}
+
+# strih_lx_repo_rsync_filters -> the repo stage rsync's filter args, one per line (issue 1515). The
+# stage dir is keyed on the obs pin, so a redeploy at the same pin reuses it, and setup-strih (root)
+# has put the box's OWN per-box release pins into its release caches (strih-snv's shading REST pin).
+# `--delete` must never remove those: they are root-owned (rc 23 before any stop, 13.11.2026) and
+# sha-verified against the pin by the box's release step on every setup run. dev1's files still arrive.
+strih_lx_repo_rsync_filters() {
+  printf '%s\n' "--filter=P /shading-release/***" "--filter=P /intercom-release/***" "--filter=P /obs-release/***"
 }
 
 _strih_lx_field() {  # KEY LINE -> the value of KEY=<value> in a read-back line
@@ -754,7 +764,8 @@ strih_lx_apply() {
   # [stage] every byte on the box BEFORE anything is stopped.
   _strih_lx_rsync "$w/bundle/" "$stage/bundle/"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail stage "$rc" 4 "rsync of the bundle to $stage/bundle failed (rc 11/23 = the /tmp quota) -- OBS NOT stopped, the old build keeps running"; return; }
-  _strih_lx_rsync "$w/repo/" "$stage/repo/"; rc=$?
+  mapfile -t _repo_filters < <(strih_lx_repo_rsync_filters)
+  _strih_lx_rsync "$w/repo/" "$stage/repo/" "${_repo_filters[@]}"; rc=$?  # strih_lx_repo_rsync_filters
   [ "$rc" = 0 ] || { _strih_lx_fail stage "$rc" 4 "rsync of the provisioning tree to $stage/repo failed -- OBS NOT stopped, the old build keeps running"; return; }
   echo "# ${box}: staged $stage/{bundle,repo}"
 
