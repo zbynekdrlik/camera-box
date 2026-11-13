@@ -203,6 +203,12 @@ strih_dante_input_tx_grade() {
   else
     bad "(program-dante) dante latency ${got:-?} ns, the facts say ${want:-?} ns -- OBS runs another config: restart OBS (a latency change needs the owner, issue 1510)"
   fi
+  # dlink's own statement of the terms (live 13.11.2026: `dlink latency: Dante latency P 13.041666 ms = network latency
+  # (a) 1 ms (default) + receive buffer (b) 12.041666 ms (default)`), named; `(default)` = OBS read no term
+  line="$(LC_ALL=C grep -a 'dlink latency: Dante latency P' "$log" | tail -n 1 | sed 's/^.*dlink latency: /dlink latency: /' || true)"
+  if [ -n "$line" ]; then
+    note "(program-dante) ${line}$([[ "$line" != *"(default)"* ]] || printf '%s' ' -- a term reads (default) while the box facts declare it: restart OBS onto the TOML')"
+  fi
   tx="$(strih_box_fact STRIH_DANTE_TX)"; tr="$(strih_box_fact STRIH_DANTE_TX_TRACK)"; k="$(strih_dante_input_field "$l2" tx_track)"
   if [ "$tx" = none ]; then
     if [ -z "$l2" ]; then :

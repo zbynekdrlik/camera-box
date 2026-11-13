@@ -81,7 +81,9 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   FAILs, a total since the start that holds still is only named). Since obs v0.4.27 (issues 1510 +
   1513, `strih_dante_input_terms_toml_grade` + `strih_dante_input_tx_grade`): `latency terms` (the TOML
   carries every term + tx line the facts declare, and no tx they do not), `dante latency` (the last `dante-input start: latency split
-  dante_latency_ns=` within 1 us of (a) + (b); a missing line FAILs), on a TX device the `dante-input start:
+  dante_latency_ns=` within 1 us of (a) + (b); a missing line FAILs), dlink's own `dlink latency: Dante latency P ... = network
+  latency (a) ... + receive buffer (b) ...` line as a NOTE (a `(default)` term while the facts declare it =
+  OBS started before the TOML carried it: restart OBS; the live 13.11.2026 stream-snv read was all `(default)`), on a TX device the `dante-input start:
   TX of OBS track N` line and the status TX tokens over the same window (`tx_track` = the fact's,
   `tx_priming=0`, `tx_played` advancing, `tx_underruns` / `tx_recentres` / `tx_overflows` not growing; a
   rate off 48000/s +-10 % is a NOTE), on an RX-only device `tx_track=0` (absent on an older line = NOTE),
