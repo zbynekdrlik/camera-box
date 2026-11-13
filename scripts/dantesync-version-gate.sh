@@ -124,7 +124,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # Bumped 2026-11-11: v1.29.0 (dsync) -- PTP phase measured on the delay floor (Theil-Sen through the last
 # 10 window minima), so one-sided late receive stamps under OBS load no longer move it; strih-snv lost its
 # phase lock every 2-15 min on 1.28.0 and none in its 1.29.0 canary hour (camera-box issue 1498).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.29.0}"
+# Bumped 2026-11-13: v1.35.1 (dsync) -- a boosted PI for 120 s + 300 s after every time-base change and
+# step handling; on 1.29.0 the whole SNV video fleet unlocked after the GM flaps of the 13.11 FOH restart
+# (the GM rate moved ~4 ppm), a 1.35.1 node on the same leg never did (dsync#182, camera-box issue 1518).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.1}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

@@ -300,7 +300,7 @@ def test_the_version_pin_is_the_release_this_date_grading_implements():
     # 1.19.0 (dantesync#134 fast boot sync) keeps every date field this grading reads; it adds
     # ntp_server_unsynchronized only. 1.20.0 (dantesync#136, the time server + NTP burst on their own
     # threads) changes no /status field.
-    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.29.0}"' in body
+    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.1}"' in body
 
 
 # ---------------------------------------------------------------------------------------------
