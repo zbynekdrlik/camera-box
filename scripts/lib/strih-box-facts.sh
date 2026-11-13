@@ -31,6 +31,27 @@ STRIH_BOX_UNSAFE_CHARS='$`\"'"'"';|&<>*?!{}[]~#'
 # shellcheck source=scripts/lib/strih-box-dante-facts.sh
 . "$(dirname "${BASH_SOURCE[0]}")/strih-box-dante-facts.sh"
 
+# _strih_box_nic_rename_ok NAME VALUE -> issue 1502: rc 0 for `none` or `<mac>=<name>`: a lower-case
+# unicast MAC (aa:bb:cc:dd:ee:ff, never all zero) and a name of 1-10 lower-case letters / digits starting
+# with a letter, so `<name>.<vlan id>` (id up to 4094) fits the kernel's 15 characters; never a kernel or
+# predictable-name prefix (eth, en, wl, ww, ib, sl) nor lo. rc 1 + a named line otherwise. Sets spelled out.
+_strih_box_nic_rename_ok() {
+  local name="$1" v="$2" mac nic LC_ALL=C hx='0123456789abcdef' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789' p
+  [ "$v" != none ] || return 0
+  mac="${v%%=*}"; nic="${v#*=}"
+  if [ "$mac" = "$v" ] || [[ ! "$mac" =~ ^[${hx}]{2}(:[${hx}]{2}){5}$ ]] || [ "$mac" = 00:00:00:00:00:00 ] \
+     || (( 16#${mac:1:1} & 1 )); then
+    echo "strih-box ${name}: STRIH_NIC_RENAME '${v}' must be none or <mac>=<name>, the MAC lower-case unicast aa:bb:cc:dd:ee:ff" >&2; return 1
+  fi
+  if [[ ! "$nic" =~ ^[${lo}][${lo}${dg}]{0,9}$ ]]; then
+    echo "strih-box ${name}: STRIH_NIC_RENAME name '${nic}' must be 1-10 lower-case letters / digits starting with a letter (<name>.<vlan id> must fit 15 characters)" >&2; return 1
+  fi
+  for p in eth en wl ww ib sl; do
+    case "$nic" in "$p"*) echo "strih-box ${name}: STRIH_NIC_RENAME name '${nic}' starts with the kernel / predictable-name prefix ${p} (a rename race)" >&2; return 1 ;; esac
+  done
+  [ "$nic" != lo ] || { echo "strih-box ${name}: STRIH_NIC_RENAME name may not be lo" >&2; return 1; }
+}
+
 # strih_box_fact_keys -> every fact key, one per line (the fact-file contract; all are required).
 strih_box_fact_keys() {
   printf '%s\n' \
@@ -55,7 +76,8 @@ strih_box_fact_keys() {
     STRIH_JXS_CAMERAS STRIH_JXS_CAMERA_PIN_MS \
     STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS \
     STRIH_DESKTOP \
-    STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK
+    STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK \
+    STRIH_NIC_RENAME
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -234,6 +256,7 @@ strih_box_validate() {
     || { echo "strih-box ${name}: STRIH_NIC_MIN_USB_MBPS '${f[STRIH_NIC_MIN_USB_MBPS]}' must be a speed in Mb/s (e.g. 10000 = USB 3.2 Gen 2) or none" >&2; bad=1; }
   [[ "${f[STRIH_NIC_MIN_LINK_MBPS]}" =~ ^[1-9][0-9]*$ ]] \
     || { echo "strih-box ${name}: STRIH_NIC_MIN_LINK_MBPS '${f[STRIH_NIC_MIN_LINK_MBPS]}' must be a speed in Mb/s (e.g. 5000)" >&2; bad=1; }
+  _strih_box_nic_rename_ok "$name" "${f[STRIH_NIC_RENAME]}" || bad=1
   for k in STRIH_OBS_PROFILE STRIH_OBS_COLLECTION; do
     [[ "${f[$k]}" =~ ^[A-Za-z0-9._\ -]+$ ]] \
       || { echo "strih-box ${name}: ${k} '${f[$k]}' may only carry letters, digits, space, . _ -" >&2; bad=1; }
@@ -897,6 +920,8 @@ strih_lx_nic_oot_driver() { strih_box_fact STRIH_NIC_OOT_DRIVER; }
 # STRIH_NIC_MIN_LINK_MBPS, issue 1391).
 strih_lx_nic_min_usb_mbps() { strih_box_fact STRIH_NIC_MIN_USB_MBPS; }
 strih_lx_nic_min_link_mbps() { strih_box_fact STRIH_NIC_MIN_LINK_MBPS; }
+# issue 1502: the rig NIC's stable short name, `<mac>=<name>` | `none` (scripts/lib/strih-nic-rename.sh).
+strih_lx_nic_rename() { strih_box_fact STRIH_NIC_RENAME; }
 
 # strih_lx_ndi_runtime_peer -> the cam box the NDI runtime is copied from (fact STRIH_NDI_RUNTIME_PEER).
 strih_lx_ndi_runtime_peer() { strih_box_fact STRIH_NDI_RUNTIME_PEER; }

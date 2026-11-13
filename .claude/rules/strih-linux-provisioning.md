@@ -1420,6 +1420,93 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
   `verify-strih.sh` (item 36 passes before the reboot: the loaded plain copy is 2.21.4). After the next
   boot, read `/sys/module/r8152/version` + `modinfo -n r8152` (must be under `updates/dkms`).
 
+## A stable short rig-NIC name: the box fact `STRIH_NIC_RENAME` (issue 1502)
+
+Owner 13.11.2026 (ROZHODNUTÉ 6849618093, lever 3 of the JPEG XS wire budget): "na stream-snv dam 2.5g
+sietovku tak som zapojil tak nastav a internu odpojim". stream-snv's rig NIC moves from the onboard
+RTL8168 (`r8169`, 1 GbE, `enp56s0`) to a USB 2.5 GbE adapter: Realtek RTL8156 (`0bda:8156`, in-tree
+`r8152`, whose alias list ends at 8156; stream-pp runs the same chip), MAC `00:e0:4c:68:01:85`, USB 5000,
+link 2500. Its predictable name `enx00e04c680185` is 15 characters, so its VLAN leg `<rig nic>.70`
+(18) cannot exist (`strih_vban_leg_resolve` refuses it).
+
+- **The fact** (the last key): `STRIH_NIC_RENAME` = `<mac>=<name>` | `none`. stream-snv
+  `00:e0:4c:68:01:85=rig0`, every other box `none`. The loader (`_strih_box_nic_rename_ok`, sets spelled
+  out under `LC_ALL=C`) takes a lower-case unicast MAC and a name of 1-10 lower-case letters / digits
+  starting with a letter (so `<name>.<vlan id up to 4094>` fits 15), never `eth` / `en` / `wl` / `ww` /
+  `ib` / `sl` / `lo` (the kernel's and the predictable-name namespaces: a rename race). stream-snv's NIC
+  facts follow the adapter: `r8152` / `none` / `5000` / `2500`. Every consumer keeps working through
+  `strih_lx_rig_nic`, which resolves a declared rename FIRST (after `STRIH_NIC_IFACE`) and fails closed
+  while that interface does not exist (never the adapter under its old name), so the leg becomes `rig0.70`, dsync's
+  `--interface rig0`, the dante-input TOML `rig0.70`, and step 11b's xhci IRQ unit now applies (USB).
+- **setup-strih step 1c** (`strih_nic_rename_apply`, `scripts/lib/strih-nic-rename.sh`, sourced by
+  strih-nic-driver.sh): writes `/etc/systemd/network/10-camera-box-rig-nic.link`
+  (`[Match] MACAddress=` + `Driver=<STRIH_NIC_DRIVER>`, `[Link] Name=`) when it differs, through a temp
+  + rename, 0644, first line = the issue-1502 marker, then `udevadm control --reload`. `Driver=` is
+  load-bearing: a VLAN (or bridge / bond) inherits its parent's MAC, so a MAC-only match would try to name
+  `rig0.70` `rig0` when NetworkManager creates it; a VLAN's driver is 802.1Q. With `none` it removes OUR
+  file only; a file without the marker is never replaced (refused with the fact set, left alone with
+  `none`). **It never renames a live interface**: udev applies a .link when the device is ADDED, and the
+  step's NOTE prints the exact command (a USB device's unbind + bind, else
+  `udevadm trigger --action=add`).
+- **verify-strih item 36** (`strih_nic_rename_grade_rows`, called from `strih_nic_grade_rows`):
+  `(nic-rename)` OK only when the .link equals its render, the interface `<name>` carries the MAC, and the
+  rig NIC resolves to `<name>`; FAIL naming the rebind when the MAC still has its old name, when no / two
+  interfaces carry it, and while the issue-1495 retired-NIC drop-in
+  (`/etc/NetworkManager/conf.d/90-vban-dante70-retired.conf`) still lists the MAC or the name (it is the
+  SAME adapter issue 1495 retired as the old VBAN leg NIC, so NetworkManager would never activate it).
+  `none` = one NOTE, our leftover file = FAIL. The other item-36 rows grade the new NIC with the new
+  facts (USB 5000, link 2500, NM pinning, single-homed).
+- **Tests:** `tests/python/test_strih_nic_rename_1502.py` (the validator table, apply / grade over a
+  fake sysfs with the seams `STRIH_NIC_RENAME_LINK` / `_SYSROOT` / `_NM_RETIRED`, the whole item 36 on
+  stream-snv's facts, the switch program against fake `nmcli` / `ping` / `arping`).
+- **The adapter's history (a risk, not a blocker):** it dropped off the USB bus on 8.11.2026 as the VBAN
+  leg (~58 min without program audio, issue 1495). As the rig NIC it now carries NDI, PTP and ssh too:
+  read `journalctl -k | grep -i 'usb.*disconnect\|r8152'` after the first production on it.
+
+### The live switch on stream-snv (supervisor runbook)
+
+NetworkManager is never touched by setup (the step-1 rule), and the leg lib REFUSES an identity change of
+an existing VLAN profile (`vlan.parent`), so the switch of the two profiles is this one-time supervisor
+step. The ssh session rides `enp56s0`, so the profile move runs DETACHED with an automatic rollback.
+Keep the onboard cable plugged in until step 6 (the rollback needs it); off-production; no rig lease held.
+
+1. **Stage the code and run step 1c ALONE** (a staged `scripts/ systemd/` tree; never a full setup-strih
+   or a genlock deploy on stream-snv between the merge and step 5: until `rig0` exists `strih_lx_rig_nic`
+   resolves nothing by design, so step 2 / 13 fail closed instead of binding dsync or the leg to a link
+   that is down): `sudo bash -c 'set -- --box stream-snv; . scripts/setup-strih.sh; strih_nic_rename_apply
+   "$(strih_lx_nic_rename)" "$(strih_lx_nic_driver)"'` (the source-guard stops after the libs load). It
+   writes the .link and prints `NOTE: 00:e0:4c:68:01:85 is still enx00e04c680185 ... echo <usb dev> >
+   /sys/bus/usb/drivers/usb/unbind && ...`. Read `nmcli -g connection.interface-name connection show
+   stream-lan` = `enp56s0` and `nmcli -g vlan.parent connection show vban-dante70` = `enp56s0`.
+2. **Rename the adapter** (no profile is on it; the retired drop-in keeps it unmanaged and down): run the
+   printed unbind + bind (or ask the owner to re-plug it), then read `ip -br link show rig0` and
+   `cat /sys/class/net/rig0/address` = `00:e0:4c:68:01:85`.
+3. **Generate the switch program:** `bash scripts/lib/strih-nic-rename.sh --switch-program enp56s0 rig0
+   stream-lan vban-dante70 70 10.77.8.1 10.77.7.232 60 | sudo tee /root/rig-nic-switch.sh >/dev/null`.
+   It refuses unless `rig0` exists; it takes the adapter out of the retired drop-in (a backup beside it),
+   points `stream-lan` at `rig0` and `vban-dante70` at `rig0` / `rig0.70`, brings both up, then waits up
+   to 60 s for `10.77.8.1` to answer a ping on rig0 AND `10.77.7.232` (mbc) an ARP on rig0.70 (ARP: the
+   leg's nft filter drops inbound echo replies). Without both it points both profiles back at enp56s0,
+   restores the drop-in and brings them up. The outcome: `/run/rig-nic-switch.result` (`ok ...` /
+   `rolled-back ...` / `refused ...`) and the unit's journal.
+4. **Run it detached:** `sudo systemd-run --unit=rig-nic-switch --collect /bin/bash /root/rig-nic-switch.sh`.
+   The ssh session drops when `stream-lan` leaves enp56s0. Reconnect to 10.77.9.204 after ~30-70 s and read
+   `cat /run/rig-nic-switch.result` + `journalctl -u rig-nic-switch`. A rollback = the box is back on
+   enp56s0; read the journal's reason before any retry.
+5. **Re-run setup-strih** (OBS stopped): step 2 rewrites dsync's unit to `--interface rig0` (one dsync
+   restart of a client), step 11b installs the xhci IRQ unit for the USB NIC, step 13 re-renders the leg
+   filter / sysctls / dante-input TOML for `rig0.70` and restarts nothing it does not own. Then start OBS.
+6. **Verify:** `sudo ./scripts/verify-strih.sh --box stream-snv`: item 36 (`(nic-rename)` x2, `(nic-usb)`
+   5000, `(nic-link)` 2500, `(nic-nm)` stream-lan pinned to rig0, `(nic-homed)` only rig0 on the rig
+   subnet), item 6d (dsync joined on rig0), item 9 (`(vban-leg)` on rig0.70, `(program-dante)` advancing).
+   Then the owner unplugs the onboard cable; `enp56s0` stays an unused interface (no profile on it).
+7. **Measure the lever:** the strih JPEG XS program output's `rx_link_mbps` (the receiver report) reads
+   2500 and its `pace_mbps` rises; `dropped_busy` / `not_taken` stay flat over the next E2E window.
+
+Rollback after a successful switch: the same program with the two NICs swapped
+(`--switch-program rig0 enp56s0 ...`, the onboard cable back in), then `STRIH_NIC_RENAME=none` + the old
+four NIC facts and a setup-strih run (the .link is removed; the adapter keeps `rig0` until it is re-added).
+
 ## A verify item for a supervised service grades the RUNNING process, not only the files (issue 1399)
 
 Files on disk byte-identical to the checkout + `is-active` = active still passes while the OLD process

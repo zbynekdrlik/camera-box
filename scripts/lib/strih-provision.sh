@@ -2019,7 +2019,8 @@ SCRIPT
 # strih_lx_rig_nic SYSROOT IP_ADDR_TEXT STATIC_IP -> print the ONE rig NDI interface the baseline's
 # network tuning (sysctl + EEE/flow-control) is scoped to, rc 0; rc 1 + a stderr reason when it cannot
 # be resolved (never a guessed interface -- the Wi-Fi/onboard NIC must stay untouched). Order (the same
-# as the boot-time NIC-IRQ script, issue 1317 item H): STRIH_NIC_IFACE override -> the ONE r8152 USB NIC
+# as the boot-time NIC-IRQ script, issue 1317 item H): STRIH_NIC_IFACE override -> the STRIH_NIC_RENAME
+# name (issue 1502; rc 1 while that interface does not exist) -> the ONE STRIH_NIC_DRIVER NIC
 # (strih_nic_iface_by_driver) -> the interface carrying STATIC_IP in IP_ADDR_TEXT (`ip -o -4 addr show`
 # output). Two r8152 NICs and no STATIC_IP match fail loud (set STRIH_NIC_IFACE to disambiguate).
 strih_lx_rig_nic() {
@@ -2027,6 +2028,16 @@ strih_lx_rig_nic() {
   if [ -n "${STRIH_NIC_IFACE:-}" ]; then
     printf '%s' "$STRIH_NIC_IFACE"
     return 0
+  fi
+  # issue 1502: a declared rename IS the rig NIC. Until that interface exists (the switch runbook in
+  # .claude/rules/strih-linux-provisioning.md) nothing resolves: never the adapter under its old name,
+  # which carries no profile then (dsync / the leg would bind a link that is down).
+  nic="$(strih_lx_nic_rename)" || return 1
+  if [ "$nic" != none ]; then
+    nic="${nic#*=}"
+    if [ -e "${sysroot}/class/net/${nic}" ]; then printf '%s' "$nic"; return 0; fi
+    echo "strih_lx_rig_nic: the declared rig NIC ${nic} (STRIH_NIC_RENAME) does not exist yet -- run the issue-1502 switch first" >&2
+    return 1
   fi
   drv="$(strih_lx_nic_driver)" || return 1
   nic="$(strih_nic_iface_by_driver "$sysroot" "$drv")" || rc=$?
