@@ -159,6 +159,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_DANTE_RECEIVE_BUFFER_MS",
     "STRIH_DANTE_TX",
     "STRIH_DANTE_TX_TRACK",
+    // issue 1502: the rig NIC's stable short name (`<mac>=<name>` | none).
+    "STRIH_NIC_RENAME",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -247,6 +249,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_DANTE_RECEIVE_BUFFER_MS=12.041666",
         "STRIH_DANTE_TX=none",
         "STRIH_DANTE_TX_TRACK=none",
+        // issue 1502: strih-snv's rig NIC keeps its kernel name.
+        "STRIH_NIC_RENAME=none",
         "LOADED=strih-snv",
     ] {
         assert!(

@@ -1607,6 +1607,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         BASELINE,
         KIOSK,
         "scripts/lib/strih-box-facts.sh",
+        // issue 1502: the Dante fact validators (sourced by the loader)
+        "scripts/lib/strih-box-dante-facts.sh",
         // issue 1415: the rig time zone (sourced by the kiosk half)
         "scripts/lib/rig-timezone.sh",
         // issue 1387: background work off the OBS cores (sourced by the system half)
@@ -1633,6 +1635,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/dsync-iface.sh",
         // issue 1391: the rig NIC driver via DKMS (setup-strih step 1b + verify-strih item 36)
         "scripts/lib/strih-nic-driver.sh",
+        // issue 1502: the rig-NIC rename (setup step 1c, sourced by strih-nic-driver.sh)
+        "scripts/lib/strih-nic-rename.sh",
         // issue 1418: the operator surface (setup-strih step 16g + verify-strih item 43)
         "scripts/lib/strih-operator.sh",
         // issue 1466: the session start + the XFCE session (setup-strih steps 15 + 16h, verify item 48)

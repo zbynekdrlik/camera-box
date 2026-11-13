@@ -83,7 +83,8 @@ def test_stream_snv_is_one_nic_and_dante():
     assert (f["STRIH_PROGRAM_VBAN_STREAMS"], f["STRIH_PROGRAM_VBAN_PORT"], f["STRIH_PROGRAM_VBAN_RESERVE_MS"]) == ("none",) * 3
     assert f["STRIH_PROGRAM_AUDIO_INPUT"] == "mbc", "the SNV stream tooling keys on the name"
     assert f["STRIH_DANTE_DEVICES"] == "stream-obs=4440:8800:4455:30000-30031"
-    assert f["STRIH_NIC_DRIVER"] == "r8169"
+    # issue 1502: the ONE rig NIC is now the USB 2.5 GbE adapter (r8152) renamed rig0; still one NIC
+    assert f["STRIH_NIC_DRIVER"] == "r8152" and f["STRIH_NIC_RENAME"] == "00:e0:4c:68:01:85=rig0"
     text = (BOXES / "stream-snv.env").read_text()
     for site in ("mbc-snv", "STREAM master"):
         assert site not in text, "the Dante transmitter names live only in the untracked site file"

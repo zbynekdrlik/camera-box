@@ -27,57 +27,29 @@ STRIH_BOX_TODO=TODO_OWNER
 # Characters a fact value may never carry (see _strih_box_unsafe).
 STRIH_BOX_UNSAFE_CHARS='$`\"'"'"';|&<>*?!{}[]~#'
 
-# _strih_box_dante_devices_ok NAME VALUE LEG -> rc 0 for `none`, or for `name=arc:cmc:flows:rxfirst-rxlast`
-# devices (space-joined) on a box with a leg, every port 1024..65535 and no two devices sharing one
-# (issue 1485: each device binds its own ports on the leg's one address). rc 1 + a named line otherwise.
-_strih_box_dante_devices_ok() {
-  local name="$1" v="$2" leg="$3" d dev ports arc cmc flows rx first last p seen=" " rc=0 dg='[0123456789]'
-  [ "$v" != none ] || return 0
-  if [ "$leg" = none ]; then
-    echo "strih-box ${name}: STRIH_DANTE_DEVICES needs a leg on the audio VLAN (STRIH_PROGRAM_VBAN_LEG is none)" >&2; return 1
-  fi
-  for d in $v; do
-    dev="${d%%=*}"; ports="${d#*=}"
-    if [ "$d" = "$dev" ] || [[ ! "$dev" =~ ^[abcdefghijklmnopqrstuvwxyz][abcdefghijklmnopqrstuvwxyz0123456789-]*$ ]] \
-       || [[ ! "$ports" =~ ^${dg}{4,5}:${dg}{4,5}:${dg}{4,5}:${dg}{4,5}-${dg}{4,5}$ ]]; then
-      echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}' must be name=arc:cmc:flows:rxfirst-rxlast" >&2; rc=1; continue
-    fi
-    IFS=: read -r arc cmc flows rx <<<"$ports"
-    first="${rx%%-*}"; last="${rx##*-}"
-    for p in "$arc" "$cmc" "$flows" "$first" "$last"; do
-      if [ "$((10#$p))" -lt 1024 ] || [ "$((10#$p))" -gt 65535 ]; then
-        echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}': port '${p}' must be 1024..65535" >&2; rc=1; continue 2
-      fi
-    done
-    if [ "$((10#$first))" -gt "$((10#$last))" ]; then
-      echo "strih-box ${name}: STRIH_DANTE_DEVICES '${d}': the RX range runs backwards" >&2; rc=1; continue
-    fi
-    for p in "$arc" "$cmc" "$flows" $(seq "$((10#$first))" "$((10#$last))"); do
-      case "$seen" in *" ${p} "*) echo "strih-box ${name}: STRIH_DANTE_DEVICES: port ${p} is used twice" >&2; rc=1 ;; esac
-      seen="${seen}${p} "
-    done
-  done
-  return "$rc"
-}
+# The Dante fact validators (_strih_box_dante_devices_ok / _strih_box_dante_terms_ok) live in their own lib.
+# shellcheck source=scripts/lib/strih-box-dante-facts.sh
+. "$(dirname "${BASH_SOURCE[0]}")/strih-box-dante-facts.sh"
 
-# _strih_box_dante_terms_ok NAME PROG NET RBUF TX TRACK -> issues 1510 + 1513 (obs v0.4.27): PROG=1 needs NET (a: 0.25/0.5/1/2/5)
-# + RBUF (b: 0 < ms <= 50, <= 6 decimals, no leading 0) explicit, TX none or `L,R` (two labels) + TRACK 1..6, never without RBUF; PROG=0 all none.
-_strih_box_dante_terms_ok() {
-  local n="strih-box $1:" prog="$2" net="$3" rb="$4" tx="$5" tr="$6" rc=0 d='[0123456789]' l r k
-  if [ "$prog" = 0 ]; then
-    for k in NETWORK_LATENCY_MS:"$net" RECEIVE_BUFFER_MS:"$rb" TX:"$tx" TX_TRACK:"$tr"; do
-      [ "${k#*:}" = none ] || { echo "$n STRIH_DANTE_${k%%:*} must be none: no <role>-obs program device in STRIH_DANTE_DEVICES" >&2; rc=1; }
-    done; return "$rc"; fi
-  case "$net" in 0.25 | 0.5 | 1 | 2 | 5) ;; *) echo "$n STRIH_DANTE_NETWORK_LATENCY_MS '${net}' must be explicit for the program device: Dante Controller's 0.25, 0.5, 1, 2 or 5 ms (issue 1510)" >&2; rc=1 ;; esac
-  if [[ ! "$rb" =~ ^(0|[123456789]${d}?)(\.${d}{1,6})?$ ]] || [[ "$rb" =~ ^[0.]+$ ]] || [ "$((10#${rb%%.*}))" -gt 50 ] || [[ "$rb" =~ ^50\.0*[123456789] ]]; then
-    echo "$n STRIH_DANTE_RECEIVE_BUFFER_MS '${rb}' must be explicit for the program device: ms above 0 and at most 50, up to 6 decimals (issue 1510)" >&2; rc=1; fi
-  [ "$tx" != none ] || { [ "$tr" = none ] || { echo "$n STRIH_DANTE_TX_TRACK must be none without STRIH_DANTE_TX" >&2; rc=1; }; return "$rc"; }
-  l="${tx%%,*}"; r="${tx#*,}"
-  if [ "$l" = "$tx" ] || [[ "$r" == *,* || -z "$l" || -z "$r" || "$l$r" == " "* || "$l" == *" " || "$r" == [\ ]* || "$r" == *" " ]] || [ "$l" = "$r" ] || [[ "$l$r" == *[\"\\]* ]] || [ "${#l}" -gt 31 ] || [ "${#r}" -gt 31 ]; then
-    echo "$n STRIH_DANTE_TX '${tx}' must be two different channel labels 'L,R' (1..31 characters each, no quote or backslash, no space first or last)" >&2; rc=1; fi
-  [[ "$tr" =~ ^[123456]$ ]] || { echo "$n STRIH_DANTE_TX_TRACK '${tr}' must be the OBS track sent, 1..6" >&2; rc=1; }
-  [ "$rb" != none ] || { echo "$n STRIH_DANTE_TX needs an explicit STRIH_DANTE_RECEIVE_BUFFER_MS: a TX without it lowers the RX latency to 8.365 ms (issue 1513)" >&2; rc=1; }
-  return "$rc"
+# _strih_box_nic_rename_ok NAME VALUE -> issue 1502: rc 0 for `none` or `<mac>=<name>`: a lower-case
+# unicast MAC (aa:bb:cc:dd:ee:ff, never all zero) and a name of 1-10 lower-case letters / digits starting
+# with a letter, so `<name>.<vlan id>` (id up to 4094) fits the kernel's 15 characters; never a kernel or
+# predictable-name prefix (eth, en, wl, ww, ib, sl) nor lo. rc 1 + a named line otherwise. Sets spelled out.
+_strih_box_nic_rename_ok() {
+  local name="$1" v="$2" mac nic LC_ALL=C hx='0123456789abcdef' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789' p
+  [ "$v" != none ] || return 0
+  mac="${v%%=*}"; nic="${v#*=}"
+  if [ "$mac" = "$v" ] || [[ ! "$mac" =~ ^[${hx}]{2}(:[${hx}]{2}){5}$ ]] || [ "$mac" = 00:00:00:00:00:00 ] \
+     || (( 16#${mac:1:1} & 1 )); then
+    echo "strih-box ${name}: STRIH_NIC_RENAME '${v}' must be none or <mac>=<name>, the MAC lower-case unicast aa:bb:cc:dd:ee:ff" >&2; return 1
+  fi
+  if [[ ! "$nic" =~ ^[${lo}][${lo}${dg}]{0,9}$ ]]; then
+    echo "strih-box ${name}: STRIH_NIC_RENAME name '${nic}' must be 1-10 lower-case letters / digits starting with a letter (<name>.<vlan id> must fit 15 characters)" >&2; return 1
+  fi
+  for p in eth en wl ww ib sl; do
+    case "$nic" in "$p"*) echo "strih-box ${name}: STRIH_NIC_RENAME name '${nic}' starts with the kernel / predictable-name prefix ${p} (a rename race)" >&2; return 1 ;; esac
+  done
+  [ "$nic" != lo ] || { echo "strih-box ${name}: STRIH_NIC_RENAME name may not be lo" >&2; return 1; }
 }
 
 # strih_box_fact_keys -> every fact key, one per line (the fact-file contract; all are required).
@@ -104,7 +76,8 @@ strih_box_fact_keys() {
     STRIH_JXS_CAMERAS STRIH_JXS_CAMERA_PIN_MS \
     STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS \
     STRIH_DESKTOP \
-    STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK
+    STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK \
+    STRIH_NIC_RENAME
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -283,6 +256,7 @@ strih_box_validate() {
     || { echo "strih-box ${name}: STRIH_NIC_MIN_USB_MBPS '${f[STRIH_NIC_MIN_USB_MBPS]}' must be a speed in Mb/s (e.g. 10000 = USB 3.2 Gen 2) or none" >&2; bad=1; }
   [[ "${f[STRIH_NIC_MIN_LINK_MBPS]}" =~ ^[1-9][0-9]*$ ]] \
     || { echo "strih-box ${name}: STRIH_NIC_MIN_LINK_MBPS '${f[STRIH_NIC_MIN_LINK_MBPS]}' must be a speed in Mb/s (e.g. 5000)" >&2; bad=1; }
+  _strih_box_nic_rename_ok "$name" "${f[STRIH_NIC_RENAME]}" || bad=1
   for k in STRIH_OBS_PROFILE STRIH_OBS_COLLECTION; do
     [[ "${f[$k]}" =~ ^[A-Za-z0-9._\ -]+$ ]] \
       || { echo "strih-box ${name}: ${k} '${f[$k]}' may only carry letters, digits, space, . _ -" >&2; bad=1; }
@@ -946,6 +920,8 @@ strih_lx_nic_oot_driver() { strih_box_fact STRIH_NIC_OOT_DRIVER; }
 # STRIH_NIC_MIN_LINK_MBPS, issue 1391).
 strih_lx_nic_min_usb_mbps() { strih_box_fact STRIH_NIC_MIN_USB_MBPS; }
 strih_lx_nic_min_link_mbps() { strih_box_fact STRIH_NIC_MIN_LINK_MBPS; }
+# issue 1502: the rig NIC's stable short name, `<mac>=<name>` | `none` (scripts/lib/strih-nic-rename.sh).
+strih_lx_nic_rename() { strih_box_fact STRIH_NIC_RENAME; }
 
 # strih_lx_ndi_runtime_peer -> the cam box the NDI runtime is copied from (fact STRIH_NDI_RUNTIME_PEER).
 strih_lx_ndi_runtime_peer() { strih_box_fact STRIH_NDI_RUNTIME_PEER; }

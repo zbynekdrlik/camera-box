@@ -888,7 +888,7 @@ def _states(rows):
 def test_grade_passes_the_live_target_state(tmp_path):
     rows = Sysfs(tmp_path).grade()
     assert _states(rows) == {"(nic-driver)": "OK", "(nic-dkms)": "OK", "(nic-usb)": "OK", "(nic-link)": "OK",
-                             "(nic-nm)": "OK"}, rows
+                             "(nic-nm)": "OK", "(nic-rename)": "NOTE"}, rows  # issue 1502: no rename declared
     text = "\n".join(d for _, d in rows)
     assert "USB link 10000 Mb/s >= 10000" in text
     assert "Ethernet link 5000 Mb/s >= 5000" in text
@@ -1019,7 +1019,8 @@ class PcieSysfs:
 def test_grade_passes_the_new_strih_lx_pcie_10g_nic(tmp_path):
     rows = PcieSysfs(tmp_path).grade()
     st = _states(rows)
-    assert st == {"(nic-driver)": "NOTE", "(nic-usb)": "NOTE", "(nic-link)": "OK", "(nic-nm)": "OK"}, rows
+    assert st == {"(nic-driver)": "NOTE", "(nic-usb)": "NOTE", "(nic-link)": "OK", "(nic-nm)": "OK",
+                  "(nic-rename)": "NOTE"}, rows  # issue 1502: strih-snv declares no rename
     text = "\n".join(d for _, d in rows)
     assert "enp7s0: not graded (STRIH_NIC_MIN_USB_MBPS=none, not a USB NIC)" in text
     assert "Ethernet link 10000 Mb/s >= 10000" in text

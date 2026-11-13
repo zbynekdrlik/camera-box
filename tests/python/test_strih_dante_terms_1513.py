@@ -71,7 +71,8 @@ def _load(tmp_path, box, pairs):
 def test_the_four_terms_are_required_facts_at_the_end_of_the_key_list():
     r = _bash("strih_box_fact_keys")
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split()[-4:] == list(TERMS)
+    # issue 1502 appended the rig-NIC rename after them
+    assert r.stdout.split()[-5:] == list(TERMS) + ["STRIH_NIC_RENAME"]
 
 
 def test_every_dante_program_box_keeps_todays_latency_explicitly():
@@ -164,7 +165,7 @@ def test_the_validator_refuses_a_quote_or_backslash_in_a_label(tx):
 
 def test_the_bracket_sets_are_spelled_out_never_a_locale_range():
     # ci-testing-gotchas: under en_US.UTF-8 a bash `[0-9]` range also takes non-ASCII digits
-    src = (SCRIPTS / "lib" / "strih-box-facts.sh").read_text()
+    src = (SCRIPTS / "lib" / "strih-box-dante-facts.sh").read_text()
     body = src[src.index("_strih_box_dante_terms_ok()"):]
     body = body[:body.index("\n}\n")]
     for line in body.splitlines():

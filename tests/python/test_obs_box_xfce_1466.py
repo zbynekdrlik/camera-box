@@ -68,8 +68,8 @@ def test_every_real_box_is_openbox_after_the_owner_rejected_xfce():
 
 
 def test_the_desktop_fact_is_the_last_key_and_the_accessor_reads_it():
-    # issues 1510 + 1513 appended the four Dante latency / TX facts after it
-    r = _bash("strih_box_fact_keys | tail -n 5 | head -n 1; strih_box_desktop; echo")
+    # issues 1510 + 1513 appended the four Dante latency / TX facts after it, issue 1502 the rig-NIC rename
+    r = _bash("strih_box_fact_keys | tail -n 6 | head -n 1; strih_box_desktop; echo")
     assert r.stdout.split() == ["STRIH_DESKTOP", "xfce"], r.stderr
 
 
