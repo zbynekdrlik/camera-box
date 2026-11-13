@@ -221,9 +221,19 @@ obs_release_windows_bundle() {
   command -v unzip >/dev/null 2>&1 || { echo "obs-release: unzip is required to unpack the ${tag} Windows bundle" >&2; return 1; }
   zipf="$(_obs_release_get "$root" "$(obs_release_windows_zip_name "$tag")" "$zsha" 1)" || return 1
   man="$(_obs_release_get "$root" "$OBS_RELEASE_WINDOWS_MANIFEST" "$msha" 0)" || return 1
+  # A second copy of a name would make unzip ask `replace?` on the operator's terminal mid-deploy, and
+  # which copy lands would depend on the answer: refuse it before anything is written (sha-pinned bytes,
+  # so this is defence in depth).
+  local dups
+  dups="$(unzip -Z1 "$zipf" 2>/dev/null | LC_ALL=C sort | uniq -d | head -n 3 || true)"
+  [ -z "$dups" ] || { echo "obs-release: ${zipf} carries a duplicate entry (${dups//$'\n'/, }) -- refused" >&2; return 1; }
   mkdir -p "$dest" || { echo "obs-release: cannot create ${dest}" >&2; return 1; }
-  if ! unzip -q "$zipf" -d "$dest"; then
+  if ! unzip -q -n "$zipf" -d "$dest" </dev/null; then
     rm -rf "$dest"; echo "obs-release: cannot unzip ${zipf}" >&2; return 1
+  fi
+  # The tree is copied onto a Windows box: a symlink entry is never staged.
+  if [ -n "$(find "$dest" -type l -print -quit 2>/dev/null)" ]; then
+    rm -rf "$dest"; echo "obs-release: the ${tag} Windows bundle carries a symlink -- refused" >&2; return 1
   fi
   # The zip carries its manifest as BUNDLE_MANIFEST.json (the name the Windows deploy program reads): it
   # must be the pinned bytes, never a second, unproved list.

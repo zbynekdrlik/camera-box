@@ -835,6 +835,7 @@ main() {
     [ -z "$anchor_rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")")" || exit 3
     if [ -n "$win_sha" ]; then win_abi="$(fleet_win_pin_stats_abi "$HERE/.." "$stage")"; else win_sha="$sha"; win_abi="$stats_abi"; fi
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
+    fleet_win_note "$HERE/.." "$win_boxes"
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
       # issue 1317 part 3: strih-snv gets its OWN plan (setup-strih.sh + strih-obs.service), never the
@@ -852,7 +853,7 @@ main() {
     # the cg deploy saved as deploy2.ps1 -> "At C:\deploy2.ps1:170"). Commenting the record keeps it
     # visible; the trailing `exit 0` makes the plan's last non-empty line clean + self-terminating.
     echo "# fleet-deploy log line (append to ${FLEET_LOG_DEFAULT} once the deploy is done):"
-    echo "#   $(fleet_log_line "$run_id" "$sha" "$boxes" "$mode")"
+    fleet_win_log_lines "$HERE/.." "$run_id" "$sha" "$boxes" "$win_sha" "$win_boxes" "$mode" | sed 's/^/#   /'
     echo "exit 0"
     exit 0
   fi
@@ -873,6 +874,7 @@ main() {
   fi
   [ -n "$win_sha" ] || { win_sha="$sha"; win_abi="$stats_abi"; }
   echo "# anchor run $run_id -> canonical SHA $sha (the Linux OBS boxes: the pinned obs release $lx_sha); deploying: $boxes (mode $mode; retention --yes=$yes)"
+  fleet_win_note "$HERE/.." "$win_boxes"
 
   local workdir; workdir="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -971,8 +973,7 @@ main() {
   # --- durable fleet-deploy log line ---------------------------------------------------------------
   if [ -n "$rest" ]; then
     mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
-    [ -z "$anchor_rest" ] || fleet_log_line "$run_id" "$sha" "$anchor_rest" "$mode" >> "$FLEET_LOG_DEFAULT"
-    [ -z "$win_boxes" ] || fleet_log_line "obs-$(obs_pin_tag "$HERE/..")" "$win_sha" "$win_boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
+    fleet_win_log_lines "$HERE/.." "$run_id" "$sha" "$rest" "$win_sha" "$win_boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
   fi
   echo "# fleet-deploy log appended: $FLEET_LOG_DEFAULT"
   exit 0

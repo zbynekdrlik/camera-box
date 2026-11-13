@@ -32,20 +32,44 @@ fleet_win_split() {
 # fleet_win_pin_mode_ok MODE -> rc 0 for full; rc 2 + a named line for fast (the release ships no fast bundle).
 fleet_win_pin_mode_ok() {
   [ "${1:-}" = full ] && return 0
-  echo "ERROR: --fast cannot deploy a Windows box from the pinned obs release (it ships the full bundle only, issue 1505) -- deploy --full" >&2
+  echo "ERROR: --fast cannot deploy a Windows box from the pinned obs release (it ships the full bundle only, issue 1505) -- deploy the Windows box separately with --full" >&2
   return 2
 }
 
 # fleet_win_pin_stats_abi ROOT DIR -> the stats pair `<stats>:<output_stats>` of DIR's BUNDLE_MANIFEST.json
-# when its release block names the pinned tag + commit; nothing otherwise (the program then removes the
-# box's marker, so a later fast deploy refuses -- never a pair from another release).
+# when its release block names the pinned tag + commit; nothing + a named WARNING otherwise (the program
+# then removes the box's marker, so a later fast deploy refuses -- never a pair from another release).
 fleet_win_pin_stats_abi() {
   local root="${1:?tree required}" dir="${2:?dir required}" tag commit
   tag="$(obs_pin_tag "$root" 2>/dev/null)" || return 0
   commit="$(obs_pin_commit "$root" 2>/dev/null)" || return 0
-  [ "$(obs_release_manifest_field "$dir" obs_tag || true)" = "$tag" ] || return 0
-  [ "$(obs_release_manifest_field "$dir" obs_commit || true)" = "$commit" ] || return 0
-  obs_release_stats_abi "$dir" || true
+  if [ "$(obs_release_manifest_field "$dir" obs_tag || true)" != "$tag" ] \
+     || [ "$(obs_release_manifest_field "$dir" obs_commit || true)" != "$commit" ]; then
+    echo "WARNING: ${dir}/BUNDLE_MANIFEST.json is not the pinned obs release ${tag} (${commit}) -- no stats ABI pair, the Windows box's GENLOCK_STATS_ABI.txt will be removed" >&2
+    return 0
+  fi
+  obs_release_stats_abi "$dir" \
+    || echo "WARNING: the pinned Windows manifest records no stats ABI pair -- the Windows box's GENLOCK_STATS_ABI.txt will be removed" >&2
+  return 0
+}
+
+# fleet_win_note ROOT WIN_BOXES -> one NOTE line (nothing when WIN_BOXES is empty): the Windows boxes take
+# the pinned release, whatever --run-id / --sha say (those are the anchor boxes' only).
+fleet_win_note() {
+  [ -n "${2:-}" ] || return 0
+  printf '# NOTE: Windows boxes %s take the pinned obs release %s (%s), not the anchor run (issue 1505)\n' \
+    "$2" "$(obs_pin_tag "${1:?tree required}")" "$(obs_pin_commit "$1")"
+}
+
+# fleet_win_log_lines ROOT RUN SHA BOXES WIN_SHA WIN_BOXES MODE -> the fleet-deploy log lines: BOXES minus
+# WIN_BOXES under RUN/SHA, then WIN_BOXES under obs-<tag>/WIN_SHA (each only when non-empty).
+fleet_win_log_lines() {
+  local root="${1:?tree required}" run="$2" sha="$3" boxes="$4" wsha="$5" wboxes="$6" mode="$7" b rest="" IFS=','
+  for b in $boxes; do
+    case ",${wboxes}," in *",${b},"*) ;; *) rest="${rest:+$rest,}$b" ;; esac
+  done
+  [ -z "$rest" ] || fleet_log_line "$run" "$sha" "$rest" "$mode"
+  [ -z "$wboxes" ] || fleet_log_line "obs-$(obs_pin_tag "$root")" "$wsha" "$wboxes" "$mode"
 }
 
 # fleet_win_bundle_label ROOT MODE -> what STEP 0 of a Windows plan uploads: the pinned zip's name (unpacked
