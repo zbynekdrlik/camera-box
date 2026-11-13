@@ -257,7 +257,7 @@ def test_a_non_dante_leg_keeps_its_table_and_loses_a_leftover_generic_filter(tmp
         ("STRIH_PROGRAM_VBAN_PORT=none", "STRIH_PROGRAM_VBAN_PORT=6981"),
         ("STRIH_PROGRAM_VBAN_RESERVE_MS=none", "STRIH_PROGRAM_VBAN_RESERVE_MS=30"),
         ("STRIH_DANTE_NETWORK_LATENCY_MS=1", "STRIH_DANTE_NETWORK_LATENCY_MS=none"),
-        ("STRIH_DANTE_RECEIVE_BUFFER_MS=12.041666", "STRIH_DANTE_RECEIVE_BUFFER_MS=none")]))
+        ("STRIH_DANTE_RECEIVE_BUFFER_MS=17.041666", "STRIH_DANTE_RECEIVE_BUFFER_MS=none")]))
     b.dstack_dir.mkdir(parents=True)
     for f in ("dante-leg.nft", "dante-leg-notrack.nft"):
         shutil.copy(FIX / f, b.dstack_dir / f)
