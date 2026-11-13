@@ -190,7 +190,7 @@ def test_strih_snv_toml_states_both_terms_and_no_tx(tmp_path):
     r = _render(tmp_path, "strih-snv", "enp7s0.70")
     assert r.returncode == 0, r.stderr
     d = tomllib.loads(r.stdout)
-    assert d["network_latency_ms"] == 1.0 and d["receive_buffer_ms"] == 12.041666
+    assert d["network_latency_ms"] == 1.0 and d["receive_buffer_ms"] == 17.041666  # issue 1510
     assert isinstance(d["network_latency_ms"], float) and isinstance(d["receive_buffer_ms"], float)
     assert "tx" not in d and "tx_track" not in d and "latency_ms" not in d
 
@@ -259,7 +259,7 @@ def _status(t, f, tx=True, **k):
 
 TOML_STREAM = ('name = "stream-obs"\nnetwork_latency_ms = 1.0\nreceive_buffer_ms = 12.041666\n'
                'tx = ["OBS program L", "OBS program R"]\ntx_track = 1\n[[subscribe]]\n')
-TOML_STRIH = 'name = "strih-obs"\nnetwork_latency_ms = 1.0\nreceive_buffer_ms = 12.041666\n[[subscribe]]\n'
+TOML_STRIH = 'name = "strih-obs"\nnetwork_latency_ms = 1.0\nreceive_buffer_ms = 17.041666\n[[subscribe]]\n'  # issue 1510: strih-obs P 18.041666 ms
 
 
 def _grade(tmp_path, box, log_lines, nxt, toml):
@@ -396,7 +396,7 @@ def test_item9_notes_a_log_without_network_latency_fields(tmp_path):
 
 
 def _strih(tmp_path, l1_kw=None, l2_kw=None, tx=True, toml=TOML_STRIH):
-    lines = [_start("strih-obs", 0), SPLIT, NETLAT, _status("12:00:10.000", 4800, tx=tx, **dict({"tx_track": "0", "tx_played": "0"} if tx else {}, **(l1_kw or {})))]
+    lines = [_start("strih-obs", 0), SPLIT.replace("13041666", "18041666"), NETLAT, _status("12:00:10.000", 4800, tx=tx, **dict({"tx_track": "0", "tx_played": "0"} if tx else {}, **(l1_kw or {})))]
     nxt = _status("12:00:20.000", 484800, tx=tx, **dict({"tx_track": "0", "tx_played": "0"} if tx else {}, **(l2_kw or {})))
     return _grade(tmp_path, "strih-snv", lines, nxt, toml)
 
