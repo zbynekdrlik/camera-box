@@ -189,6 +189,25 @@ mod tests {
 
     const YUYV: u32 = u32::from_le_bytes(*b"YUYV");
 
+    /// Owner 13.11.2026: switch the preview by a command, not the button. One request = one flip, taken
+    /// once; a real SIGUSR1 after the install is a request (the handler only stores the flag).
+    #[test]
+    fn a_preview_toggle_request_is_taken_once_and_sigusr1_makes_one_1501() {
+        let _ = take_preview_toggle_request();
+        assert!(!take_preview_toggle_request());
+        request_preview_toggle();
+        assert!(take_preview_toggle_request());
+        assert!(!take_preview_toggle_request(), "one request flips the preview once");
+        install_preview_toggle_signal();
+        install_preview_toggle_signal(); // idempotent
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: raise is a plain POSIX call; the installed handler only stores an atomic flag.
+            assert_eq!(unsafe { libc::raise(libc::SIGUSR1) }, 0);
+            assert!(take_preview_toggle_request(), "SIGUSR1 is a preview toggle request");
+        }
+    }
+
     fn frame(width: u32, height: u32, stride: u32, fill: u8) -> Vec<u8> {
         let mut v = vec![0xEE; (stride * height) as usize];
         for y in 0..height {
