@@ -83,15 +83,21 @@ fleet_win_bundle_label() {
   fi
 }
 
-# fleet_win_bundle_source ROOT STAGE -> where STEP 0's bytes come from. A pinned box: the cached,
-# sha-proved zip (its root is the stage layout), expanded on the box -- the unzipped STAGE is a mktemp
-# dir the planner removes on exit. Else: the downloaded windows-genlock artifact at STAGE.
+# fleet_win_bundle_source ROOT STAGE WIN_STAGE -> where STEP 0's bytes come from. A pinned box: the cached,
+# sha-proved zip (its root is the stage layout), expanded on the box into WIN_STAGE -- the unzipped STAGE is a
+# mktemp dir the planner removes on exit; a --plan run never fetches, so a zip not cached yet is named as
+# such. Else: the downloaded windows-genlock artifact at STAGE.
 fleet_win_bundle_source() {
-  local root="${1:?tree required}" tag
+  local root="${1:?tree required}" tag zip sha
   if obs_pin_has_windows "$root" && tag="$(obs_pin_tag "$root" 2>/dev/null)"; then
-    printf 'the cached pinned zip %s, sha256 %s -- upload it and Expand-Archive it into the stage\n' \
-      "${OBS_RELEASE_CACHE:-${root%/}/obs-release}/${tag}/$(obs_release_windows_zip_name "$tag")" \
-      "$(obs_pin_windows_sha256 "$root")"
+    zip="${OBS_RELEASE_CACHE:-${root%/}/obs-release}/${tag}/$(obs_release_windows_zip_name "$tag")"
+    sha="$(obs_pin_windows_sha256 "$root" 2>/dev/null)" || sha="UNREADABLE (scripts/obs-release.pin)"
+    if [ -f "$zip" ]; then
+      printf 'the cached pinned zip %s, sha256 %s -- upload it, check its sha256 there and Expand-Archive it into %s\n' \
+        "$zip" "$sha" "${3:-the box stage}"
+    else
+      printf 'the pinned zip is not cached yet at %s -- run this deploy once without --plan to fetch + prove it\n' "$zip"
+    fi
   else
     printf 'staged locally at %s\n' "${2:-}"
   fi
