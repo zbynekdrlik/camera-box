@@ -95,12 +95,19 @@ strih_dante_peer_ports() {
     "$STRIH_DANTE_MDNS_PORT" "$STRIH_DANTE_INFO_PORT"
 }
 
-# strih_dante_nft_input IF NET DEVICES -> the input rules (a leg's table, before its drop).
+# strih_dante_nft_input IF NET DEVICES [TX] -> the input rules (a leg's table, before its drop). TX = the box
+# fact STRIH_DANTE_TX (`none` / empty = receive only). Issue 1513 (dstack, 13.11.2026): a TX flow socket binds
+# an EPHEMERAL port and the receiver's keepalives come from ITS ephemeral port, so neither rule above admits
+# them; the flow expired after 4 s. A TX box admits UDP from the /24 to the ephemeral range (stopgap until
+# dstack's fixed TX flow port range, then the rule names those ports).
 strih_dante_nft_input() {
-  local ifc="$1" net="$2" dev="$3"
+  local ifc="$1" net="$2" dev="$3" tx="${4:-none}"
   printf '        iifname "%s" ip saddr %s udp dport { %s } counter accept\n' "$ifc" "$net" "$(strih_dante_in_ports "$dev")"
   printf '        iifname "%s" ip saddr %s udp sport { %s } udp dport %s counter accept\n' "$ifc" "$net" \
     "$(strih_dante_peer_ports "$dev")" "$STRIH_DANTE_EPHEMERAL_PORTS"
+  if [ -n "$tx" ] && [ "$tx" != none ]; then
+    printf '        iifname "%s" ip saddr %s udp dport %s counter accept\n' "$ifc" "$net" "$STRIH_DANTE_EPHEMERAL_PORTS"
+  fi
   if strih_dante_ptp_leg_open; then
     printf '        iifname "%s" ip saddr %s ip daddr %s udp dport { %s } counter accept\n' "$ifc" "$net" \
       "$STRIH_DANTE_PTP_GROUP" "$STRIH_DANTE_PTP_PORTS"

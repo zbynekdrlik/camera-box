@@ -109,6 +109,8 @@ _strih_vban_leg_plen() { if strih_dante_leg_declared; then echo 24; else echo 32
 
 # _strih_vban_leg_devices -> the box fact STRIH_DANTE_DEVICES (`none` when unreadable).
 _strih_vban_leg_devices() { strih_lx_dante_devices 2>/dev/null || echo none; }
+# _strih_vban_leg_tx -> the loaded box's STRIH_DANTE_TX (`none` when unset or unreadable), issue 1513.
+_strih_vban_leg_tx() { strih_box_fact STRIH_DANTE_TX 2>/dev/null || echo none; }
 
 # _strih_vban_leg_filter_words SENDER PORT -> what the leg's filter admits, for the setup + verify lines.
 _strih_vban_leg_filter_words() {
@@ -182,11 +184,11 @@ strih_vban_leg_resolve() {
 # the pytest).
 strih_vban_leg_nft_text() {
   local ifc="${1:?interface required}" sender="${2:?sender required}" port="${3:?port required}"
-  local addr="${4:-}" dev="${5:-none}" dante_in="" dante_out="" net
+  local addr="${4:-}" dev="${5:-none}" tx="${6:-none}" dante_in="" dante_out="" net
   local vin="" voff="" what="only echo requests (no VBAN sender declared yet)"
   if [ "$dev" != none ]; then
     net="$(strih_vban_leg_net "$addr")"
-    dante_in="$(strih_dante_nft_input "$ifc" "$net" "$dev")"$'\n'
+    dante_in="$(strih_dante_nft_input "$ifc" "$net" "$dev" "$tx")"$'\n'
     dante_out="$(strih_dante_nft_output "$ifc" "$addr" "$net")"$'\n'
   fi
   if [ "$sender" != none ]; then
@@ -407,14 +409,14 @@ _strih_vban_leg_put() {
 
 # _strih_vban_leg_filter_apply IF SENDER PORT ADDR -> the ruleset file, the oneshot (enabled), the live table.
 _strih_vban_leg_filter_apply() {
-  local ifc="$1" sender="$2" port="$3" addr="$4" nf uf w1 w2 live want dev
-  dev="$(_strih_vban_leg_devices)"
+  local ifc="$1" sender="$2" port="$3" addr="$4" nf uf w1 w2 live want dev tx
+  dev="$(_strih_vban_leg_devices)"; tx="$(_strih_vban_leg_tx)"
   nf="$(_strih_vban_leg_nft_file)"; uf="$(_strih_vban_leg_unit_file)"
   if ! command -v nft >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nftables \
       || { echo "strih-vban-leg: nft is missing and nftables could not be installed" >&2; return 1; }
   fi
-  w1="$(_strih_vban_leg_put "$nf" 0644 "$(strih_vban_leg_nft_text "$ifc" "$sender" "$port" "$addr" "$dev")")" \
+  w1="$(_strih_vban_leg_put "$nf" 0644 "$(strih_vban_leg_nft_text "$ifc" "$sender" "$port" "$addr" "$dev" "$tx")")" \
     || { echo "strih-vban-leg: could not write ${nf}" >&2; return 1; }
   w2="$(_strih_vban_leg_put "$uf" 0644 "$(strih_vban_leg_unit_text "$nf")")" \
     || { echo "strih-vban-leg: could not write ${uf}" >&2; return 1; }
@@ -425,7 +427,7 @@ _strih_vban_leg_filter_apply() {
   if ! systemctl is-enabled -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
     systemctl enable "$STRIH_VBAN_LEG_UNIT" || { echo "strih-vban-leg: could not enable ${STRIH_VBAN_LEG_UNIT}" >&2; return 1; }
   fi
-  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$dev")"
+  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$dev" "$tx")"
   live="$(nft list table inet "$STRIH_VBAN_LEG_NFT_TABLE" 2>/dev/null | strih_vban_leg_nft_normalize || true)"
   if [ "$w1" = written ] || [ "$w2" = written ] || [ "$live" != "$want" ] \
      || ! systemctl is-active -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
@@ -595,7 +597,7 @@ _strih_vban_leg_carrying_nic_leg() {
 _strih_vban_leg_retiring_filter() {
   local tmp rc=0
   tmp="$(mktemp)" || return 1
-  strih_vban_leg_nft_text "$1" "$2" "$3" "$4" "$(_strih_vban_leg_devices)" \
+  strih_vban_leg_nft_text "$1" "$2" "$3" "$4" "$(_strih_vban_leg_devices)" "$(_strih_vban_leg_tx)" \
     | sed "s/inet ${STRIH_VBAN_LEG_NFT_TABLE}\$/inet ${STRIH_VBAN_LEG_RETIRING_TABLE}/; s/inet ${STRIH_VBAN_LEG_NFT_TABLE} {\$/inet ${STRIH_VBAN_LEG_RETIRING_TABLE} {/" >"$tmp" || rc=1
   [ "$rc" = 1 ] || nft -f "$tmp" || rc=1
   rm -f "$tmp"
@@ -961,7 +963,7 @@ strih_vban_leg_grade() {
     bad "(vban-leg) filter: cannot read table inet ${STRIH_VBAN_LEG_NFT_TABLE} (missing, or verify-strih not run as root) -- ${STRIH_VBAN_LEG_UNIT} loads it"
     return 0
   fi
-  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$(_strih_vban_leg_devices)")"
+  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$(_strih_vban_leg_devices)" "$(_strih_vban_leg_tx)")"
   if [ "$(printf '%s\n' "$l1" | strih_vban_leg_nft_normalize)" != "$want" ] \
      || [ "$(systemctl is-enabled "$STRIH_VBAN_LEG_UNIT" 2>/dev/null || true)" != enabled ] \
      || ! systemctl is-active -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
