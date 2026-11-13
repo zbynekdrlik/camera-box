@@ -1,0 +1,54 @@
+#!/usr/sbin/nft -f
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Conntrack only on the Dante leg (dstack #264, asked by camera-box), the
+# companion of dante-leg.nft: identical on every PC that loads it, never
+# edited per device.
+#
+# LOAD IT ONLY ON A PC WITH NO NAT AND NO OTHER STATEFUL FIREWALL: no
+# Docker, no libvirt, no masquerade, snat or dnat in `nft list ruleset`,
+# and ufw / firewalld inactive. An untracked packet is never NATed (a
+# container's packet entering on its bridge would leave unmasqueraded,
+# and a reply would never be mapped back), and a stateful rule on another
+# NIC sees its own replies as untracked, not established (ufw's default
+# deny then drops them). A PC with NAT tracks every flow for it anyway,
+# so the table would save it nothing.
+#
+# Asymmetric routing: a TCP connection that comes in on another NIC and
+# answers out of the leg is untracked on the way in, so its answer is
+# new and invalid on the leg and dante-leg.nft's out chain drops it.
+#
+# Why: dante-leg.nft is stateful (`ct state established,related`), and
+# the first stateful rule in a network namespace makes conntrack track
+# every flow in it, on every NIC: multi-Gb/s NDI and JPEG XS on the
+# stream and editing PCs too. The two chains below run at raw priority
+# (-300, before conntrack at -200) and mark every packet not on the leg
+# untracked, so conntrack sees only the leg.
+#
+# oifname in the output hook: for a locally generated packet the route
+# is chosen before the hook runs (__ip_local_out and __ip6_local_out
+# pass the route's device to NF_INET_LOCAL_OUT), so the outgoing
+# interface is known here, as in dante-leg.nft's out chain; no fib
+# lookup is needed. A later re-route (a mark set in a `type route`
+# chain) would move a packet after this test; neither table sets a mark.
+#
+# Load (as root) with the same interface as dante-leg.nft:
+#   nft -D dante_leg=<iface> -f /etc/dstack/dante-leg-notrack.nft
+# A load without -D fails ("unknown identifier"), and nothing changes.
+# Loading again replaces the table in one transaction (idempotent).
+# The chains are checked by crates/dstack/tests/dante_leg.rs.
+
+table inet dstack_dante_leg_notrack
+delete table inet dstack_dante_leg_notrack
+
+table inet dstack_dante_leg_notrack {
+	chain raw_pre {
+		type filter hook prerouting priority raw; policy accept;
+		iifname != $dante_leg notrack
+	}
+
+	chain raw_out {
+		type filter hook output priority raw; policy accept;
+		oifname != $dante_leg notrack
+	}
+}
