@@ -58,6 +58,11 @@ obs project; camera-box moves the pin.
     the full bundle only), the stats pair comes from the pinned manifest only when its release block
     names the pin (plan mode reads it from `--stage`; another release = the marker is removed), and the
     fleet log records the pinned boxes as `obs-<tag>`.
+  - STEP 0 of a pinned box names the cached, sha-proved zip `<tree>/obs-release/<tag>/obs-windows-x64-<tag>.zip`
+    (`fleet_win_bundle_source`): scp it to `C:\stage-genlock-<commit>`, check its sha256 on the box, `Expand-Archive`
+    it there (the zip's root is the stage layout). The unzipped tree the plan verified is a mktemp dir, gone on exit.
+    Then the deploy `.ps1` and the `launch-obs-genlock.sh --box resolume-snv --force` `.ps1` run by `-File`
+    (resolume-snv on v0.4.28, 13.11.2026: every DLL byte-verified, one obs64 in session 1, `:8899` LOCKED).
   - A pin WITHOUT the two fields keeps the Windows boxes on the anchor run's windows-genlock artifact
     (the vendor-path planner tests run against such a pin).
 - **Still on the vendor build:** imag (`linux-genlock.yml`), the Windows FAST/FULL manifest auto-source,
