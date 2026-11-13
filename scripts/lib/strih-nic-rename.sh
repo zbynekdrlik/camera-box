@@ -242,8 +242,11 @@ point() {
 up() {
   nmcli --wait 30 connection up "$LAN" </dev/null >/dev/null && nmcli --wait 30 connection up "$LEG" </dev/null >/dev/null
 }
+# ARP, never an ICMP ping: while both NICs hold the rig address the gateway's ARP entry still names the
+# old NIC's MAC, so a ping's reply comes back on the old NIC (live 13.11.2026); an ARP request from the
+# new NIC is answered to its own MAC and proves the new port (and VLAN 70 for the leg).
 healthy() {
-  ping -c 1 -W 1 -I "$NEW" "$GW" >/dev/null 2>&1 && arping -q -c 1 -w 2 -I "$NEW.$VID" "$PEER" >/dev/null 2>&1
+  arping -q -c 1 -w 2 -I "$NEW" "$GW" >/dev/null 2>&1 && arping -q -c 1 -w 2 -I "$NEW.$VID" "$PEER" >/dev/null 2>&1
 }
 announce() {
   arping -q -U -c 2 -I "$1" "$2" >/dev/null 2>&1 || log "WARNING: the unsolicited ARP for $2 on $1 failed -- neighbours wait for their entry to expire"
@@ -283,6 +286,7 @@ rollback() {
     mv -f -- "$BACKUP" "$RETIRED" && nmcli general reload conf </dev/null >/dev/null 2>&1
     nmcli device set "$NEW" managed no </dev/null >/dev/null 2>&1 || log "WARNING: ${NEW} stays managed until NetworkManager's next start"
   fi
+  ip addr flush dev "$NEW" || log "WARNING: could not take the addresses off ${NEW}"
   ip link set dev "$NEW" down || log "WARNING: could not take ${NEW}'s link down"
   { point "$OLD" && up; } || finish "rollback-FAILED $1 -- ${OLD} did not come back up: the box may be off the network (console needed)" 2
   finish "rolled-back $1" 1
