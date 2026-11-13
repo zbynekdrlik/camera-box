@@ -478,7 +478,7 @@ def test_switch_rolls_back_when_the_new_nic_does_not_answer(tmp_path):
     assert log[-1] == "--wait 30 connection up vban-dante70"
     assert "device set rig0 managed no" in log
     assert log.index("device set rig0 managed no") < log.index("connection modify stream-lan connection.interface-name enp56s0")
-    assert _log(st, "ip.log") == ["link set dev rig0 down"]
+    assert _log(st, "ip.log") == ["addr flush dev rig0", "link set dev rig0 down"]
     assert not any(" -U " in " %s " % x for x in _log(st, "arping.log"))
 
 
