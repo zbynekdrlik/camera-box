@@ -539,8 +539,15 @@ def test_the_marker_the_linux_writer_writes_passes_the_verdict_1302(tmp_path, wh
 # --- the planner ---------------------------------------------------------------------------------
 
 def _plan(tmp_path, mode, sha, boxes="resolume-snv"):
+    # issue 1505: these cases pin the VENDOR-build stats ABI path (vendor obs.h at the anchor SHA), which a
+    # Windows box takes only while the obs pin carries no Windows zip -- so the planner reads the real pin
+    # minus its OBS_RELEASE_WINDOWS_* lines (the pinned-zip path: tests/python/test_obs_release_windows_1505.py).
+    pin = tmp_path / "obs-release-no-windows.pin"
+    pin.write_text("".join(l + "\n" for l in (REPO / "scripts" / "obs-release.pin").read_text().splitlines()
+                           if not l.startswith("OBS_RELEASE_WINDOWS_")))
     return subprocess.run([str(FLEET), "--plan", "--run-id", "RUN1302", "--sha", sha, "--stage", str(tmp_path),
-                           "--boxes", boxes, f"--{mode}"], capture_output=True, text=True, timeout=180, cwd=REPO)
+                           "--boxes", boxes, f"--{mode}"], capture_output=True, text=True, timeout=180, cwd=REPO,
+                          env={**os.environ, "OBS_RELEASE_PIN_FILE": str(pin)})
 
 
 def test_plan_fast_reads_the_abi_of_the_deployed_commit_1302(tmp_path):
@@ -581,7 +588,7 @@ def test_plan_full_with_an_unreadable_abi_removes_the_marker_1302(tmp_path):
 def test_execute_mode_stages_the_abi_before_strih_lx_is_touched_1302():
     s = FLEET.read_text()
     main = s[s.index("main() {"):]
-    resolve = main.index('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")" 1)" || exit 3',
+    resolve = main.index('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")" 1)" || exit 3',
                          main.index("# --- execute mode"))
     # issue 1487: the Linux boxes take the pinned obs release, its pair from the release's own manifest
     prepare = main.index('strih_lx_prepare "$lx_sha"')
@@ -596,7 +603,9 @@ def test_plan_reads_without_network_and_names_the_boxes_1302():
     s = FLEET.read_text()
     main = s[s.index("main() {"):]
     plan = main[:main.index("# --- execute mode")]
-    assert '[ -z "$rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")")" || exit 3' in plan
+    # issue 1505: only the boxes that still take an anchor build read the vendor obs.h (a Windows box on the
+    # pinned zip reads its pair from the pinned manifest)
+    assert '[ -z "$anchor_rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")")" || exit 3' in plan
     # the execute mode's own Windows-box switch reads the same predicate (one place names the boxes)
     assert 'want_win="$(fleet_boxes_swap_obs_dll "$boxes")"' in main
 

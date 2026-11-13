@@ -17,7 +17,8 @@ obs-vban and, since issue 1425, vlc-video backups + byte-verifies) live in `scri
 never inline in the main script. The stats-ABI blocks live in `scripts/lib/genlock-stats-abi.sh`
 for the same reason (issue 1302), and since issue 1426 the box list itself (`fleet_normalize_boxes`,
 `fleet_deploy_order`) lives in `scripts/lib/genlock-fleet-boxes.sh` and the per-box Linux apply loop
-(`strih_lx_apply_all`) in `scripts/lib/strih-snv-deploy.sh`; the script sits at 958 lines.
+(`strih_lx_apply_all`) in `scripts/lib/strih-snv-deploy.sh`, and since issue 1505 the Windows
+pinned-zip routing in `scripts/lib/genlock-windows-pin.sh`; the script sits at 984 lines.
 
 ## A FAST deploy refuses an obs.dll with another stats ABI (issue 1302, design 6028838843, ROZHODNUTÉ 6030159870)
 
