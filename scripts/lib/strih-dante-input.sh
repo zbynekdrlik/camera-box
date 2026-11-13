@@ -31,8 +31,9 @@
 #                                         Dante, else the obs-vban grade (strih-program-vban.sh)
 #
 # No CPU pinning for the Dante threads (dstack v0.6.28, owner ruling relayed by dstack issue 1, 4.11.2026):
-# dlink's own default budget (15 ms, a 6 ms pump margin) is used, so the TOML carries no latency_ms, and
-# step 13 removes what the earlier CPU reservation left on a box (strih-dante-cpu-leftovers.sh).
+# step 13 removes what the earlier CPU reservation left on a box (strih-dante-cpu-leftovers.sh). The latency
+# is the box facts' NAMED terms since obs v0.4.27 (issues 1510 + 1513): `network_latency_ms` + `receive_buffer_ms`
+# (never `latency_ms`, which the release refuses), and on stream-snv the program TX (`tx` + `tx_track`).
 #
 # Seams: STRIH_DANTE_INPUT_SITE_FILE, STRIH_DANTE_INPUT_TOML (the destination), STRIH_DANTE_INPUT_IFACE
 # (skip the leg resolve), STRIH_DANTE_INPUT_KIND_FILE (the OBS input kind instead of the WS read),
@@ -125,7 +126,7 @@ strih_dante_input_site_rows() {
 
 # strih_dante_input_toml IFACE "ARC CMC FLOWS RXBASE" ROWS -> the dante-input.toml text (pure). ROWS =
 # strih_dante_input_site_rows' output. network_rate 96000 (the Dante network; dlink halves it to OBS's
-# 48 kHz), no sample_rate (OBS's own), no latency_ms (dlink's default, 15 ms since dstack v0.6.28).
+# 48 kHz), no sample_rate (OBS's own), the facts' latency terms + TX (strih_dante_input_terms_toml).
 strih_dante_input_toml() {
   local iface="${1:?iface required}" ports="${2:?ports required}" chans="${3:?rows required}"
   local arc cmc flows base label dev chan rx="" i=0 subs=""
@@ -140,7 +141,121 @@ strih_dante_input_toml() {
   printf 'name = "%s"\niface = "%s"\nnetwork_rate = %s\nrx = [%s]\n' \
     "$(strih_dante_input_device)" "$iface" "$STRIH_DANTE_INPUT_NETWORK_RATE" "$rx"
   printf 'arc_port = %s\ncmc_port = %s\nflows_port = %s\nrx_port_base = %s\n' "$arc" "$cmc" "$flows" "$base"
+  strih_dante_input_terms_toml || return 1   # a failed fact read never writes a file without the terms
   printf '%s' "$subs"
+}
+
+# _strih_dante_input_float MS -> MS as a TOML float (`1` -> `1.0`; the obs release reads an f64).
+_strih_dante_input_float() { case "$1" in *.*) printf '%s' "$1" ;; *) printf '%s.0' "$1" ;; esac; }
+
+# strih_dante_input_terms_toml -> the loaded box's named latency terms + program TX as dante-input.toml lines
+# (issues 1510 + 1513, obs v0.4.27 / dstack 244): `network_latency_ms` (a) + `receive_buffer_ms` (b) = the Dante
+# latency P, and on a TX box `tx` + `tx_track`. A `none` fact writes no line. Before the [[subscribe]] tables.
+strih_dante_input_terms_toml() {
+  local net rb tx tr
+  net="$(strih_box_fact STRIH_DANTE_NETWORK_LATENCY_MS)" && rb="$(strih_box_fact STRIH_DANTE_RECEIVE_BUFFER_MS)" \
+    && tx="$(strih_box_fact STRIH_DANTE_TX)" && tr="$(strih_box_fact STRIH_DANTE_TX_TRACK)" || return 1
+  [ "$net" = none ] || printf 'network_latency_ms = %s\n' "$(_strih_dante_input_float "$net")"
+  [ "$rb" = none ] || printf 'receive_buffer_ms = %s\n' "$(_strih_dante_input_float "$rb")"
+  [ "$tx" = none ] || printf 'tx = ["%s", "%s"]\ntx_track = %s\n' "${tx%%,*}" "${tx#*,}" "$tr"
+}
+
+# strih_dante_input_expected_latency_ns -> the Dante latency P = (a) + (b) of the loaded box in ns (rounded).
+strih_dante_input_expected_latency_ns() {
+  LC_ALL=C awk -v a="$(strih_box_fact STRIH_DANTE_NETWORK_LATENCY_MS)" -v b="$(strih_box_fact STRIH_DANTE_RECEIVE_BUFFER_MS)" \
+    'BEGIN { if (a == "none" || b == "none") exit 1; printf "%d\n", (a + b) * 1000000 + 0.5 }'
+}
+
+# _strih_dante_input_line_ms LINE -> the OBS log line's HH:MM:SS.mmm prefix in ms since midnight (rc 1 without).
+_strih_dante_input_line_ms() {
+  local d='[0123456789]'
+  [[ "$1" =~ ^(${d}{2}):(${d}{2}):(${d}{2})\.(${d}{3}) ]] || return 1
+  printf '%s\n' "$(( (10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}) * 1000 + 10#${BASH_REMATCH[4]} ))"
+}
+
+# strih_dante_input_terms_toml_grade DEST -> the `(program-dante) latency terms` row: DEST carries exactly the
+# facts' term + TX lines (issues 1510 + 1513). Through the caller's ok / bad.
+strih_dante_input_terms_toml_grade() {
+  local dest="$1" want line miss=""
+  want="$(strih_dante_input_terms_toml)" || { bad "(program-dante) latency terms: the box facts are unreadable"; return 0; }
+  while IFS= read -r line; do
+    [ -z "$line" ] || grep -qxF -- "$line" "$dest" 2>/dev/null || miss="${miss}${miss:+; }${line%% =*}"
+  done <<<"$want"
+  if [[ "$want" != *"tx = "* ]] && grep -qE '^(tx|tx_track) =' "$dest" 2>/dev/null; then miss="${miss}${miss:+; }a tx the facts do not declare"; fi
+  if [ -n "$miss" ]; then
+    bad "(program-dante) latency terms in ${dest} differ from the box facts (${miss}) -- re-run setup-strih.sh step 13, then restart OBS"
+  else
+    ok "(program-dante) latency terms in ${dest}: $(printf '%s' "$want" | tr '\n' ' ' | sed 's/ $//')"
+  fi
+}
+
+# strih_dante_input_tx_grade LOG L1 L2 -> verify item 9's TX rows (issue 1513) + the dante latency and the
+# network-latency NOTE (issue 1510). L1 / L2 = the status lines of the live window. Through ok / bad / note.
+strih_dante_input_tx_grade() {
+  local log="$1" l1="$2" l2="$3" want split got tx tr k a b t1 t2 grew="" hist="" probs=() rate line
+  want="$(strih_dante_input_expected_latency_ns 2>/dev/null || true)"
+  split="$(LC_ALL=C grep -a 'dante-input start: latency split' "$log" | tail -n 1 || true)"
+  got="$(strih_dante_input_field "$split" dante_latency_ns)"
+  if [ -z "$split" ]; then
+    bad "(program-dante) no 'dante-input start: latency split' line in ${log} (an obs release before v0.4.27, or the device did not start)"
+  elif [[ "$got" =~ ^[0123456789]+$ ]] && [ -n "$want" ] && [ "$((got > want ? got - want : want - got))" -le 1000 ]; then
+    ok "(program-dante) dante latency ${got} ns = (a) $(strih_box_fact STRIH_DANTE_NETWORK_LATENCY_MS) + (b) $(strih_box_fact STRIH_DANTE_RECEIVE_BUFFER_MS) ms (the start line's split)"
+  else
+    bad "(program-dante) dante latency ${got:-?} ns, the facts say ${want:-?} ns -- OBS runs another config: restart OBS (a latency change needs the owner, issue 1510)"
+  fi
+  # dlink's own statement of the terms (live 13.11.2026: `dlink latency: Dante latency P 13.041666 ms = network latency
+  # (a) 1 ms (default) + receive buffer (b) 12.041666 ms (default)`), named; `(default)` = OBS read no term
+  line="$(LC_ALL=C grep -a 'dlink latency: Dante latency P' "$log" | tail -n 1 | sed 's/^.*dlink latency: /dlink latency: /' || true)"
+  if [ -n "$line" ]; then
+    note "(program-dante) ${line}$([[ "$line" != *"(default)"* ]] || printf '%s' ' -- a term reads (default) while the box facts declare it: restart OBS onto the TOML')"
+  fi
+  tx="$(strih_box_fact STRIH_DANTE_TX)"; tr="$(strih_box_fact STRIH_DANTE_TX_TRACK)"; k="$(strih_dante_input_field "$l2" tx_track)"
+  if [ "$tx" = none ]; then
+    if [ -z "$l2" ]; then :
+    elif [ -z "$k" ]; then note "(program-dante) tx: the status line carries no tx_track (an obs release before v0.4.27)"
+    elif [ "$k" = 0 ]; then ok "(program-dante) tx: none on this device (tx_track=0)"
+    else bad "(program-dante) tx: tx_track=${k} on a device whose facts declare no TX -- re-run setup-strih.sh step 13, then restart OBS"; fi
+  else
+    line="$(LC_ALL=C grep -a "dante-input start: TX of OBS track ${tr} " "$log" | tail -n 1 || true)"
+    if [ -n "$line" ]; then ok "(program-dante) TX of OBS track ${tr}: obs_to_wire_ns=$(strih_dante_input_field "$line" obs_to_wire_ns) (computed by dlink)"
+    else bad "(program-dante) no 'dante-input start: TX of OBS track ${tr}' line in ${log}: the program TX did not start (the TOML's tx keys, then restart OBS)"; fi
+    if [ -n "$l2" ] && [ "$k" != "$tr" ]; then
+      bad "(program-dante) tx: tx_track=${k:-absent}, the facts send track ${tr} (an obs release before v0.4.27, or OBS started without the tx keys)"
+    elif [ -n "$l2" ]; then
+      [ "$(strih_dante_input_field "$l2" tx_priming)" = 0 ] || probs+=("tx_priming=$(strih_dante_input_field "$l2" tx_priming) (the TX player waits for its FIFO: silence goes out)")
+      for k in tx_underruns tx_recentres tx_overflows; do
+        a="$(strih_dante_input_field "$l1" "$k")"; b="$(strih_dante_input_field "$l2" "$k")"
+        [[ "$b" =~ ^[0123456789]+$ ]] || { probs+=("${k} unreadable"); continue; }
+        [ "$b" = 0 ] || hist="${hist}${k}=${b} "
+        if [ "$l1" != "$l2" ] && [[ "$a" =~ ^[0123456789]+$ ]] && [ "$b" -gt "$a" ]; then grew="${grew}${k} +$((b - a)) "; fi
+      done
+      [ -z "$grew" ] || probs+=("${grew% } over the window -- program audio to Dante lost while OBS runs")
+      a="$(strih_dante_input_field "$l1" tx_played)"; b="$(strih_dante_input_field "$l2" tx_played)"
+      if [ "$l1" = "$l2" ] || ! [[ "$a" =~ ^[0123456789]+$ && "$b" =~ ^[0123456789]+$ ]] || [ "$b" -le "$a" ]; then
+        probs+=("tx_played did not advance over the window (${a:-?} -> ${b:-?})")
+      fi
+      if [ "${#probs[@]}" -gt 0 ]; then
+        for k in "${probs[@]}"; do bad "(program-dante) tx: ${k}"; done
+      else
+        ok "(program-dante) tx: tx_played ${a} -> ${b}, tx_ppm=$(strih_dante_input_field "$l2" tx_ppm)${hist:+; since the start: ${hist% }}"
+        if t1="$(_strih_dante_input_line_ms "$l1")" && t2="$(_strih_dante_input_line_ms "$l2")"; then
+          [ "$t2" -ge "$t1" ] || t2=$((t2 + 86400000))
+          if [ "$t2" -gt "$t1" ]; then
+            rate=$(( (b - a) * 1000 / (t2 - t1) ))
+            [ "$rate" -ge 43200 ] && [ "$rate" -le 52800 ] \
+              || note "(program-dante) tx rate ${rate} frames/s over the window (48000 expected from the app rate; report-only)"
+          fi
+        fi
+      fi
+    fi
+  fi
+  line="$(LC_ALL=C grep -a 'network_latency_p99_us=' "$log" | tail -n 1 || true)"
+  if [ -n "$line" ]; then
+    note "(program-dante) network latency (report-only): min $(strih_dante_input_field "$line" network_latency_min_us) us p99 $(strih_dante_input_field "$line" network_latency_p99_us) us max $(strih_dante_input_field "$line" network_latency_max_us) us (the newest flow line)"
+  else
+    note "(program-dante) network latency (report-only): no network_latency_p99_us field in ${log}"
+  fi
+  return 0
 }
 
 # _strih_dante_input_dest HOME -> where the plugin reads it.
@@ -237,6 +352,7 @@ strih_dante_input_grade() {
   else
     bad "(program-dante) ${dest} is missing or names no ${dev} device -- re-run setup-strih.sh step 13 (the site file $(strih_dante_input_site_file) must exist), then restart OBS"
   fi
+  strih_dante_input_terms_toml_grade "$dest"   # issues 1510 + 1513: the named latency terms + the program TX
   if [ -n "${STRIH_DANTE_INPUT_KIND_FILE:-}" ]; then kind="$(cat "$STRIH_DANTE_INPUT_KIND_FILE" 2>/dev/null || true)"
   else kind="$(python3 "$scn" --host "$ws" --audio-input-kind 2>/dev/null || echo absent)"; fi
   if [ "$kind" = "$STRIH_DANTE_INPUT_SOURCE_KIND" ]; then
@@ -277,6 +393,7 @@ strih_dante_input_grade() {
     *) bad "(program-dante) ${v#bad }" ;;
   esac
   strih_dante_media_clock_grade "(program-dante)" obs < "$log"
+  strih_dante_input_tx_grade "$log" "$l1" "$l2"   # issues 1510 + 1513: the dante latency, the TX tokens, the network-latency NOTE
   # issue 1485: timing signals, report-only (a pump WARN that lost blocks also raises the gated rebootstraps)
   local tl pw
   tl="$(LC_ALL=C grep -a -c 'dante-input timing:' "$log" || true)"

@@ -10,6 +10,7 @@ paths:
   - "tests/python/test_strih_dante_ptp_1485.py"
   - "tests/python/test_stream_snv_dante_1495.py"
   - "scripts/strih-boxes/stream-snv.env"
+  - "tests/python/test_strih_dante_terms_1513.py"
 ---
 
 # strih-snv's program audio over Dante: the obs release's `dante_input` source (issue 1485)
@@ -47,9 +48,23 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
 - **The file:** `~/.camera-box/dante-input.toml` of the OBS user, read ONCE at OBS start (no file = no
   device and no source kind). setup-strih step 13 writes it after the leg (`strih_dante_input_install`):
   name `strih-obs`, iface = the leg's (`enp7s0.70`), `network_rate = 96000`, no `sample_rate`,
-  no `latency_ms` (dlink's default: 15 ms with a 6 ms pump margin since dstack v0.6.28, the old 10 ms on
-  the releases before it; writing 10 would pin OBS under the new default), the fact's ports, one `[[subscribe]]` per RX channel. Another box removes a file
+  never `latency_ms` (obs v0.4.27 refuses it), the named latency terms + the program TX from the box facts
+  (the bullet below), the fact's ports, one `[[subscribe]]` per RX channel. Another box removes a file
   carrying our header and leaves an operator's own.
+- **The named latency terms + the program TX (issues 1510 + 1513, obs v0.4.27 / dstack 244).** Four
+  required facts, the last of the key list: `STRIH_DANTE_NETWORK_LATENCY_MS` (a, one of Dante Controller's
+  0.25 / 0.5 / 1 / 2 / 5) -> `network_latency_ms`, `STRIH_DANTE_RECEIVE_BUFFER_MS` (b, 0 < ms <= 50, up to 6
+  decimals, no leading zero: TOML refuses `05.0`) -> `receive_buffer_ms` (both written as TOML floats), `STRIH_DANTE_TX` (`none` or two DIFFERENT labels
+  `L,R`, 1..31 characters each, no quote or backslash) + `STRIH_DANTE_TX_TRACK` (1..6) -> `tx = ["L", "R"]` + `tx_track`
+  (`strih_dante_input_terms_toml`, before the `[[subscribe]]` tables). The loader
+  (`_strih_box_dante_terms_ok`): a program device needs (a) and (b) explicit; a TX needs both labels, a
+  track and an explicit (b) (without it dlink lowers P to 8.365 ms); a box without a program device sets all
+  four `none` (so a VBAN rollback of stream-snv is the three VBAN facts + `STRIH_DANTE_DEVICES=none` + these
+  four `none`). strih-snv + stream-snv: (a) 1 + (b) 12.041666 = P 13.041666 ms, exactly the earlier default
+  (no latency change, owner rule); only stream-snv sends `OBS program L,OBS program R` track 1 (mbc Live RX
+  5/6, owner yes on issue 1513). A change of (a) or (b) is an owner decision. Clocks + latencies:
+  `.claude/rules/audio-clock-map.md` ("The named Dante latency terms"). Tests:
+  `tests/python/test_strih_dante_terms_1513.py`.
 - **Site data is never in git (the repo is public):** the per-box untracked
   `/etc/camera-box/dante-input.site.conf` (`STRIH_DANTE_INPUT_SITE_FILE`), placed by the supervisor:
   `RX<n>=<rx label>|<tx device>|<tx channel>`, 1-6 or 8 channels, contiguous. Missing or malformed on a
@@ -63,8 +78,19 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   PRESENT decides, also with an empty value), any
   `dante-input error:` line, and two `dante-input status:` lines 12 s apart (clock=media, holdover 0, a
   grandmaster, delivered_frames advancing; any of the gate's loss counters GROWING between the two lines
-  FAILs, a total since the start that holds still is only named). The `(vban-leg) vban` arrival
-  row is a NOTE on a Dante box. PipeWire stays purged (`dante:strih-obs` counts as a direct program).
+  FAILs, a total since the start that holds still is only named). Since obs v0.4.27 (issues 1510 +
+  1513, `strih_dante_input_terms_toml_grade` + `strih_dante_input_tx_grade`): `latency terms` (the TOML
+  carries every term + tx line the facts declare, and no tx they do not), `dante latency` (the last `dante-input start: latency split
+  dante_latency_ns=` within 1 us of (a) + (b); a missing line FAILs), dlink's own `dlink latency: Dante latency P ... = network
+  latency (a) ... + receive buffer (b) ...` line as a NOTE (a `(default)` term while the facts declare it =
+  OBS started before the TOML carried it: restart OBS; the live 13.11.2026 stream-snv read was all `(default)`), on a TX device the `dante-input start:
+  TX of OBS track N` line and the status TX tokens over the same window (`tx_track` = the fact's,
+  `tx_priming=0`, `tx_played` advancing, `tx_underruns` / `tx_recentres` / `tx_overflows` not growing; a
+  rate off 48000/s +-10 % is a NOTE), on an RX-only device `tx_track=0` (absent on an older line = NOTE),
+  and a report-only NOTE with the newest `network_latency_min_us` / `_p99_us` / `_max_us` found on any
+  OBS log line (UNVERIFIED where they appear: dstack names them per-flow status fields, and whether dlink's
+  log lines forwarded into the OBS log carry them is read on the box after the deploy; absent = a NOTE). The
+  `(vban-leg) vban` arrival row is a NOTE on a Dante box. PipeWire stays purged (`dante:strih-obs` counts as a direct program).
 - **The E2E gate:** `program-audio-continuity.sh` also marks the strih OBS log (through `strih-log-read.sh`)
   when `$STRIH` is a Dante box, and folds `scripts/dante_input_continuity.py`'s window result into the
   `program_audio_continuity` block (`strih_dante`, the worse verdict, `strih Dante:` reasons, so the
@@ -86,8 +112,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   launched on the reduced mask, systemd + user-manager CPUAffinity drop-ins, a hub ExecStartPost drop-in,
   the JPEG XS encoder's cores derived from it) after pump WARNs at a 5 ms margin. dstack v0.6.28 raised
   dlink's default budget to 15 ms with a 6 ms pump margin instead and removed `pump_cpu` / `io_cpu` /
-  `rx_cpu`. That machinery is GONE; never bring a reservation back, and never write a dlink latency
-  (`latency_ms`) for the OBS device. The hub's TOML is the intercom project's.
+  `rx_cpu`. That machinery is GONE; never bring a reservation back, and never write `latency_ms`
+  for the OBS device (the latency is the named terms of the box facts since obs v0.4.27). The hub's TOML is the intercom project's.
   - **The leftovers (`scripts/lib/strih-dante-cpu-leftovers.sh`, `strih_dante_cpu_leftover_paths`):**
     `/etc/strih-dante-rx-cpu.conf`, `/usr/local/sbin/strih-dante-rx-pin`, `/etc/sudoers.d/strih-dante-rx-pin`
     (always ours by name), `/etc/systemd/{system,user}.conf.d/50-strih-dante-reserved-cpu.conf` and

@@ -147,9 +147,12 @@ def test_the_toml_is_the_example_format_from_the_facts_and_the_site_file(tmp_pat
     assert d == {"name": "strih-obs", "iface": "enp7s0.70", "network_rate": 96000,
                  "rx": ["Program L", "Program R"], "arc_port": 4440, "cmc_port": 8800, "flows_port": 4455,
                  "rx_port_base": 30000,
+                 # issues 1510 + 1513: the named latency terms, P = 1 + 12.041666 = today's 13.041666 ms
+                 "network_latency_ms": 1.0, "receive_buffer_ms": 12.041666,
                  "subscribe": [{"rx": 1, "tx_channel": "MASTER-L", "tx_device": "foh-tx"},
                                {"rx": 2, "tx_channel": "MASTER-R", "tx_device": "foh-tx"}]}
-    assert "sample_rate" not in d and "latency_ms" not in d   # dlink's default (15 ms since dstack v0.6.28)
+    assert "sample_rate" not in d and "latency_ms" not in d   # obs v0.4.27 refuses latency_ms
+    assert "tx" not in d and "tx_track" not in d   # strih-obs sends nothing (issue 1513 is stream-snv's)
 
 
 @pytest.mark.parametrize("site,why", [
@@ -227,7 +230,9 @@ def _status(t, f, **k):
 
 START = ("12:00:00.000: dante-input start: config=/home/newlevel/.camera-box/dante-input.toml name=strih-obs "
          "iface=enp7s0.70 latency_ms=10 obs_rate=48000 sample_rate=48000 device_rate=96000 halved=true rx=[] "
-         "ports=Some(4440)/Some(8800)/Some(4455) rx_port_base=Some(47200) subscriptions=2 state_file=x")
+         "ports=Some(4440)/Some(8800)/Some(4455) rx_port_base=Some(47200) subscriptions=2 state_file=x\n"
+         # issues 1510 + 1513: the obs v0.4.27 split line, item 9 grades it against the facts' (a) + (b)
+         "12:00:00.001: dante-input start: latency split dante_latency_ns=13041666 rx_path_ns=14999999 tx_path_ns=28677082")
 
 
 def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=None, user=None):
@@ -241,7 +246,8 @@ def _grade(tmp_path, log_lines, kind="dante_input", toml=True, grow=True, nxt=No
     kf.write_text(kind)
     dest = tmp_path / "dante-input.toml"
     if toml:
-        dest.write_text('name = "strih-obs"\n[[subscribe]]\n')
+        # issues 1510 + 1513: the facts' named latency terms, as step 13 writes them
+        dest.write_text('name = "strih-obs"\nnetwork_latency_ms = 1.0\nreceive_buffer_ms = 12.041666\n[[subscribe]]\n')
     # the "live window": a sleep stand-in that appends one more status line
     nxt = nxt or _status("12:00:20.000", 999999)
     sleep_fn = ('sleep() { printf "%%s\\n" %s >> %s; }' % (json.dumps(nxt), json.dumps(str(log)))) if grow else 'sleep() { :; }'
