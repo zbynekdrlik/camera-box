@@ -45,7 +45,7 @@ WIN_FILES = {
 }
 
 
-def _release(tmp, tamper=None, zip_manifest="same", side=None, commit=COMMIT, drop=()):
+def _release(tmp, tamper=None, zip_manifest="same", side=None, commit=COMMIT, drop=(), zip_extra=None):
     """Publish a fake Windows release under tmp/srv/<tag>/ + its pin; returns the env."""
     stage = tmp / "stage"
     files = dict(WIN_FILES)
@@ -76,6 +76,8 @@ def _release(tmp, tamper=None, zip_manifest="same", side=None, commit=COMMIT, dr
         for p in sorted(stage.rglob("*")):
             if p.is_file():
                 z.write(p, p.relative_to(stage).as_posix())
+        if zip_extra:
+            zip_extra(z)
     (srv / "WINDOWS_MANIFEST.json").write_text(man_text)
     (srv / (ZIP + ".sha256")).write_text(f"{side or _sha(zp)} *{ZIP}\n")
     pin = tmp / "obs-release.pin"
@@ -198,6 +200,37 @@ def test_a_zip_without_a_required_windows_file_is_refused(tmp_path):
     assert not dest.exists()
 
 
+def test_a_zip_carrying_a_symlink_is_refused(tmp_path):
+    """The deploy copies the tree onto a Windows box: a symlink entry is never staged (review finding)."""
+    def link(z):
+        info = zipfile.ZipInfo("obs-plugins/64bit/evil.dll")
+        info.create_system = 3
+        info.external_attr = (0o120777 << 16)
+        z.writestr(info, "/etc/passwd")
+    env = _release(tmp_path, zip_extra=link)
+    r, dest = _bundle(tmp_path, env)
+    assert r.returncode == 1 and "symlink" in r.stderr, r.stderr
+    assert not dest.exists()
+
+
+def test_a_zip_with_a_duplicate_entry_never_waits_on_a_prompt(tmp_path):
+    """unzip asks `replace?` on a second copy of a name; the bundle must never read the terminal."""
+    def dup(z):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            z.writestr("bin/64bit/obs.dll", "a second libobs\n")
+    env = _release(tmp_path, zip_extra=dup)
+    dest = tmp_path / "win"
+    r = subprocess.run(["bash", "-c", f"set -euo pipefail\n. '{LIB}'\nobs_release_windows_bundle \"$1\" \"$2\"",
+                        "harness", str(REPO), str(dest)], capture_output=True, text=True, timeout=60,
+                       env={"PATH": "/usr/bin:/bin", **env}, input="A\n")
+    # (tmp_path holds this test's name, so match the lib's own phrase, never a bare word)
+    assert r.returncode == 1 and "carries a duplicate entry" in r.stderr, r.stdout + r.stderr
+    assert "[y]es, [n]o" not in r.stdout + r.stderr, "unzip must never prompt"
+    assert not dest.exists()
+
+
 def test_an_unreachable_release_is_refused_never_another_build(tmp_path):
     env = _release(tmp_path)
     env["OBS_RELEASE_URL"] = f"file://{tmp_path / 'nowhere'}"
@@ -210,7 +243,7 @@ def test_an_unreachable_release_is_refused_never_another_build(tmp_path):
 
 def _fake_gh(tmp):
     d = tmp / "fakebin"
-    d.mkdir()
+    d.mkdir(exist_ok=True)
     gh = d / "gh"
     gh.write_text(f"#!/bin/bash\necho \"gh $*\" >> '{tmp / 'gh.log'}'\nif [ \"$1 $2\" = 'run list' ]; then echo '[]'; fi\nexit 0\n")
     gh.chmod(0o755)
@@ -258,6 +291,67 @@ def test_a_fast_deploy_of_a_pinned_windows_box_is_refused(tmp_path):
     r = _deploy(tmp_path, env, "--plan", "--fast", "--stage", str(tmp_path), "--boxes", "resolume-snv")
     assert r.returncode == 2, r.stdout + r.stderr
     assert "--fast" in r.stderr and "pinned obs release" in r.stderr, r.stderr
+    r = _deploy(tmp_path, env, "--plan", "--fast", "--run-id", "R", "--sha", "ab12cd3", "--stage", str(tmp_path),
+                "--boxes", "imag,resolume-snv")
+    assert r.returncode == 2 and "separately" in r.stderr, r.stdout + r.stderr
+
+
+def test_a_mixed_imag_and_resolume_plan_gives_each_box_its_own_sha_and_pair(tmp_path):
+    """imag keeps the anchor SHA + its obs.h pair; resolume takes the pin commit + the pinned manifest's pair."""
+    env = _release(tmp_path)
+    r, tree = _bundle(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    r = _deploy(tmp_path, env, "--plan", "--run-id", "R", "--sha", "ab12cd3", "--stage", str(tree),
+                "--boxes", "imag,resolume-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = r.stdout
+    imag = out[out.index("box=imag"):out.index("box=resolume-snv")]
+    win = out[out.index("box=resolume-snv"):out.index("# fleet-deploy log line")]
+    log = out[out.index("# fleet-deploy log line"):]
+    assert "\tR\tab12cd3\timag\tfull" in log and f"\tobs-{TAG}\t{COMMIT}\tresolume-snv\tfull" in log, log
+    assert "genlock_write_markers \"$MARKER_DIR\" 'ab12cd3' 'ab12cd3' '' ''" in imag, imag
+    assert "4:1" not in imag and COMMIT not in imag
+    assert f"'GENLOCK_BUILD_SHA.txt')  '{COMMIT}'" in win and f"C:\\stage-genlock-{COMMIT}" in win
+    assert "@('4', 'output_stats=1')" in win and ZIP in win and "ab12cd3" not in win
+    note = f"Windows boxes resolume-snv take the pinned obs release {TAG} ({COMMIT})"
+    assert note in out, "the plan says the Windows box ignores the anchor run"
+
+
+def test_execute_warns_when_the_verified_manifest_records_no_stats_pair(tmp_path):
+    env = _release(tmp_path)
+    srv = tmp_path / "srv" / TAG
+    # rebuild the release with a manifest whose release block carries no stats versions
+    man = json.loads((srv / "WINDOWS_MANIFEST.json").read_text())
+    del man["release"]["genlock_stats_version"]
+    text = json.dumps(man, indent=2) + "\n"
+    (srv / "WINDOWS_MANIFEST.json").write_text(text)
+    with zipfile.ZipFile(srv / ZIP, "a") as z:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            z.writestr("BUNDLE_MANIFEST.json", text)
+    # a zip with two BUNDLE_MANIFEST.json entries is refused, so rebuild it cleanly instead
+    stage = tmp_path / "stage"
+    (stage / "BUNDLE_MANIFEST.json").write_text(text)
+    (srv / ZIP).unlink()
+    with zipfile.ZipFile(srv / ZIP, "w") as z:
+        for p in sorted(stage.rglob("*")):
+            if p.is_file():
+                z.write(p, p.relative_to(stage).as_posix())
+    (srv / (ZIP + ".sha256")).write_text(f"{_sha(srv / ZIP)} *{ZIP}\n")
+    pin = Path(env["OBS_RELEASE_PIN_FILE"])
+    lines = []
+    for l in pin.read_text().splitlines():
+        if l.startswith("OBS_RELEASE_WINDOWS_SHA256="):
+            l = "OBS_RELEASE_WINDOWS_SHA256=" + _sha(srv / ZIP)
+        elif l.startswith("OBS_RELEASE_WINDOWS_MANIFEST_SHA256="):
+            l = "OBS_RELEASE_WINDOWS_MANIFEST_SHA256=" + _sha(srv / "WINDOWS_MANIFEST.json")
+        lines.append(l)
+    pin.write_text("\n".join(lines) + "\n")
+    r = _deploy(tmp_path, env, "--boxes", "resolume-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "records no stats ABI pair" in r.stderr, r.stderr
+    assert "stats ABI unknown at plan time" in r.stdout
 
 
 def test_execute_stages_the_verified_pinned_zip_and_never_asks_for_a_windows_genlock_run(tmp_path):
