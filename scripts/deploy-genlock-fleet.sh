@@ -743,7 +743,7 @@ emit_windows_plan() {
   # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
   emit_forced_table_audit_preflight "$box" "$ip"
   cat <<PLAN
-# STEP 0 (once per box): upload the downloaded '${artifact}' bytes (staged locally at ${stage}) to
+# STEP 0 (once per box): upload the downloaded '${artifact}' bytes ($(fleet_win_bundle_source "$HERE/.." "$stage")) to
 #         the box at ${win_stage} via the ${mcp} MCP FileUpload (or sshpass scp -O of a zip +
 #         Expand-Archive on the box), then run the program below in the ${mcp} MCP Shell
 #         (timeout >= 360 s: the issue-1367 clean close may wait 30 s for a recording + 45 s for OBS):

@@ -82,3 +82,17 @@ fleet_win_bundle_label() {
     fleet_windows_artifact "${2:-full}"
   fi
 }
+
+# fleet_win_bundle_source ROOT STAGE -> where STEP 0's bytes come from. A pinned box: the cached,
+# sha-proved zip (its root is the stage layout), expanded on the box -- the unzipped STAGE is a mktemp
+# dir the planner removes on exit. Else: the downloaded windows-genlock artifact at STAGE.
+fleet_win_bundle_source() {
+  local root="${1:?tree required}" tag
+  if obs_pin_has_windows "$root" && tag="$(obs_pin_tag "$root" 2>/dev/null)"; then
+    printf 'the cached pinned zip %s, sha256 %s -- upload it and Expand-Archive it into the stage\n' \
+      "${OBS_RELEASE_CACHE:-${root%/}/obs-release}/${tag}/$(obs_release_windows_zip_name "$tag")" \
+      "$(obs_pin_windows_sha256 "$root")"
+  else
+    printf 'staged locally at %s\n' "${2:-}"
+  fi
+}
