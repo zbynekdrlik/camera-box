@@ -72,3 +72,46 @@ def test_the_repo_stage_rsync_uses_the_filters_and_the_bundle_one_does_not_1515(
     bundle_call = next(l for l in text.splitlines() if '"$w/bundle/" "$stage/bundle/"' in l)
     assert "strih_lx_repo_rsync_filters" in repo_call, repo_call
     assert "strih_lx_repo_rsync_filters" not in bundle_call, bundle_call
+
+
+def _child_run(tmp_path, setup_rc):
+    """Run the generated run-setup.sh --child with a fake setup-strih.sh and a `chown` stub on PATH."""
+    stage = tmp_path / "genlock-stage-x"
+    (stage / "repo" / "scripts").mkdir(parents=True)
+    (stage / "repo" / "scripts" / "setup-strih.sh").write_text(f"#!/bin/bash\nexit {setup_rc}\n")
+    (stage / "repo" / "scripts" / "setup-strih.sh").chmod(0o755)
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    log = tmp_path / "chown.log"
+    # the stub records its argv and whether setup-strih.rc already existed (the deploy polls that file)
+    (stubs / "chown").write_text(
+        "#!/bin/bash\n"
+        f'[ -e "{stage}/setup-strih.rc" ] && rc=present || rc=absent\n'
+        f'printf "%s|rc=%s\\n" "$*" "$rc" >> "{log}"\n')
+    (stubs / "chown").chmod(0o755)
+    runner = subprocess.run(
+        ["bash", "-c", '. "$1" && strih_lx_setup_runner "$2" strih-snv', "h", str(DEPLOY_LIB), str(stage)],
+        capture_output=True, text=True)
+    assert runner.returncode == 0, runner.stderr
+    script = tmp_path / "run-setup.sh"
+    script.write_text(runner.stdout)
+    import os
+    env = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}")
+    r = subprocess.run(["bash", str(script), "--child"], capture_output=True, text=True, env=env)
+    return stage, log, r
+
+
+def test_the_root_setup_hands_the_stage_tree_back_before_its_rc_1515(tmp_path):
+    # live 13.11.2026: the sweep could not delete an older stage whose repo/ held root-owned files
+    # (the box's shading pin cache, a __pycache__): each pin bump left one stage in the /tmp quota.
+    stage, log, r = _child_run(tmp_path, 0)
+    assert r.returncode == 0, r.stderr
+    assert (stage / "setup-strih.rc").read_text().strip() == "0"
+    lines = log.read_text().splitlines() if log.exists() else []
+    assert lines == [f"-R --reference={stage} {stage}/repo|rc=absent"], lines
+
+
+def test_a_failed_setup_still_hands_the_tree_back_and_keeps_its_rc_1515(tmp_path):
+    stage, log, r = _child_run(tmp_path, 7)
+    assert (stage / "setup-strih.rc").read_text().strip() == "7"
+    assert log.exists() and "--reference" in log.read_text()
