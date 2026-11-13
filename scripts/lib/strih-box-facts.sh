@@ -60,6 +60,26 @@ _strih_box_dante_devices_ok() {
   return "$rc"
 }
 
+# _strih_box_dante_terms_ok NAME PROG NET RBUF TX TRACK -> issues 1510 + 1513 (obs v0.4.27): PROG=1 needs NET (a: 0.25/0.5/1/2/5)
+# + RBUF (b: 0 < ms <= 50, <= 6 decimals) explicit, TX none or `L,R` (1..31 chars) + TRACK 1..6, never without RBUF; PROG=0: all none.
+_strih_box_dante_terms_ok() {
+  local n="strih-box $1:" prog="$2" net="$3" rb="$4" tx="$5" tr="$6" rc=0 d='[0123456789]' l r k
+  if [ "$prog" = 0 ]; then
+    for k in NETWORK_LATENCY_MS:"$net" RECEIVE_BUFFER_MS:"$rb" TX:"$tx" TX_TRACK:"$tr"; do
+      [ "${k#*:}" = none ] || { echo "$n STRIH_DANTE_${k%%:*} must be none: no <role>-obs program device in STRIH_DANTE_DEVICES" >&2; rc=1; }
+    done; return "$rc"; fi
+  case "$net" in 0.25 | 0.5 | 1 | 2 | 5) ;; *) echo "$n STRIH_DANTE_NETWORK_LATENCY_MS '${net}' must be explicit for the program device: Dante Controller's 0.25, 0.5, 1, 2 or 5 ms (issue 1510)" >&2; rc=1 ;; esac
+  if [[ ! "$rb" =~ ^${d}{1,2}(\.${d}{1,6})?$ ]] || [[ "$rb" =~ ^[0.]+$ ]] || [ "$((10#${rb%%.*}))" -gt 50 ] || [[ "$rb" =~ ^50\.0*[123456789] ]]; then
+    echo "$n STRIH_DANTE_RECEIVE_BUFFER_MS '${rb}' must be explicit for the program device: ms above 0 and at most 50, up to 6 decimals (issue 1510)" >&2; rc=1; fi
+  [ "$tx" != none ] || { [ "$tr" = none ] || { echo "$n STRIH_DANTE_TX_TRACK must be none without STRIH_DANTE_TX" >&2; rc=1; }; return "$rc"; }
+  l="${tx%%,*}"; r="${tx#*,}"
+  if [ "$l" = "$tx" ] || [[ "$r" == *,* || -z "$l" || -z "$r" || "$l$r" == " "* || "$l" == *" " || "$r" == [\ ]* || "$r" == *" " ]] || [ "${#l}" -gt 31 ] || [ "${#r}" -gt 31 ]; then
+    echo "$n STRIH_DANTE_TX '${tx}' must be two channel labels 'L,R' (1..31 characters each, no space first or last)" >&2; rc=1; fi
+  [[ "$tr" =~ ^[123456]$ ]] || { echo "$n STRIH_DANTE_TX_TRACK '${tr}' must be the OBS track sent, 1..6" >&2; rc=1; }
+  [ "$rb" != none ] || { echo "$n STRIH_DANTE_TX needs an explicit STRIH_DANTE_RECEIVE_BUFFER_MS: a TX without it lowers the RX latency to 8.365 ms (issue 1513)" >&2; rc=1; }
+  return "$rc"
+}
+
 # strih_box_fact_keys -> every fact key, one per line (the fact-file contract; all are required).
 strih_box_fact_keys() {
   printf '%s\n' \
@@ -83,7 +103,8 @@ strih_box_fact_keys() {
     STRIH_AUDIO_BUFFERING_MS \
     STRIH_JXS_CAMERAS STRIH_JXS_CAMERA_PIN_MS \
     STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS \
-    STRIH_DESKTOP
+    STRIH_DESKTOP \
+    STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -335,6 +356,8 @@ strih_box_validate() {
     fi
   fi
   _strih_box_dante_devices_ok "$name" "${f[STRIH_DANTE_DEVICES]}" "${f[STRIH_PROGRAM_VBAN_LEG]}" || bad=1
+  v=0; [[ " ${f[STRIH_DANTE_DEVICES]} " != *" ${f[STRIH_ROLE]}-obs="* ]] || v=1   # issues 1510 + 1513
+  _strih_box_dante_terms_ok "$name" "$v" "${f[STRIH_DANTE_NETWORK_LATENCY_MS]}" "${f[STRIH_DANTE_RECEIVE_BUFFER_MS]}" "${f[STRIH_DANTE_TX]}" "${f[STRIH_DANTE_TX_TRACK]}" || bad=1
   # issue 1439 (ROZHODNUTÉ 6360417876, owner 23.10.2026): the VBAN-only leg on the console's audio VLAN
   # (scripts/lib/strih-vban-leg.sh). STRIH_PROGRAM_VBAN_LEG = `mac:<MAC>` (a second NIC, its MAC lower-case
   # as sysfs prints it; stream-snv) | `vlan:<id>` (a tagged VLAN 1..4094 on the rig NIC; strih-snv, the
@@ -764,21 +787,11 @@ strih_box_desktop() { strih_box_fact STRIH_DESKTOP; }
 
 # strih_lx_dante_gm -> the PTP grandmaster host the box's dantesync config allows (fact STRIH_DANTE_GM;
 # RIG_GRANDMASTER_IP overrides it for one run, the same override every rig grandmaster read honours).
-strih_lx_dante_gm() {
-  if [ -n "${RIG_GRANDMASTER_IP:-}" ]; then
-    printf '%s' "$RIG_GRANDMASTER_IP"
-  else
-    strih_box_fact STRIH_DANTE_GM
-  fi
-}
+strih_lx_dante_gm() { if [ -n "${RIG_GRANDMASTER_IP:-}" ]; then printf '%s' "$RIG_GRANDMASTER_IP"; else strih_box_fact STRIH_DANTE_GM; fi; }
 
 # strih_lx_program_sender -> the NDI program a stream box receives (fact STRIH_PROGRAM_SENDER), empty on
 # a strih (`none`).
-strih_lx_program_sender() {
-  local s
-  s="$(strih_box_fact STRIH_PROGRAM_SENDER)" || return 1
-  [ "$s" = none ] || printf '%s' "$s"
-}
+strih_lx_program_sender() { local s; s="$(strih_box_fact STRIH_PROGRAM_SENDER)" || return 1; [ "$s" = none ] || printf '%s' "$s"; }
 
 # strih_lx_program_vban_streams / _port / _reserve_ms -> issue 1439: the console's program VBAN stream
 # name(s) the box receives straight into its obs-vban source, the UDP port OBS binds and the fixed
