@@ -41,15 +41,18 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     `stream_dante` (`e2e_report_youtube.py`).
   - Before the first deploy, read `ss -lntup` on stream-snv: the box-wide `ip_unprivileged_port_start =
     319` lets every unprivileged process bind 319-1023 there too (strih-snv's read was 6629102078).
-- **Which box:** the fact `STRIH_DANTE_DEVICES` names `strih-obs=arc:cmc:flows:rxfirst-rxlast`
-  (`strih_program_dante_declared`). The loader then requires the VBAN program facts `none` and keeps
-  `STRIH_PROGRAM_AUDIO_INPUT` (`ASIO zvuk`) as the input's name; a box with both is refused. The leg's
-  sender keeps only the hub's 6980.
+- **Which box:** the fact `STRIH_DANTE_DEVICES` names `strih-obs=arc:cmc:flows`
+  (`strih_program_dante_declared`; issue 1519 dropped the RX range: dstack's fixed slot blocks, the ARC port
+  in 4440-4471). The loader then requires the VBAN program facts `none` and keeps
+  `STRIH_PROGRAM_AUDIO_INPUT` (`ASIO zvuk`) as the input's name; a box with both is refused. A Dante box has
+  no leg VBAN sender (issue 1519: dstack's generic leg filter, `obs-vban-receive.md`).
 - **The file:** `~/.camera-box/dante-input.toml` of the OBS user, read ONCE at OBS start (no file = no
   device and no source kind). setup-strih step 13 writes it after the leg (`strih_dante_input_install`):
   name `strih-obs`, iface = the leg's (`enp7s0.70`), `network_rate = 96000`, no `sample_rate`,
   never `latency_ms` (obs v0.4.27 refuses it), the named latency terms + the program TX from the box facts
-  (the bullet below), the fact's ports, one `[[subscribe]]` per RX channel. Another box removes a file
+  (the bullet below), the fact's arc / cmc / flows ports, never `rx_port_base` or `tx_port_base` (issue 1519,
+  obs v0.4.28: unset = the slot's fixed block from the ARC port; a kept base warns), one `[[subscribe]]` per RX
+  channel. Another box removes a file
   carrying our header and leaves an operator's own.
 - **The named latency terms + the program TX (issues 1510 + 1513, obs v0.4.27 / dstack 244).** Four
   required facts, the last of the key list: `STRIH_DANTE_NETWORK_LATENCY_MS` (a, one of Dante Controller's
@@ -153,7 +156,7 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   the leg, receive only) and falls back to the dsync service's clock. The dsync service stays the ONLY writer
   of the system clock and the clock of the rest of the box; "dsync is the only PTP owner" is superseded for
   these devices.
-  - **The leg:** one input rule for the group to 319/320 (`obs-vban-receive.md`, the Dante variant).
+  - **The leg:** dstack's generic filter admits 319/320 (issue 1519, `obs-vban-receive.md`, the Dante variant).
   - **OBS's right to bind 319 = the box-wide sysctl** `net.ipv4.ip_unprivileged_port_start = 319` in
     `/etc/sysctl.d/60-strih-dante-ptp-port.conf`, step 13 on a Dante-program box (`strih_dante_ptp_port_install`
     from `strih_dante_input_install`, header-checked file, the running value written to
@@ -177,9 +180,9 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   - **The hub's right** comes from its released unit (item 16, `intercom-pinned-release.md`).
   - **The pin threshold** `STRIH_DANTE_PTP_FIRST_DSTACK=v0.6.23`: a component is READY when its pin's
     `*_RELEASE_DSTACK_VERSION` is at or above it (`strih_dante_ptp_pin_ready intercom|obs`, the repo's one
-    version rule `release_version_cmp`, which `dtray_version_ge` uses too). Below it nothing opens 319: the
-    leg rule needs either pin READY (`strih_dante_ptp_leg_open`: it only admits packets), the box-wide sysctl
-    both (`strih_dante_ptp_all_ready`: the bind right is what starts an old follower); the capability
+    version rule `release_version_cmp`, which `dtray_version_ge` uses too). Below it nothing may bind 319: the
+    box-wide sysctl needs both (`strih_dante_ptp_all_ready`: the bind right is what starts an old follower);
+    the leg itself admits 319/320 since issue 1519 (dstack's generic filter); the capability
     and media clock rows are NOTEs. The threshold follows the pins, never a date.
   - **The hub's journal** is read for the current invocation only, filtered to the clock lines as it
     streams (a weeks-long invocation is never held whole), bounded 20 s; a hub that is not running is a

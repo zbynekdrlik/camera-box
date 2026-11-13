@@ -301,6 +301,24 @@ fn fake_shading_release(dir: &Path) -> (PathBuf, PathBuf) {
     (pin, cache)
 }
 
+/// Issue 1519: dstack's two pinned leg-filter files under a file:// mirror laid out like the raw tag
+/// tree (`<tag>/tools/linux/<file>`), so the staging step never reaches the network.
+fn dstack_leg_filter_mirror(dir: &Path) -> PathBuf {
+    let base = dir.join("dstack-mirror");
+    let d = base.join("v0.6.119/tools/linux");
+    fs::create_dir_all(&d).unwrap();
+    for f in ["dante-leg.nft", "dante-leg-notrack.nft"] {
+        fs::copy(
+            manifest_dir()
+                .join("tests/fixtures/dstack_leg_1519")
+                .join(f),
+            d.join(f),
+        )
+        .unwrap();
+    }
+    base
+}
+
 fn sha256_of(p: &Path) -> String {
     let sum = Command::new("sha256sum").arg(p).output().unwrap();
     String::from_utf8(sum.stdout).unwrap()[..64].to_string()
@@ -401,6 +419,7 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
     );
     let (intercom_pin, intercom_tarball) = fake_intercom_release(dir.path());
     let (shading_pin, shading_cache) = fake_shading_release(dir.path());
+    let dstack_mirror = dstack_leg_filter_mirror(dir.path());
     let bin = stub_bin(dir.path());
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
@@ -428,6 +447,15 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
         .env("STRIH_INTERCOM_TARBALL_SRC", &intercom_tarball)
         .env("SHADING_RELEASE_PIN_FILE", &shading_pin)
         .env("SHADING_RELEASE_CACHE", &shading_cache)
+        .env(
+            "STRIH_DANTE_LEG_URL",
+            format!("file://{}", dstack_mirror.display()),
+        )
+        .env("STRIH_DANTE_LEG_CACHE", dir.path().join("dstack-cache"))
+        .env(
+            "STRIH_DANTE_LEG_PIN_FILE",
+            manifest_dir().join("scripts/dstack-leg-filter.pin"),
+        )
         .env("STRIH_LX_SETUP_POLLS", "3")
         .env("STRIH_LX_SETUP_POLL_SECS", "0")
         .env("STRIH_LX_VERIFY_POLLS", "3")

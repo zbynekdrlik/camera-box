@@ -9,7 +9,7 @@
 # load (no file = no device and no source kind); the format is the release's dante-input.example.toml.
 #
 # Which box: one whose fact STRIH_DANTE_DEVICES names the program device `<STRIH_ROLE>-obs` (its ports
-# arc:cmc:flows:rxfirst-rxlast): `strih-obs` on a strih box (strih-snv), `stream-obs` on a stream box
+# arc:cmc:flows, issue 1519): `strih-obs` on a strih box (strih-snv), `stream-obs` on a stream box
 # (stream-snv since issue 1495, distinct from mbc's own Dante device `mbc-snv`). Such a box takes its program
 # from Dante: the loader then refuses the VBAN program facts (STRIH_PROGRAM_VBAN_STREAMS / _PORT /
 # _RESERVE_MS none) and keeps STRIH_PROGRAM_AUDIO_INPUT as the input's name (`ASIO zvuk`, `mbc`). Every
@@ -59,17 +59,17 @@ strih_dante_input_device() {
   case "$role" in stream) printf 'stream-obs\n' ;; *) printf '%s\n' "$STRIH_DANTE_INPUT_DEVICE" ;; esac
 }
 
-# strih_dante_input_ports DEVICES [NAME] -> `arc cmc flows rx_port_base` of the program device NAME (default
-# the loaded box's, strih_dante_input_device) in DEVICES (the fact's value); nothing + rc 1 when DEVICES names
-# no such device.
+# strih_dante_input_ports DEVICES [NAME] -> `arc cmc flows` of the program device NAME (default the loaded
+# box's, strih_dante_input_device) in DEVICES (the fact's value); nothing + rc 1 when DEVICES names no such
+# device. Issue 1519: no rx_port_base -- the flow ports are the fixed block of the ARC port's slot.
 strih_dante_input_ports() {
-  local d spec ports first name="${2-}"
+  local d name="${2-}"
   [ -n "$name" ] || name="$(strih_dante_input_device)"
   for d in ${1:-}; do
     case "$d" in
       "${name}="*)
-        spec="${d#*=}"; ports="${spec%:*}"; first="${spec##*:}"; first="${first%%-*}"
-        printf '%s %s\n' "${ports//:/ }" "$first"
+        d="${d#*=}"
+        printf '%s\n' "${d//:/ }"
         return 0 ;;
     esac
   done
@@ -124,13 +124,13 @@ strih_dante_input_site_rows() {
   for ((k = 1; k <= n; k++)); do printf '%s\n' "${site_rows[$k]}"; done
 }
 
-# strih_dante_input_toml IFACE "ARC CMC FLOWS RXBASE" ROWS -> the dante-input.toml text (pure). ROWS =
+# strih_dante_input_toml IFACE "ARC CMC FLOWS" ROWS -> the dante-input.toml text (pure). ROWS =
 # strih_dante_input_site_rows' output. network_rate 96000 (the Dante network; dlink halves it to OBS's
 # 48 kHz), no sample_rate (OBS's own), the facts' latency terms + TX (strih_dante_input_terms_toml).
 strih_dante_input_toml() {
   local iface="${1:?iface required}" ports="${2:?ports required}" chans="${3:?rows required}"
-  local arc cmc flows base label dev chan rx="" i=0 subs=""
-  read -r arc cmc flows base <<<"$ports"
+  local arc cmc flows label dev chan rx="" i=0 subs=""
+  read -r arc cmc flows <<<"$ports"
   while IFS=$'\t' read -r label dev chan; do
     [ -n "$label" ] || continue
     i=$((i + 1))
@@ -140,7 +140,9 @@ strih_dante_input_toml() {
   printf '%s\n\n' "$STRIH_DANTE_INPUT_HEADER"
   printf 'name = "%s"\niface = "%s"\nnetwork_rate = %s\nrx = [%s]\n' \
     "$(strih_dante_input_device)" "$iface" "$STRIH_DANTE_INPUT_NETWORK_RATE" "$rx"
-  printf 'arc_port = %s\ncmc_port = %s\nflows_port = %s\nrx_port_base = %s\n' "$arc" "$cmc" "$flows" "$base"
+  # issue 1519 (obs v0.4.28 / dstack 0.6.117): no rx_port_base and never a tx_port_base -- unset = the slot's
+  # fixed block in 29800-31847 from the ARC port (the loader keeps it in 4440-4471)
+  printf 'arc_port = %s\ncmc_port = %s\nflows_port = %s\n' "$arc" "$cmc" "$flows"
   strih_dante_input_terms_toml || return 1   # a failed fact read never writes a file without the terms
   printf '%s' "$subs"
 }

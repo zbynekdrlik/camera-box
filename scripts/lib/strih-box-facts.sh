@@ -329,7 +329,7 @@ strih_box_validate() {
       echo "strih-box ${name}: STRIH_PROGRAM_VBAN_RESERVE_MS '${vr}' must be the fixed Receive Buffer in ms (${STRIH_BOX_VBAN_RESERVE_MS_MIN}..${STRIH_BOX_VBAN_RESERVE_MS_MAX})" >&2; bad=1
     fi
   fi
-  _strih_box_dante_devices_ok "$name" "${f[STRIH_DANTE_DEVICES]}" "${f[STRIH_PROGRAM_VBAN_LEG]}" || bad=1
+  _strih_box_dante_devices_ok "$name" "${f[STRIH_DANTE_DEVICES]}" "${f[STRIH_PROGRAM_VBAN_LEG]}" "${f[STRIH_PROGRAM_VBAN_SENDER]}" || bad=1
   v=0; [[ " ${f[STRIH_DANTE_DEVICES]} " != *" ${f[STRIH_ROLE]}-obs="* ]] || v=1   # issues 1510 + 1513
   _strih_box_dante_terms_ok "$name" "$v" "${f[STRIH_DANTE_NETWORK_LATENCY_MS]}" "${f[STRIH_DANTE_RECEIVE_BUFFER_MS]}" "${f[STRIH_DANTE_TX]}" "${f[STRIH_DANTE_TX_TRACK]}" || bad=1
   # issue 1439 (ROZHODNUTÉ 6360417876, owner 23.10.2026): the VBAN-only leg on the console's audio VLAN
@@ -781,7 +781,7 @@ strih_lx_program_vban_leg() { strih_box_fact STRIH_PROGRAM_VBAN_LEG; }
 strih_lx_program_vban_leg_addr() { strih_box_fact STRIH_PROGRAM_VBAN_LEG_ADDR; }
 strih_lx_program_vban_sender() { strih_box_fact STRIH_PROGRAM_VBAN_SENDER; }
 
-# issue 1485: the Dante devices on the leg (`none`, or `name=arc:cmc:flows:rxfirst-rxlast ...`, strih-dante-leg.sh).
+# issue 1485: the Dante devices on the leg (`none`, or `name=arc:cmc:flows ...`, issue 1519; strih-dante-leg.sh).
 strih_lx_dante_devices() { strih_box_fact STRIH_DANTE_DEVICES; }
 
 # strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).

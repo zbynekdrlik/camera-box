@@ -1,0 +1,77 @@
+#!/usr/sbin/nft -f
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The generic Dante-leg filter (dstack #264, docs/two-networks.md): one
+# ruleset, identical on every Linux PC with a Dante leg, never edited per
+# device or per direction. Every device of ours binds fixed ports from its
+# slot inside the dstack flow range below, so the filter names no device.
+#
+# Load (as root), naming the PC's Dante-leg interface:
+#   nft -D dante_leg=<iface> -f /etc/dstack/dante-leg.nft
+# A load without -D fails ("unknown identifier"), and nothing changes.
+# Loading again replaces the table in one transaction (idempotent).
+#
+# The port sets are read by crates/dstack/tests/dante_leg.rs, which checks
+# them against the ports the code binds: change both together.
+
+table inet dstack_dante_leg
+delete table inet dstack_dante_leg
+
+table inet dstack_dante_leg {
+	# Dante's ports and the dstack flow range: PTP 319/320, multicast
+	# audio 4321, every slot's ARC 4440-4471 and flow control 4455-4486
+	# (Audinate's 4440, 4444, 4455 inside), mDNS 5353, the info ports
+	# 8700-8708 (8702/8708 groups), every slot's CMC 8800-8831,
+	# Audinate's unicast audio 14336-14591 (Dante Virtual Soundcard), and
+	# the dstack flow range (slot k: RX 29800+64k..+31, TX the next 32).
+	set dante_udp {
+		type inet_service
+		flags interval
+		elements = { 319-320, 4321, 4440-4486, 5353, 8700-8708, 8800-8831, 14336-14591, 29800-31847 }
+	}
+
+	# Dante's multicast groups: link-local (mDNS 224.0.0.251, the info and
+	# heartbeat groups 224.0.0.231/.233, PTP peer delay), PTP's
+	# 224.0.1.129-132, and multicast audio flows (239.0.0.0/8).
+	set dante_groups {
+		type ipv4_addr
+		flags interval
+		elements = { 224.0.0.0/24, 224.0.1.129-224.0.1.132, 239.0.0.0/8 }
+	}
+
+	# Remote access on the Dante address (owner, 13.11.2026, dstack #239):
+	# ssh and the remoteos MCP, from anywhere.
+	set remote_tcp {
+		type inet_service
+		elements = { 22, 8092 }
+	}
+
+	chain in {
+		type filter hook input priority filter; policy accept;
+		iifname != $dante_leg accept
+		ct state established,related accept
+		ct state invalid counter drop
+		meta nfproto ipv6 counter drop
+		ip protocol { icmp, igmp } accept
+		udp dport @dante_udp accept
+		ip daddr @dante_groups meta l4proto udp accept
+		# Dante's mDNS answers come unicast from port 5353 to the port a
+		# query left from: the OS's ephemeral ports only.
+		udp sport 5353 udp dport 32768-60999 accept
+		# A DHCP server's answer to a leg that takes its address by DHCP.
+		udp sport 67 udp dport 68 accept
+		tcp dport @remote_tcp accept
+		counter drop
+	}
+
+	chain out {
+		type filter hook output priority filter; policy accept;
+		oifname != $dante_leg accept
+		ct state established,related accept
+		meta nfproto ipv6 counter drop
+		ip protocol { icmp, igmp, udp } accept
+		# An admin host reaching another PC on its Dante address.
+		tcp dport @remote_tcp accept
+		counter drop
+	}
+}
