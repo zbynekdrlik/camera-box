@@ -382,38 +382,58 @@ case "$1 $2" in
   "connection modify")
     prof="$3"; shift 3
     while [ $# -ge 2 ]; do printf '%s\n' "$2" > "$state/$prof.$1"; shift 2; done ;;
-  "--wait 30") [ ! -e "$state/up-fails" ] || exit 4 ;;
+  "--wait 30")
+    # an up fails after `fail-ups-after` successful ups (the rollback-FAILED case)
+    n=$(( $(cat "$state/ups" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$state/ups"
+    if [ -e "$state/fail-ups-after" ] && [ "$n" -gt "$(cat "$state/fail-ups-after")" ]; then exit 4; fi ;;
 esac
 exit 0
 '''
+# iputils' arping: `-V` names iputils; a `-U` announce is logged; a probe answers per $FAKE_HEALTHY.
+ARPING = r'''
+case "$1" in -V) echo "arping from iputils 20240117"; exit 0 ;; esac
+printf '%s\n' "$*" >> "$FAKE_NM/arping.log"
+case " $* " in *" -U "*) exit 0 ;; esac
+[ "$FAKE_HEALTHY" = 1 ]
+'''
+SWITCH_ARGS = ["enp56s0", "rig0", "stream-lan", "vban-dante70", "70", "10.77.8.1", "10.77.7.232",
+               "10.77.9.204", "10.77.7.204"]
 
 
-def _switch(tmp_path, healthy, new_present=True, retired=None, wait="1"):
+def _switch(tmp_path, healthy, new_present=True, retired=None, wait="1", arping=ARPING,
+            fail_ups_after=None):
     state = tmp_path / "nm"
     state.mkdir()
+    if fail_ups_after is not None:
+        (state / "fail-ups-after").write_text(str(fail_ups_after))
     sysroot = tmp_path / "sys"
     _nic(sysroot, "enp56s0", "e8:9c:25:ce:b6:ea", driver="r8169", usb=False)
     if new_present:
         _nic(sysroot, "rig0", MAC)
     bin_dir = tmp_path / "bin"
     _stub(bin_dir, "nmcli", NMCLI)
-    ok = "exit 0\n" if healthy else "exit 1\n"
-    _stub(bin_dir, "ping", ok)
-    _stub(bin_dir, "arping", ok)
+    _stub(bin_dir, "ping", '[ "$FAKE_HEALTHY" = 1 ]\n')
+    _stub(bin_dir, "arping", arping)
+    _stub(bin_dir, "ip", 'printf "%s\\n" "$*" >> "$FAKE_NM/ip.log"\n')
     conf = tmp_path / "90-retired.conf"
     if retired is not None:
         conf.write_text(retired)
-    gen = subprocess.run(["bash", str(RENAME), "--switch-program", "enp56s0", "rig0", "stream-lan",
-                          "vban-dante70", "70", "10.77.8.1", "10.77.7.232", wait],
+    gen = subprocess.run(["bash", str(RENAME), "--switch-program", *SWITCH_ARGS, wait],
                          capture_output=True, text=True, timeout=30)
     assert gen.returncode == 0, gen.stderr
     prog = tmp_path / "switch.sh"
     prog.write_text(gen.stdout)
     env = dict(os.environ, PATH="%s:%s" % (bin_dir, os.environ["PATH"]), FAKE_NM=str(state),
+               FAKE_HEALTHY="1" if healthy else "0",
                RIG_NIC_SWITCH_RESULT=str(tmp_path / "result"), RIG_NIC_SWITCH_RETIRED=str(conf),
                RIG_NIC_SWITCH_SYSROOT=str(sysroot))
     r = subprocess.run(["bash", str(prog)], capture_output=True, text=True, env=env, timeout=60)
     return r, state, conf, (tmp_path / "result")
+
+
+def _log(state, name):
+    f = state / name
+    return f.read_text().splitlines() if f.exists() else []
 
 
 RETIRED = ("# issue 1495\n[device-vban-dante70-retired]\n"
@@ -428,10 +448,22 @@ def test_switch_moves_both_profiles_and_unretires_the_adapter(tmp_path):
     assert (st / "stream-lan.connection.interface-name").read_text().strip() == "rig0"
     assert (st / "vban-dante70.vlan.parent").read_text().strip() == "rig0"
     assert (st / "vban-dante70.connection.interface-name").read_text().strip() == "rig0.70"
-    assert "match-device=interface-name:enxaabbccddeeff;mac:aa:bb:cc:dd:ee:ff\n" in conf.read_text()
-    log = (st / "nmcli.log").read_text()
+    assert conf.read_text() == ("# issue 1495\n[device-vban-dante70-retired]\n"
+                                "match-device=interface-name:enxaabbccddeeff;mac:aa:bb:cc:dd:ee:ff\nmanaged=0\n")
+    log = "\n".join(_log(st, "nmcli.log"))
     assert "device set rig0 managed yes" in log
     assert log.index("connection up stream-lan") < log.index("connection up vban-dante70")
+
+
+def test_a_successful_switch_downs_the_old_nic_and_announces_both_addresses(tmp_path):
+    """The onboard NIC stays cabled until the owner unplugs it: left up it would answer ARP for the rig
+    address on the same L2 (and NetworkManager could DHCP it), and neighbours would keep the old MAC."""
+    r, st, _, _ = _switch(tmp_path, healthy=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "device disconnect enp56s0" in _log(st, "nmcli.log")
+    assert _log(st, "ip.log") == ["link set dev enp56s0 down"]
+    announces = [x for x in _log(st, "arping.log") if " -U " in " %s " % x]
+    assert announces == ["-q -U -c 2 -I rig0 10.77.9.204", "-q -U -c 2 -I rig0.70 10.77.7.204"]
 
 
 def test_switch_rolls_back_when_the_new_nic_does_not_answer(tmp_path):
@@ -442,30 +474,64 @@ def test_switch_rolls_back_when_the_new_nic_does_not_answer(tmp_path):
     assert (st / "vban-dante70.vlan.parent").read_text().strip() == "enp56s0"
     assert (st / "vban-dante70.connection.interface-name").read_text().strip() == "enp56s0.70"
     assert conf.read_text() == RETIRED
-    log = (st / "nmcli.log").read_text().splitlines()
+    log = _log(st, "nmcli.log")
     assert log[-1] == "--wait 30 connection up vban-dante70"
+    assert "device set rig0 managed no" in log
+    assert log.index("device set rig0 managed no") < log.index("connection modify stream-lan connection.interface-name enp56s0")
+    assert _log(st, "ip.log") == ["link set dev rig0 down"]
+    assert not any(" -U " in " %s " % x for x in _log(st, "arping.log"))
+
+
+def test_a_rollback_that_cannot_bring_the_old_nic_up_says_so(tmp_path):
+    r, st, _, res = _switch(tmp_path, healthy=False, fail_ups_after=2)
+    assert r.returncode == 2
+    assert res.read_text().startswith("rollback-FAILED ") and "console" in res.read_text()
 
 
 def test_switch_refuses_before_any_change_without_the_renamed_nic(tmp_path):
     r, st, conf, res = _switch(tmp_path, healthy=True, new_present=False, retired=RETIRED)
     assert r.returncode == 1 and res.read_text().startswith("refused ")
-    assert not (st / "nmcli.log").exists()
+    assert not _log(st, "nmcli.log") and not _log(st, "ip.log")
     assert conf.read_text() == RETIRED
+
+
+def test_switch_refuses_an_arping_that_is_not_iputils(tmp_path):
+    r, st, conf, res = _switch(tmp_path, healthy=True, retired=RETIRED, arping='echo "ARPing 2.21, by Thomas Habets"\n')
+    assert r.returncode == 1 and "not iputils" in res.read_text()
+    assert not _log(st, "nmcli.log") and conf.read_text() == RETIRED
+
+
+def test_switch_refuses_a_dropin_with_two_match_lines(tmp_path):
+    two = RETIRED + "match-device=mac:11:22:33:44:55:66\n"
+    r, st, conf, res = _switch(tmp_path, healthy=True, retired=two)
+    assert r.returncode == 1 and "more than one match-device" in res.read_text()
+    assert not _log(st, "nmcli.log") and conf.read_text() == two
 
 
 def test_switch_without_a_retired_dropin_touches_no_file(tmp_path):
     r, st, conf, res = _switch(tmp_path, healthy=True)
     assert r.returncode == 0 and not conf.exists()
-    assert "managed yes" not in (st / "nmcli.log").read_text()
+    assert "managed yes" not in "\n".join(_log(st, "nmcli.log"))
 
 
-@pytest.mark.parametrize("args", [
-    ["enp56s0", "rig0", "stream-lan", "vban-dante70", "70", "10.77.8.1", "10.77.7.232", "0"],
-    ["enp56s0", "rig0", "stream lan", "vban-dante70", "70", "10.77.8.1", "10.77.7.232"],
-    ["enp56s0", "rig0;id", "stream-lan", "vban-dante70", "70", "10.77.8.1", "10.77.7.232"],
-    ["-x", "rig0", "stream-lan", "vban-dante70", "70", "10.77.8.1", "10.77.7.232"],
-    ["enp56s0", "rig0", "stream-lan", "vban-dante70", "x70", "10.77.8.1", "10.77.7.232"],
+@pytest.mark.parametrize("bad", [
+    {9: "0"},                 # WAIT_S
+    {2: "stream lan"},
+    {1: "rig0;id"},
+    {0: "-x"},
+    {4: "x70"},
+    {4: "4095"},             # VLAN id over 4094
+    {7: "10.77.9.204&"},
 ])
-def test_the_switch_program_refuses_unsafe_arguments(args):
+def test_the_switch_program_refuses_unsafe_arguments(bad):
+    args = SWITCH_ARGS + ["60"]
+    for i, v in bad.items():
+        args[i] = v
     r = subprocess.run(["bash", str(RENAME), "--switch-program", *args], capture_output=True, text=True)
     assert r.returncode != 0 and not r.stdout
+
+
+def test_the_runbook_runs_the_program_with_the_lib_signature():
+    rule = (REPO / ".claude" / "rules" / "strih-linux-provisioning.md").read_text()
+    assert ("--switch-program enp56s0 rig0\n   stream-lan vban-dante70 70 10.77.8.1 10.77.7.232 10.77.9.204 10.77.7.204 60"
+            in rule)
