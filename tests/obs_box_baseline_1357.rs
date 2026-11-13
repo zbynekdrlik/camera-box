@@ -1607,6 +1607,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         BASELINE,
         KIOSK,
         "scripts/lib/strih-box-facts.sh",
+        // issue 1502: the Dante fact validators (sourced by the loader)
+        "scripts/lib/strih-box-dante-facts.sh",
         // issue 1415: the rig time zone (sourced by the kiosk half)
         "scripts/lib/rig-timezone.sh",
         // issue 1387: background work off the OBS cores (sourced by the system half)

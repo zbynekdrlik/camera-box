@@ -248,7 +248,7 @@ def test_installer_enables_one_timer_per_venue_and_retires_the_single_unit():
 def test_installer_ships_the_venue_table_libs_and_fact_files():
     out = _source(_DEV2_INSTALL, 'printf "%s\\n" "${LIB_FILES[@]}"')
     assert set(out.split()) == {
-        "avsync-measure.sh", "avsync-venues.sh", "obs-fleet.sh", "strih-box-facts.sh",
+        "avsync-measure.sh", "avsync-venues.sh", "obs-fleet.sh", "strih-box-facts.sh", "strih-box-dante-facts.sh",
     }
     src = _DEV2_INSTALL.read_text()
     assert "scripts/strih-boxes/" in src
