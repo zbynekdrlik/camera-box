@@ -374,6 +374,9 @@ STREAM_SNV_PRE_1495 = {
     "STRIH_PROGRAM_VBAN_STREAMS": "stream", "STRIH_PROGRAM_VBAN_PORT": "6980", "STRIH_PROGRAM_VBAN_RESERVE_MS": "80",
     "STRIH_PROGRAM_VBAN_LEG": "mac:00:e0:4c:68:01:85", "STRIH_PROGRAM_VBAN_SENDER": "10.77.7.232",
     "STRIH_DANTE_DEVICES": "none",
+    # issues 1510 + 1513: no program Dante device = no latency terms and no TX
+    "STRIH_DANTE_NETWORK_LATENCY_MS": "none", "STRIH_DANTE_RECEIVE_BUFFER_MS": "none",
+    "STRIH_DANTE_TX": "none", "STRIH_DANTE_TX_TRACK": "none",
 }
 BOXES = Path(__file__).resolve().parent.parent.parent / "scripts" / "strih-boxes"
 

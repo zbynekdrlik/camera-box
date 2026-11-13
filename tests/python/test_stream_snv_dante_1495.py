@@ -112,7 +112,10 @@ def test_a_dante_program_next_to_a_vban_program_is_refused(tmp_path):
 
 def test_the_vban_rollback_is_the_three_program_facts_and_no_device(tmp_path):
     d = _boxes_with(tmp_path, "stream-snv", {"STRIH_PROGRAM_VBAN_STREAMS": "stream", "STRIH_PROGRAM_VBAN_PORT": "6980",
-                                             "STRIH_PROGRAM_VBAN_RESERVE_MS": "80", "STRIH_DANTE_DEVICES": "none"})
+                                             "STRIH_PROGRAM_VBAN_RESERVE_MS": "80", "STRIH_DANTE_DEVICES": "none",
+                                             # issues 1510 + 1513: the four Dante terms go none with the device
+                                             "STRIH_DANTE_NETWORK_LATENCY_MS": "none", "STRIH_DANTE_RECEIVE_BUFFER_MS": "none",
+                                             "STRIH_DANTE_TX": "none", "STRIH_DANTE_TX_TRACK": "none"})
     r = _bash('strih_box_load stream-snv >/dev/null; if strih_program_dante_declared; then echo dante; else echo vban; fi; '
               'strih_lx_program_vban_leg', env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode == 0, r.stderr
@@ -141,6 +144,9 @@ def test_the_stream_box_toml_names_its_own_device_on_the_vlan(tmp_path):
     assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["rx_port_base"]) == (4440, 8800, 4455, 30000)
     assert [x["tx_channel"] for x in d["subscribe"]] == ["MIX-L", "MIX-R"]
     assert "sample_rate" not in d and "latency_ms" not in d
+    # issues 1510 + 1513: the named terms (P kept at 13.041666 ms) + the program TX to mbc
+    assert (d["network_latency_ms"], d["receive_buffer_ms"]) == (1.0, 12.041666)
+    assert (d["tx"], d["tx_track"]) == (["OBS program L", "OBS program R"], 1)
 
 
 def test_the_install_writes_the_stream_toml(tmp_path):

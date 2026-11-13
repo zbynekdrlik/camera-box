@@ -154,6 +154,11 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_JXS_PROGRAM_PIN_MS",
     // issue 1466: the operator desktop session (openbox | xfce).
     "STRIH_DESKTOP",
+    // issues 1510 + 1513: the program Dante device's named latency terms + the program TX.
+    "STRIH_DANTE_NETWORK_LATENCY_MS",
+    "STRIH_DANTE_RECEIVE_BUFFER_MS",
+    "STRIH_DANTE_TX",
+    "STRIH_DANTE_TX_TRACK",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -237,6 +242,11 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_JXS_PROGRAM_PIN_MS=none",
         // issue 1466: strih-snv stays on the openbox kiosk until its turn.
         "STRIH_DESKTOP=openbox",
+        // issues 1510 + 1513: P = 1 + 12.041666 ms, today's; strih-obs sends nothing.
+        "STRIH_DANTE_NETWORK_LATENCY_MS=1",
+        "STRIH_DANTE_RECEIVE_BUFFER_MS=12.041666",
+        "STRIH_DANTE_TX=none",
+        "STRIH_DANTE_TX_TRACK=none",
         "LOADED=strih-snv",
     ] {
         assert!(
