@@ -367,6 +367,22 @@ def test_execute_stages_the_verified_pinned_zip_and_never_asks_for_a_windows_gen
     assert fields[1:5] == [f"obs-{TAG}", COMMIT, "resolume-snv", "full"], log
 
 
+def test_execute_step0_names_the_cached_pinned_zip_never_the_removed_unzip_dir(tmp_path):
+    """The unzipped tree lives in a mktemp dir the planner removes on exit: STEP 0 must name the
+    cached, sha-proved zip (and its sha256 + Expand-Archive) that still exists when the operator acts."""
+    env = _release(tmp_path)
+    r = _deploy(tmp_path, env, "--boxes", "resolume-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    step0 = next(line for line in r.stdout.splitlines() if line.startswith("# STEP 0"))
+    block = r.stdout[r.stdout.index(step0):r.stdout.index(step0) + 600]
+    cached = tmp_path / "cache" / TAG / ZIP
+    assert cached.is_file()
+    assert str(cached) in block, block
+    assert _sha(cached) in block, block
+    assert "Expand-Archive" in block, block
+    assert "staged locally at" not in block, block
+
+
 def test_execute_refuses_a_pinned_zip_that_does_not_verify_and_prints_no_program(tmp_path):
     env = _release(tmp_path, side="2" * 64)
     r = _deploy(tmp_path, env, "--boxes", "resolume-snv")
