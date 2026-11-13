@@ -569,6 +569,44 @@ def test_a_peers_reply_to_an_ephemeral_client_socket_is_admitted_by_its_source_p
                      r"udp dport 32768-60999 counter accept", _dante_text())
 
 
+def _dante_tx_text(tx):
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        r = _bash('. "%s"\nstrih_vban_leg_nft_text "$@"' % LEG_LIB, "enp56s0.70", "none", "none", "10.77.7.204",
+                  "stream-obs=4440:8800:4455:30000-30031", tx,
+                  env=dict(_pin_env(d, "v0.6.23", "v0.6.23"), STRIH_DANTE_AVAHI_UID="111"))
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+TX_KEEPALIVE = 'iifname "enp56s0.70" ip saddr 10.77.7.0/24 udp dport 32768-60999 counter accept'
+
+
+def test_a_tx_box_admits_its_receivers_keepalives_to_the_ephemeral_tx_flow_sockets_1513():
+    """Issue 1513 (dstack, 13.11.2026 09:51Z): stream-obs's TX flow sockets bind ephemeral ports (47533,
+    52825); mbc's receiver keepalives come from ITS ephemeral ports (60170/60171), so neither the device
+    dports nor the peer-sport rule admits them. They fell to the leg's drop, the TX flow expired after 4 s
+    and mbc re-requested it every ~9 s. A box whose facts declare a program TX admits UDP from the Dante
+    /24 to the ephemeral range (the stopgap until dstack's fixed TX flow port range)."""
+    t = _dante_tx_text("OBS program L,OBS program R")
+    assert TX_KEEPALIVE in t, t
+    assert t.index(TX_KEEPALIVE) < t.index('iifname "enp56s0.70" counter drop'), t
+
+
+def test_a_receive_only_box_keeps_the_ephemeral_range_shut_to_any_source_port_1513():
+    t = _dante_tx_text("none")
+    assert TX_KEEPALIVE not in t, t
+    assert "udp dport 32768-60999 counter accept" in t  # the peer-sport reply rule stays
+
+
+def test_the_filter_install_and_its_grade_pass_the_box_tx_fact_1513():
+    text = LEG_LIB.read_text()
+    for call in ('strih_vban_leg_nft_text "$ifc" "$sender" "$port" "$addr" "$dev" "$tx"',
+                 'strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$dev" "$tx"'):
+        assert call in text, call
+    assert "_strih_vban_leg_tx()" in text
+
+
 def test_a_peer_device_in_a_higher_slot_is_admitted_1508():
     """Issue 1508 (12.11.2026): a dstack device on a peer PC sits in slot k above the base (ARC 4440+k,
     flows 4455+k, CMC 8800+k, k = 0..31). mbc-snv answered from 4456 after mbc's restart and the base-only
