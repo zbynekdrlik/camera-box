@@ -27,6 +27,20 @@ ME = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).s
 MYGROUP = subprocess.run(["id", "-gn"], capture_output=True, text=True, check=True).stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def _xfce_box_facts(tmp_path_factory, monkeypatch):
+    """The owner rejected XFCE on 13.11.2026 and every real box is openbox again, so the xfce code path is
+    tested on a COPY of the fact files where stream-snv reads `STRIH_DESKTOP=xfce`."""
+    boxes = tmp_path_factory.mktemp("xfce-boxes")
+    for f in (SCRIPTS / "strih-boxes").iterdir():
+        if f.is_file():
+            shutil.copy(f, boxes / f.name)
+    env = boxes / "stream-snv.env"
+    env.write_text(env.read_text().replace("STRIH_DESKTOP=openbox", "STRIH_DESKTOP=xfce"))
+    monkeypatch.setenv("STRIH_BOXES_DIR", str(boxes))
+    return boxes
+
+
 def _bash(body, *args, box="stream-snv", env=None):
     script = ('set -euo pipefail\n. "$1"\nstrih_box_load "$2"\n. "$3"\n. "$4"\nshift 4\n'
               'fail() { echo "FAIL: $*" >&2; return 1; }\n' + body)
@@ -37,7 +51,7 @@ def _bash(body, *args, box="stream-snv", env=None):
 
 
 def _fact(box, key):
-    for line in (SCRIPTS / "strih-boxes" / f"{box}.env").read_text().splitlines():
+    for line in (Path(os.environ["STRIH_BOXES_DIR"]) / f"{box}.env").read_text().splitlines():
         if line.startswith(key + "="):
             return line.split("=", 1)[1]
     return None
@@ -45,10 +59,12 @@ def _fact(box, key):
 
 # --- the fact ---------------------------------------------------------------------------------------------
 
-def test_stream_snv_is_the_first_xfce_box_and_every_other_box_stays_openbox():
-    assert _fact("stream-snv", "STRIH_DESKTOP") == "xfce"
-    for box in ("strih-snv", "strih-pp", "stream-pp"):
-        assert _fact(box, "STRIH_DESKTOP") == "openbox", box
+def test_every_real_box_is_openbox_after_the_owner_rejected_xfce():
+    # owner 13.11.2026: "xdce nepaci sa mi takze vrat stream-snv naspat ten co mame je lepsi"
+    for box in ("strih-snv", "stream-snv", "strih-pp", "stream-pp"):
+        line = [l for l in (SCRIPTS / "strih-boxes" / f"{box}.env").read_text().splitlines()
+                if l.startswith("STRIH_DESKTOP=")]
+        assert line == ["STRIH_DESKTOP=openbox"], (box, line)
 
 
 def test_the_desktop_fact_is_the_last_key_and_the_accessor_reads_it():
@@ -60,7 +76,7 @@ def test_the_desktop_fact_is_the_last_key_and_the_accessor_reads_it():
 @pytest.mark.parametrize("value", ["gnome", "", "XFCE", "openbox xfce"])
 def test_the_loader_refuses_any_other_desktop(tmp_path, value):
     boxes = tmp_path / "boxes"
-    shutil.copytree(SCRIPTS / "strih-boxes", boxes)
+    shutil.copytree(os.environ["STRIH_BOXES_DIR"], boxes)
     f = boxes / "stream-snv.env"
     f.write_text(f.read_text().replace("STRIH_DESKTOP=xfce", f"STRIH_DESKTOP={value}"))
     r = subprocess.run(["bash", "-c", '. "$1"; strih_box_load stream-snv', "h", str(FACTS)],
