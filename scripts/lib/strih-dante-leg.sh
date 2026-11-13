@@ -50,6 +50,9 @@ STRIH_DANTE_GROUPS="224.0.0.231 224.0.0.233 224.0.0.251"
 STRIH_DANTE_PEER_DEFAULT_PORTS="4440-4471 4455-4486 8800-8831"
 # net.ipv4.ip_local_port_range's Linux default, where a port-0 client socket lands
 STRIH_DANTE_EPHEMERAL_PORTS="32768-60999"
+# issue 1517 (owner 13.11.2026, airuleset#1313): ssh + the remoteos MCP agent answer on the Dante address
+# too, from the leg's /24 only (remoteos-mcp#96).
+STRIH_DANTE_MGMT_TCP_PORTS="22, 8092"
 
 # strih_dante_leg_declared -> rc 0 when the LOADED box declares Dante devices on the leg.
 strih_dante_leg_declared() {
@@ -113,6 +116,7 @@ strih_dante_nft_input() {
       "$STRIH_DANTE_PTP_GROUP" "$STRIH_DANTE_PTP_PORTS"
   fi
   printf '        iifname "%s" ip protocol igmp counter accept\n' "$ifc"
+  printf '        iifname "%s" ip saddr %s tcp dport { %s } counter accept\n' "$ifc" "$net" "$STRIH_DANTE_MGMT_TCP_PORTS"
 }
 
 # _strih_dante_avahi_uid -> the avahi user's uid ('' when there is none). nft stores a uid and lists the
@@ -129,4 +133,5 @@ strih_dante_nft_output() {
   if [ -n "$uid" ]; then printf '        oifname "%s" meta skuid %s counter drop\n' "$ifc" "$uid"; fi
   printf '        oifname "%s" ip protocol igmp counter accept\n' "$ifc"
   printf '        oifname "%s" ip saddr %s ip daddr { %s%s } meta l4proto udp counter accept\n' "$ifc" "$addr" "$net" "$groups"
+  printf '        oifname "%s" ip saddr %s ip daddr %s tcp sport { %s } counter accept\n' "$ifc" "$addr" "$net" "$STRIH_DANTE_MGMT_TCP_PORTS"
 }
