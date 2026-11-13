@@ -63,7 +63,7 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   (`_strih_box_dante_terms_ok`): a program device needs (a) and (b) explicit; a TX needs both labels, a
   track and an explicit (b) (without it dlink lowers P to 8.365 ms); a box without a program device sets all
   four `none` (so a VBAN rollback of stream-snv is the three VBAN facts + `STRIH_DANTE_DEVICES=none` + these
-  four `none`). stream-snv: (a) 1 + (b) 12.041666 = P 13.041666 ms, exactly the earlier default; strih-snv since issue 1510 (dstack #234, owner 13.11.2026): (b) 17.041666 = P 18.041666 ms (its RX thread woke up to 10.7 ms late, late_blocks ~9/s)
+  four `none`). strih-snv + stream-snv: (a) 1 + (b) 12.041666 = P 13.041666 ms, exactly the earlier default
   (no latency change, owner rule); only stream-snv sends `OBS program L,OBS program R` track 1 (mbc Live RX
   5/6, owner yes on issue 1513). A change of (a) or (b) is an owner decision. Clocks + latencies:
   `.claude/rules/audio-clock-map.md` ("The named Dante latency terms"). Tests:
