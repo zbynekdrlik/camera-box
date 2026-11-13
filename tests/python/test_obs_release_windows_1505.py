@@ -383,6 +383,28 @@ def test_execute_step0_names_the_cached_pinned_zip_never_the_removed_unzip_dir(t
     assert "staged locally at" not in block, block
 
 
+def test_step0_names_the_box_stage_as_the_expand_target(tmp_path):
+    """Review of the STEP 0 fix: the zip is expanded on the BOX, into C:\\stage-genlock-<commit>."""
+    env = _release(tmp_path)
+    r = _deploy(tmp_path, env, "--boxes", "resolume-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    step0 = next(line for line in r.stdout.splitlines() if line.startswith("# STEP 0"))
+    block = r.stdout[r.stdout.index(step0):r.stdout.index(step0) + 700]
+    assert f"Expand-Archive it into C:\\stage-genlock-{COMMIT}" in block, block
+
+
+def test_plan_without_a_cached_zip_says_to_fetch_it_first(tmp_path):
+    """A --plan run never fetches: STEP 0 must not point at a cache path that does not exist."""
+    env = _release(tmp_path)
+    r, tree = _bundle(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    env = dict(env, OBS_RELEASE_CACHE=str(tmp_path / "empty-cache"))
+    r = _deploy(tmp_path, env, "--plan", "--stage", str(tree), "--boxes", "resolume-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    step0 = next(line for line in r.stdout.splitlines() if line.startswith("# STEP 0"))
+    assert "is not cached yet" in step0 and "without --plan" in step0, step0
+
+
 def test_execute_refuses_a_pinned_zip_that_does_not_verify_and_prints_no_program(tmp_path):
     env = _release(tmp_path, side="2" * 64)
     r = _deploy(tmp_path, env, "--boxes", "resolume-snv")
