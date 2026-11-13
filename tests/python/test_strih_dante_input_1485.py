@@ -467,6 +467,18 @@ def test_a_timing_counter_is_reported_never_graded(key):
     assert r["verdict"] == "PASS" and r["counters"][key]["delta"] == 2, r
 
 
+def test_rx_reordered_is_reported_never_graded_1508():
+    """obs v0.4.29 (dstack #278): a reorder is not a loss; its count is shown, never a failure."""
+    w = [l + " rx_reordered=%d" % (10 * n) if "dante-input status:" in l else l for n, l in enumerate(_window())]
+    r = CONT.decide(w, 1, 3)
+    assert r["verdict"] == "PASS" and r["counters"]["rx_reordered"]["delta"] == 40, r
+
+
+def test_a_line_without_rx_reordered_is_not_unknown_1508():
+    r = CONT.decide(_window(), 1, 3)
+    assert r["verdict"] == "PASS" and "rx_reordered" not in r["counters"], r
+
+
 def test_a_line_before_obs_v030_is_unknown():
     w = [l.split(" rx_holes=")[0] if "dante-input status:" in l else l for l in _window()]
     r = CONT.decide(w, 1, 3)
