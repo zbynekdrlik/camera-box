@@ -279,6 +279,14 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
 4. **stage** — `rsync -a --delete --timeout=120` bundle → `/tmp/genlock-stage-<sha>/bundle/`, tree →
    `…/repo/` (ONE per-sha dir the next sweep removes whole; the old fixed `/tmp/strih-snv-deploy-repo`
    is gone). **OBS is still running** — an rsync failure exits 4 BEFORE anything is stopped.
+   **A redeploy at the SAME obs pin reuses that stage dir (issue 1515).** setup-strih (root) puts the
+   box's OWN per-box release pins into `repo/shading-release/` etc. (strih-snv's REST shading pin), so
+   the repo rsync protects `/shading-release/` `/intercom-release/` `/obs-release/` from `--delete`
+   (`strih_lx_repo_rsync_filters`; without it: rc 23, live 13.11.2026), and the root child hands
+   `repo/` back with `chown -R --reference=<stage>` before `setup-strih.rc`, so the operator's sweep
+   can remove the stage later. A pytest of rsync behaviour needs stand-in files of DIFFERENT lengths:
+   rsync's quick check skips equal size + same-second mtime, and a same-user 0555 dir is no stand-in for
+   root ownership (rsync makes a dir it owns writable before deleting in it).
 5. **stop** — delegated to `/usr/local/bin/strih-obs-stop.sh` (plain mode = `systemctl --user stop`,
    so the unit `ExecStop` runs and `Restart=on-failure` stays quiet) + a bounded wait for the unit AND
    every `obs`. The deploy itself sends no signal; the stop code's own SIGTERM → grace → SIGKILL ladder
