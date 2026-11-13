@@ -607,6 +607,22 @@ def test_the_filter_install_and_its_grade_pass_the_box_tx_fact_1513():
     assert "_strih_vban_leg_tx()" in text
 
 
+MGMT_IN = 'iifname "enp56s0.70" ip saddr 10.77.7.0/24 tcp dport { 22, 8092 } counter accept'
+MGMT_OUT = 'oifname "enp56s0.70" ip saddr 10.77.7.204 ip daddr 10.77.7.0/24 tcp sport { 22, 8092 } counter accept'
+
+
+def test_a_dante_leg_admits_ssh_and_the_mcp_agent_from_its_subnet_1517():
+    """Owner 13.11.2026 (airuleset#1313): ssh and the remoteos MCP agent may be reached on both
+    interfaces. The leg dropped all TCP, so 22 and 8092 were dead on the Dante address while the LAN leg
+    was down, and every setup-strih run dropped remoteos's live patch (remoteos-mcp#96)."""
+    t = _dante_tx_text("none")
+    assert MGMT_IN in t, t
+    assert MGMT_OUT in t, t
+    assert t.index(MGMT_IN) < t.index('iifname "enp56s0.70" counter drop'), t
+    assert t.index(MGMT_OUT) < t.index('oifname "enp56s0.70" counter drop'), t
+    assert "tcp dport 80" not in t and "tcp dport { 80" not in t
+
+
 def test_a_peer_device_in_a_higher_slot_is_admitted_1508():
     """Issue 1508 (12.11.2026): a dstack device on a peer PC sits in slot k above the base (ARC 4440+k,
     flows 4455+k, CMC 8800+k, k = 0..31). mbc-snv answered from 4456 after mbc's restart and the base-only
