@@ -143,7 +143,10 @@ fn the_hubs_dante_ports_are_the_ones_the_leg_declares() {
     ] {
         assert!(toml.contains(want), "the hub TOML must carry `{want}`");
     }
-    assert!(!toml.contains("rx_port_base"), "the fixed slot block, never a base");
+    assert!(
+        !toml.contains("rx_port_base"),
+        "the fixed slot block, never a base"
+    );
     let env = read(&root().join("scripts/strih-boxes/strih-snv.env"));
     assert!(env.contains("strih-snv-intercom=4441:8801:4456 "));
 }
