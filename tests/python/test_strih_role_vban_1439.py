@@ -59,7 +59,7 @@ def _vban_era_boxes():
                      ("STRIH_PROGRAM_VBAN_SENDER=none\n", "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,6981\n"),
                      # issues 1510 + 1513: no program Dante device = the four latency / TX facts none
                      ("STRIH_DANTE_NETWORK_LATENCY_MS=1\n", "STRIH_DANTE_NETWORK_LATENCY_MS=none\n"),
-                     ("STRIH_DANTE_RECEIVE_BUFFER_MS=17.041666\n", "STRIH_DANTE_RECEIVE_BUFFER_MS=none\n")):
+                     ("STRIH_DANTE_RECEIVE_BUFFER_MS=12.041666\n", "STRIH_DANTE_RECEIVE_BUFFER_MS=none\n")):
         assert t.count(old) == 1, old
         t = t.replace(old, new)
     f.write_text(t)
