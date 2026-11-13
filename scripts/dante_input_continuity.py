@@ -45,7 +45,9 @@ GATED = ("rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "reboots
 NAMED = ("rx_late", "overruns", "late_blocks", "rx_packets", "blocks", "delivered_frames")
 # issue 1508: obs v0.4.29 (dstack #278) appends `rx_reordered`; a reorder is NOT a loss (the late packet is
 # played in its slot), so it is reported when both lines carry it and never gated; an older line lacks it.
-OPTIONAL = ("rx_reordered",)
+# obs v0.4.30 (dstack v0.6.126) appends `start_holes`: the reads before a flow's first packet (the OBS-start
+# burst), no longer in rx_holes; reported, never gated (the gate's window never contains an OBS start).
+OPTIONAL = ("rx_reordered", "start_holes")
 _FIELD_RE = re.compile(r"(?:^|\s)([a-z_]+)=(\S+)")
 _TS_RE = re.compile(r"^\d\d:\d\d:\d\d\.\d\d\d: ")
 
