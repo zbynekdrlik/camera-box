@@ -19,7 +19,8 @@
 # files in a throwaway network namespace; THEN our issue-1439/1485 `inet vban_dante70` table, its unit and
 # file go (never before: the leg is never unfiltered); avahi gets `deny-interfaces=<leg>` (dstack's ask).
 # Setup never restarts avahi (an avahi restart risks the NDI announcement): the deny takes effect at its
-# next start, which verify names. The old table's avahi uid drop goes with the table (deny-interfaces is
+# next start, and verify FAILs an avahi that runs from before it. Setup refuses the whole step on a box with
+# NAT or another stateful firewall (the notrack file's own condition, strih_dante_leg_nat_problems). The old table's avahi uid drop goes with the table (deny-interfaces is
 # its replacement). A box without Dante devices removes a leftover generic filter (strih_dante_leg_filter_remove).
 # verify item 9 (strih_dante_leg_filter_grade): `(dante-leg) files|filter|avahi|old table` rows.
 #
@@ -114,14 +115,30 @@ strih_dante_leg_filter_render() {
   # shellcheck disable=SC2016  # the inner script's own positional parameters
   unshare -n sh -c 'nft -D "dante_leg=$1" -f "$2" && nft -D "dante_leg=$1" -f "$3" && nft list table inet "$4" && nft list table inet "$5"' \
     sh "$1" "$2" "$3" "${STRIH_DANTE_LEG_TABLES[@]}" 2>/dev/null | strih_vban_leg_nft_normalize
-  [ "${PIPESTATUS[0]}" = 0 ]
+  [ "${PIPESTATUS[0]}${PIPESTATUS[1]}" = 00 ]
 }
 
 # strih_dante_leg_filter_live -> both live tables, normalized (rc 1 when either is missing or unreadable).
 strih_dante_leg_filter_live() {
   { nft list table inet "${STRIH_DANTE_LEG_TABLES[0]}" && nft list table inet "${STRIH_DANTE_LEG_TABLES[1]}"; } \
     2>/dev/null | strih_vban_leg_nft_normalize
-  [ "${PIPESTATUS[0]}" = 0 ]
+  [ "${PIPESTATUS[0]}${PIPESTATUS[1]}" = 00 ]
+}
+
+# strih_dante_leg_nat_problems -> one line per thing that forbids dstack's notrack file on this box (its own
+# header: load it ONLY with no NAT and no other stateful firewall): a masquerade / snat / dnat rule in the
+# ruleset outside dstack's tables, an enabled ufw, an active firewalld. rc 0 when there is one, rc 1 when the
+# box qualifies, rc 2 when the ruleset is unreadable (never read as "qualifies").
+strih_dante_leg_nat_problems() {
+  local rs hits ufw out=""
+  rs="$(nft list ruleset 2>/dev/null)" || { echo "nft list ruleset is unreadable (run as root)"; return 2; }
+  hits="$(printf '%s\n' "$rs" | awk '/^table / { skip = ($3 ~ /^dstack_dante_leg/) } !skip && /(masquerade|snat|dnat)/' | head -n 3)"
+  [ -z "$hits" ] || out="NAT in the ruleset ($(printf '%s' "$hits" | tr -s ' \t\n' ' '))"
+  ufw="${STRIH_DANTE_UFW_CONF:-/etc/ufw/ufw.conf}"
+  if grep -qiE '^[[:space:]]*ENABLED[[:space:]]*=[[:space:]]*yes' "$ufw" 2>/dev/null; then out="${out}${out:+; }ufw is enabled (${ufw})"; fi
+  if systemctl is-active -q firewalld 2>/dev/null; then out="${out}${out:+; }firewalld is active"; fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
 }
 
 # _strih_dante_leg_copy SRC DEST -> `written` (temp + rename, 0644) or `unchanged`; rc 1 on a write error.
@@ -170,10 +187,12 @@ strih_dante_avahi_denies() {
 
 # _strih_dante_avahi_apply IF -> avahi's deny-interfaces for the leg (never a restart of avahi).
 _strih_dante_avahi_apply() {
-  local conf w
+  local conf w txt
   conf="$(_strih_dante_avahi_conf)"
   if [ ! -f "$conf" ]; then echo "  NOTE: no ${conf} (avahi not installed): nothing to deny on ${1}"; return 0; fi
-  w="$(_strih_vban_leg_put "$conf" 0644 "$(strih_dante_avahi_deny_text "$1" < "$conf")")" \
+  txt="$(strih_dante_avahi_deny_text "$1" < "$conf")" && [ -n "$txt" ] \
+    || { echo "dstack-leg-filter: could not read or edit ${conf} -- left as it is" >&2; return 1; }
+  w="$(_strih_vban_leg_put "$conf" 0644 "$txt")" \
     || { echo "dstack-leg-filter: could not write ${conf}" >&2; return 1; }
   if [ "$w" = written ]; then
     echo "  ${conf}: deny-interfaces lists ${1} (dstack two-networks); avahi takes it at its next start -- restart avahi-daemon with OBS stopped, setup never does (the NDI announcement)"
@@ -210,6 +229,10 @@ _strih_dante_leg_old_table_remove() {
 strih_dante_leg_filter_apply() {
   local ifc="${1:?leg required}" root dir etc uf f w ww="" wu want live
   root="$(_strih_dante_leg_root)"; etc="$(_strih_dante_leg_etc)"; uf="$(_strih_dante_leg_unit_file)"
+  if w="$(strih_dante_leg_nat_problems)" || [ $? = 2 ]; then
+    echo "dstack-leg-filter: dstack's notrack file must not load on this box: ${w} -- nothing changed, our old table stays (dstack-leg-filter.sh header)" >&2
+    return 1
+  fi
   dir="$(strih_dante_leg_filter_ensure "$root")" || return 1
   for f in "${STRIH_DANTE_LEG_FILES[@]}"; do
     w="$(_strih_dante_leg_copy "${dir}/${f}" "${etc}/${f}")" || { echo "dstack-leg-filter: could not write ${etc}/${f}" >&2; return 1; }
@@ -226,7 +249,7 @@ strih_dante_leg_filter_apply() {
   if ! systemctl is-enabled -q "$STRIH_DANTE_LEG_UNIT" 2>/dev/null; then
     systemctl enable "$STRIH_DANTE_LEG_UNIT" || { echo "dstack-leg-filter: could not enable ${STRIH_DANTE_LEG_UNIT}" >&2; return 1; }
   fi
-  want="$(strih_dante_leg_filter_render "$ifc" "${etc}/dante-leg.nft" "${etc}/dante-leg-notrack.nft")" \
+  want="$(strih_dante_leg_filter_render "$ifc" "${etc}/dante-leg.nft" "${etc}/dante-leg-notrack.nft")" && [ -n "$want" ] \
     || { echo "dstack-leg-filter: the pinned files do not load in a throwaway network namespace (unshare -n, as root)" >&2; return 1; }
   live="$(strih_dante_leg_filter_live || true)"
   if [ -n "$ww" ] || [ "$wu" = written ] || [ "$live" != "$want" ] \
@@ -269,7 +292,7 @@ strih_dante_leg_filter_remove() {
 
 # strih_dante_leg_filter_grade IF -> verify item 9's `(dante-leg)` rows (the caller's ok / bad / note).
 strih_dante_leg_filter_grade() {
-  local ifc="$1" root etc uf f bad_files="" want live conf ts mt left=""
+  local ifc="$1" root etc uf f bad_files="" want live conf ts mt left="" w
   root="$(_strih_dante_leg_root)"; etc="$(_strih_dante_leg_etc)"; uf="$(_strih_dante_leg_unit_file)"
   for f in "${STRIH_DANTE_LEG_FILES[@]}"; do
     [ "$(_strih_dante_leg_sha "${etc}/${f}")" = "$(strih_dante_leg_file_sha "$root" "$f" 2>/dev/null)" ] \
@@ -280,7 +303,8 @@ strih_dante_leg_filter_grade() {
   else
     ok "(dante-leg) files: ${etc}/dante-leg.nft + dante-leg-notrack.nft = dstack $(strih_dante_leg_filter_tag "$root" 2>/dev/null)"
   fi
-  if ! want="$(strih_dante_leg_filter_render "$ifc" "${etc}/dante-leg.nft" "${etc}/dante-leg-notrack.nft")"; then
+  if ! want="$(strih_dante_leg_filter_render "$ifc" "${etc}/dante-leg.nft" "${etc}/dante-leg-notrack.nft")" \
+     || [ -z "$want" ]; then
     bad "(dante-leg) filter: the installed files do not load in a throwaway network namespace (run verify-strih as root)"
   elif ! live="$(strih_dante_leg_filter_live)" || [ "$live" != "$want" ] \
        || [ "$(cat "$uf" 2>/dev/null)" != "$(strih_dante_leg_filter_unit_text "$ifc" "$etc")" ] \
@@ -299,10 +323,15 @@ strih_dante_leg_filter_grade() {
     ts="$(systemctl show -p ActiveEnterTimestamp --value --timestamp=unix avahi-daemon.service 2>/dev/null || true)"
     ts="${ts#@}"; mt="$(stat -c %Y "$conf" 2>/dev/null || echo 0)"
     if [[ "$ts" =~ ^[0123456789]+$ ]] && [ "$ts" -lt "$mt" ]; then
-      note "(dante-leg) avahi: ${conf} denies ${ifc}, but avahi-daemon started before it: restart avahi-daemon with OBS stopped (or reboot) for the deny to apply"
+      bad "(dante-leg) avahi: ${conf} denies ${ifc}, but avahi-daemon started before it and still announces on the leg: restart avahi-daemon with OBS stopped (or reboot)"
     else
       ok "(dante-leg) avahi: deny-interfaces lists ${ifc}"
     fi
+  fi
+  if w="$(strih_dante_leg_nat_problems)" || [ $? = 2 ]; then
+    bad "(dante-leg) nat: dstack's notrack file needs a box with no NAT and no other stateful firewall: ${w}"
+  else
+    ok "(dante-leg) nat: no NAT and no other stateful firewall, the notrack file may stay"
   fi
   if nft list table inet "$STRIH_VBAN_LEG_NFT_TABLE" >/dev/null 2>&1; then left="table inet ${STRIH_VBAN_LEG_NFT_TABLE} live"; fi
   if [ "$(systemctl is-enabled "$STRIH_VBAN_LEG_UNIT" 2>/dev/null || true)" = enabled ]; then left="${left}${left:+, }${STRIH_VBAN_LEG_UNIT} enabled"; fi

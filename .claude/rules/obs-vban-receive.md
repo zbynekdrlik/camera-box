@@ -791,12 +791,16 @@ outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender o
     `/etc/avahi/avahi-daemon.conf` `[server]` (an active list is extended, else one line after the header).
   - **avahi is never restarted by setup** (the NDI announcement): the deny takes effect at avahi's next start
     (the supervisor restarts avahi-daemon with OBS stopped, or the box reboots). The old table's avahi uid drop
-    went with the table; deny-interfaces replaces it.
+    went with the table; deny-interfaces replaces it, and until avahi restarts it still announces on the leg,
+    so verify's `(dante-leg) avahi` row FAILs that state (review round 1).
   - **Stateful, but conntrack only on the leg:** dante-leg.nft uses `ct state established,related`; the
     notrack file's raw chains (priority -300) mark every packet NOT on the leg untracked, so the NDI / JPEG XS
     on the rig NIC never enter conntrack. Load the notrack file only on a box with no NAT and no other
     stateful firewall (both SNV boxes checked 13.11.2026: no docker / libvirt / firewalld / ufw rules, no
-    masquerade; nf_conntrack was not even loaded).
+    masquerade; nf_conntrack was not even loaded). Setup re-checks it every run
+    (`strih_dante_leg_nat_problems`: a masquerade / snat / dnat outside dstack's tables, ufw ENABLED=yes in
+    /etc/ufw/ufw.conf -- ufw.service reads active even when disabled -- or an active firewalld) and then
+    changes nothing; verify item 9's `(dante-leg) nat` row FAILs it.
   - **What it admits on the leg:** Dante's ports + the flow range 29800-31847 (incl. PTP 319/320, 4321,
     4440-4486, 5353, 8700-8708, 8800-8831, 14336-14591), the multicast groups, mDNS answers to the ephemeral
     ports, DHCP answers, icmp/igmp, ssh + the MCP agent (22, 8092: issue 1517 covered), established
@@ -807,9 +811,9 @@ outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender o
   - **verify item 9** (`strih_dante_leg_filter_grade`, called by `strih_vban_leg_grade` after the rp_filter
     row, which then returns: no VBAN counter rows on a Dante leg): `(dante-leg) files` (the two installed
     files = the pin), `(dante-leg) filter` (both live tables = the netns render of the installed files, the
-    unit = its render, enabled + active; run as root), `(dante-leg) avahi` (the deny; a NOTE while avahi
-    runs from before the file), `(dante-leg) old table` (FAIL on a live `vban_dante70`, its unit enabled, or
-    either file left).
+    unit = its render, enabled + active; run as root; an empty render never passes), `(dante-leg) avahi` (the
+    deny; FAIL while avahi runs from before the file), `(dante-leg) nat`, `(dante-leg) old table` (FAIL on a
+    live `vban_dante70`, its unit enabled, or either file left).
   - **A box that drops its Dante devices** (a VBAN rollback) loads the issue-1439 table again and removes
     a leftover generic filter (`strih_dante_leg_filter_remove`: unit, both tables, both files).
   - **The issue-1495 retiring filter** (an old NIC leg during a NIC-to-VLAN move) renders the plain

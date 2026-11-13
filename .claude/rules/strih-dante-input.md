@@ -180,9 +180,9 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   - **The hub's right** comes from its released unit (item 16, `intercom-pinned-release.md`).
   - **The pin threshold** `STRIH_DANTE_PTP_FIRST_DSTACK=v0.6.23`: a component is READY when its pin's
     `*_RELEASE_DSTACK_VERSION` is at or above it (`strih_dante_ptp_pin_ready intercom|obs`, the repo's one
-    version rule `release_version_cmp`, which `dtray_version_ge` uses too). Below it nothing opens 319: the
-    leg rule needs either pin READY (`strih_dante_ptp_leg_open`: it only admits packets), the box-wide sysctl
-    both (`strih_dante_ptp_all_ready`: the bind right is what starts an old follower); the capability
+    version rule `release_version_cmp`, which `dtray_version_ge` uses too). Below it nothing may bind 319: the
+    box-wide sysctl needs both (`strih_dante_ptp_all_ready`: the bind right is what starts an old follower);
+    the leg itself admits 319/320 since issue 1519 (dstack's generic filter); the capability
     and media clock rows are NOTEs. The threshold follows the pins, never a date.
   - **The hub's journal** is read for the current invocation only, filtered to the clock lines as it
     streams (a weeks-long invocation is never held whole), bounded 20 s; a hub that is not running is a
