@@ -31,7 +31,7 @@ def _tree(tmp_path: Path):
     (src / "shading-release" / "v0.1.2").mkdir(parents=True)
     (src / "shading-release" / "v0.1.2" / "relay.tar.gz").write_text("dev1 default pin")
     (src / "scripts").mkdir()
-    (src / "scripts" / "strih-obs-start.sh").write_text("new wrapper")
+    (src / "scripts" / "strih-obs-start.sh").write_text("new wrapper (issue 1512 shutdown watch)")
     dst = tmp_path / "stage" / "repo"
     box = dst / "shading-release" / "v0.2.5" / "bkshading-service"
     box.mkdir(parents=True)
@@ -53,7 +53,7 @@ def test_the_same_pin_redeploy_keeps_the_box_fetched_cache_and_delivers_dev1s_tr
     assert r.returncode == 0, r.stderr
     assert (dst / "shading-release" / "v0.2.5" / "bkshading-service" / "app.js").exists()
     assert (dst / "shading-release" / "v0.1.2" / "relay.tar.gz").read_text() == "dev1 default pin"
-    assert (dst / "scripts" / "strih-obs-start.sh").read_text() == "new wrapper"
+    assert (dst / "scripts" / "strih-obs-start.sh").read_text() == "new wrapper (issue 1512 shutdown watch)"
     assert not (dst / "scripts" / "gone.sh").exists(), "--delete still prunes the provisioning tree"
 
 
