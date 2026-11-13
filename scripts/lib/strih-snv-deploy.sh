@@ -316,7 +316,11 @@ if [ "${1:-}" = "--child" ]; then
   rm -f "$S/.runner.env"
   export PYTHONDONTWRITEBYTECODE=1   # issue 1426: no root-owned __pycache__ in the stage
   "$S/repo/scripts/setup-strih.sh" --box "$BOX" > "$S/setup-strih.log" 2>&1
-  echo "$?" > "$S/setup-strih.rc"
+  rc=$?
+  # issue 1515: whatever setup-strih wrote into the tree as root (the box's own release pin caches)
+  # goes back to the stage owner = the deploy user, so a later deploy's sweep can remove this stage.
+  chown -R --reference="$S" "$S/repo" || echo "run-setup: could not hand $S/repo back to the stage owner" >> "$S/setup-strih.log"
+  echo "$rc" > "$S/setup-strih.rc"
   exit 0
 fi
 [ "$(id -u)" = 0 ] || { echo "run-setup: must run as root" >&2; exit 2; }
