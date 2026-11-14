@@ -103,8 +103,8 @@ fn audio_decode_pairs_via_the_camera_box_video_ring() {
 /// their sync_index events `si.gate_convention = true;`, and on_sync_found must route the event
 /// through `cb_dock_latency_display_ms`. A subtree pull (or careless revert) dropping any of
 /// these still COMPILES and every pure-fn test stays green — the exact "the fix never reached
-/// the display path" class issue 999 itself was. Mirrored pwsh anchors live in BOTH
-/// windows-genlock*.yml (the #269 lock-step pattern).
+/// the display path" class issue 999 itself was. (The pwsh mirror in the Windows workflows
+/// was retired by issue 1505.)
 #[test]
 fn on_sync_found_display_path_gate_conversion_is_wired_999() {
     let out = squish(&av_sync_dock_output::source());

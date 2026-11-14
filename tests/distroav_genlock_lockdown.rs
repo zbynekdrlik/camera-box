@@ -28,7 +28,7 @@
 //!
 //! This is a SOURCE-presence guard (same convention as
 //! tests/distroav_source_config_lock.rs, tests/genlock_preload.rs,
-//! tests/obs_updater_disabled.rs): the lockdown lives in the vendored C++
+//! obs:tests/vendored/tests/obs_updater_disabled.rs): the lockdown lives in the vendored C++
 //! (`git log -- vendor/` is the patch series, per vendor/README.md). It defends
 //! against a future `git subtree pull` upstream bump (#44) silently dropping the
 //! lockdown and reintroducing the #150 misconfig class — which
@@ -49,8 +49,6 @@ fn squish(s: &str) -> String {
 }
 
 const NDI_SOURCE: &str = "vendor/distroav/src/ndi-source.cpp";
-const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
-const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
 
 /// Extract the body of a free function `name(` up to the next top-level `\n<ret> <name>(`
 /// boundary. Good enough to scope an assertion to one function in this file.
@@ -206,10 +204,9 @@ fn getproperties_is_the_hard_whitelist() {
 /// #257 — the NAMED whitelist table itself must exist (not just its per-prop effects, already
 /// covered by `getproperties_is_the_hard_whitelist` above): a future refactor could rename/inline
 /// it away and still happen to add the same five props one-off, silently losing the "one
-/// auditable COMPLEMENT-of-the-forced-table" property #257 is built on. Mirrors the pwsh
-/// production-build gate's own `-notmatch 'GENLOCK_WHITELIST_PROPS'` check
-/// (`.github/workflows/windows-genlock.yml`), asserted here against the real vendored source so
-/// it runs on every push, not only on a manual `workflow_dispatch`.
+/// auditable COMPLEMENT-of-the-forced-table" property #257 is built on. Asserted here against the
+/// real vendored source on every push (the Windows workflow that mirrored it in pwsh was retired
+/// by issue 1505: the Windows boxes run the pinned obs release).
 #[test]
 fn genlock_whitelist_table_is_declared() {
     let squished = squish(&vendor_file(NDI_SOURCE));
@@ -225,10 +222,8 @@ fn genlock_whitelist_table_is_declared() {
 /// must actually be APPLIED live at update time, not just present in the UI: `ndi_source_update`
 /// must resolve + invoke the runtime-exported `obs_source_set_genlock_burn` setter, or toggling
 /// the UI checkbox would be visually present but functionally inert (no OBS restart needed —
-/// see the `resolve_set_genlock_burn` doc comment). Mirrors the pwsh production-build gate's own
-/// `-notmatch 'obs_source_set_genlock_burn'` check, asserted here against the real vendored
-/// source (scoped to `ndi_source_update`'s own body, stronger than the pwsh whole-file substring
-/// check) so it runs on every push, not only on a manual `workflow_dispatch`.
+/// see the `resolve_set_genlock_burn` doc comment). Asserted here against the real vendored
+/// source, scoped to `ndi_source_update`'s own body, on every push.
 #[test]
 fn update_applies_the_measurement_burn_toggle_live() {
     let src = vendor_file(NDI_SOURCE);
@@ -297,26 +292,6 @@ fn force_genlock_certified_settings_has_monitor_source_bandwidth_exception() {
         "{NDI_SOURCE}: #501 — the base certified forcing (PROP_BW_HIGHEST for every non-monitor \
          source) must remain in GENLOCK_FORCED_SETTINGS; the monitor exception narrowly OVERRIDES \
          it afterward, it must not replace it."
-    );
-}
-
-/// Lock-step gate: the Windows production-build workflow re-asserts the #150/#257 hard-lock SOURCE
-/// tokens in pwsh BEFORE the 150-min build (the Linux Rust guard above can't compile on the
-/// windows-2022 runner). Drop the workflow check and CI fails here.
-#[test]
-fn windows_genlock_workflow_gates_on_the_lockdown_patch() {
-    let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-
-    assert!(
-        wf.contains("force_genlock_certified_settings"),
-        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the certified-value forcer \
-         SOURCE patch — a subtree bump could reship a DistroAV that lets a genlock source come up \
-         misconfigured. Re-add the pwsh forcer gate."
-    );
-    assert!(
-        wf.contains("GENLOCK_WHITELIST_PROPS"),
-        "{WINDOWS_GENLOCK_WF}: #257 — the production build no longer asserts the GENLOCK_WHITELIST_PROPS \
-         hard-lock UI. Re-add the pwsh #257 gate."
     );
 }
 
@@ -389,36 +364,4 @@ fn source_selector_is_list_only_with_saved_name_preserved_795() {
          genlock_ensure_saved_source_listed(source_list, s); the saved source name would not be \
          injected and a LIST combo could clobber it."
     );
-}
-
-/// #795 lock-step gate: BOTH Windows genlock build workflows re-assert the list-only source-selector
-/// tokens in pwsh (the Linux Rust guard above can't compile on the windows-2022 runner; the FAST
-/// path also ships distroav.dll for hot-swap, so it must gate too — the same lock-step convention
-/// #245/#249 established). Drop either check and CI fails HERE.
-#[test]
-fn windows_genlock_workflows_gate_on_the_list_only_source_selector_795() {
-    for wf_path in [WINDOWS_GENLOCK_WF, WINDOWS_GENLOCK_FAST_WF] {
-        let wf = squish(&vendor_file(wf_path));
-        assert!(
-            wf.contains("OBS_COMBO_TYPE_LIST"),
-            "{wf_path}: #795 — the build no longer asserts the list-only source selector \
-             (OBS_COMBO_TYPE_LIST). A subtree bump could reship an editable source combo (the \
-             2026-07-17 black-screen trap). Re-add the pwsh #795 gate."
-        );
-        assert!(
-            wf.contains("genlock_ensure_saved_source_listed"),
-            "{wf_path}: #795 — the build no longer asserts the saved-source-name preservation helper \
-             (genlock_ensure_saved_source_listed). Re-add the pwsh #795 gate."
-        );
-        // The NEGATIVE anti-editable gate must stay too — the token only appears in the pwsh
-        // `-match OBS_COMBO_TYPE_EDITABLE → exit 1` guard, so its presence proves that gate is armed
-        // (without this, a future edit could drop the anti-editable pwsh check unnoticed by the
-        // workflow-parity guard, even though the source test still protects ndi-source.cpp itself).
-        assert!(
-            wf.contains("OBS_COMBO_TYPE_EDITABLE"),
-            "{wf_path}: #795 — the build no longer asserts the anti-editable gate (the pwsh \
-             `-match OBS_COMBO_TYPE_EDITABLE → exit 1` check is gone). A subtree bump could reship \
-             an editable source combo. Re-add the pwsh #795 anti-editable gate."
-        );
-    }
 }

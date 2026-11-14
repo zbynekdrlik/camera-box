@@ -242,7 +242,8 @@ exclude the glue — follow how `kms.rs` / `painter.rs` are already handled (#28
 
 ## Building an OBS PLUGIN from source against the genlock OBS (the #188 A/V-sync dock)
 
-The `windows-genlock.yml` (+ `-fast`) workflow builds a first-party OBS plugin (the vendored
+Until issue 1505 retired them (the Windows OBS boxes now deploy the pinned obs release's Windows
+zip), the `windows-genlock.yml` (+ `-fast`) workflow built a first-party OBS plugin (the vendored
 norihiro `obs-audio-video-sync-dock` at `vendor/av-sync-dock/`, with `deps/quirc`) standalone
 against the from-source genlock OBS. A plugin's CMake does `find_package(libobs)` /
 `find_package(obs-frontend-api)`, which needs the OBS **SDK config packages** — and getting those

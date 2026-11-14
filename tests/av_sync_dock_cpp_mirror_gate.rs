@@ -11,8 +11,8 @@
 //! against the SAME results the Rust proves. A drift between the C++ the dock ships and the Rust
 //! decode fails HERE, in the fast Linux CI, not silently on the rig.
 //!
-//! (The full OBS/quirc plugin build is the separate `windows-genlock-fast.yml` compile gate; this
-//! gate is specifically the pure-logic equivalence the plugin build cannot check.)
+//! (The full OBS/quirc plugin build is not part of this repo's CI: the Windows workflows were
+//! retired by issue 1505; this gate is specifically the pure-logic equivalence.)
 
 use std::path::PathBuf;
 use std::process::Command;

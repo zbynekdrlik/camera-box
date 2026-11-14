@@ -20,20 +20,16 @@
 //!   (the stamp basis's waiting point, which a packet with no stamp advance still adds to);
 //! - the `asrc:` line names the basis after its byte-identical issue-1367 suffix.
 //!
-//! The same needle lists are required in both `windows-genlock*.yml` pwsh gates (one list, so the
-//! copies cannot drift). Std-only on purpose: it runs under `cargo test` AND standalone
+//! (The Windows workflows that mirrored these lists in pwsh were retired by issue 1505; the Windows
+//! boxes run the pinned obs release.) Std-only on purpose: it runs under `cargo test` AND standalone
 //! (`CARGO_MANIFEST_DIR=<repo> rustc --test --edition 2021 tests/genlock_audio_stamp_basis_wiring_1425.rs`).
-//! Every anchor is whitespace-squished, the same form the pwsh gates use.
+//! Every anchor is whitespace-squished.
 
 use std::fs;
 use std::path::PathBuf;
 
 const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
 const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
-const WINDOWS_WORKFLOWS: [&str; 2] = [
-    ".github/workflows/windows-genlock.yml",
-    ".github/workflows/windows-genlock-fast.yml",
-];
 
 /// `source_output_audio_data` (squished): the basis, its direct-stamp flag and the measure gate.
 const INGEST_WIRING: [&str; 8] = [
@@ -216,35 +212,4 @@ fn the_asrc_line_names_the_basis_1425() {
         internal.contains("int genlock_asrc_basis;"),
         "issue 1425: struct obs_source must carry the ingest's basis for the asrc: line"
     );
-}
-
-#[test]
-fn windows_workflows_guard_the_same_wiring_1425() {
-    for wf in WINDOWS_WORKFLOWS {
-        let text = read(wf);
-        for needle in INGEST_WIRING
-            .iter()
-            .chain(&RATE_POINT_WIRING)
-            .chain(&ASRC_LINE_WIRING)
-        {
-            let want = format!(
-                "$src -notmatch [regex]::Escape('{}')",
-                needle.replace('\'', "''")
-            );
-            assert!(
-                text.contains(&want),
-                "issue 1425: {wf} no longer requires `{needle}` in obs-source.c"
-            );
-        }
-        for needle in STAMP_BASIS_ABSENT {
-            let want = format!(
-                "$src -match [regex]::Escape('{}')",
-                needle.replace('\'', "''")
-            );
-            assert!(
-                text.contains(&want),
-                "issue 1425: {wf} no longer forbids `{needle}` in obs-source.c"
-            );
-        }
-    }
 }

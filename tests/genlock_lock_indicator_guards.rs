@@ -1,13 +1,13 @@
 //! #1298 — vendored-source anchor guards for the in-OBS genlock lock indicator.
 //!
 //! The libobs genlock-stats API, the DistroAV output hook, and the Qt statusbar widget are
-//! all in the vendored tree, compiled only by the Windows/Linux genlock workflows. These
+//! all in the vendored tree, compiled only by the Linux genlock workflow. These
 //! guards (the `tests/genlock_preload.rs` convention) assert the new symbols + log strings are
 //! PRESENT so a future `git subtree pull` can't silently revert them, and that the new
 //! `genlock-lock:` OBS-log marker stays mutually non-substring with every existing `genlock-*`
-//! / `*-audit:` family (the `.claude/rules/jitter-audit-parser.md` rule). They are the Linux-CI
-//! twin of the 3-copy pwsh source-anchor gates in both `windows-genlock{,-fast}.yml`
-//! (`.claude/rules/obs-titlebar-build-id.md`) — keep all three in lock-step.
+//! / `*-audit:` family (the `.claude/rules/jitter-audit-parser.md` rule). (The Windows workflows' pwsh
+//! twins of these gates were retired by issue 1505; the Windows boxes run the pinned obs
+//! release.)
 //!
 //! Std-only. Standalone it needs `CARGO_MANIFEST_DIR=<repo>` at compile time, for the pinned vstack
 //! lookup (`rustc --test tests/genlock_lock_indicator_guards.rs` from the repo root).
@@ -44,8 +44,7 @@ fn assert_has(file: &str, needle: &str) {
     assert!(
         src.contains(needle),
         "{file}: #1298 anchor `{needle}` is GONE — the genlock lock indicator was partially \
-         reverted (e.g. a subtree pull). Re-apply it and keep the windows-genlock{{,-fast}}.yml \
-         pwsh gates in lock-step."
+         reverted (e.g. a subtree pull). Re-apply it."
     );
 }
 
@@ -109,8 +108,7 @@ fn audio_placement_stats_present_1302() {
     // Issue 1302: the per-input audio PLACEMENT (hold mode, withheld packets, measured placement
     // error) rides the stats struct (v4) through the ONE shared fill, so the `genlock-fifo audit`
     // line and the LOCK widget's heartbeat cannot disagree. A consumer (the SongPlayer A/V gate)
-    // waits on it per input. Linux-CI twin of the issue-1302 pwsh block in BOTH
-    // windows-genlock{,-fast}.yml -- keep all three in lock-step.
+    // waits on it per input.
     for field in [
         "int audio_hold_mode;",
         "uint64_t audio_withheld;",
@@ -264,8 +262,8 @@ fn decision_header_present_and_pure() {
 fn audio_parity_lock_term_present_1303() {
     // #1303: the audio DEGRADE term in the LOCK decision. The pure decision + its C mirror gain an
     // additive `audio_unpaired` facet + a new `AudioPairing` reason, and the widget aggregates the
-    // per-source audio pairing-offset breach into that facet. Linux-CI twin of the #1298 pwsh gate's
-    // #1303 anchor in BOTH windows-genlock{,-fast}.yml — keep all three in lock-step.
+    // per-source audio pairing-offset breach into that facet. (The Windows pwsh twin was retired by
+    // issue 1505.)
     assert_has(HEADER, "GENLOCK_LOCK_REASON_AUDIO_PAIRING = 9,");
     assert_has(HEADER, "int audio_unpaired;");
     // the widget fills the facet from the per-source v2 stats aggregate, and the reason token flows
@@ -284,8 +282,8 @@ fn audio_unexpected_lock_term_present_1303() {
     // table expects it silent (a camera on any box; the double-audio hazard). The pure decision + C
     // mirror gain an additive `audio_unexpected` facet + a new `AudioUnexpected=10` reason; the
     // widget flags it via the header's parity-gated camera classifier (the C mirror of
-    // genlock_forced_table_audit::is_camera_input). Linux-CI twin of the #1303 pwsh gate in BOTH
-    // windows-genlock{,-fast}.yml — keep all three in lock-step.
+    // genlock_forced_table_audit::is_camera_input). (The Windows pwsh twin was retired by
+    // issue 1505.)
     assert_has(HEADER, "GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED = 10,");
     assert_has(HEADER, "int audio_unexpected;");
     assert_has(
@@ -330,7 +328,7 @@ fn qpc_drift_books_a_fleet_date_step_1372() {
     // Issue 1372: the widget re-baselines its qpc history by a booked dantesync date step (one
     // genlock-wall-step: line) instead of reading it DEGRADED for the whole 300 s window. The
     // decision is the parity-gated genlock_qpc_wall_step_rebase_ms; a clock set and a step storm
-    // still degrade. Mirror of the issue-1372 pwsh block in both windows-genlock*.yml.
+    // still degrade.
     assert_has(
         HEADER,
         "static inline int64_t genlock_qpc_wall_step_rebase_ms(int64_t jump_ms, int64_t step_bound_ms, int64_t book_max_ms, int64_t booked_in_window, int64_t steps_per_window)",

@@ -201,8 +201,8 @@ branch (`ndiLib->send_destroy(o->ndi_sender); o->ndi_sender = nullptr;` — safe
 
 ## Lock-step anchors (vendored change — CI is the first compile)
 
-A change here needs a `distroav_timecode_patch.rs`-style Rust source-guard test AND matching pwsh
-gates in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml` (both ship distroav.dll).
+A change here needs a `distroav_timecode_patch.rs`-style Rust source-guard test (until issue 1505
+also matching pwsh gates in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml`, retired).
 Anchor on CALL-SITE-unique tokens, never a bare function name — a name that also appears in an
 extern DECLARATION passes the gate on the decl alone even if a subtree-pull drops the call hunk
 (the issue-832 anchor class): e.g. `ndi_output_reserve_main_sender(QT_TO_UTF8(config->OutputName)`

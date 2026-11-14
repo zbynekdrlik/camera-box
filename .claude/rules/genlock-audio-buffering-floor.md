@@ -7,7 +7,6 @@ paths:
   - "tests/genlock_audio_buffering_wiring_1367.rs"
   - "vendor/obs-studio/libobs/obs-genlock-mix-guard.h"
   - "vendor/obs-studio/libobs/obs-output.c"
-  - "tests/genlock_audio_buffering_freeze_wiring_1425.rs"
   - "tests/genlock_audio_slice3_1425.rs"
   - "scripts/obs-guarded-launch.ps1"
   - "scripts/rig-health-audit.py"
@@ -31,7 +30,7 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
 | the marker `~/.camera-box/genlock-audio-buffering-ms` of the OBS user (`<ms>` + newline, 0644, compare-then-write, never through a symlink, the dir via `strih_user_home_dir`) | setup-strih BEFORE step 1 (right after the root check, issue 1425 28.10 fix), `obs_audio_buffering_install` in `scripts/lib/obs-audio-buffering.sh`; it never restarts OBS |
 | the read, once per audio reset (the genlock-min-latency marker pattern): ABSENT / INVALID / FIXED | obs.c `genlock_audio_buffering_read_box_ms`, BEFORE the plan block |
 | the pure parse (1..3 ASCII numerals + an optional newline, 0..960), the plan (`make_plan_box` / `plan_box`: floor = the value, `box_fixed`) and the freeze (`frozen_plan`: a fixed plan is frozen on every tick) | `obs-genlock-audio-buffering.h` <-> `vstack:rig/core/src/genlock_audio_buffering.rs`, parity gate `tests/genlock_audio_buffering_parity_1367.rs` |
-| the per-tick freeze takes `audio->genlock_buffering_box_fixed` | obs-audio.c `genlock_buffering_frozen_now(..., box_fixed)`, the call anchor in `tests/genlock_audio_buffering_freeze_wiring_1425.rs` + both windows-genlock pwsh steps |
+| the per-tick freeze takes `audio->genlock_buffering_box_fixed` | obs-audio.c `genlock_buffering_frozen_now(..., box_fixed)`, the call anchor in `obs:tests/vendored/tests/genlock_audio_buffering_freeze_wiring_1425.rs` (its two windows-genlock pwsh mirrors retired with those workflows, issue 1505) |
 
 - **Behaviour under a FIXED plan:** the floor (the declared ticks) is raised on the first tick right
   after the freeze decision, BEFORE that tick's render loop, the mix guard and the `#800` telemetry (an
@@ -169,8 +168,8 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
   vector spreads, lifts every define (the floor must read 0) and holds a launch's own draw (the floor
   plus one or two ticks) under all three #786 launch-gate bounds.
 - `tests/genlock_audio_buffering_wiring_1367.rs` (std-only): the wiring anchors (ONE `WIRING` list,
-  also required by the pwsh step "Assert the genlock audio-buffering floor is present" in both
-  `windows-genlock*.yml`) and a C LIFT of the shipped reset block, tick decision and buffering
+  until issue 1505 also required by the pwsh step "Assert the genlock audio-buffering floor is present"
+  in both retired `windows-genlock*.yml`) and a C LIFT of the shipped reset block, tick decision and buffering
   functions: a launch with its startup race (21 / 42 ms), a late source (149 ms), the low-latency
   toggle, 44.1 kHz, a maximum, and a 4-tick floor set by hand (`max(floor, stock)`). The lift models
   the window `audio_callback` really processes (the front of `buffered_timestamps`, `start − total ×
@@ -279,7 +278,7 @@ then reaches the same upstream increase as before (`launch-late`: 128 ms).
 
 **Tests** (`obs:tests/vendored/tests/genlock_audio_mix_guard_1381.rs`, std-only):
 - Wiring anchors (8, `WIRING`: obs-audio.c, obs-internal.h, obs-genlock-mix-guard.h) + the SAME
-  list in a pwsh step of both `windows-genlock*.yml`.
+  list in a pwsh step of both `windows-genlock*.yml` until issue 1505 retired them.
 - A C LIFT of the shipped `audio_callback` path, verbatim: the render-order tail (mark + catch-all
   loop), the render loop, `calc_min_ts`, the 1367 tick decision, mix + discard, and every function
   they call (`push_audio_tree`, `convert_time_to_frames`, `ignore_audio` .. `calc_min_ts` incl. the
@@ -345,7 +344,7 @@ so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
 | the decision: frozen while an output with an audio encoder runs, and only then | `genlock_audio_buffering_frozen(encoder_active)` | `frozen` |
 | the action: `frozen` turns DYNAMIC into NONE; the FLOOR is never frozen | `genlock_audio_buffering_action(..., source_behind, frozen)` | `action` |
 | a member behind the window while frozen is re-anchored | `GENLOCK_MIX_GUARD_MIXED_LATE` (3) from `genlock_mix_guard_reason(..., frozen)` -> `genlock_mix_guard_reanchor` (the 1381 path: drop the behind samples, restart the timeline when nothing is left) | the 1381 lift (no Rust authority: the guard's reasons are pinned by its truth table) |
-| the encoder count | `obs-output.c`: `os_atomic_inc_long` in `hook_data_capture` and `os_atomic_dec_long` in `end_data_capture_thread`, both in the ENCODED branch; read by `obs_output_genlock_audio_encoder_outputs()` | `tests/genlock_audio_buffering_freeze_wiring_1425.rs` |
+| the encoder count | `obs-output.c`: `os_atomic_inc_long` in `hook_data_capture` and `os_atomic_dec_long` in `end_data_capture_thread`, both in the ENCODED branch; read by `obs_output_genlock_audio_encoder_outputs()` | `obs:tests/vendored/tests/genlock_audio_buffering_freeze_wiring_1425.rs` |
 
 - **Per tick, in `audio_callback`:** `genlock_mix_mark_members` -> the freeze decision, read once into
   `audio->genlock_buffering_frozen` -> the render loop (the reason gets it) -> `calc_min_ts` -> the
@@ -401,10 +400,10 @@ so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
     `late-start-kept-stamp-encoder` (muted while late, the 2b limit);
   - `frozen-ingest-race` (the action's frozen term) and the probes `reason-1425` (the 32-row truth
     table over member / entered / composite / behind / frozen) and `mixed-late` (the counters).
-- `tests/genlock_audio_buffering_freeze_wiring_1425.rs` (std-only): ONE `FREEZE_WIRING` /
+- `obs:tests/vendored/tests/genlock_audio_buffering_freeze_wiring_1425.rs` (std-only): ONE `FREEZE_WIRING` /
   `FREEZE_ABSENT` list (the absent half refuses the retired settle: `genlock_settle_tick`, the
-  settle define, the settle clock), required by the pwsh step "Assert the audio buffering freeze is
-  present (issue 1425)" in both `windows-genlock*.yml`; the per-tick order; the count's two capture
+  settle define, the settle clock), required until issue 1505 by the pwsh step "Assert the audio
+  buffering freeze is present (issue 1425)" in both retired `windows-genlock*.yml`; the per-tick order; the count's two capture
   sites in the encoded branch.
 - Mutation (scratch tree, the tests compiled once against it, both pwsh steps run for real): see the
   lane returns on the ticket (round 1: 36/38 killed, 2 equivalent; round 2: the re-run on the

@@ -3200,14 +3200,11 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
     // Lock-step assertion (per this repo's convention, e.g. tests/vendored_cpp_compile_gate.rs):
     // the pure lookup table must never silently drift out of sync with the REAL CI trigger path
     // filters it is meant to mirror. imag's own build trigger is linux-genlock.yml's `on.push.paths`
-    // (deliberately WITHOUT vendor/av-sync-dock/**, a Windows-only OBS dock DLL); every other
-    // (Windows) box's is windows-genlock-fast.yml's (WITH vendor/av-sync-dock/**).
+    // (deliberately WITHOUT vendor/av-sync-dock/**). Issue 1505 retired camera-box's own Windows
+    // build, so a Windows box ships no vendor/ tree at all; its row keeps the fail-closed superset.
     let linux_wf =
         std::fs::read_to_string(manifest_dir().join(".github/workflows/linux-genlock.yml"))
             .expect("read linux-genlock.yml");
-    let windows_wf =
-        std::fs::read_to_string(manifest_dir().join(".github/workflows/windows-genlock-fast.yml"))
-            .expect("read windows-genlock-fast.yml");
 
     assert!(
         linux_wf.contains("vendor/obs-studio/**") && linux_wf.contains("vendor/distroav/**"),
@@ -3221,14 +3218,6 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
         linux_wf.contains("vendor/av-sync-dock/**"),
         "linux-genlock.yml must trigger on vendor/av-sync-dock/** (the strih variant builds the \
          A/V-sync dock, issue 1470) — genlock_parity_consumed_paths(strih, 1) carries it"
-    );
-    assert!(
-        windows_wf.contains("vendor/obs-studio/**")
-            && windows_wf.contains("vendor/distroav/**")
-            && windows_wf.contains("vendor/av-sync-dock/**")
-            && windows_wf.contains("vendor/obs-vban/**"),
-        "windows-genlock-fast.yml must still trigger on all four vendor dirs (issue 1372 added \
-         vendor/obs-vban) — genlock_parity_consumed_paths(<a Windows box>) mirrors exactly this set"
     );
     // issue 1439: the strih-variant Linux job builds the VBAN receive source, so linux-genlock.yml
     // triggers on vendor/obs-vban/** and a Linux strih consumes it; the imag-parity job does not
@@ -3281,7 +3270,7 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
         assert_eq!(
             win_section.trim(),
             "vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock\nvendor/obs-vban",
-            "a Windows box's consumed set must be exactly windows-genlock-fast.yml's four dirs: {out:?}"
+            "any other box gets the fail-closed four-dir superset: {out:?}"
         );
     }
 }

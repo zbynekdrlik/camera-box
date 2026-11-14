@@ -187,10 +187,10 @@ obs_release_bundle() {
 
 # --- issue 1505: the Windows OBS boxes (resolume-snv, later resolume-pp + grading-pp) take the same
 # release's `obs-windows-x64-<tag>.zip` (a portable rundir: bin/64bit, data, obs-plugins/64bit, the two
-# markers and BUNDLE_MANIFEST.json, the same layout as the windows-genlock.yml stage) with its own
-# WINDOWS_MANIFEST.json. The release's Windows .sha256 files read `<sha> *<name>` (git-bash); the first
-# token is the hash. The pin carries both sha256 beside the strih ones; a pin without them keeps the
-# Windows boxes on the vendor build (the planner's choice, scripts/lib/genlock-windows-pin.sh).
+# markers and BUNDLE_MANIFEST.json, the layout camera-box's own retired windows-genlock.yml stage had)
+# with its own WINDOWS_MANIFEST.json. The release's Windows .sha256 files read `<sha> *<name>` (git-bash);
+# the first token is the hash. The pin carries both sha256 beside the strih ones; a pin without them
+# refuses a Windows box by name (scripts/lib/genlock-windows-pin.sh) -- there is no vendor build any more.
 OBS_RELEASE_WINDOWS_MANIFEST="WINDOWS_MANIFEST.json"
 # What the Windows deploy program reads beyond the manifest's own list (build_windows_deploy_program +
 # genlock-plugin-deploy.sh): the frontend, libobs, the three plugins it byte-verifies, the markers.

@@ -32,7 +32,7 @@
 # version compare — unit-tested from tests/drift_guard.rs by sourcing this file) and a flow that
 # runs only when executed directly. The source-guard below (BASH_SOURCE != $0) lets the tests
 # exercise the pure functions in isolation. The OBS auto-update dialog is a BUILD property guarded
-# at the source by tests/obs_updater_disabled.rs (#43) — it is not runtime-readable off a running
+# at the source by obs:tests/vendored/tests/obs_updater_disabled.rs (#43) — it is not runtime-readable off a running
 # box, so it is intentionally checked at that layer, not here.
 #
 # Usage:
@@ -616,12 +616,14 @@ imag_build_drift_report() {
 #     1372 review) -> the same pair PLUS vendor/av-sync-dock (issue 1470: the strih-variant job builds
 #                        the A/V-sync dock) and vendor/obs-vban (issue 1439: the VBAN receive source);
 #                        linux-genlock.yml's `on.push.paths` carries all four
-#   - anything else    -> windows-genlock-fast.yml's `on.push.paths` (adds vendor/av-sync-dock/** and
-#                        vendor/obs-vban/**, the paced VBAN sender + receive source, issues 1372/1439).
+#   - anything else    -> the four-dir superset (adds vendor/av-sync-dock/** and vendor/obs-vban/**,
+#                        issues 1372/1439). It was windows-genlock-fast.yml's `on.push.paths` until issue
+#                        1505 retired camera-box's own Windows build (a Windows box now runs the pinned
+#                        obs release, built from no vendor/ here); it stays the fail-closed default.
 #                        The Linux stream box (issue 1462, label "stream") lands here too: it runs the
 #                        same Linux strih-variant build, whose four paths are this same set.
 # (see tests/drift_guard.rs's genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949
-# for the lock-step assertion against the two workflow files themselves.) PURE — a lookup table, no
+# for the lock-step assertion against linux-genlock.yml itself.) PURE — a lookup table, no
 # I/O. An unrecognized label gets the WINDOWS (superset) set: the fail-closed default that can never
 # make a real consumed dir silently invisible to the #949 content-equivalence check below.
 genlock_parity_consumed_paths() {
@@ -1942,8 +1944,8 @@ Usage:
   (never a silent clean). Omit it → the check is skipped (historic behavior).
 
 --compare per-component BUILD SHA + capability keys (#122, opt-in — supply `manifest` to activate):
-  manifest (path to the build-under-test's #120 BUNDLE_MANIFEST.json — download it from the
-    windows-genlock / windows-genlock-fast artifact for the deployed build),
+  manifest (path to the build-under-test's #120 BUNDLE_MANIFEST.json -- for a Windows box the
+    pinned obs release's WINDOWS_MANIFEST.json since issue 1505 retired camera-box's own build),
   obs_dll_sha256 (the deployed obs.dll Get-FileHash SHA256, read live off the box),
   distroav_dll_sha256 (the deployed distroav.dll Get-FileHash SHA256, read live off the box),
   genlock_capability (the live OBS-log genlock marker text — the build-unique
@@ -1951,8 +1953,8 @@ Usage:
     lines; a STOCK OBS 32.2.0 emits NONE -> DRIFT even though its version matches).
   With a manifest supplied, an unread live SHA or capability marker is UNKNOWN (exit 11), never a
   silent clean — a wrong build we failed to hash is exactly the false-negative this facet prevents.
-  alt_manifest (#1346, optional: the OTHER Windows workflow's BUNDLE_MANIFEST.json of the SAME build —
-    the full windows-genlock bundle beside the fast obs.dll-only one; their obs.dll bytes differ):
+  alt_manifest (#1346, optional: a second BUNDLE_MANIFEST.json of the SAME build whose bytes differ --
+    the full beside the fast obs.dll-only Windows build until issue 1505 retired both):
     obs_dll_sha256 is OK on EITHER manifest's entry (the line names which) and DRIFT on neither;
     distroav_dll_sha256 accepts either only when the primary manifest already lists distroav (an
     alternate never switches on a check the primary skips). Given WITHOUT manifest=, it is judged

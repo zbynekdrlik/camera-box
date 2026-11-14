@@ -245,20 +245,16 @@ fn normalize_boxes_dedups_and_validates() {
     );
 }
 
+/// issue 1505: camera-box's own Windows build is retired -- the planner names no windows-genlock
+/// workflow or artifact any more (a Windows box deploys only from the pinned obs release's zip).
 #[test]
-fn windows_artifact_and_workflow_by_mode() {
-    assert_eq!(
-        run_sourced(&script(), "fleet_windows_artifact full").trim(),
-        "obs-genlock-windows-x64"
-    );
-    assert_eq!(
-        run_sourced(&script(), "fleet_windows_artifact fast").trim(),
-        "obs-genlock-fast-dll"
-    );
-    assert!(run_sourced(&script(), "fleet_windows_workflow full").contains("windows-genlock.yml"));
+fn linux_artifacts_and_no_windows_build_1505() {
+    let s = std::fs::read_to_string(script()).unwrap();
     assert!(
-        run_sourced(&script(), "fleet_windows_workflow fast").contains("windows-genlock-fast.yml")
+        !s.contains("fleet_windows_workflow") && !s.contains("fleet_windows_artifact"),
+        "the windows-genlock resolution is gone"
     );
+    assert!(!s.contains("obs-genlock-windows-x64") && !s.contains("obs-genlock-fast-dll"));
     assert_eq!(
         run_sourced(&script(), "fleet_linux_bundle_artifact").trim(),
         "obs-genlock-linux-x86_64"

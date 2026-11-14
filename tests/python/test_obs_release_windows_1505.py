@@ -414,9 +414,28 @@ def test_execute_refuses_a_pinned_zip_that_does_not_verify_and_prints_no_program
     assert "windows-genlock" not in gh_log, "no fallback to the vendor build"
 
 
-def test_a_pin_without_the_windows_zip_keeps_the_windows_genlock_artifact(tmp_path):
+def test_a_pin_without_the_windows_zip_refuses_every_windows_box_by_name(tmp_path):
+    """The retired windows-genlock build is never a fallback: a pin with no Windows zip refuses a
+    Windows box by name, in plan and execute mode, and asks gh for no Windows run."""
     env = _release(tmp_path)
     pin = Path(env["OBS_RELEASE_PIN_FILE"])
     pin.write_text("".join(l + "\n" for l in pin.read_text().splitlines() if "WINDOWS" not in l))
-    r = _deploy(tmp_path, env, "--boxes", "resolume-snv")
-    assert r.returncode == 2 and "--run-id is required" in r.stderr, r.stdout + r.stderr
+    for args in (("--boxes", "resolume-snv"),
+                 ("--run-id", "R", "--boxes", "imag,resolume-snv"),
+                 ("--plan", "--run-id", "R", "--sha", "ab12cd3", "--stage", str(tmp_path), "--boxes", "resolume-snv")):
+        r = _deploy(tmp_path, env, *args)
+        assert r.returncode == 3, (args, r.stdout + r.stderr)
+        assert "the pin carries no Windows zip" in r.stderr and "resolume-snv" in r.stderr, r.stderr
+        assert "Write-MarkerAtomic" not in r.stdout, r.stdout
+    gh_log = (tmp_path / "gh.log").read_text() if (tmp_path / "gh.log").exists() else ""
+    assert "windows-genlock" not in gh_log, gh_log
+
+
+def test_a_pin_without_the_windows_zip_still_plans_imag_from_its_anchor_build(tmp_path):
+    """imag stays on linux-genlock.yml: the missing Windows fields never block an imag-only run."""
+    env = _release(tmp_path)
+    pin = Path(env["OBS_RELEASE_PIN_FILE"])
+    pin.write_text("".join(l + "\n" for l in pin.read_text().splitlines() if "WINDOWS" not in l))
+    r = _deploy(tmp_path, env, "--plan", "--run-id", "R", "--sha", "ab12cd3", "--stage", str(tmp_path), "--boxes", "imag")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "box=imag" in r.stdout

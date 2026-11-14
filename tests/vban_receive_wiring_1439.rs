@@ -8,7 +8,8 @@
 //!    thread hands every slot to libobs at its deadline -- the packet, or a slot of silence in the
 //!    packet's own sample format -- and is stopped and joined in update and destroy; the 10 s status
 //!    line;
-//! 3. the Linux strih bundle builds and stages the plugin, and both Windows builds assert it.
+//! 3. the Linux strih bundle builds and stages the plugin (the Windows builds were retired by
+//!    issue 1505).
 //!
 //! Std-only, like the parity file:
 //!
@@ -395,24 +396,4 @@ fn the_linux_strih_bundle_builds_and_stages_obs_vban_1439() {
         !imag.contains("obs-vban"),
         "issue 1439: the imag-parity Linux bundle must not build obs-vban"
     );
-}
-
-/// Both Windows genlock builds compile the same source: their pwsh gate checks the receive side too.
-#[test]
-fn both_windows_builds_assert_the_receive_timeline_1439() {
-    for name in ["windows-genlock.yml", "windows-genlock-fast.yml"] {
-        let yml = read(&format!(".github/workflows/{name}"));
-        for needle in [
-            "Test-Path \"vendor/obs-vban/src/vban-receive-timeline.h\"",
-            "[regex]::Escape('#include \"vban-receive-timeline.h\"')",
-            "[regex]::Escape('vban_recv_packet(&s->timeline, now, header->nuFrame,')",
-            "[regex]::Escape('\"obs-vban receive: received=%\"')",
-            "$source -match [regex]::Escape('Padding packet')",
-        ] {
-            assert!(
-                yml.contains(needle),
-                "issue 1439: {name}'s obs-vban assert lost `{needle}`"
-            );
-        }
-    }
 }

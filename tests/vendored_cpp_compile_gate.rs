@@ -1,29 +1,23 @@
 //! #101 — the vendored OBS/DistroAV C++ (vendor/obs-studio, vendor/distroav) must get a
-//! PRE-MERGE compile gate, not only the manual post-merge `windows-genlock.yml` build.
+//! PRE-MERGE compile gate, not only a post-merge production build.
 //!
 //! Background: the per-PR `ci.yml` is Rust-only (cargo), and this repo fires CI on
 //! `push:[dev,main]` (deliberately NOT `pull_request`, per #157 single-fire), so the
 //! push-to-dev run IS the pre-merge gate. A C++ compile error in the vendored tree
 //! therefore passed every PR gate and reached main, where only the manual 150-min
-//! `windows-genlock.yml` caught it (#97's `genlock_source_drop_cap()` used ~700 lines
+//! Windows genlock build caught it (#97's `genlock_source_drop_cap()` used ~700 lines
 //! before its definition → MSVC C2220; all PR checks were green, the manual build failed).
 //!
-//! The owner's 2026-06-19 partial fix added `windows-genlock-fast.yml`, which builds ONLY
-//! libobs (`--target libobs`) on push to dev when `vendor/obs-studio/libobs/**` changes —
-//! a real MSVC compile of libobs in minutes, but NO DistroAV and nothing outside libobs.
-//!
-//! This issue closes the remaining gap: extend that fast build into a DistroAV-inclusive
-//! compile gate that fires on push to dev when `vendor/distroav/**` (or the vendored OBS)
-//! changes, configures + builds the DistroAV plugin (the whole `ndi-*.cpp` / burn-filter /
-//! plugin-main C++) against an installed libobs SDK prefix, with ENABLE_BROWSER OFF so it
-//! stays minutes-not-hours. A C++ error in DistroAV can then never again pass the push-to-dev
-//! gate and reach main / waste a full 150-min genlock build cycle.
+//! #101 first closed the gap with a DistroAV compile-check in the Windows fast workflow. The
+//! Windows genlock workflows were retired by issue 1505 (the Windows boxes run the pinned obs
+//! release), so the gate that remains is `linux-genlock.yml`'s `linux-distroav-compile-check`
+//! job: on push to dev when `vendor/distroav/**` (or the vendored OBS) changes, it builds
+//! libobs, installs it as an SDK prefix and builds the DistroAV plugin against it, with
+//! ENABLE_BROWSER OFF so it stays minutes-not-hours.
 //!
 //! These are STRUCTURAL guards on the workflow YAML: they fail loudly if a future edit drops
 //! the DistroAV compile job, its trigger path, or the configure/build/install plumbing it
-//! needs. They run on every push, on any host, with no Windows toolchain. The DEFINITIVE
-//! end-to-end proof is the CI job itself actually compiling the vendored C++ on a windows
-//! runner.
+//! needs. The DEFINITIVE end-to-end proof is the CI job itself compiling the vendored C++.
 
 use std::fs;
 
@@ -32,19 +26,45 @@ fn read(p: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-const FAST: &str = ".github/workflows/windows-genlock-fast.yml";
+const LINUX: &str = ".github/workflows/linux-genlock.yml";
+const JOB: &str = "\n  linux-distroav-compile-check:\n";
 
-/// The fast pre-merge workflow must carry a DistroAV compile-check job — the part the
-/// libobs-only build does NOT cover (#101). We assert by the build target the job must run.
+/// The `linux-distroav-compile-check` job's text: from its key to the next top-level job key
+/// (a line indented by exactly two spaces that ends in `:`).
+fn compile_job() -> String {
+    let wf = read(LINUX);
+    let start = wf
+        .find(JOB)
+        .unwrap_or_else(|| panic!("#101: {LINUX} lost its linux-distroav-compile-check job"));
+    let body = &wf[start + JOB.len()..];
+    let mut end = body.len();
+    let mut at = 0;
+    for line in body.split_inclusive('\n') {
+        let key = line.trim_end();
+        if key.len() > 2
+            && key.starts_with("  ")
+            && !key.starts_with("   ")
+            && !key.trim_start().starts_with('#')
+            && key.ends_with(':')
+        {
+            end = at;
+            break;
+        }
+        at += line.len();
+    }
+    wf[start..start + JOB.len() + end].to_string()
+}
+
+/// The pre-merge workflow must carry a DistroAV compile-check job (#101). We assert by the
+/// build target the job must run.
 #[test]
-fn fast_workflow_compiles_distroav_plugin() {
-    let wf = read(FAST);
+fn compile_job_builds_the_distroav_plugin() {
+    let wf = compile_job();
     assert!(
         wf.contains("vendor/distroav"),
-        "#101: {FAST} must reference vendor/distroav — the DistroAV C++ is the half the \
-         libobs-only fast build never compiled. A DistroAV compile-check job is required so a \
-         C++ error in ndi-*.cpp / the burn filter is caught pre-merge, not only by the manual \
-         150-min windows-genlock.yml build."
+        "#101: {LINUX}'s compile-check job must reference vendor/distroav — a DistroAV \
+         compile-check is required so a C++ error in ndi-*.cpp / the burn filter is caught \
+         pre-merge, not only by a post-merge production build."
     );
     // The DistroAV plugin links against libobs; it is configured against an installed OBS SDK
     // prefix and then built. Assert the configure-against-SDK-prefix + build plumbing exists.
@@ -56,11 +76,10 @@ fn fast_workflow_compiles_distroav_plugin() {
     assert!(
         wf.contains("CMAKE_PREFIX_PATH"),
         "#101: DistroAV must be configured with -DCMAKE_PREFIX_PATH=<installed OBS SDK> so it \
-         links against the genlock-patched libobs (mirrors windows-genlock.yml)."
+         links against the genlock-patched libobs."
     );
     // It must actually BUILD DistroAV in the distroav working directory (that is the C++
-    // compile that catches the error). The full build uses `cmake --build build_x64` under
-    // working-directory: vendor/distroav.
+    // compile that catches the error).
     assert!(
         wf.contains("working-directory: vendor/distroav"),
         "#101: the gate must run a cmake build with working-directory: vendor/distroav — \
@@ -69,31 +88,29 @@ fn fast_workflow_compiles_distroav_plugin() {
 }
 
 /// Speed budget: the compile gate is a CHECK, not the full production bundle. It must turn
-/// OFF the CEF/browser dependency (the bulk of the 150-min build) so it stays in the
-/// minutes-not-hours window. `windows-x64` preset defaults ENABLE_BROWSER=true.
+/// OFF the CEF/browser dependency (the bulk of a full build) so it stays in the
+/// minutes-not-hours window.
 #[test]
-fn fast_workflow_disables_browser_for_speed() {
-    let wf = read(FAST);
+fn compile_job_disables_browser_for_speed() {
+    let wf = compile_job();
     assert!(
         wf.contains("-DENABLE_BROWSER=OFF"),
         "#101: the compile gate must configure OBS with -DENABLE_BROWSER=OFF — the CEF/browser \
-         download+build is the bulk of the 150-min full build and is not needed to compile-check \
-         the vendored C++. Keep the gate fast (compile-check, not full bundle)."
+         download+build is the bulk of a full build and is not needed to compile-check the \
+         vendored C++. Keep the gate fast (compile-check, not full bundle)."
     );
 }
 
 /// The gate must FIRE on a push that touches the vendored DistroAV tree, so a DistroAV C++
-/// change is actually compile-checked before it can be merged to main (#101). The libobs-only
-/// build only watches `vendor/obs-studio/libobs/**` — a DistroAV-only change skipped it.
+/// change is actually compile-checked before it can be merged to main (#101).
 #[test]
-fn fast_workflow_triggers_on_distroav_changes() {
-    let wf = read(FAST);
+fn linux_workflow_triggers_on_distroav_changes() {
+    let wf = read(LINUX);
     // The push-path filter must include the DistroAV tree.
     assert!(
         wf.contains("vendor/distroav/**"),
-        "#101: {FAST} `on.push.paths` must include `vendor/distroav/**` so a DistroAV-only C++ \
-         change triggers the compile gate (the libobs-only build watched only \
-         vendor/obs-studio/libobs/**, so DistroAV edits slipped through to main)."
+        "#101: {LINUX} `on.push.paths` must include `vendor/distroav/**` so a DistroAV-only C++ \
+         change triggers the compile gate."
     );
     // This repo gates merges via push-to-dev (it deliberately omits pull_request, #157), so
     // the trigger must be push to dev — that IS the pre-merge gate here.

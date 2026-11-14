@@ -16,8 +16,8 @@
 //! helpers under `-Werror -Wconversion` over hand-written truth tables (the helpers have no
 //! Rust consumer, so the truth table IS the spec). Fails loudly when no C compiler is present.
 //!
-//! No pwsh mirror in windows-genlock*.yml: pure Linux/EGL/DRM path (strih+stream are
-//! libobs-d3d11); the module compiles only via libobs/cmake/os-linux.cmake on linux-genlock.yml.
+//! No Windows mirror (the Windows workflows were retired by issue 1505): pure Linux/EGL/DRM path;
+//! the module compiles only via libobs/cmake/os-linux.cmake on linux-genlock.yml.
 
 use std::fs;
 use std::path::PathBuf;

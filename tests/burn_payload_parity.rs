@@ -11,7 +11,7 @@
 //! Two facets, mirroring the proven tests/genlock_preload.rs convention:
 //!   1. C++↔Rust byte-identity of the payload string AND the gen_ts_ns boundary math,
 //!      by compiling+running the vendored headers with g++ at test time.
-//!   2. Vendored-source + CMake + windows-genlock-workflow guards so a future
+//!   2. Vendored-source + CMake guards so a future
 //!      `git subtree pull` (#44) or a build-wiring regression can't silently drop the
 //!      burn filter / encoder.
 
@@ -44,7 +44,6 @@ const QRCODEGEN_CPP: &str = "vendor/distroav/src/qrcodegen/qrcodegen.cpp";
 const BURN_FILTER: &str = "vendor/distroav/src/ndi-burn-filter.cpp";
 const DISTROAV_CMAKE: &str = "vendor/distroav/CMakeLists.txt";
 const PLUGIN_MAIN: &str = "vendor/distroav/src/plugin-main.cpp";
-const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
 
 // ---- 1. C++↔Rust byte-identity (compile + run the real vendored encoder) -----
 
@@ -1570,24 +1569,5 @@ fn burn_filter_is_in_the_distroav_cmake_sources() {
         cm.contains("src/ndi-burn-filter.cpp"),
         "{DISTROAV_CMAKE}: ndi-burn-filter.cpp is not in target_sources — it would not \
          compile into distroav.dll. #111 build-wiring reverted."
-    );
-}
-
-#[test]
-fn windows_genlock_workflow_gates_on_the_burn_filter() {
-    // Lock-step with the other vendored-patch guards: the production Windows build
-    // re-asserts the #111 burn-filter tokens in pwsh BEFORE the 150-min build, since
-    // this Linux Rust guard can't compile on the windows runner. A subtree bump (#44)
-    // that drops the burn filter then fails HERE, fast, not after a 150-min build.
-    let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-    assert!(
-        wf.contains("ndi-burn-filter.cpp") || wf.contains("create_ndi_burn_filter_info"),
-        "{WINDOWS_GENLOCK_WF}: #111 — the production build no longer asserts the QR burn \
-         filter is present; re-add the pwsh #111 gate."
-    );
-    assert!(
-        wf.contains("burn_payload::encode"),
-        "{WINDOWS_GENLOCK_WF}: #111 — the production build no longer asserts the burn \
-         filter calls the shared byte-identical encoder; re-add the pwsh #111 gate."
     );
 }

@@ -5,13 +5,13 @@
 //! `sync-test-output.cpp` (the obs_output_info callbacks, the lifecycle, the registration),
 //! `sync-test-output-video.cpp`, `sync-test-output-audio.cpp` and the shared
 //! `sync-test-output-internal.hpp`. The Rust anchor tests read the union through
-//! `tests/support/av_sync_dock_output.rs`; the pwsh anchor steps of both windows-genlock workflows
-//! dot-source its twin `vendor/av-sync-dock/test/dock-output-source.ps1`. These checks pin that
-//! wiring:
+//! `tests/support/av_sync_dock_output.rs`; its pwsh twin is `vendor/av-sync-dock/test/dock-output-source.ps1`
+//! (the Windows workflows that dot-sourced it were retired by issue 1505: the Windows boxes run the
+//! pinned obs release). These checks pin that wiring:
 //! - the union is exactly the output's compiled TUs plus its internal header, never the public
 //!   `sync-test-output.hpp`;
 //! - every TU wraps its code in the one namespace and includes the internal header;
-//! - the pwsh twin reads the same files in the same order, and every dock step goes through it;
+//! - the pwsh twin reads the same files in the same order;
 //! - no Rust test reads one output file on its own.
 
 use std::collections::BTreeSet;
@@ -23,11 +23,6 @@ mod av_sync_dock_output;
 
 const CMAKE: &str = "vendor/av-sync-dock/CMakeLists.txt";
 const PWSH_TWIN: &str = "vendor/av-sync-dock/test/dock-output-source.ps1";
-const WORKFLOWS: [&str; 2] = [
-    ".github/workflows/windows-genlock.yml",
-    ".github/workflows/windows-genlock-fast.yml",
-];
-const DOT_SOURCE: &str = ". ./vendor/av-sync-dock/test/dock-output-source.ps1";
 
 fn squish(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -164,59 +159,6 @@ fn the_pwsh_twin_reads_the_same_files_in_the_same_order() {
         ("sync-test-output-audio.cpp.orig", false),
     ] {
         assert_eq!(av_sync_dock_output::is_output_file(name), is, "{name}");
-    }
-}
-
-#[test]
-fn every_dock_step_in_both_workflows_reads_the_union() {
-    for wf in WORKFLOWS {
-        let text = repo_file(wf);
-        // Any spelling of one output file outside a comment (a Get-Content, a
-        // [IO.File]::ReadAllText, a quoted path in either quote style), or a glob over the output
-        // files (`sync-test-output-*.cpp`), means a step reads them on its own instead of through the
-        // helper. The file names are judged by the union's own rule, so the public
-        // sync-test-output.hpp and a comment pointer stay allowed.
-        for (n, line) in text.lines().enumerate() {
-            if line.trim_start().starts_with('#') {
-                continue;
-            }
-            for (at, _) in line.match_indices("sync-test-output") {
-                let name: String = line[at..]
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-                    .collect();
-                let glob = line[at + name.len()..].starts_with(['*', '?', '[']);
-                assert!(
-                    !av_sync_dock_output::is_output_file(&name) && !glob,
-                    "{wf}:{}: reads the dock output file(s) `{name}{}` on its own ({line:?}) -- a \
-                     step must read the union: dot-source {PWSH_TWIN} and use \
-                     Get-DockOutputSource (issue 1386)",
-                    n + 1,
-                    if glob { "…" } else { "" }
-                );
-            }
-        }
-        let mut dock_steps = 0;
-        for step in text.split("\n      - name: ") {
-            if !(step.contains("Get-DockOutputSource") || step.contains("Get-DockBody")) {
-                continue;
-            }
-            dock_steps += 1;
-            let name = step.lines().next().unwrap_or("");
-            assert!(
-                step.contains(DOT_SOURCE),
-                "{wf}: step `{name}` uses the union helper without dot-sourcing {PWSH_TWIN}"
-            );
-            assert!(
-                !step.contains("function Get-Body("),
-                "{wf}: step `{name}` carries its own body extractor again -- use Get-DockBody"
-            );
-        }
-        assert!(
-            dock_steps >= 6,
-            "{wf}: the six dock anchor steps (#942, #1319, both issue-1367 steps, issue 1381, \
-             #398) must all read the union; found {dock_steps}"
-        );
     }
 }
 

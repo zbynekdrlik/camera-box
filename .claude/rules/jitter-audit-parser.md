@@ -34,7 +34,7 @@ families** over the SAME log — extend the matching one, never cross-wire them:
    `=` and are skipped. Never hand-model the decoration syntax.
 3. **RED→GREEN in this module** — it compiles on default features (no probe/OBS/rig):
    `cargo test --lib jitter_audit`. The emitting C++ under `vendor/distroav/**` is CI-only
-   (windows-genlock*/linux-genlock) and is NOT what you touch here — this is read-only log tooling.
+   (linux-genlock; the Windows build is the pinned obs release since issue 1505) and is NOT what you touch here — this is read-only log tooling.
 
 ## `genlock-jitter-report` CLI landmine — the `--json` #757 contract
 

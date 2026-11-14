@@ -31,8 +31,8 @@
 //! truth-tabled by `tests/distroav_recv_create_retry_1080.rs`; re-lifting it here would be pure
 //! redundancy. The #1097-unique risk is the CONTROL-FLOW revert (break reappearing on a `git subtree
 //! pull` re-importing stock DistroAV), which a source anchor catches. Per
-//! `.claude/rules/distroav-receiver-lifecycle.md` these anchors are ALSO mirrored as pwsh token
-//! checks in BOTH `windows-genlock*.yml` (the fast path hot-swaps distroav.dll un-gated). Runs
+//! `.claude/rules/distroav-receiver-lifecycle.md` these anchors were also mirrored as pwsh token
+//! checks in the Windows workflows, which issue 1505 retired. Runs
 //! offline via `rustc --test`; std-only.
 
 use std::fs;
@@ -57,8 +57,8 @@ fn squish(s: &str) -> String {
 
 // ----------------------------------------------------------------------------------------------
 // Facet A — source anchors (revert protection: a `git subtree pull` re-importing stock DistroAV
-// silently drops the whole patch; CI then fails loudly here. Mirrored as pwsh token checks in BOTH
-// windows-genlock*.yml because the fast path hot-swaps distroav.dll un-gated).
+// silently drops the whole patch; CI then fails loudly here. The pwsh mirror in the Windows
+// workflows was retired by issue 1505).
 // ----------------------------------------------------------------------------------------------
 
 #[test]
