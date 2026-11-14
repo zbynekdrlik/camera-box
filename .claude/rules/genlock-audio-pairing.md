@@ -50,7 +50,7 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
    carries the audit-line-only `audio_hold=off|latency|timecode|pending video_delay_ms=<smoothed>
    audio_health=<decide_audio_health, -1 = fps unknown>` (issue 1367), printed BEFORE
    `audio_enabled=` so `(long long)gs.audio_pairing_offset_ms);` stays the last argument (a
-   `genlock_lock_indicator_guards.rs` anchor). Parsed by `src/jitter_audit.rs` (additive,
+   `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs` anchor). Parsed by `src/jitter_audit.rs` (additive,
    forward-compatible; the three new keys are ignored there). Since ROZHODNUTÉ 5827497952 the line
    also carries `shallow_depth= shallow_capped= shallow_latches= audio_slew_ms= audio_slews=
    audio_steps= audio_withheld= audio_place_err_ms=` right after `n1_grows=` (audit-line-only;
@@ -1034,7 +1034,7 @@ aggregates the per-source pairing-offset breach (`st.version >= 2 && st.audio_en
 |audio_pairing_offset_ms| > GENLOCK_AUDIO_PAIRING_BOUND_MS`, 33 ms) into that one facet — the twin of
 its existing qpc-drift reduction — so an unpaired audio leg turns the indicator DEGRADED (`audio
 unpaired: <src>`). The C↔Rust decision stays parity-gated (`tests/genlock_lock_state_parity.rs`, now
-a 2^8 flag sweep), lock-stepped by `tests/genlock_lock_indicator_guards.rs` +
+a 2^8 flag sweep), lock-stepped by `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs` +
 `tests/genlock_preload.rs` (+ the #1298 pwsh gate in BOTH `windows-genlock{,-fast}.yml` until issue 1505). Per the
 scope, audio disabled/absent never degrades (the `audio_enabled` guard); `decide_audio_health`'s
 AudioDisabledOnProgram + AsrcSaturated branches are NOT surfaced here (they need is-program-source /

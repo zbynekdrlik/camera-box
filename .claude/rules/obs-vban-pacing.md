@@ -1,9 +1,6 @@
 ---
 paths:
   - "vendor/obs-vban/**"
-  - "src/vban_pacing.rs"
-  - "src/vban_pacing_bench.rs"
-  - "tests/vban_pacing_parity_1372.rs"
   - "scripts/lib/genlock-plugin-deploy.sh"
 ---
 
@@ -144,11 +141,11 @@ A buffering hole brings no backlog and `t0` never moves.
 
 - `vendor/obs-vban/src/vban-pacing.h`: the pure C decision. It is header-only and has no OBS
   dependency.
-- `src/vban_pacing.rs`: the Rust authority. `src/vban_pacing_bench.rs` is its test-only
+- `obs:tests/vendored/tests/support/vban_pacing.rs`: the Rust authority. `obs:tests/vendored/tests/support/vban_pacing_bench.rs` is its test-only
   `#[path]` child, and it replays the logged callback pattern.
   - The bench adds stalls, buffering holes and the measured 0–30 ms wake lateness.
   - It checks conservation, the frame counter and the latency before and after.
-- `tests/vban_pacing_parity_1372.rs` `#include`s the SHIPPED header by its absolute path and
+- `obs:tests/vendored/tests/vban_pacing_parity_1372.rs` `#include`s the SHIPPED header by its absolute path and
   compiles it under `-Wall -Wextra -Wconversion -Wsign-conversion -Wformat=2 -Werror`. It then
   requires the C decision and state after every scripted wake to equal the Rust.
   - The scripts hit exact deadlines, the grace edge and one ns before it, the cap instants, the
@@ -205,6 +202,9 @@ sleeps without spinning. While a slot waits for its audio the thread waits on th
 only delays the grace check, never loses audio.
 
 ## Verify
+
+The Rust authority and its parity gate live in obs since issue 1505; run them there, in obs's
+`tests/vendored` crate:
 
 ```bash
 cargo test --test vban_pacing_parity_1372   # unit tests + the bench + the C parity + the wiring pin

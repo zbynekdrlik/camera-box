@@ -296,8 +296,8 @@ fn triggers_on_vendor_changes_and_dispatch() {
 }
 
 /// Neither job should re-duplicate the dozens of Windows pwsh "assert genlock patch present"
-/// text-token guards — those already run as real Rust tests on every push via ci.yml's `test`
-/// job (tests/genlock_preload.rs, distroav_genlock_lockdown.rs, etc.). This workflow's unique
+/// text-token guards — those run as real Rust tests (camera-box ci.yml: tests/genlock_preload.rs;
+/// obs's tests/vendored job since issues 1504 + 1505: distroav_genlock_lockdown.rs, etc.). This workflow's unique
 /// job is proving actual COMPILATION on Linux, not re-asserting source tokens.
 #[test]
 fn does_not_duplicate_the_windows_pwsh_guard_pattern() {

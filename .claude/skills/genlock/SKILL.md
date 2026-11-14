@@ -105,7 +105,7 @@ more** — the old env knobs were removed in #257. The current model:
   the capability marker.
 
 The `#235` env model and the `STALE-ENV TRAP` notes below are HISTORY (pre-#257) — there is no
-genlock env to lose any more. Tests: `tests/genlock_preload.rs`, `tests/distroav_genlock_lockdown.rs`,
+genlock env to lose any more. Tests: `tests/genlock_preload.rs`, `obs:tests/vendored/tests/distroav_genlock_lockdown.rs`,
 `tests/launch_obs_genlock.rs`, `tests/rig_mode.rs`, `tests/drift_guard.rs`, `tests/burn_payload_parity.rs`.
 
 **PLAYBOOK HYGIENE (when you kill an env var / identifier):** grep the WHOLE playbook —

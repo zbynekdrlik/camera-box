@@ -11,29 +11,8 @@ paths:
   - "scripts/lib/strih-vban-leg-move.sh"
   - "vendor/obs-vban/src/vban-source.c"
   - "vendor/obs-vban/src/vban-receive-timeline.h"
-  - "src/vban_receive_timeline.rs"
-  - "src/vban_receive_timeline_bench.rs"
-  - "src/vban_receive_timeline_tests.rs"
-  - "src/vban_receive_timeline_late_tests.rs"
-  - "src/vban_receive_timeline_worker_model.rs"
-  - "src/vban_receive_timeline_bench_wake.rs"
-  - "src/vban_receive_timeline_bench_reorder.rs"
-  - "src/vban_receive_timeline_reorder_tests.rs"
-  - "src/vban_receive_timeline_conceal_tests.rs"
-  - "src/vban_conceal.rs"
-  - "src/vban_conceal_tests.rs"
   - "vendor/obs-vban/src/vban-conceal.h"
   - "vendor/obs-vban/src/vban-sample-io.h"
-  - "tests/vban_conceal_parity_1439.rs"
-  - "tests/vban_source_reorder_1439.rs"
-  - "tests/vban_source_conceal_1439.rs"
-  - "tests/vban_receive_timeline_parity_1439.rs"
-  - "tests/support/vban_receive_scripts_1439.rs"
-  - "tests/vban_source_loss_1439.rs"
-  - "tests/vban_receive_wiring_1439.rs"
-  - "tests/support/vban_c_1439.rs"
-  - "tests/support/vban_source_driver_1439.c"
-  - "tests/support/vban_source_harness_1439.rs"
   - "scripts/program_audio_vban.py"
   - "scripts/lib/strih-program-vban.sh"
   - "tests/python/test_stream_role_vban_1439.py"
@@ -57,7 +36,7 @@ PipeWire. Phase 2 (addendum 6338457001) does the same on the STRIH role by the s
 `ASIO zvuk` takes the console's `strih-obs` on UDP 6981 and the hub's `program_out` is gone (section
 "The strih role (phase 2)" below).
 
-## The receive timeline (`vban-receive-timeline.h` <-> `src/vban_receive_timeline.rs`)
+## The receive timeline (`vban-receive-timeline.h` <-> `obs:tests/vendored/tests/support/vban_receive_timeline.rs`)
 
 Stock 0.3.1 stamped every packet `arrival - length`, so the sender's network jitter reached an OBS
 that mixes at 0 ms audio buffering: a late packet was re-anchored by OBS, and that was a click. A
@@ -207,8 +186,8 @@ lost packets landed on audio already delivered).
     packet is normally stored ~75 ms ahead, so both fades are known. A run that starts as silence stays
     silence (`prev_audio` false), and the limit holds whatever head the caller hands in (the run so far
     is counted, not only the distance).
-  - The math (`vban-conceal.h` <-> `src/vban_conceal.rs`, C-vs-Rust bit for bit in
-    `tests/vban_conceal_parity_1439.rs`): the previous packet's samples, faded IN over 1 ms (at most a
+  - The math (`vban-conceal.h` <-> `obs:tests/vendored/tests/support/vban_conceal.rs`, C-vs-Rust bit for bit in
+    `obs:tests/vendored/tests/vban_conceal_parity_1439.rs`): the previous packet's samples, faded IN over 1 ms (at most a
     quarter slot, at least one frame) from the last sample handed to libobs on that channel (held), and
     -- `toward_next` -- OUT over the last 1 ms toward the next packet's first sample. Raised cosine
     `0.5 - 0.5 cos(pi (i + 1) / (n + 1))`, no libm (a Taylor cos on [0, pi/4] and sin on [pi/4, pi/2],
@@ -264,10 +243,10 @@ lost packets landed on audio already delivered).
     reorder turns the whole store through the deque under the lock -- ~16 entries at R 80, up to the
     4096-packet cap with a stalled worker (a slot ring by position would make it O(1) if that ever
     matters).
-- **Bench** (`src/vban_receive_timeline_bench.rs`): a two-clock sender at +-50 ppm, 5..7 ms bursts, gaps
+- **Bench** (`obs:tests/vendored/tests/support/vban_receive_timeline_bench.rs`): a two-clock sender at +-50 ppm, 5..7 ms bursts, gaps
   of 5..30 ms every ~400 ms, receive-thread wake jitter.
   - **What it runs:** the replay runs the source as shipped. The receive decision, then the playout
-    worker of `src/vban_receive_timeline_worker_model.rs` -- ONE model shared with the unit tests' `Rig`
+    worker of `obs:tests/vendored/tests/support/vban_receive_timeline_worker_model.rs` -- ONE model shared with the unit tests' `Rig`
     (review round 5): it wakes only at the times it scheduled itself, or idle when a packet is stored,
     and the bench can make every wake late (`WakeLate`: a fixed part + a u^4 tail) -- into the libobs
     model `Obs`. The parity test keeps its own driver: it mirrors the C test driver line for line.
@@ -297,7 +276,7 @@ lost packets landed on audio already delivered).
     the starve; ONE re-anchor; the lead-in puts the new stretch on its stamp; held within 0.51 ms.
   - At R = 20 ms the same sender drops late packets (never a re-anchor): the test that the bench can
     fail.
-  - **A late worker (`src/vban_receive_timeline_bench_wake.rs`, review round 5):** every acceptance row
+  - **A late worker (`obs:tests/vendored/tests/support/vban_receive_timeline_bench_wake.rs`, review round 5):** every acceptance row
     above (loss 40-900 ms, the hiccup, the step) and the 50 ppm sender with 30 ms gaps, with EVERY wake
     up to 1.9 ms late (inside the margin), encoder running and not: the same numbers, nothing missed.
     stream-snv's R 80 against the same sender with every wake up to 15 ms late: held within 0.81 ms,
@@ -426,7 +405,7 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   from an atomic copy.
 - **A reconfiguration (another port / stream / host) asks for the new timeline BEFORE the new sender
   is let in** (review round 1; set after only, its first packet could land on the old timeline as lost
-  slots), and again after. `tests/vban_source_loss_1439.rs` reads the pending reset at each UDP
+  slots), and again after. `obs:tests/vendored/tests/vban_source_loss_1439.rs` reads the pending reset at each UDP
   registration call.
 - **A failed bind is final:** `vban-udp-thread.c` logs `[obs-vban] Failed to bind port P` and its
   thread exits, no retry. A hub still holding 6980 when OBS starts = no program audio until OBS
@@ -447,7 +426,7 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   Development-scene guard read it; never a role constant.
 - **stream-snv (issue 1462):** a Linux stream box like stream-pp since 22.10.2026. mbc.lan sends the SNV
   program as VBAN `stream`, 24-bit PCM (format byte 0x02), 48 kHz stereo, 239 frames per packet, to
-  UDP 6980: the source decodes it (pinned by `tests/vban_source_loss_1439.rs`). Its OBS input `mbc`
+  UDP 6980: the source decodes it (pinned by `obs:tests/vendored/tests/vban_source_loss_1439.rs`). Its OBS input `mbc`
   read as the obs-vban source on 23.10.2026 (`stream_name` `stream`, port 6980, R 80; the setup step 13
   hub removal and the launch seed's switch from the earlier hub-fed capture had run), and mbc.lan
   must keep sending to 6980. The collection port has no `stream-snv` preset
@@ -562,7 +541,7 @@ for the hub (one UDP port has one receiver). The console-side setting is the own
   at 20 ms (23.10.2026 22:59:48, 23 s after the OBS start) dropped one packet 1.5 ms past its deadline
   (one 2.5 ms silence slot) and read `max_late_ms` -5 to -7 in the steady state, so R went to 30. The
   pytest pins the in-time window (R - the 2 ms margin) >= 20 + 1.5 + 5 ms and R <= 30.
-- **96 kHz:** `tests/vban_source_96k_1439.rs` runs `strih-obs`'s exact shape through the shipped
+- **96 kHz:** `obs:tests/vendored/tests/vban_source_96k_1439.rs` runs `strih-obs`'s exact shape through the shipped
   source (the lift driver's `sr=N` token = the VBAN rate index): every output at 96 kHz, contiguous on
   the 96 kHz clock, the lead-in = R on that clock, 24-bit samples whole, one loss one concealed slot.
 - **The leftover `strih-program` null sink + loopback** on a box whose program is VBAN: issue 1440
@@ -877,19 +856,20 @@ outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender o
 
 ## Verify
 
-- `cargo test --lib vban_receive_timeline` (unit tests + the bench), in the debug profile like CI,
+- The Rust authority, its unit tests, the bench and the parity gates below live in obs since issue 1505
+  (`obs:tests/vendored`); run them there. The unit tests + the bench run in the debug profile like CI,
   where an unsigned underflow panics; an `-O` build wraps it silently (round 3 shipped two GREEN
   commits that only passed under `-O`). Where the C header wraps, the Rust twin uses `wrapping_sub`,
   and test arrivals are monotonic like the real receive thread.
-- `tests/vban_receive_timeline_parity_1439.rs` (the C-vs-Rust trace, bit-for-bit doubles under
-  `-ffp-contract=off`), `tests/vban_receive_wiring_1439.rs` (the ASRC lift, the source wiring and the workflow pins; split
-  out in review round 1, both share `tests/support/vban_c_1439.rs`) and `tests/vban_source_loss_1439.rs`
+- `obs:tests/vendored/tests/vban_receive_timeline_parity_1439.rs` (the C-vs-Rust trace, bit-for-bit doubles under
+  `-ffp-contract=off`), `obs:tests/vendored/tests/vban_receive_wiring_1439.rs` (the ASRC lift, the source wiring and the workflow pins; split
+  out in review round 1, both share `obs:tests/vendored/tests/support/vban_c_1439.rs`) and `obs:tests/vendored/tests/vban_source_loss_1439.rs`
   (the SHIPPED `vban-source.c` lifted into a C driver with libobs stubs: loss = silence, contiguous
   stamps, the status line's fields).
 - The plugin sources: `gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wformat=2 -Werror` with a generated
   `plugin-macros.generated.h` + a two-define `obsconfig.h` (the pacing rule's recipe).
-- ROZHODNUTÉ 6352253147: `src/vban_conceal.rs` (the math), `tests/vban_conceal_parity_1439.rs`,
-  `tests/vban_source_reorder_1439.rs` and `tests/vban_source_conceal_1439.rs` (the shipped source through the lift driver, whose `out`
+- ROZHODNUTÉ 6352253147: `obs:tests/vendored/tests/support/vban_conceal.rs` (the math), `obs:tests/vendored/tests/vban_conceal_parity_1439.rs`,
+  `obs:tests/vendored/tests/vban_source_reorder_1439.rs` and `obs:tests/vendored/tests/vban_source_conceal_1439.rs` (the shipped source through the lift driver, whose `out`
   line carries each output's `mid=` and `last=` sample and `logs=`, the plugin's log lines written
   before it, atomic: both threads log). The real-thread driver with a reorder and
   short losses in it runs clean under ThreadSanitizer.
@@ -916,7 +896,7 @@ outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender o
   `git add`: build it from `string.ascii_letters + string.digits` (python) or short bash locals.
 - Parity coverage: random event scripts that re-anchor too often never reach a valid fit; a
   boundary-hit counter test (17 counters, every one >= 1) keeps the gate from going blind.
-- The source driver (`tests/support/vban_source_driver_1439.c`) is baked into the Rust test binary at
+- The source driver (`obs:tests/vendored/tests/support/vban_source_driver_1439.c`) is baked into the Rust test binary at
   COMPILE time (`include_str!`): after editing it, recompile the test binary, or the old driver runs.
   The shipped `vban-source.c` and the header are read at RUN time, so a RED can be checked against
   the committed twins with `git stash push -- <twin files>`, the same compiled binary, `git stash pop`.
@@ -929,5 +909,5 @@ outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender o
 - Never `println!` a bench `Run` with `--nocapture`: its Debug prints every emitted record (MBs per
   run). For numbers, copy `src/vban_receive_timeline*.rs` to a scratch dir, append a test that prints
   the compact fields, and run that copy.
-- `rustfmt src/vban_receive_timeline.rs` formats every `#[path]` child too (the bench, its `wake`
+- In the obs repo, `rustfmt tests/vendored/tests/support/vban_receive_timeline.rs` formats every `#[path]` child too (the bench, its `wake`
   child, the tests, the worker model).

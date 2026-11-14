@@ -116,7 +116,7 @@ needs the crate + `CARGO_TARGET_TMPDIR` and runs ONLY under `cargo test`. A vend
 DECISION helper that NOTHING in the Rust appliance calls (e.g. `genlock_reconnect_decision` in
 `vendor/distroav/src/ndi-source.cpp`, a DistroAV-receiver-loop-only choice) has no such authority to
 compare against — so DON'T invent a crate-root module just to have one. Instead make the whole gate
-**self-contained / std-only** (`tests/distroav_ndi_reconnect_767.rs`): it `fs::read_to_string`s the
+**self-contained / std-only** (`obs:tests/vendored/tests/distroav_ndi_reconnect_767.rs`): it `fs::read_to_string`s the
 vendored file, lifts the `static inline` helper by signature → first `\n}\n`, compiles it with `cc`
 against a tiny `<stdint.h>`/`<stdbool.h>` stub + a `main()` driving a hand-written **truth table**,
 and asserts each hardcoded expected bool. The truth table IS the spec (no Rust reference needed), so
