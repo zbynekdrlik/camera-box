@@ -64,7 +64,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "$HERE/lib/genlock-markers.sh"
 # shellcheck source=scripts/lib/genlock-stats-abi.sh
-# issue 1302: the --fast stats-ABI gate (step 0f) + the full deploy's GENLOCK_STATS_ABI.txt (step 5b).
+# issue 1302: the full deploy's GENLOCK_STATS_ABI.txt (cleared at step 3c, recorded at step 5b).
 . "$HERE/lib/genlock-stats-abi.sh"
 # shellcheck source=scripts/lib/ahk-watchdog.sh
 # Shared AHK fragments: the issue-1372 GUARD (stop if running, never restart) + the #789 relaunch.
@@ -132,13 +132,15 @@ fleet_pick_run_at_sha() {
 #   stops + restart-verifies it. Step (0b, issue 1357) first sets + reads back a max-performance
 #   power plan when the active one is not (the only Windows-baseline mutation, before any OBS stop,
 #   scripts/lib/obs-box-baseline-win.sh). It stops obs64, clears crash sentinels, backs up the components it overwrites,
-#   copies the new bytes from STAGE (full = 3 surgical robocopies; fast = obs.dll only), writes BOTH
+#   copies the new bytes from STAGE (3 surgical robocopies of the full bundle), writes BOTH
 #   markers + DEPLOYED_AT temp-then-rename, sha256-verifies the deployed obs.dll against the bundle
 #   manifest (fail-closed), and prints a box-backup RETENTION PLAN (keep newest KEEP; delete only
 #   when $fleetConfirmRetention). Env-free (the genlock build carries no OBS_GENLOCK_*/OBS_BURN_*).
-#   STATS_ABI (issue 1302): the pair <stats>:<output_stats>; FAST refuses at step (0f) unless the box's GENLOCK_STATS_ABI.txt names both and each equals it; FULL clears it (3c), records it (5b).
+#   STATS_ABI (issue 1302): the pair <stats>:<output_stats>, cleared at (3c), recorded at (5b). MODE must be full (issue 1522).
 build_windows_deploy_program() {
   local box="$1" mode="$2" stage="$3" obs_dir="$4" has_ahk="$5" backup_root="$6" keep="$7" gsha="$8" dsha="$9" confirm="${10:-0}" stats_abi="${11:-}"
+  # issue 1522: the pinned release ships the full bundle only (issue 1505), so no obs.dll-only program.
+  [ "$mode" = "full" ] || { echo "build_windows_deploy_program: mode '$mode' refused -- a Windows box takes the full bundle only (issue 1505)" >&2; return 2; }
   # Escape ' for the PowerShell single-quoted strings (double it) -- incl. gsha/dsha (--sha is
   # operator-supplied in plan mode and also flows into $stage paths; #789 review #7 defense-in-depth).
   local stage_ps="${stage//\'/\'\'}" obs_ps="${obs_dir//\'/\'\'}" back_ps="${backup_root//\'/\'\'}"
@@ -270,8 +272,7 @@ PSKAR
   fi
 
   local copy_block
-  if [ "$mode" = "full" ]; then
-    copy_block=$(cat <<'PSFULL'
+  copy_block=$(cat <<'PSFULL'
 # (4) FULL bundle: three surgical robocopies (overwrite-keep-extras, NEVER /MIR|/PURGE). robocopy
 #     exit 0-7 is SUCCESS; only >= 8 is failure. /XF the two files that must not ride here:
 #     *.pdb (never deployed) and obs-virtualcam-module64.dll (held by the Camera Frame Server ->
@@ -286,22 +287,11 @@ if ($LASTEXITCODE -ge 8) { Write-Error "robocopy obs-plugins\64bit failed ($LAST
 Copy-Item -Force (Join-Path $stage 'BUNDLE_MANIFEST.json') (Join-Path $obsDir 'BUNDLE_MANIFEST.json')
 PSFULL
 )
-  else
-    copy_block=$(cat <<'PSFAST'
-# (4) FAST (libobs-only) deploy: swap obs.dll ONLY -- no bulk copy of data\ / obs-plugins\ (a
-#     libobs-only change has no other changed files). obs.dll can stay locked past a short sleep
-#     after Stop-Process, so retry the copy once.
-$src = Join-Path $stage 'obs.dll'
-$dst = Join-Path $obsDir 'bin\64bit\obs.dll'
-try { Copy-Item -Force $src $dst } catch { Start-Sleep -Seconds 5; Copy-Item -Force $src $dst }
-PSFAST
-)
-  fi
-  # #1115 + issue 1372: the FULL-mode plugin deploys + byte verifies (distroav to its ProgramData
+  # #1115 + issue 1372: the plugin deploys + byte verifies (distroav to its ProgramData
   # load path, the paced obs-vban into Program Files) live in scripts/lib/genlock-plugin-deploy.sh.
   local plugin_backup_block plugin_deploy_block
-  plugin_backup_block="$(genlock_plugin_backup_ps "$mode")"
-  plugin_deploy_block="$(genlock_plugin_deploy_ps "$mode")"
+  plugin_backup_block="$(genlock_plugin_backup_ps)"
+  plugin_deploy_block="$(genlock_plugin_deploy_ps)"
   # issue 1357: the power-plan set + read-back (the ONLY baseline mutation), before OBS is touched.
   local power_plan_block clean_close_pre clean_close_stop saved_readback
   power_plan_block="$(win_baseline_power_plan_ensure_ps)"
@@ -324,8 +314,6 @@ PSFAST
 # (0) preflight -- the staged bundle must already be on the box (STEP 0 of the plan uploads it).
 if (-not (Test-Path \$stage))  { Write-Error "stage \$stage not found -- upload the artifact first (plan STEP 0)"; exit 2 }
 if (-not (Test-Path \$obsDir)) { Write-Error "OBS install \$obsDir not found"; exit 2 }
-
-$(genlock_fast_abi_gate_ps "$mode" "$stats_abi")
 
 ${clean_close_pre}
 
@@ -350,7 +338,7 @@ New-Item -ItemType Directory -Force -Path \$backupDir | Out-Null
 Copy-Item -Force (Join-Path \$obsDir 'bin\\64bit\\obs.dll') (Join-Path \$backupDir 'obs.dll.pre-789') -ErrorAction SilentlyContinue
 Copy-Item -Force (Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt') (Join-Path \$backupDir 'GENLOCK_BUILD_SHA.txt.pre-789') -ErrorAction SilentlyContinue
 ${plugin_backup_block}
-$(genlock_stats_abi_clear_ps "$mode")
+$(genlock_stats_abi_clear_ps)
 
 ${copy_block}
 
@@ -364,7 +352,7 @@ function Write-MarkerAtomic(\$dest, \$content) {
 Write-MarkerAtomic (Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt')  '${gsha_ps}'
 Write-MarkerAtomic (Join-Path \$obsDir 'DISTROAV_BUILD_SHA.txt') '${dsha_ps}'
 Write-MarkerAtomic (Join-Path \$obsDir 'DEPLOYED_AT')            (Get-Date -Format o)
-$(genlock_stats_abi_marker_ps "$mode" "$stats_abi")
+$(genlock_stats_abi_marker_ps "$stats_abi")
 
 # (6) sha256 verify the DEPLOYED obs.dll bytes against the bundle manifest (fail-closed) -- proof the
 #     right build actually landed, not just that the copy step said ok (the #122/#121 deploy contract).
@@ -378,7 +366,7 @@ if (Test-Path \$manifest) {
   Write-Host "VERIFY obs.dll want=\$want got=\$got match=\$match"
   if (-not \$match) { Write-Error "VERIFY FAIL: deployed obs.dll bytes do not match the bundle manifest -- do NOT trust this box"; exit 4 }
 } else {
-  Write-Warning "no BUNDLE_MANIFEST.json in \$stage -- cannot byte-verify obs.dll (fast deploy); marker-only proof."
+  Write-Warning "no BUNDLE_MANIFEST.json in \$stage -- cannot byte-verify obs.dll; marker-only proof."
 }
 
 ${plugin_deploy_block}
@@ -815,7 +803,7 @@ main() {
     [ -n "$sha_override" ] || [ -n "$anchor_rest" ] || sha_override="$lx_sha"
     [ -n "$sha_override" ] || { echo "ERROR: --plan requires --sha (no network in plan mode)" >&2; exit 2; }
     local sha="$sha_override" stats_abi=""
-    [ -z "$anchor_rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")")" || exit 3
+    [ -z "$anchor_rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/..")"
     [ -z "$win_sha" ] || win_abi="$(fleet_win_pin_stats_abi "$HERE/.." "$stage")"
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
     fleet_win_note "$HERE/.." "$win_boxes"
@@ -853,7 +841,7 @@ main() {
     sha="$(gh run view "$run_id" --repo "$GENLOCK_REPO" --json headSha -q .headSha 2>/dev/null)" \
       || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
     [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
-    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")" 1)" || exit 3
+    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." 1)"
   fi
   echo "# anchor run $run_id -> canonical SHA $sha (the Linux OBS boxes: the pinned obs release $lx_sha); deploying: $boxes (mode $mode; retention --yes=$yes)"
   fleet_win_note "$HERE/.." "$win_boxes"

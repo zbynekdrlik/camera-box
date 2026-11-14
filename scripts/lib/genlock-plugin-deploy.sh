@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # airuleset:script-ok source-only lib (pure printer functions, no top-level statements) -- the
 # scripts/lib/*.sh convention: the caller (deploy-genlock-fleet.sh) owns `set -euo pipefail`.
-# genlock-plugin-deploy.sh -- the FULL-mode plugin PowerShell blocks of the Windows genlock deploy.
+# genlock-plugin-deploy.sh -- the plugin PowerShell blocks of the Windows genlock deploy.
 # Sourced by scripts/deploy-genlock-fleet.sh (build_windows_deploy_program); pure printers, no I/O.
 #
 # Each function prints literal PowerShell (quoted heredocs, nothing expands) that the fleet
 # deploy program embeds. $obsDir, $stage, $backupDir and $manifest are variables of that program
-# (steps 0, 3 and 6). A FAST (obs.dll-only) deploy carries neither plugin, so both print a no-op
-# comment for it.
+# (steps 0, 3 and 6). Every Windows deploy ships the whole bundle (issue 1505 retired the obs.dll-only
+# FAST deploy; issue 1522 removed its branches), so both always print their blocks.
 #
-#   genlock_plugin_backup_ps MODE  -- step (3b): keep the box's current obs-vban.dll and (issue 1425)
+#   genlock_plugin_backup_ps       -- step (3b): keep the box's current obs-vban.dll and (issue 1425)
 #                                     vlc-video.dll for rollback, BEFORE the step-(4) robocopy of
 #                                     obs-plugins\64bit overwrites them.
-#   genlock_plugin_deploy_ps MODE  -- step (6b) #1115: deploy + byte-verify distroav.dll at its
+#   genlock_plugin_deploy_ps       -- step (6b) #1115: deploy + byte-verify distroav.dll at its
 #                                     ProgramData load path; step (6c) issue 1372: byte-verify the
 #                                     paced obs-vban.dll the robocopy put into Program Files; step (6d)
 #                                     issue 1425: byte-verify the media-clock vlc-video.dll the same way.
@@ -20,11 +20,6 @@
 # The obs-vban rollback copy (issue 1372). Program Files\obs-studio\obs-plugins\64bit is the one
 # path the boxes load obs-vban from (no ProgramData / AppData copy, verified on resolume 26.9.2026).
 genlock_plugin_backup_ps() {
-  if [ "$1" != "full" ]; then
-    echo "# (3b) issue 1372: no obs-vban backup on a FAST deploy (no obs-vban in the fast bundle)."
-    echo "# (3b) issue 1425: no vlc-video backup on a FAST deploy (no vlc-video in the fast bundle)."
-    return 0
-  fi
   cat <<'PSOBSVBANBACKUP'
 # (3b) issue 1372 -- keep the box's current obs-vban.dll (the stock 0.3.1 on the first deploy).
 Copy-Item -Force (Join-Path $obsDir 'obs-plugins\64bit\obs-vban.dll') (Join-Path $backupDir 'obs-vban.dll.pre-789') -ErrorAction SilentlyContinue
@@ -34,13 +29,7 @@ PSOBSVBANBACKUP
 }
 
 genlock_plugin_deploy_ps() {
-  if [ "$1" != "full" ]; then
-    echo '# (6b) #1115: distroav ProgramData deploy -- no-op on a FAST (obs.dll-only) deploy (no distroav in the fast bundle).'
-    echo "# (6c) issue 1372: obs-vban verify -- no-op on a FAST (obs.dll-only) deploy (no obs-vban in the fast bundle)."
-    echo "# (6d) issue 1425: vlc-video verify -- no-op on a FAST (obs.dll-only) deploy (no vlc-video in the fast bundle)."
-    return 0
-  fi
-  # #1115 (Option A): FULL mode ALSO deploys the bundle's genlock distroav.dll to the REAL OBS load
+  # #1115 (Option A): the deploy ALSO deploys the bundle's genlock distroav.dll to the REAL OBS load
   # path in ProgramData (backup + fail-closed byte verify), so the LOADED plugin is the canonical
   # build and the byte-parity gather/compare against the manifest becomes real.
   cat <<'PSDISTROAV'

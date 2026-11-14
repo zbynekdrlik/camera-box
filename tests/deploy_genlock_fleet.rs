@@ -444,8 +444,17 @@ fn windows_program_refuses_fast_mode_and_carries_no_fast_gate_1522() {
         "the refusal names the mode and why:\n{err}"
     );
     let full = win_program("stream-snv", "full", "0");
-    for gone in ["(0f)", "FAST DEPLOY REFUSED", "$abiNew", "PSFAST", "obs.dll ONLY"] {
-        assert!(!full.contains(gone), "the retired FAST step '{gone}' is gone:\n{full}");
+    for gone in [
+        "(0f)",
+        "FAST DEPLOY REFUSED",
+        "$abiNew",
+        "PSFAST",
+        "obs.dll ONLY",
+    ] {
+        assert!(
+            !full.contains(gone),
+            "the retired FAST step '{gone}' is gone:\n{full}"
+        );
     }
 }
 

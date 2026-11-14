@@ -44,7 +44,7 @@ fleet_win_pin_mode_ok() {
 
 # fleet_win_pin_stats_abi ROOT DIR -> the stats pair `<stats>:<output_stats>` of DIR's BUNDLE_MANIFEST.json
 # when its release block names the pinned tag + commit; nothing + a named WARNING otherwise (the program
-# then removes the box's marker, so a later fast deploy refuses -- never a pair from another release).
+# then removes the box's marker -- never a pair from another release).
 fleet_win_pin_stats_abi() {
   local root="${1:?tree required}" dir="${2:?dir required}" tag commit
   tag="$(obs_pin_tag "$root" 2>/dev/null)" || return 0

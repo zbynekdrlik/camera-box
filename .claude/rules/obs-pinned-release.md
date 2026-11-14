@@ -74,10 +74,10 @@ project; camera-box moves the pin. Only imag still runs camera-box's own `linux-
   `fleet_windows_artifact`), the E2E's Windows FAST/FULL manifest auto-source
   (`manifest_autosource_fetch_win_full`, `win_manifest_pair_*`; an operator can still pass
   `VERSION_GATE_MANIFEST` / `VERSION_GATE_ALT_MANIFEST`) and every pwsh lock-step mirror those
-  workflows carried. `--fast` is refused for a Windows box, so the FAST program + its stats-ABI gate
-  (0f) are no longer reachable from the planner. The builders and their tests remain until their
-  removal lands; it was returned to the supervisor as a follow-up candidate in the issue-1505
-  LANE-RETURN (a separate cleanup of the FAST deploy program, `genlock_fast_abi_*` and their tests).
+  workflows carried. `--fast` is refused for a Windows box, and issue 1522 removed what that made
+  unreachable: the FAST deploy program, its stats-ABI gate (0f) (`genlock_fast_abi_*`), the refusal
+  branch of `genlock_stats_abi_resolve` and their tests; `build_windows_deploy_program` refuses a
+  fast MODE with rc 2.
   `linux-genlock.yml`'s header comment still names the two moved tests: an edit to that workflow
   triggers its full Linux build, so the comment waits for the next real change there.
 - **Deploy-test fixtures carry the Windows zip too:** `tests/python/obs_release_fake_1487.py`
