@@ -2,7 +2,6 @@
 paths:
   - "src/av_sync_dock.rs"
   - "vendor/av-sync-dock/src/camera-box-audio.hpp"
-  - "tests/av_sync_dock_latency_display_*.rs"
   - "tests/av_sync_dock_pairing_recover_1153.rs"
   - "vendor/av-sync-dock/src/camera-box-channel-pick.hpp"
 ---

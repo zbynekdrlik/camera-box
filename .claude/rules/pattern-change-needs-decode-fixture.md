@@ -1,7 +1,6 @@
 ---
 paths:
   - "vendor/av-sync-dock/**"
-  - "tests/av_sync_dock_video_decode*.rs"
   - "tests/fixtures/av-sync-dock-*/**"
   - "src/av_sync_dock.rs"
   - "src/aux_tick.rs"

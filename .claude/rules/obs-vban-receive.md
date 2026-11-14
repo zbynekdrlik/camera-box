@@ -909,5 +909,5 @@ outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender o
 - Never `println!` a bench `Run` with `--nocapture`: its Debug prints every emitted record (MBs per
   run). For numbers, copy `src/vban_receive_timeline*.rs` to a scratch dir, append a test that prints
   the compact fields, and run that copy.
-- `rustfmt obs:tests/vendored/tests/support/vban_receive_timeline.rs` formats every `#[path]` child too (the bench, its `wake`
+- In the obs repo, `rustfmt tests/vendored/tests/support/vban_receive_timeline.rs` formats every `#[path]` child too (the bench, its `wake`
   child, the tests, the worker model).
