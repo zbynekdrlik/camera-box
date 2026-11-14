@@ -55,7 +55,7 @@ project; camera-box moves the pin. Only imag still runs camera-box's own `linux-
     markers, `BUNDLE_MANIFEST.json`), so the ONE Windows program `build_windows_deploy_program` reads
     the unzipped tree unchanged (obs.dll verify, distroav to ProgramData + verify, obs-vban/vlc-video).
   - The routing is `scripts/lib/genlock-windows-pin.sh` (the deploy script is at its line budget):
-    `fleet_win_split` sends a Windows box to the zip when the pin carries one; its markers name the pin
+    `fleet_win_split` sends every Windows box to the zip (a pin without one refuses it); its markers name the pin
     commit, `--run-id` / `--sha` are needed only for imag, `--fast` is refused (exit 2: the release ships
     the full bundle only), the stats pair comes from the pinned manifest only when its release block
     names the pin (plan mode reads it from `--stage`; another release = the marker is removed), and the
@@ -75,7 +75,11 @@ project; camera-box moves the pin. Only imag still runs camera-box's own `linux-
   (`manifest_autosource_fetch_win_full`, `win_manifest_pair_*`; an operator can still pass
   `VERSION_GATE_MANIFEST` / `VERSION_GATE_ALT_MANIFEST`) and every pwsh lock-step mirror those
   workflows carried. `--fast` is refused for a Windows box, so the FAST program + its stats-ABI gate
-  (0f) are no longer reachable from the planner (the builders and their tests remain).
+  (0f) are no longer reachable from the planner. The builders and their tests remain until their
+  removal lands; it was returned to the supervisor as a follow-up candidate in the issue-1505
+  LANE-RETURN (a separate cleanup of the FAST deploy program, `genlock_fast_abi_*` and their tests).
+  `linux-genlock.yml`'s header comment still names the two moved tests: an edit to that workflow
+  triggers its full Linux build, so the comment waits for the next real change there.
 - **Still on the vendor build:** imag (`linux-genlock.yml`) and the `vendor/**` tests below. The
   vendored OBS is removed only after a green E2E on the pin, in a separate change.
 

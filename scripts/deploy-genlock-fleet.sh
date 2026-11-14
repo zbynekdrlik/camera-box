@@ -90,7 +90,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # the ONE shared rig-busy guard strih_lx_apply runs before its first mutation (rig-mutation-broadcast-guard.md).
 . "$HERE/lib/stray-session-check.sh"
 # shellcheck source=scripts/lib/genlock-windows-pin.sh
-# issue 1505: a Windows box takes the pinned obs release's Windows zip once the pin carries it.
+# issue 1505: a Windows box takes the pinned obs release's Windows zip; a pin without it refuses the box.
 . "$HERE/lib/genlock-windows-pin.sh"
 
 GENLOCK_REPO="zbynekdrlik/camera-box"
@@ -666,7 +666,8 @@ Usage (execute -- resolve + download the same-SHA artifacts, ssh-deploy the setu
 Windows plan):
   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv] [--yes]
 
-  --run-id   the ANCHOR CI run id -- its headSha is the ONE canonical version every box converges to.
+  --run-id   the ANCHOR linux-genlock.yml run id for imag (optional without imag); the setup-strih
+             and Windows boxes take the pinned obs release (scripts/obs-release.pin).
   --full     default; a Windows box takes the pinned obs release's whole Windows zip (issue 1505).
   --fast     refused for a Windows box (the release ships the full bundle only).
   --boxes    comma list of strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv (default:

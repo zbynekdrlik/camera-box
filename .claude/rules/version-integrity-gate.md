@@ -178,7 +178,8 @@ the live gather being verified on the rig, which no worktree worker can check).
   per-path resolver, NEVER `bundle_hashes`+`drift_check_all_files` — that walks EVERY manifest path
   (~1600) and flips a partial 3-file ssh gather to UNKNOWN. Verdict codes: 10=DORMANT (skip, uncounted),
   20=DRIFT, 11=UNKNOWN, 0=OK.
-- **The Windows auto-source MUST be gated on BOTH boxes ALREADY reporting the keys a manifest
+- **(History: the Windows auto-source below was retired with camera-box's Windows build, issue
+  1505.) The Windows auto-source MUST be gated on BOTH boxes ALREADY reporting the keys a manifest
   activates.** The gate applies the GLOBAL `--manifest` to EVERY `--win-state` box (strih AND stream),
   and a manifest activates BOTH the `obs_dll_sha256` byte compare AND the `genlock_capability` check on
   each. Supplying it while EITHER box has not yet reported EITHER key flips that box to UNKNOWN
@@ -239,6 +240,9 @@ the keys appear on BOTH, THEN remove the `recording-e2e.sh` guard — same LIVE-
 #1067's port4455 caveat.
 
 ## #1100 (Windows half) — ENFORCED (the staged half, unblocked 2026-08-18)
+
+History: issue 1505 retired the Windows FAST manifest auto-source this section describes (see the
+#1346 section below); recording-e2e.sh now passes only an operator `VERSION_GATE_MANIFEST`.
 
 Precondition 1 was unblocked by the supervisor (~19:30) redeploying the current bundle-state-server +
 restarting BundleStateServer. Re-verified LIVE, read-only, at canonical SHA `03cd9c073`: strih
@@ -355,8 +359,8 @@ change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release 
 - Tests: `tests/drift_guard.rs` (`*_1346`, engine), `tests/version_integrity_gate.rs`
   (`run_gate_alt_1346`: full-bundle pass / foreign refuse / unchanged without the flag; its manifest
   file names are prefixed `bundle_1346_` per the write_state-clobber GOTCHA below),
-  `tests/harness_manifest_autosource_1082.rs` (the seam records workflow + artifact + sha), and
-  `tests/harness_windows_manifest_enforce_1100.rs` (the static recording-e2e.sh wiring, count 2).
+  and `tests/harness_manifest_autosource_1082.rs` (the seam records workflow + artifact + sha). The
+  static recording-e2e.sh wiring test `harness_windows_manifest_enforce_1100.rs` went with issue 1505.
 
 ## #1164 — `--imag-acked-offline REASON`: an operator-acked absent imag must NOT UNKNOWN-refuse
 
