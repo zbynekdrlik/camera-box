@@ -115,6 +115,8 @@ confirms the camera is set right):**
 
 ## The production exposure: snapshot before the first set, restore at the EVENT switch
 
+**Run `scripts/rig-mode.sh test` BEFORE a release E2E when the rig is in EVENT mode** (14.11.2026, run 43600647027 attempt 1): EVENT keeps the bkshading relay on the camera's USB-C (the `[0/8]` shutter check reads "no camera attached" and skips) and the camera on the owner's production exposure, so the optical head-end preflight refuses the run on a blurred cam5 within 3 minutes. Switch to TEST, `gh run rerun`, and run `rig-mode.sh event` after the run.
+
 Owner, 26.9.2026: "ked vypina sa development tak ze aj vratis iso a uzavierku naspat". The E2E
 changes the test camera to the TEST baseline, so leaving development must put the owner's own
 production ISO + shutter back. Design comment 5847510146 (Approach 1). A pinned "production
