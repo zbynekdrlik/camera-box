@@ -88,7 +88,7 @@ WS limping. Now the process exits at once, and the output is dark until the resp
 stream at least one self-heal pass plus its confirm, when the task is enabled). That is upstream's
 intended end state too.
 
-Guards: `tests/obs_crash_handler_no_modal_1378.rs`.
+Guards: `obs:tests/vendored/tests/obs_crash_handler_no_modal_1378.rs` (in the obs repo since issue 1504).
 
 - **Facet A: source anchors** on the comment-stripped handler body (`tests/support/cpp_source.rs`).
   No `MessageBox`/`MB_TASKMODAL`/clipboard call; the crash-file write, the recorded write result,
@@ -103,15 +103,16 @@ Guards: `tests/obs_crash_handler_no_modal_1378.rs`.
     abort) with the `could NOT be written to` line.
   - The lift compiles only the non-`_WIN32` branches of the two inner `#ifdef _WIN32` blocks. The
     wide-path open and the `\` replace stay CI-only.
-- **The pwsh mirrors.** This is a rig-critical behavioural divergence that still compiles either way
-  (the #1195 class), so BOTH windows-genlock workflows carry a source-text step. It checks that the
+- **The pwsh mirrors (retired with camera-box's windows-genlock workflows, issue 1505).** This is a
+  rig-critical behavioural divergence that still compiles either way (the #1195 class), so BOTH
+  windows-genlock workflows carried a source-text step until issue 1505. It checks that the
   marker phrase is present FILE-WIDE (like the #1195 step; the Rust Facet A does the scoped check)
   and that the `"OBS has crashed!"` literal is absent. Two other `MessageBoxA` calls stay in
   obs-main.cpp (the VC-runtime check and `--help`), so the negative check keys on the crash-only
   title, never a bare `MessageBoxA`.
 
-FRONTEND change: it lands in `obs64.exe`, so it needs a FULL-bundle deploy to stream and resolume,
-never the fast obs.dll path. The live acceptance after the deploy is the supervisor's:
+FRONTEND change: it lands in `obs64.exe`; since issue 1505 the Windows boxes only ever take the
+pinned obs release's full Windows zip (no fast obs.dll path). The live acceptance after the deploy is the supervisor's:
 
 1. Read the respawner state on each box first: the self-heal task on stream, the AHK process on
    resolume.
@@ -149,8 +150,9 @@ The vendored frontend `.cpp` compiles ONLY on CI. Reuse the
 
 Two frontend-specific differences from the libobs rule:
 
-- **pwsh mirror: NO for a #773-class NULL-guard, YES for a rig-critical BEHAVIORAL divergence
-  (corrected #1195).** The original claim here — "the windows-genlock ymls do NOT reference
+- **pwsh mirror (history: camera-box's windows-genlock workflows and their pwsh mirrors are retired
+  since issue 1505, so no new pwsh mirror is added here): NO for a #773-class NULL-guard, YES for a
+  rig-critical BEHAVIORAL divergence (corrected #1195).** The original claim here — "the windows-genlock ymls do NOT reference
   `frontend/**`, so a frontend anchor is Rust-test-only" — is **FALSE**: both `windows-genlock.yml`
   and `windows-genlock-fast.yml` already carry frontend source-text anchors (OBSApp.cpp `#43`
   IsUpdaterDisabled in the full yml; OBSBasic.cpp `#152` titlebar + OBSProjector `#276` in BOTH).
@@ -159,13 +161,13 @@ Two frontend-specific differences from the libobs rule:
   never given one), but a rig-critical BEHAVIORAL divergence from upstream that STILL COMPILES
   either way and that a `git subtree pull` would silently revert (the #43/#152 class, and #1195's
   auto-normal unclean-shutdown launch — `tests/obs_unclean_shutdown_auto_normal_1195.rs` — and
-  issue 1378's no-dialog crash handler, `tests/obs_crash_handler_no_modal_1378.rs`) gets a
+  issue 1378's no-dialog crash handler, `obs:tests/vendored/tests/obs_crash_handler_no_modal_1378.rs`) got a
   pwsh source-text anchor in BOTH ymls, mirroring the Rust guard — exactly as
   `vendored-libobs-change-safety.md` + `av-sync-dock-anchor-refactor-safety.md` mandate for any
   vendored guard. Decide by: "would a subtree pull silently revert a behavior we depend on, while
   still compiling?" → mirror to BOTH ymls; a pure crash/NULL safety guard → Rust anchor only.
-- **A frontend change needs a FULL-BUNDLE deploy, never fast-dll** — it lands in `obs64.exe`, not
-  `obs.dll` (`obs-titlebar-build-id.md` / `rig-state-inspection.md`). The supervisor/rig-ops owns
+- **A frontend change needs a FULL-BUNDLE deploy, never fast-dll** (moot on Windows since issue
+  1505: only the pinned release's full zip deploys) — it lands in `obs64.exe`, not `obs.dll` (`obs-titlebar-build-id.md` / `rig-state-inspection.md`). The supervisor/rig-ops owns
   that deploy.
 
 ## Sweeping the WHOLE frontend for the class (a shared helper, not #773's file-local guard) (#1106)

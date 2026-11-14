@@ -6,8 +6,6 @@ paths:
   - "vendor/distroav/src/ndi-filter.cpp"
   - "vendor/distroav/src/ndi-sender-port.cpp"
   - "vendor/distroav/src/ndi-sender-port.h"
-  - "tests/distroav_sender_port_linger_1363.rs"
-  - "tests/fixtures/distroav_sender_port_linger_1363/**"
 ---
 
 # DistroAV SENDER-output lifecycle + NDI port ordering (#1185)
@@ -111,7 +109,7 @@ while libndi's sockets are still open — the dev1 repro used a libndi harness, 
   AND the per-source `ndi_filter` (destroy + the destroy-then-recreate on rename). All of it sits in
   `#ifdef __linux__` (the TU is added in CMake only on Linux), so Windows compiles byte-identical
   code. A NEW sender create/destroy site must get the same pair, or
-  `tests/distroav_sender_port_linger_1363.rs` fails (it counts the real `send_create(`/
+  `obs:tests/vendored/tests/distroav_sender_port_linger_1363.rs` fails (it counts the real `send_create(`/
   `send_destroy(` sites; a `+`/`-` prefix marks the DEBUG log strings it skips).
 - **libndi has no API for a sender's port**: `send_get_source_name(s)->p_url_address` is NULL for a
   local sender (measured). The port is the ONE new TCP LISTENING socket in `/proc/self/fd` across the
@@ -168,7 +166,7 @@ while libndi's sockets are still open — the dev1 repro used a libndi harness, 
   reach.
 - Verify recipe (no OBS build): the gate test's Facet C compiles the REAL
   `ndi-sender-port.cpp` with g++ against a stub `plugin-main.h` + a fake libndi (both C++ sources in
-  `tests/fixtures/distroav_sender_port_linger_1363/`, `include_str!`-ed; a real 0.0.0.0 sender-band listener; its destroy does libndi's `shutdown(SHUT_RDWR)`, then the viewer closes on
+  `obs:tests/fixtures/distroav_sender_port_linger_1363/`, `include_str!`-ed; a real 0.0.0.0 sender-band listener; its destroy does libndi's `shutdown(SHUT_RDWR)`, then the viewer closes on
   EOF, then `close()`). The control reproduces the TIME_WAIT and the abort frees the port. A "race"
   scenario opens a receiver-band listener (:6961 when free) during the create (still identified), and an
   "ambiguous" one opens two band listeners (PORTID-1363, port 0). For the real libndi, compile
@@ -201,8 +199,8 @@ branch (`ndiLib->send_destroy(o->ndi_sender); o->ndi_sender = nullptr;` — safe
 
 ## Lock-step anchors (vendored change — CI is the first compile)
 
-A change here needs a `distroav_timecode_patch.rs`-style Rust source-guard test AND matching pwsh
-gates in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml` (both ship distroav.dll).
+A change here needs a `obs:tests/vendored/tests/distroav_timecode_patch.rs`-style Rust source-guard test (until issue 1505
+also matching pwsh gates in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml`, retired).
 Anchor on CALL-SITE-unique tokens, never a bare function name — a name that also appears in an
 extern DECLARATION passes the gate on the decl alone even if a subtree-pull drops the call hunk
 (the issue-832 anchor class): e.g. `ndi_output_reserve_main_sender(QT_TO_UTF8(config->OutputName)`

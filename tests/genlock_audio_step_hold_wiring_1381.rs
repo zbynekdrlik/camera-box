@@ -8,12 +8,13 @@
 //! says: the ingest maps the term, the previous term and the timecode ASRC's stamp through the HELD
 //! offset, a release that moves the placement by more than one packet places, the backstop places a
 //! jump the owed cap cannot hold, the ASRC is not fed while a hold runs, and the render thread leaves
-//! the shallow latch and both video-delay tracker calls alone meanwhile. The same needle list is
-//! required in both `windows-genlock*.yml` pwsh gates (one list, so the copies cannot drift).
+//! the shallow latch and both video-delay tracker calls alone meanwhile. (The Windows workflows
+//! that mirrored this list in pwsh were retired by issue 1505; the Windows boxes run the pinned obs
+//! release.)
 //!
 //! Std-only on purpose: it runs under `cargo test` AND standalone
 //! (`CARGO_MANIFEST_DIR=<repo> rustc --test --edition 2021 tests/genlock_audio_step_hold_wiring_1381.rs`).
-//! Every anchor is whitespace-squished, the same form the pwsh gates use.
+//! Every anchor is whitespace-squished.
 
 use std::fs;
 use std::path::PathBuf;
@@ -22,12 +23,8 @@ const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
 const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
 const ASRC_C: &str = "vendor/obs-studio/libobs/media-io/asrc-compensator.c";
 const ASRC_H: &str = "vendor/obs-studio/libobs/media-io/asrc-compensator.h";
-const WINDOWS_WORKFLOWS: [&str; 2] = [
-    ".github/workflows/windows-genlock.yml",
-    ".github/workflows/windows-genlock-fast.yml",
-];
 
-/// The `obs-source.c` wiring (squished). The pwsh gate in both Windows workflows requires each one.
+/// The `obs-source.c` wiring (squished).
 const STEP_HOLD_WIRING: [&str; 17] = [
     "#include \"obs-genlock-wall-step.h\"",
     "int64_t genlock_off_ns = genlock_off_live_ns; const int genlock_step_release = genlock_audio_step_hold_source( source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_off_live_ns, data->timestamp, genlock_step_packet_ns, os_time, genlock_timeline_reset, &genlock_off_ns);",
@@ -57,8 +54,7 @@ const STEP_HOLD_ABSENT: [&str; 2] = [
 
 /// Issue 1381 (design 5900385541) — the RELABEL wiring (squished): a packet whose stamps jumped WITH
 /// the wall step continues the source's timeline before the smoothing and in the system-domain check,
-/// so it APPENDS (no 70 ms re-placement, no > 2 s reset), and the step-hold line counts it. The pwsh
-/// gate in both Windows workflows requires each one.
+/// so it APPENDS (no 70 ms re-placement, no > 2 s reset), and the step-hold line counts it.
 const RELABEL_WIRING: [&str; 6] = [
     "const bool genlock_relabel = source->timing_set && source->next_audio_ts_min != 0 && genlock_audio_relabel_source(source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_off_live_ns, data->timestamp, genlock_step_packet_ns, &genlock_relabel_off_jump_ns, &genlock_relabel_move_ns);",
     "if (genlock_relabel) { source->next_audio_ts_min = data->timestamp; source->genlock_audio_relabels++; }",
@@ -72,8 +68,7 @@ const RELABEL_WIRING: [&str; 6] = [
 /// a stamp-only jump with continuous arrival (the sender's box stepped first) continues the source's
 /// timeline before the smoothing (the system-domain continuation is `RELABEL_WIRING[2]`), the skew
 /// hold carries the pending state, a relabel's remainder is added to the placement slew before the
-/// backstop, and the step-hold line counts a resolved pending relabel. The pwsh gate in both Windows
-/// workflows requires each one.
+/// backstop, and the step-hold line counts a resolved pending relabel.
 const PENDING_WIRING: [&str; 5] = [
     "const bool genlock_relabel_pending = source->timing_set && source->next_audio_ts_min != 0 && genlock_audio_relabel_pending_source(source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_off_live_ns, data->timestamp, genlock_step_packet_ns, os_time);",
     "if (genlock_relabel_pending) source->next_audio_ts_min = data->timestamp;",
@@ -422,37 +417,6 @@ fn the_log_marker_is_its_own_family_1381() {
             "issue 1381: `{MARKER}` and `{other}` must be mutually non-substring (a parser keyed on \
              one would read the other)"
         );
-    }
-}
-
-#[test]
-fn windows_workflows_guard_the_same_wiring_1381() {
-    for wf in WINDOWS_WORKFLOWS {
-        let text = read(wf);
-        for needle in STEP_HOLD_WIRING
-            .iter()
-            .chain(RELABEL_WIRING.iter())
-            .chain(PENDING_WIRING.iter())
-        {
-            let want = format!(
-                "$src -notmatch [regex]::Escape('{}')",
-                needle.replace('\'', "''")
-            );
-            assert!(
-                text.contains(&want),
-                "issue 1381: {wf} no longer requires `{needle}` in obs-source.c"
-            );
-        }
-        for needle in STEP_HOLD_ABSENT {
-            let want = format!(
-                "$src -match [regex]::Escape('{}')",
-                needle.replace('\'', "''")
-            );
-            assert!(
-                text.contains(&want),
-                "issue 1381: {wf} no longer forbids `{needle}` in obs-source.c"
-            );
-        }
     }
 }
 

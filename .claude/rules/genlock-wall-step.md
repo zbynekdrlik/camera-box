@@ -95,12 +95,13 @@ sender) is the supervisor's rig investigation, not this code.
   the Rust authority, and pins the obs-video.c wiring.
 - `tests/genlock_qpc_wall_step_parity_1372.rs` (the widget's booking, lifted from
   GenlockLockState.hpp), `tests/asrc_compensator_parity_1367.rs` (the trace carries `rec=` / `recp=`; the step
-  scenario must show a payment at −1000 ppm), `tests/genlock_lock_indicator_guards.rs` (widget wiring:
+  scenario must show a payment at −1000 ppm), `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs` (widget wiring:
   the booking is the member `OBSBasicStatusBar::BookGenlockWallStep`, called right before the history
-  push; the two new log families mutually non-substring), the pwsh blocks in both
-  `windows-genlock*.yml`. The render-tick needles are ONE list (`RENDER_TICK_WIRING` in
+  push; the two new log families mutually non-substring), and (until issue 1505) the pwsh
+  blocks in both `windows-genlock*.yml`. The render-tick needles are ONE list (`RENDER_TICK_WIRING` in
   `tests/genlock_wall_step_parity_1372.rs`) that the Rust guard AND
-  `windows_workflows_guard_the_same_render_tick_wiring_1372` check against both workflow files — review
+  `windows_workflows_guard_the_same_render_tick_wiring_1372` checked against both workflow files until
+  issue 1505 retired them — review
   round 2 found the pwsh copy still requiring the round-0 line, which would have failed both Windows
   builds at the guard step.
 - `src/genlock_wall_step_bench.rs` (test-only): the logged step against all three. Production: 1

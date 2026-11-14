@@ -202,7 +202,7 @@ release re-latches N) — not a regression: that regime drained deep sources bef
 - The whole `obs-source.c` `gcc -fsyntax-only` (the `vendored-libobs-change-safety.md` recipe) and
   every std-only reader of it (`genlock_release_cadence`, `genlock_n2_grid_wiring_1367`,
   `genlock_shallow_depth_wiring_1367`, `genlock_audio_timecode_placement_1367`, …).
-- pwsh anchors: every `Escape('…')` in both `windows-genlock*.yml` checked against the `\s+`-squished
+- pwsh anchors (until issue 1505 retired them): every `Escape('…')` in both `windows-genlock*.yml` checked against the `\s+`-squished
   C offline — and against the OLD C, where each new one must fail.
 
 Count anchors this slice moved (update them together): `genlock_n1_tick_wall_now(wall_now)` 5,

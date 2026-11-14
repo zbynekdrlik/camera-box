@@ -3,7 +3,6 @@ paths:
   - "src/genlock_fifo_relabel_bench.rs"
   - "vendor/obs-studio/libobs/obs-genlock-fifo-relabel.h"
   - "tests/genlock_fifo_relabel_parity_1372.rs"
-  - "tests/genlock_fifo_relabel_wiring_1372.rs"
 ---
 
 # The receive-FIFO date-step relabel (issue 1372 part B)
@@ -140,7 +139,7 @@ the new-epoch stamp (`early` <= 1 in the bench), which costs nothing.
 ## Verifying
 
 - `cargo test` covers the unit tests, the benches (Linux-gated with `genlock_stamp`), the parity and
-  the wiring (`tests/genlock_fifo_relabel_wiring_1372.rs`).
+  the wiring (`obs:tests/vendored/tests/genlock_fifo_relabel_wiring_1372.rs`, in the obs repo).
 - Mutation: point `CARGO_MANIFEST_DIR` at a scratch repo holding the mutated header AND a copy of
   `obs-genlock-wall-step.h`; 27/27 C mutants RED after review round 2 (the window end `>` and the
   equidistant tie needed their own vectors; the stale-booking bounds have nine, incl. one just

@@ -483,8 +483,8 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   or with GNU_STACK other than `RW`. A change to `scripts/vstack-release.pin` or `Cargo.toml` re-runs the strih build. vstack's CI lints and
   tests `jxs-recv-ffi`.
 - `jxs_resolve` repeats ndi-source.cpp's `resolve_obs_export` (dlsym) on purpose: that one is
-  `static` in ndi-source.cpp, carries the `_WIN32` branch and sits under the windows-genlock*.yml
-  pwsh anchors; sharing it would touch the Windows builds for a Linux-only source.
+  `static` in ndi-source.cpp and carries the `_WIN32` branch (it sat under the windows-genlock*.yml
+  pwsh anchors until issue 1505); sharing it would touch the Windows builds for a Linux-only source.
 - Tests: `tests/jxs_receiver_1387.rs` (the receiver over real UDP), `vstack:jxs/recv-ffi/tests/{abi,loopback}.rs`
   (the ABI pins; the real encoder -> the C ABI, timecode + PSNR + the report reaching the sender),
   `tests/distroav_jxs_source_1387.rs` (the decide header's truth table compiled as shipped, a g++
@@ -862,7 +862,7 @@ is on, and per source whether it comes over NDI or JPEG XS.
   Rust authority, the anchors, the JSON keys, the log family, the pwsh steps). The existing
   `tests/distroav_jxs_output_1387.rs` g++ `-fsyntax-only` of jxs-source.cpp / jxs-output.cpp covers
   the proc handler and the fill points against the real libobs headers.
-- Both `windows-genlock{,-fast}.yml` carry `Assert the JPEG XS indicator + per-source transport tag
+- Until issue 1505 both `windows-genlock{,-fast}.yml` carried `Assert the JPEG XS indicator + per-source transport tag
   present (issue 1387)`: one `(file, squished needle)` table; the Rust test pins every row of it.
   Run locally with the portable pwsh (`~/.local/pwsh74/pwsh -File` on the step text from a script).
 - The Qt TUs (`GenlockJxsWidget.cpp`, `OBSBasicStatusBar.cpp`, `SourceTreeItem.cpp`) compile first on

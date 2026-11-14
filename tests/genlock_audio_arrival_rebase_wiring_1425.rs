@@ -7,12 +7,12 @@
 //! file pins that the code CALLS them where the design says: the stamp-domain rebase right after the
 //! direct-stamp detection and before the smoothing, the system-domain rebase under `audio_buf_mutex`
 //! before the push-back check, the count recorded before the lock is released and printed after it, and
-//! both VLC stamp sites mapped onto the media clock. The same needle lists are required in both
-//! `windows-genlock*.yml` pwsh gates (one list each, so the copies cannot drift).
+//! both VLC stamp sites mapped onto the media clock. (The Windows workflows that mirrored these lists
+//! in pwsh were retired by issue 1505; the Windows boxes run the pinned obs release.)
 //!
 //! Std-only on purpose: it runs under `cargo test` AND standalone
 //! (`CARGO_MANIFEST_DIR=<repo> rustc --test --edition 2021 tests/genlock_audio_arrival_rebase_wiring_1425.rs`).
-//! Every anchor is whitespace-squished, the same form the pwsh gates use.
+//! Every anchor is whitespace-squished.
 
 use std::fs;
 use std::path::PathBuf;
@@ -20,12 +20,8 @@ use std::path::PathBuf;
 const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
 const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
 const VLC_SOURCE: &str = "vendor/obs-studio/plugins/vlc-video/vlc-video-source.c";
-const WINDOWS_WORKFLOWS: [&str; 2] = [
-    ".github/workflows/windows-genlock.yml",
-    ".github/workflows/windows-genlock-fast.yml",
-];
 
-/// The `obs-source.c` wiring (squished). The pwsh gate in both Windows workflows requires each one.
+/// The `obs-source.c` wiring (squished).
 const ARRIVAL_REBASE_WIRING: [&str; 10] = [
     "static bool genlock_audio_arrival_rebase_source(const obs_source_t *source, int hold_mode, bool direct_ts, uint64_t cont_ns, uint64_t ts_ns) { const bool monitor_only = source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY; const bool can_resample = source->asrc_enabled && source->resampler; return cont_ns != 0 && genlock_audio_arrival_rebase(genlock_audio_asrc_placement(hold_mode, direct_ts, monitor_only, can_resample), monitor_only, can_resample, source->asrc.level_captured, uint64_diff(cont_ns, ts_ns)); }",
     "const int64_t genlock_arrival_drift_ns = (int64_t)(data->timestamp - source->next_audio_ts_min); const bool genlock_arrival_rebase_ts = source->timing_set && genlock_audio_arrival_rebase_source(source, genlock_hold_mode, using_direct_ts, source->next_audio_ts_min, data->timestamp); if (genlock_arrival_rebase_ts) source->next_audio_ts_min = data->timestamp;",
@@ -199,36 +195,5 @@ fn both_vlc_stamp_sites_are_on_the_media_clock_1425() {
             "issue 1425: vlc-video-source.c stamps relative to plugin load again (`{needle}`): the \
              source drifts against the disciplined mixer"
         );
-    }
-}
-
-#[test]
-fn windows_workflows_guard_the_same_wiring_1425() {
-    for wf in WINDOWS_WORKFLOWS {
-        let text = read(wf);
-        for (var, needle) in ARRIVAL_REBASE_WIRING
-            .iter()
-            .map(|n| ("$s4src", n))
-            .chain(VLC_WIRING.iter().map(|n| ("$s4vlc", n)))
-        {
-            let want = format!(
-                "{var} -notmatch [regex]::Escape('{}')",
-                needle.replace('\'', "''")
-            );
-            assert!(
-                text.contains(&want),
-                "issue 1425: {wf} no longer requires `{needle}`"
-            );
-        }
-        for needle in VLC_ABSENT {
-            let want = format!(
-                "$s4vlc -match [regex]::Escape('{}')",
-                needle.replace('\'', "''")
-            );
-            assert!(
-                text.contains(&want),
-                "issue 1425: {wf} no longer forbids `{needle}` in vlc-video-source.c"
-            );
-        }
     }
 }

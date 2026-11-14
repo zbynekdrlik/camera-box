@@ -36,6 +36,7 @@ table inet dstack_dante_leg {
 	chain out {
 		type filter hook output priority filter; policy accept;
 		oifname != "zzleg0.70" accept
+		udp dport 5353 ip daddr 224.0.0.251 limit rate over 50/second burst 200 packets counter packets 0 bytes 0 drop
 		ct state established,related accept
 		meta nfproto ipv6 counter packets 0 bytes 0 drop
 		ip protocol { icmp, igmp, udp } accept

@@ -89,7 +89,8 @@ is not a complete bump:
    `versionconfig.cmake` falls to `git describe` / `OBS_VERSION_OVERRIDE`, and our `.git`-less
    subtree can't git-describe OBS (`_obs_default_version` is upstream's placeholder `0.0.1`). The
    REAL lever is **`-DOBS_VERSION_OVERRIDE=<X.Y.Z>` in the 5 genlock-workflow steps**
-   (`linux-genlock.yml` ×2, `windows-genlock.yml` ×1, `windows-genlock-fast.yml` ×2). Forget these
+   (`linux-genlock.yml` ×2; the `windows-genlock.yml` ×1 + `windows-genlock-fast.yml` ×2 steps went
+   with those workflows in issue 1505 — the Windows build is the pinned obs release's). Forget these
    and an otherwise-perfect merged tree still ships the OLD version.
 
 3. **The `32.1.2` PIN LATTICE is broad — bump it all, prove it with the tests.** Beyond `vendor/README.md`
@@ -126,5 +127,7 @@ is not a complete bump:
 7. **The genlock C auto-merges clean on a minor bump** (its regions don't overlap upstream's
    additive delta) — but PROVE no patch was lost: run every genlock/distroav anchor test
    (genlock_release_cadence, gl_pbo_orphan, distroav_*, aux_sender_teardown,
-   obs_updater_disabled, linux_genlock_workflow_gate, windows_manifest_gate) + grep the markers in
+   linux_genlock_workflow_gate; obs_updater_disabled now lives in the obs repo as
+   `obs:tests/vendored/tests/obs_updater_disabled.rs`, windows_manifest_gate was deleted with its
+   workflow in issue 1505) + grep the markers in
    obs-source.c / gl-texture2d.c / distroav/src.

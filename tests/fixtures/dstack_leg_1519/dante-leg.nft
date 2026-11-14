@@ -8,6 +8,8 @@
 #
 # Load (as root), naming the PC's Dante-leg interface:
 #   nft -D dante_leg=<iface> -f /etc/dstack/dante-leg.nft
+# What the mDNS cap (chain out) dropped:
+#   nft list chain inet dstack_dante_leg out | grep 'limit rate over'
 # A load without -D fails ("unknown identifier"), and nothing changes.
 # Loading again replaces the table in one transaction (idempotent).
 #
@@ -67,6 +69,10 @@ table inet dstack_dante_leg {
 	chain out {
 		type filter hook output priority filter; policy accept;
 		oifname != $dante_leg accept
+		# The host's own mDNS out to the group, capped (dstack #288): no
+		# program on this PC floods the VLAN, even with no switch cap.
+		# Normal mDNS out is 5/s at most; past the burst, over 50/s drops.
+		udp dport 5353 ip daddr 224.0.0.251 limit rate over 50/second burst 200 packets counter drop
 		ct state established,related accept
 		meta nfproto ipv6 counter drop
 		ip protocol { icmp, igmp, udp } accept

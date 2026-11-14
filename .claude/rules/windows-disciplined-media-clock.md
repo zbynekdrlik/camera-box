@@ -195,7 +195,8 @@ every media-timestamped quantity (audio mixer, outputs, the ASRC master) would j
 
   With obs.dll alone, those browser stamps drift against the disciplined mixer.
 - stream's `vlc_source` ("NL playlist") gets the vendored `vlc-video.dll` since issue 1425 (S4v, below).
-- **Compile proof for obs-browser = a green `windows-genlock.yml` run at the lane's head.** The
+- **(Until issue 1505 retired camera-box's Windows build; the Windows bytes now come from the pinned
+  obs release.) Compile proof for obs-browser = a green `windows-genlock.yml` run at the lane's head.** The
   pre-merge fast gate configures with `-DENABLE_BROWSER=OFF`, so `browser-client.cpp` compiles only
   in the full build. The Rust test pins its text, not its compile. `windows-genlock.yml` is
   dispatch-only: after the lane is integrated, run
@@ -223,8 +224,9 @@ on the rig.
 VLC's clock is not the disciplined system-time rate; which Windows counter VLC 3 reads by default is not
 verified) until its audio was re-placed 70 ms at a time. Now:
 
-- Every genlock configure builds the plugin (`-DENABLE_VLC=ON` in `windows-genlock.yml`, both
-  `windows-genlock-fast.yml` configures and both `linux-genlock.yml` builds). The headers come from
+- Every genlock configure builds the plugin (`-DENABLE_VLC=ON` in both `linux-genlock.yml` builds;
+  until issue 1505 also `windows-genlock.yml` and both `windows-genlock-fast.yml` configures; the
+  Windows `vlc-video.dll` now ships in the pinned obs release's Windows zip). The headers come from
   the Windows prebuilt obs-deps (`include/vlc`, VLC 3.0.21, `VLC_PATH` = the prebuilt dir) and from
   `libvlc-dev` on Linux; the plugin still dlopens libvlc from the installed VLC at runtime.
 - `vlcs_media_clock_ns` (`vlc-video-source.c`) maps both stamp sites, video

@@ -10,16 +10,15 @@
 # but left the marker (GENLOCK_BUILD_SHA.txt) as the only cross-box signal; this lib supplies the two
 # deferred live-side pieces:
 #   1. AUTO-SOURCE each box's CI-authoritative BUNDLE_MANIFEST for its OWN marker SHA X
-#      (Windows FAST: windows-genlock-fast.yml / obs-genlock-fast-dll; imag: linux-genlock.yml /
-#      obs-genlock-linux-x86_64 -- the setup-imag.sh recipe), so the gate compares DEPLOYED bytes
-#      against the build the marker claims, closing the WHOLESALE-wrong-bundle case.
+#      (imag: linux-genlock.yml / obs-genlock-linux-x86_64 -- the setup-imag.sh recipe; the Windows
+#      FAST/FULL pair went with camera-box's own Windows build, issue 1505), so the gate compares
+#      DEPLOYED bytes against the build the marker claims, closing the WHOLESALE-wrong-bundle case.
 #   2. GATHER imag's deployed .so sha256s over ssh (imag is NOT a --win-state bundle-state box; its
 #      bytes have no other path into the gate) for the new --imag-bytes facet.
 #
 # ALL best-effort: a fetch/gather failure yields "" so the caller OMITS the arg. What an omitted arg
 # means is the GATE's call: the imag byte facet (ENFORCED since #1100) and the Linux boxes'
-# linux_so_bytes row (issue 1474) read it as UNKNOWN and refuse; the Windows fast pin treats a fetch
-# outage as dormant for that run. `gh run download` + the imag ssh gather are isolated behind
+# linux_so_bytes row (issue 1474) read it as UNKNOWN and refuse. `gh run download` + the imag ssh gather are isolated behind
 # env-overridable command seams (MANIFEST_AUTOSOURCE_CMD, #836 executable-fixture) so the whole path
 # is offline-testable with no gh/ssh/network (tests/harness_manifest_autosource_1082.rs).
 
@@ -231,81 +230,10 @@ manifest_autosource_cache_store() {
   return 0
 }
 
-# manifest_autosource_fetch_win_full REPO SHA DEST -> #1346: the FULL windows-genlock bundle's
-# BUNDLE_MANIFEST.json (windows-genlock.yml / artifact obs-genlock-windows-x64) for the SAME marker
-# SHA the FAST manifest is keyed on. The gate passes it as the ALTERNATE manifest: the two Windows
-# workflows are not byte-reproducible (build 54995646: fast obs.dll 18ea7acf..., full
-# bin/64bit/obs.dll e454b134...), so a correct full-bundle deploy read DRIFT against the fast
-# manifest alone. Same best-effort contract as manifest_autosource_fetch ("" on any failure -> no
-# alternate -> the fast manifest is judged exactly as before). Only the manifest is kept; the
-# download itself is the whole artifact (~270 MB zip, extracted to a mktemp dir and removed at once)
-# because GitHub serves an artifact only as one zip -- so the per-run cache in
-# manifest_autosource_fetch makes that a once-per-build cost, and its timeout bounds it.
-manifest_autosource_fetch_win_full() {
-  manifest_autosource_fetch "$1" windows-genlock.yml obs-genlock-windows-x64 "$2" "$3"
-}
-
-# manifest_autosource_run_state REPO WORKFLOW SHA -> "found" when WORKFLOW has a SUCCESSFUL run at
-# commit SHA, "none" when it provably has none, "unknown" on any lookup failure (gh missing/failing/
-# timing out, unparseable answer, no SHA). Uses the server-side --commit filter, so the answer does
-# not depend on any recency window (the fetch uses the same filter). Only "none" is ever acted on as
-# a fact. It always asks the real gh: the MANIFEST_AUTOSOURCE_CMD offline seam replaces only the
-# FETCH, so an offline test of a no-fast-manifest path stubs gh on PATH instead.
-manifest_autosource_run_state() {
-  local repo="$1" workflow="$2" sha="$3" n=""
-  if [ -z "$sha" ] || ! command -v gh >/dev/null 2>&1; then
-    printf 'unknown'
-    return 0
-  fi
-  n="$(timeout "${MANIFEST_AUTOSOURCE_TIMEOUT_S:-300}" gh run list --repo "$repo" --workflow "$workflow" \
-    --commit "$sha" --status success -L 1 --json databaseId --jq 'length' 2>/dev/null)" || n=""
-  case "$n" in
-    0) printf 'none' ;;
-    ''|*[!0-9]*) printf 'unknown' ;;
-    *) printf 'found' ;;
-  esac
-  return 0
-}
-
-# win_manifest_pair_decide FAST FULL FAST_RUN_STATE -> pure: the Windows manifest pair the gate gets,
-# as two stdout lines "<primary>" and "<alternate>" (either may be empty), per the main's #1346 ruling
-# (issue comment 5829099220):
-#   - FAST fetched                    -> FAST primary, FULL (if any) alternate
-#   - no FAST, FULL, run state "none" -> a FULL-ONLY build: FULL is judged alone (logged)
-#   - no FAST, FULL, "found"/"unknown"-> a FETCH OUTAGE: the byte pin is OMITTED for this run (loud
-#     WARNING), never the full manifest alone -- that would refuse a correctly fast-deployed box
-#   - neither                         -> both empty (the pre-existing dormant outage semantics)
-# Log lines go to stderr so stdout stays the two-line contract.
-win_manifest_pair_decide() {
-  local fast="$1" full="$2" state="$3"
-  if [ -n "$fast" ]; then
-    printf '%s\n%s\n' "$fast" "$full"
-  elif [ -z "$full" ]; then
-    printf '\n\n'
-  elif [ "$state" = "none" ]; then
-    echo "version gate: no successful windows-genlock-fast.yml run at the marker sha -- full-only build, judging the full bundle manifest alone" >&2
-    printf '%s\n\n' "$full"
-  else
-    echo "WARNING: version gate: a fast windows-genlock run exists (or could not be ruled out: $state) but its manifest fetch failed -- fetch outage, the Windows obs.dll byte pin is OMITTED for this run" >&2
-    printf '\n\n'
-  fi
-  return 0
-}
-
-# win_manifest_pair_resolve REPO SHA FAST FULL -> win_manifest_pair_decide, looking the fast run up
-# ONLY when it matters (no FAST manifest but a FULL one), so the normal path costs no extra gh call.
-win_manifest_pair_resolve() {
-  local repo="$1" sha="$2" fast="$3" full="$4" state="found"
-  if [ -z "$fast" ] && [ -n "$full" ]; then
-    state="$(manifest_autosource_run_state "$repo" windows-genlock-fast.yml "$sha")"
-  fi
-  win_manifest_pair_decide "$fast" "$full" "$state"
-}
-
 # genlock_build_sha_state_read FILE -> the `genlock_build_sha` value (the marker SHA a box's
 # bundle-state-server reports) from the flat JSON state FILE, "" if absent/unreadable. Mirrors the
-# gate's own genlock_build_sha_from_state, kept here so recording-e2e.sh can key the Windows manifest
-# auto-source on the box's OWN reported SHA without sourcing the whole gate.
+# gate's own genlock_build_sha_from_state, kept here so the E2E (scripts/lib/e2e-linux-bytes.sh) can key
+# a box's manifest fetch on its OWN reported SHA without sourcing the whole gate.
 genlock_build_sha_state_read() {
   local file="$1"
   [ -f "$file" ] || return 0

@@ -6,7 +6,7 @@ deploy program (scripts/deploy-genlock-fleet.sh, build_windows_deploy_program) s
 `Stop-Process -Force`, which skips the save on exit, so each deploy reloaded older saved values
 (runtime `mbc` sync 37 ms vs saved 29 ms). Design: comment 6014590298 (Approach 1).
 
-This suite pins the emitted program for both Windows boxes (stream, resolume), FULL and FAST:
+This suite pins the emitted program for both Windows boxes (stream, resolume):
 
   * step (0a): the obs-websocket stream/record read and the live-broadcast refusal run BEFORE any
     change on the box (before the power plan, the AutoHotkey64 stop and the keep-alive disable);
@@ -49,7 +49,7 @@ REPO = HERE.parents[1]
 SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "obs-clean-close-win.sh"
 BOXES = ["stream", "resolume"]
-MODES = ["full", "fast"]
+MODES = ["full"]  # issue 1522: the Windows program has no FAST mode any more
 WS_URI = "ws://127.0.0.1:4455"
 FORCE_LINE = ("Get-Process obs64,obs-browser-page -ErrorAction SilentlyContinue | "
               "Stop-Process -Force -ErrorAction SilentlyContinue")

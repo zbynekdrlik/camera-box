@@ -193,8 +193,8 @@ burn cadence again, re-verify these three before assuming green.
 **Pure seam.** The pure prepare-once-per-tick decision is `src/burn_tick_cache.rs`
 (`BurnTickCache`, pure std) mirrored byte-identically by the C header, locked by
 `tests/burn_tick_cache_parity.rs` (compiles the header + drives the same event sequences,
-`render_budget.rs ↔ obs-display-budget.h` pattern). The FULL filter compiles only on CI (`linux-genlock.yml`
-+ `windows-genlock*.yml`) — a TYPE error surfaces there. **Still MANDATORY before it reaches the rig:**
+`render_budget.rs ↔ obs-display-budget.h` pattern). The FULL filter compiles only on CI (`linux-genlock.yml`;
+`windows-genlock*.yml` until issue 1505) — a TYPE error surfaces there. **Still MANDATORY before it reaches the rig:**
 the supervisor's genlock-fleet deploy + rig validation (burns-ON `multiview-audit rendered_fps` back
 ≥ 28 AND a clean E2E recording-verdict burns-ON — proving the cache didn't corrupt the recorded stamp).
 
@@ -208,7 +208,7 @@ decision (`obs_display_should_skip`) is untouched; accumulated in the audit bloc
 `obs_display` fields (`render_audit_pre_mv_sum_ns`/`_max_ns`/`render_audit_tick_count`), reset per
 window. `mv_audit.rs` ignores unknown keys so every consumer is unaffected (proven by
 `parse_tolerates_appended_1260_budget_fields`). Lock-step anchors updated: `tests/genlock_preload.rs`
-+ `obs:tests/vendored/tests/mv_audit_emit.rs` + BOTH `windows-genlock*.yml` (the format string) — verify a further field
++ `obs:tests/vendored/tests/mv_audit_emit.rs` (+ BOTH `windows-genlock*.yml` for the format string, until issue 1505) — verify a further field
 add the same way (lift-compile the `blog` under `-Wformat=2`, offline `re.sub`-squish pwsh check,
 the obs repo's `mv_audit_emit` test (issue 1504) + `cargo test --lib mv_audit`).
 
@@ -260,8 +260,8 @@ mv_top1=<sanitized-name>:<ms> mv_top2=<sanitized-name>:<ms>`.
   are timed, per the review fix); the pure name sanitizer (`obs_audit_copy_cell_name`) has a
   COMMITTED lift-test `tests/mv_audit_cell_name_sanitizer_1260.rs` (extracts the real static from
   obs-display.c, `cc -Wall -Wextra -Wconversion -Wformat=2` + a truth table incl. multibyte→`_` and
-  the 63-byte cap); the format string is lock-stepped across `genlock_preload.rs` + BOTH
-  `windows-genlock*.yml`. Full frontend+libobs compile is CI-only.
+  the 63-byte cap); the format string is lock-stepped in `genlock_preload.rs` (and was in BOTH
+  `windows-genlock*.yml` until issue 1505). Full frontend+libobs compile is CI-only.
 
 ## Contention profile (issue 1260 hard-debug lane, 2026-09-02) — CPU-SIDE-DOMINATED, not GPU-bound, not scheduling-starved
 

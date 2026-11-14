@@ -400,9 +400,9 @@ Options:
   --readme PATH     pinned-set source (default ${DEFAULT_README}); threaded to drift-guard --compare.
   --manifest PATH   the build-under-test BUNDLE_MANIFEST.json — when set, applied to every box that
                     does not already carry a manifest= in its state (activates the BUILD-SHA facet).
-  --alt-manifest PATH  #1346 -- the OTHER Windows workflow's BUNDLE_MANIFEST.json of the SAME build
-                    (the full windows-genlock bundle beside the fast obs.dll-only --manifest). The
-                    two builds' obs.dll bytes differ, so a box is OK on EITHER entry (the line
+  --alt-manifest PATH  #1346 -- a second BUNDLE_MANIFEST.json of the SAME build (the full Windows
+                    bundle beside the fast obs.dll-only --manifest, until issue 1505 retired both;
+                    an operator pin now). Their obs.dll bytes differ, so a box is OK on EITHER entry (the line
                     names which) and DRIFT on neither. Applied wherever --manifest is; given alone
                     it is judged exactly like a lone --manifest (fail-closed).
   --win-state N=FILE  a box N whose observed drift-guard stack state JSON the caller wrote to FILE

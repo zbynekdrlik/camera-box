@@ -4,8 +4,8 @@
 //! The output (`sync-test-output`) is split into `sync-test-output.cpp` (the obs_output_info
 //! callbacks), `sync-test-output-video.cpp`, `sync-test-output-audio.cpp` and the shared
 //! `sync-test-output-internal.hpp`. Every text anchor on the output reads the union through
-//! [`source`], so a function moving between those files never breaks an anchor. The pwsh twin that
-//! both windows-genlock workflows dot-source is `vendor/av-sync-dock/test/dock-output-source.ps1`:
+//! [`source`], so a function moving between those files never breaks an anchor. The pwsh twin is
+//! `vendor/av-sync-dock/test/dock-output-source.ps1` (its Windows workflows were retired by issue 1505):
 //! the same file rule and the same (ordinal) order, change both together. The public
 //! `sync-test-output.hpp` (the dock UI's interface) is not part of the union.
 

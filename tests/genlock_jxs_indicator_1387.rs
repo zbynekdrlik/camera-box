@@ -11,7 +11,8 @@
 //! 3. the anchors: the proc handler, the fill points in the source and the output, the plugin
 //!    registration, the status-bar wiring, the CMake lists, the Sources-dock tag, the JSON keys the
 //!    widget reads = the keys the table writes, the `jxs-state:` log family;
-//! 4. the pwsh mirrors in BOTH windows-genlock ymls carry every anchor of this file's list.
+//! 4. every anchor of this file's list holds in the tree (the Windows workflows that mirrored the
+//!    list in pwsh were retired by issue 1505; the Windows boxes run the pinned obs release).
 //!
 //! A compiler missing = FAIL, never a skip.
 
@@ -51,10 +52,6 @@ const STATUSBAR: &str = "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cp
 const STATUSBAR_HPP: &str = "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.hpp";
 const TREE: &str = "vendor/obs-studio/frontend/components/SourceTreeItem.cpp";
 const TREE_HPP: &str = "vendor/obs-studio/frontend/components/SourceTreeItem.hpp";
-const WIN_YMLS: [&str; 2] = [
-    ".github/workflows/windows-genlock.yml",
-    ".github/workflows/windows-genlock-fast.yml",
-];
 
 static RUNS: AtomicUsize = AtomicUsize::new(0);
 
@@ -879,10 +876,10 @@ fn the_jxs_state_log_family_collides_with_no_other_marker() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 4. the pwsh mirrors
+// 4. the anchor list
 
-/// Every anchor the windows-genlock pwsh step checks (file, squished needle): the step must carry
-/// each one, and each one must hold in the tree.
+/// The anchor list (file, squished needle) the retired windows-genlock pwsh step mirrored; each one
+/// must hold in the tree.
 const PWSH_ANCHORS: &[(&str, &str)] = &[
     ("widgets/OBSBasicStatusBar.cpp", "#include \"GenlockJxsWidget.hpp\""),
     ("widgets/OBSBasicStatusBar.cpp", "jxsWidget = new GenlockJxsWidget(this); addPermanentWidget(jxsWidget, 0);"),
@@ -919,29 +916,5 @@ fn all_pwsh_anchors() -> Vec<(String, String)> {
 fn every_pwsh_anchor_holds_in_the_tree() {
     for (file, needle) in all_pwsh_anchors() {
         assert_in(&file, &needle);
-    }
-}
-
-#[test]
-fn both_windows_genlock_ymls_carry_the_issue_1387_step_with_every_anchor() {
-    for yml in WIN_YMLS {
-        let text = read(yml);
-        let name =
-            "- name: Assert the JPEG XS indicator + per-source transport tag present (issue 1387)";
-        assert_eq!(text.matches(name).count(), 1, "{yml}: the issue-1387 step");
-        let step_start = text.find(name).unwrap();
-        let step =
-            &text[step_start..step_start + text[step_start..].find("\n      - name:").unwrap()];
-        for (file, needle) in all_pwsh_anchors() {
-            let row = format!("@('{file}', '{needle}')");
-            assert!(
-                step.contains(&row),
-                "{yml}: the issue-1387 step lacks `{row}`"
-            );
-        }
-        // the check squishes like the Rust guard and fails the job on a miss
-        assert!(step.contains("$text = (Get-Content $c[0] -Raw) -replace '\\s+', ' '"));
-        assert!(step.contains("if ($text -notmatch [regex]::Escape($c[1])) {"));
-        assert!(step.contains("exit 1"));
     }
 }

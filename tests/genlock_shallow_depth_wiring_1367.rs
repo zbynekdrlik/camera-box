@@ -18,8 +18,7 @@
 //!
 //! Std-only on purpose: it runs under `cargo test` AND standalone
 //! (`CARGO_MANIFEST_DIR=<repo> rustc --test --edition 2021 tests/genlock_shallow_depth_wiring_1367.rs`).
-//! Every anchor is whitespace-squished, the same form the pwsh gates in both `windows-genlock*.yml`
-//! use.
+//! Every anchor is whitespace-squished.
 
 use std::fs;
 use std::path::PathBuf;

@@ -5,8 +5,11 @@ paths:
 
 # Writing a NEW `tests/av_sync_dock_*.rs` twin-harness test (#999/#1005 session, 2026-08-11)
 
-Two gotchas hit writing two new twin-harness files (`av_sync_dock_lock_churn_999.rs`,
-`av_sync_dock_video_ts_valid_1005.rs`) in the same session, following the established pattern
+Since issue 1505 the vendor-only dock tests live in obs (`obs:tests/vendored/tests/av_sync_dock_*.rs`):
+a new test of the vendored dock goes there; camera-box keeps only tests of its own code.
+
+Two gotchas hit writing two new twin-harness files (`obs:tests/vendored/tests/av_sync_dock_lock_churn_999.rs`,
+`obs:tests/vendored/tests/av_sync_dock_video_ts_valid_1005.rs`) in the same session, following the established pattern
 (`obs:tests/vendored/tests/av_sync_dock_audit_log.rs` etc. — a `const HARNESS_CPP: &str = r#"..."#;` raw string
 containing a tiny C++ program compiled+run against the real vendored header).
 

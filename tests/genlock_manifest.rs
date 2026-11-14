@@ -1,14 +1,14 @@
 //! Behavioral guard for the genlock-bundle SHA-manifest generator `scripts/genlock-manifest.sh` (#120).
 //!
-//! EPIC #125 / #119: the windows-genlock artifact once shipped a STALE prebuilt DistroAV (a pre-#97
+//! EPIC #125 / #119: the Windows genlock artifact once shipped a STALE prebuilt DistroAV (a pre-#97
 //! build of the right *version* — the preload knob was inert) and the marketing-version pins (#45
 //! drift-guard) could not catch it. #120's fix is a per-component SHA manifest shipped INSIDE the
 //! bundle that records (a) the pinned SOURCE of every rebuilt component and (b) the per-file sha256
 //! of every file actually in the bundle, SELF-CONSISTENT with what ships. #121 later byte/SHA-verifies
 //! a deployed stack against this manifest.
 //!
-//! The 150-min windows-genlock.yml build is `workflow_dispatch`-only and cannot run per-PR, so the
-//! manifest-generation LOGIC is proven HERE (the per-PR Linux `test` job): these tests source the
+//! The Windows genlock workflows were retired by issue 1505 (the Windows boxes run the pinned obs
+//! release); the manifest-generation LOGIC is proven HERE (the per-PR Linux `test` job): these tests source the
 //! REAL script (its `BASH_SOURCE != $0` guard skips the executed flow), drive it against a synthetic
 //! stage dir mirroring the real OBS rundir layout, and assert the produced manifest lists every
 //! component with its SHA, is self-consistent with the bundle, and that the self-consistency check
@@ -62,7 +62,7 @@ fn run_sourced(body: &str) -> (i32, String, String) {
     )
 }
 
-/// Build a synthetic staged bundle mirroring the windows-genlock.yml stage/ layout: the OBS rundir
+/// Build a synthetic staged bundle mirroring the Windows genlock stage/ layout: the OBS rundir
 /// (bin/64bit/obs64.exe + obs.dll), the DistroAV plugin (obs-plugins/64bit/distroav.dll), its data,
 /// and the existing GENLOCK_BUILD_SHA.txt. Returns the stage dir path (inside a tempdir kept alive
 /// by the returned guard).
@@ -375,7 +375,7 @@ fn empty_stage_generates_and_self_checks_clean_under_set_e() {
 }
 
 /// Build a synthetic stage with `n` files spread across the real bundle's nested layout
-/// (bin/64bit/*.dll + data/libobs/*.effect), mirroring the ~2000-file windows-genlock bundle.
+/// (bin/64bit/*.dll + data/libobs/*.effect), mirroring the ~2000-file Windows genlock bundle.
 fn make_large_stage(n: usize) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let stage = tmp.path().join("stage");
@@ -402,7 +402,7 @@ fn make_large_stage(n: usize) -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn check_is_consistent_on_a_large_real_sized_bundle() {
-    // REGRESSION (#239): the real windows-genlock bundle is ~2000 files. The original
+    // REGRESSION (#239): the real Windows genlock bundle is ~2000 files. The original
     // check_consistency ran `printf '%s\n' "$listed" | grep -qxF "$rel"` ONCE PER staged file;
     // `grep -q` exits early on a match, sending SIGPIPE to the upstream `printf`, and under
     // `set -euo pipefail` that SIGPIPE nondeterministically poisoned the pipeline's exit status —

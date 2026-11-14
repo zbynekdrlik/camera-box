@@ -697,7 +697,7 @@ default-thread runs failed, while every local run used `--test-threads 1` and st
 nextest is parallel. Fix: name each
 compile `{tag}-{pid}-{counter}` with a `static AtomicUsize` counter. The counter separates threads of
 one process (unlike a clock), the pid separates nextest's per-test processes. Remove the call's own
-files after the run (`tests/support/ndi_source_lift_1367.rs`). Run every new lift gate at least once
+files after the run (`obs:tests/vendored/tests/support/ndi_source_lift_1367.rs`). Run every new lift gate at least once
 with the DEFAULT thread count, several times, before trusting it.
 
 ## A shared JSON/state file read FIELD-BY-FIELD (N separate parses) tears when a peer deletes it mid-read; read it ATOMICALLY (#970/#980)
@@ -1581,7 +1581,7 @@ a scratch run and watching the test go RED.
 
 ## A compiled-header parity gate with a STALE test binary reports a fake C-vs-Rust divergence (issue 1381)
 
-The parity gates that `#include` a shipped C header (`tests/vban_pacing_parity_1372.rs` and its
+The parity gates that `#include` a shipped C header (`obs:tests/vendored/tests/vban_pacing_parity_1372.rs` and its
 siblings) compile the C driver at RUN time from the header on disk, but the Rust authority is
 baked in at COMPILE time. If the step that rebuilds the test binary did not run, the old binary
 compares the NEW C against the OLD Rust. A typical cause is a `rustfmt --check && rustc …` chain

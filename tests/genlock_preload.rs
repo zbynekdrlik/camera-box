@@ -10,7 +10,7 @@
 //!  1. The PURE decision logic (preload parse/clamp + consume decision) is mirrored
 //!     in `camera_box::probe::genlock` and unit-tested — the testable core of the
 //!     fix, independent of OBS.
-//!  2. A vendored-source guard (same convention as tests/obs_updater_disabled.rs)
+//!  2. A vendored-source guard (same convention as obs:tests/vendored/tests/obs_updater_disabled.rs)
 //!     asserts the C patch is present in vendor/obs-studio so a future
 //!     `git subtree pull` (#44) can't silently revert it.
 
@@ -1111,8 +1111,6 @@ mod vendored_source {
     // libobs core seam it delegates to.
     pub const NDI_FILTER: &str = "vendor/distroav/src/ndi-filter.cpp";
     pub const OBS_CORE_C: &str = "vendor/obs-studio/libobs/obs.c";
-    pub const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
-    pub const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
     // #942: the LIVE dock's pure decision header + its OBS glue caller (issue 1386: the glue is
     // split over several files, read as one through `av_sync_dock_output::source()`).
     pub const AV_SYNC_DOCK_AUDIO: &str = "vendor/av-sync-dock/src/camera-box-audio.hpp";
@@ -2178,7 +2176,7 @@ mod vendored_source {
         // stamp advance (obs-source.c asrc_timecode_ingest). Src authority + Tier-0 gates:
         // src/asrc_bench_timecode.rs, the two-clock bench src/asrc_timecode_bench.rs, the executable
         // parity scenario `tc` in tests/asrc_compensator_parity_1367.rs; the obs-source.c wiring is
-        // pinned by tests/genlock_audio_timecode_placement_1367.rs + both windows-genlock*.yml.
+        // pinned by tests/genlock_audio_timecode_placement_1367.rs.
         let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
         assert!(
             h.contains("#define ASRC_PLACE_JUMP_MIN_MS 10.0")
@@ -2556,8 +2554,7 @@ mod vendored_source {
         // term (anchored at OBS start) so the leading remaining A/V-shift candidate — the two
         // clock domains the WALL-slaved video deadline and the QPC-slaved audio live in —
         // is answerable from the log alone. Mirror: src/jitter_audit.rs AuditSample.wall_qpc_drift_ms
-        // + the std-only tests/genlock_wall_qpc_emit.rs anchor. Lock-stepped into BOTH
-        // windows-genlock*.yml pwsh gates.
+        // + the std-only tests/genlock_wall_qpc_emit.rs anchor.
         let src = squish(&vendor_file(OBS_SOURCE));
         assert!(
             src.contains("static long long genlock_wall_qpc_drift_ms(void)"),
@@ -2582,8 +2579,7 @@ mod vendored_source {
         // source_output_audio_data ingest seam so a genlock_fifo source's audio is delayed by the
         // same latency_ms the video FIFO holds video, and the 5s audit line must carry the audio
         // facet. Pure decision + C-vs-Rust parity: vstack:rig/core/src/genlock_audio_pairing.rs <->
-        // tests/genlock_audio_pairing_parity.rs. Lock-stepped into BOTH windows-genlock*.yml pwsh
-        // gates.
+        // tests/genlock_audio_pairing_parity.rs.
         let src = squish(&vendor_file(OBS_SOURCE));
         // the three contiguous static-inline helpers exist (the parity gate lifts this block).
         assert!(
@@ -2621,7 +2617,7 @@ mod vendored_source {
         // The pure decision + its C mirror gained an additive `audio_unpaired` facet + an
         // `AudioPairing` reason (parity-gated), and the statusbar widget aggregates the per-source
         // pairing-offset breach into that facet. (Full LOCK-term anchors: the #1298 3-copy
-        // lock-step in tests/genlock_lock_indicator_guards.rs + both windows-genlock*.yml.)
+        // lock-step in obs:tests/vendored/tests/genlock_lock_indicator_guards.rs.)
         let hdr = squish(&vendor_file(
             "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
         ));
@@ -3052,8 +3048,8 @@ mod vendored_source {
         // bypass (three full-scene renders every tick, ~13ms of the 33.3ms budget at idle).
         //
         // Executable parity + never-freeze invariants: tests/aux_sender_budget_879.rs (compiles
-        // and runs the shipped C). These anchors additionally fail the Windows genlock build
-        // loudly if the mechanism is reverted, mirrored into BOTH windows-genlock*.yml.
+        // and runs the shipped C). These anchors additionally fail loudly if the mechanism is
+        // reverted.
         let bud = squish(&vendor_file(OBS_DISPLAY_BUDGET));
         assert!(
             bud.contains(
@@ -3121,21 +3117,6 @@ mod vendored_source {
                 "f->render_ewma_ns = f->render_ewma_ns ? (f->render_ewma_ns * 3 + render_dur_879) / 4 : render_dur_879;"
             ),
             "{NDI_FILTER}: #879 — the per-filter render-cost EWMA update is gone; the budget gate can no longer learn an aux sender is heavy."
-        );
-
-        // #879 lock-step: BOTH windows-genlock workflows must still carry the assert step, or
-        // the 150-min Windows genlock build silently loses the vendored-C guard (issue-912 rule).
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-        assert!(
-            wf.contains("Assert #879 aux NDI sender render-budget gate present"),
-            "{WINDOWS_GENLOCK_WF}: #879 aux-sender budget-gate assert step gone — a vendored-C \
-             revert would no longer fail the Windows build."
-        );
-        let wff = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
-        assert!(
-            wff.contains("Assert #879 aux NDI sender render-budget gate present"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #879 aux-sender budget-gate assert step gone — a \
-             vendored-C revert would no longer fail the fast Windows build."
         );
 
         // #879: the inline #776 derivation in render_display() (obs-display.c) is a SECOND copy
@@ -3213,21 +3194,6 @@ mod vendored_source {
         assert!(
             hdr.contains("uint32_t render_audit_render_count;"),
             "{OBS_INTERNAL}: #771 — obs_display.render_audit_render_count is missing; rendered_fps cannot be measured."
-        );
-
-        // #771 lock-step: BOTH windows-genlock workflows must carry the assert step, or the
-        // Windows genlock build silently loses the vendored-C guard (issue-912 rule).
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-        assert!(
-            wf.contains("Assert #771 multiview-audit fps observability line present"),
-            "{WINDOWS_GENLOCK_WF}: #771 multiview-audit assert step gone — a vendored-C revert \
-             would no longer fail the Windows build."
-        );
-        let wff = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
-        assert!(
-            wff.contains("Assert #771 multiview-audit fps observability line present"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #771 multiview-audit assert step gone — a vendored-C \
-             revert would no longer fail the fast Windows build."
         );
     }
 
@@ -3333,7 +3299,7 @@ mod vendored_source {
 
         let output = squish(&super::av_sync_dock_output::source());
         // #955: the Write/Suggest/RailWarn/Quiet decision is now a pure extracted function
-        // (cb_dock_lock_outcome(), tests/av_sync_dock_outcome_955.rs proves its OWN behavior
+        // (cb_dock_lock_outcome(), obs:tests/vendored/tests/av_sync_dock_outcome_955.rs proves its OWN behavior
         // byte-identically); this file only needs to prove the CALLER actually wires the real
         // cb_dock_lock_may_actuate() seam into it -- not a hardcoded true/false -- and that the
         // resulting `switch` genuinely gates the write behind the Write case.
@@ -3418,42 +3384,12 @@ mod vendored_source {
              correction (offset/implied target) even though it is never applied."
         );
     }
-
-    #[test]
-    fn windows_genlock_workflows_gate_on_dock_lock_monitor_only_942() {
-        // #942 hardening: this Linux-CI guard (above) can't compile on the Windows runner, so
-        // BOTH production build workflows must re-assert the #942 hard-lock in pwsh BEFORE their
-        // build — mirror of windows_genlock_workflows_gate_on_asrc_default_on (#912). Without
-        // this test, deleting BOTH pwsh gate steps entirely is invisible to CI: nothing else
-        // pins that the steps exist at all, only what they check while present.
-        for (wf_const, wf_path) in [
-            (WINDOWS_GENLOCK_WF, "windows-genlock.yml"),
-            (WINDOWS_GENLOCK_FAST_WF, "windows-genlock-fast.yml"),
-        ] {
-            let wf = squish(&vendor_file(wf_const));
-            assert!(
-                wf.contains("bool CB_DOCK_LOCK_ACTUATION_ENABLED = false;"),
-                "{wf_path}: #942 — the pwsh gate no longer asserts \
-                 CB_DOCK_LOCK_ACTUATION_ENABLED is hard-locked false; re-add the pwsh #942 gate."
-            );
-            assert!(
-                wf.contains("return CB_DOCK_LOCK_ACTUATION_ENABLED;"),
-                "{wf_path}: #942 hardening — the pwsh gate no longer asserts \
-                 cb_dock_lock_may_actuate()'s BODY still returns CB_DOCK_LOCK_ACTUATION_ENABLED \
-                 directly (only checking the function EXISTS is not enough — its body could be \
-                 rewritten to `return true;` and still pass); re-add the #942 body check."
-            );
-        }
-    }
 }
 
 // ---- #97 GUI: DistroAV per-source preload slider + ms info-text --------------
 
 mod distroav_source {
-    use super::vendored_source::{
-        vendor_file, NDI_BURN_FILTER, NDI_SOURCE, OBS_API, OBS_SOURCE, WINDOWS_GENLOCK_FAST_WF,
-        WINDOWS_GENLOCK_WF,
-    };
+    use super::vendored_source::{vendor_file, NDI_BURN_FILTER, NDI_SOURCE, OBS_API, OBS_SOURCE};
 
     fn squish(s: &str) -> String {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -3687,321 +3623,6 @@ mod distroav_source {
         assert!(
             obs.contains("source->genlock_latency_ms = GENLOCK_LATENCY_MS_MIN_INIT"),
             "{OBS_SOURCE}: #257 — the per-source latency no longer inits to the floor at create."
-        );
-    }
-
-    #[test]
-    fn windows_genlock_workflow_gates_on_the_hard_lock() {
-        // #257: the Windows production build re-asserts the hard-lock tokens in pwsh BEFORE the
-        // 150-min build (this Linux Rust guard can't compile on the runner). The legacy preload
-        // slider must be GONE; the whitelist + floor-3 + genlock-default-on + per-source burn must
-        // be gated.
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-        assert!(
-            wf.contains("GENLOCK_WHITELIST_PROPS"),
-            "{WINDOWS_GENLOCK_WF}: #257 — the build no longer gates on the GENLOCK_WHITELIST_PROPS \
-             hard-lock UI; re-add the pwsh #257 gate."
-        );
-        assert!(
-            wf.contains("#define GENLOCK_LATENCY_MS_MIN 3"),
-            "{WINDOWS_GENLOCK_WF}: #257 — the build no longer gates on the latency floor (3); re-add."
-        );
-        assert!(
-            wf.contains("obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true)"),
-            "{WINDOWS_GENLOCK_WF}: #257 — the build no longer gates on genlock default-ON; re-add."
-        );
-        assert!(
-            wf.contains("obs_source_get_genlock_burn"),
-            "{WINDOWS_GENLOCK_WF}: #257 — the build no longer gates on the per-source burn; re-add."
-        );
-    }
-
-    #[test]
-    fn windows_genlock_workflow_gates_on_the_per_source_latency() {
-        // #245: the Windows production build must re-assert the per-source latency tokens in
-        // pwsh BEFORE the 150-min build (this Linux Rust guard can't compile on the runner),
-        // so a subtree bump can't ship a build without the per-source latency control while
-        // the version pin still passes.
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-        assert!(
-            wf.contains("obs_source_set_genlock_latency_ms"),
-            "{WINDOWS_GENLOCK_WF}: #245 — the production build no longer asserts the per-source \
-             latency API (obs_source_set_genlock_latency_ms); re-add the pwsh #245 gate."
-        );
-        assert!(
-            wf.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC"),
-            "{WINDOWS_GENLOCK_WF}: #245 — the production build no longer asserts the editable \
-             per-source latency int field; re-add the pwsh #245 gate."
-        );
-        // #292: the build must also gate on the source-arrival-fps drop-cap budget, so a subtree
-        // revert that re-caps a deep latency at ~450ms fails at the token, not silently in prod.
-        assert!(
-            wf.contains("#define GENLOCK_MAX_SOURCE_FPS 60")
-                && wf.contains("source->genlock_latency_ms * GENLOCK_MAX_SOURCE_FPS"),
-            "{WINDOWS_GENLOCK_WF}: #292 — the production build no longer gates on the \
-             GENLOCK_MAX_SOURCE_FPS drop-cap arrival-fps budget; a revert re-caps latency at \
-             ~450ms. Re-add the pwsh #292 gate."
-        );
-    }
-
-    #[test]
-    fn windows_genlock_fast_workflow_gates_on_the_per_source_latency() {
-        // #249: the FAST hot-DLL workflow COMPILES the real vendored C/cpp (a broken patch fails the
-        // build), but it had NO source-text token gate for #245 — only #136. A `git subtree pull`
-        // that silently reverts #245 to inert-but-still-compiling would ship an INERT obs.dll un-gated
-        // on the fast path (the slow windows-genlock.yml gained the #245 gate in #248). The fast path
-        // must re-assert the same #245 tokens BEFORE its build, mirroring the slow gate.
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
-        assert!(
-            wf.contains("obs_source_set_genlock_latency_ms"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #249/#245 — the FAST build does not assert the per-source \
-             latency API (obs_source_set_genlock_latency_ms); a subtree pull could ship an inert \
-             obs.dll on the fast path. Add the pwsh #245 gate, mirroring windows-genlock.yml."
-        );
-        assert!(
-            wf.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #249/#245 — the FAST build does not assert the editable \
-             per-source latency int field; add the pwsh #245 gate."
-        );
-        // #292: the FAST build must also gate on the source-arrival-fps drop-cap budget (mirror the
-        // slow gate), so a subtree pull can't hot-swap an obs.dll that re-caps latency at ~450ms.
-        assert!(
-            wf.contains("#define GENLOCK_MAX_SOURCE_FPS 60")
-                && wf.contains("source->genlock_latency_ms * GENLOCK_MAX_SOURCE_FPS"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #292 — the FAST build does not gate on the \
-             GENLOCK_MAX_SOURCE_FPS drop-cap arrival-fps budget; a subtree pull could hot-swap an \
-             obs.dll that re-caps latency at ~450ms. Add the pwsh #292 gate, mirroring windows-genlock.yml."
-        );
-    }
-
-    #[test]
-    fn windows_genlock_workflows_gate_on_asrc_default_on() {
-        // #912: BOTH the slow and fast Windows production builds must re-assert the ASRC
-        // build-default token in pwsh BEFORE their build (this Linux Rust guard can't compile
-        // on the runner) — a `git subtree pull` (#44) that silently reverts the default-on init
-        // would ship an obs.dll where ASRC is inert again, un-gated, exactly the regression #912
-        // exists to prevent. Mirror of every other #257-style hard-lock lock-step guard here.
-        for (wf_const, wf_path) in [
-            (WINDOWS_GENLOCK_WF, "windows-genlock.yml"),
-            (WINDOWS_GENLOCK_FAST_WF, "windows-genlock-fast.yml"),
-        ] {
-            let wf = squish(&vendor_file(wf_const));
-            assert!(
-                wf.contains("source->asrc_enabled = true;"),
-                "{wf_path}: #912 — the build no longer gates on the ASRC default-on init \
-                 (source->asrc_enabled = true;); re-add the pwsh #912 gate."
-            );
-        }
-    }
-
-    #[test]
-    fn windows_genlock_workflows_gate_on_asrc_starvation_guard() {
-        // #960: BOTH the slow and fast Windows production builds must re-assert the ASRC
-        // starvation-guard tokens in pwsh BEFORE their build (this Linux Rust guard can't compile
-        // on the runner) — a `git subtree pull` (#44) or hand-edit that silently reverts the
-        // guard would ship an obs.dll where a starved source rails the servo again, exactly the
-        // #960 defect. Mirror of every other lock-step guard here (see #912's own version above).
-        for (wf_const, wf_path) in [
-            (WINDOWS_GENLOCK_WF, "windows-genlock.yml"),
-            (WINDOWS_GENLOCK_FAST_WF, "windows-genlock-fast.yml"),
-        ] {
-            let wf = squish(&vendor_file(wf_const));
-            assert!(
-                wf.contains("ASRC_MAX_SANE_INSTANTANEOUS_PPM 100000.0"),
-                "{wf_path}: #960 — the build no longer gates on the starvation-guard sanity \
-                 ceiling (ASRC_MAX_SANE_INSTANTANEOUS_PPM); re-add the pwsh #960 gate."
-            );
-            assert!(
-                wf.contains("starved_blocks=%u"),
-                "{wf_path}: #960 — the build no longer gates on the starved_blocks telemetry \
-                 field reaching the asrc: log line; re-add the pwsh #960 gate."
-            );
-        }
-    }
-
-    #[test]
-    fn windows_genlock_workflows_gate_on_asrc_level_integral_1335() {
-        // #1335: BOTH Windows production builds must re-assert the ASRC buffer-LEVEL integral tokens
-        // in pwsh BEFORE their build (this Linux Rust guard can't compile on the runner) — a
-        // `git subtree pull` (#44) or hand-edit reverting the level term would ship an obs.dll that
-        // drifts the mix buffer again. Mirror of every other lock-step guard here.
-        for (wf_const, wf_path) in [
-            (WINDOWS_GENLOCK_WF, "windows-genlock.yml"),
-            (WINDOWS_GENLOCK_FAST_WF, "windows-genlock-fast.yml"),
-        ] {
-            let wf = squish(&vendor_file(wf_const));
-            assert!(
-                wf.contains("ASRC_LEVEL_KI_PPM_PER_MS_S 0.0002")
-                    && wf.contains("ASRC_LEVEL_INTEGRAL_MAX_PPM 3.0"),
-                "{wf_path}: #1335 — the build no longer gates on the level-integral constants \
-                 (ASRC_LEVEL_KI_PPM_PER_MS_S / ASRC_LEVEL_INTEGRAL_MAX_PPM); re-add the pwsh #1335 gate."
-            );
-            assert!(
-                wf.contains("c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm"),
-                "{wf_path}: #1335 — the build no longer gates on the level integral being folded into \
-                 target_ppm; re-add the pwsh #1335 gate."
-            );
-            assert!(
-                wf.contains("level=%.1fms target=%.1fms integral=%.3fppm (#1335)"),
-                "{wf_path}: #1335 — the build no longer gates on the asrc: telemetry reporting \
-                 level=/target=/integral=; re-add the pwsh #1335 gate."
-            );
-        }
-    }
-
-    #[test]
-    fn windows_genlock_workflow_gates_on_the_backward_step_recovery() {
-        // #147: the slow production build must re-assert the backward-clock-step re-anchor
-        // tokens in pwsh BEFORE the 150-min build (this Linux Rust guard can't compile on the
-        // runner), so a subtree bump can't ship an obs.dll that FREEZES the program feed on an
-        // NTP/PTP backward step while the version pin still passes (the #269 lock-step gotcha:
-        // a vendored-C guard lives in the YAML too, not only this test).
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-        assert!(
-            wf.contains("source->genlock_backward_steps++"),
-            "{WINDOWS_GENLOCK_WF}: #147 — the production build no longer asserts the \
-             backward-step re-anchor counter (genlock_backward_steps); re-add the pwsh #147 gate."
-        );
-        assert!(
-            wf.contains("max_ts > wall_now + backward_margin"),
-            "{WINDOWS_GENLOCK_WF}: #147/#269 [3]/#1009 — the production build no longer asserts \
-             the re-qualified backward-clock-step detection (max queued ts > wall_now + \
-             backward_margin); re-add the pwsh #147/#1009 gate."
-        );
-        assert!(
-            wf.contains("genlock_backward_regime_end("),
-            "{WINDOWS_GENLOCK_WF}: #1009 — the production build no longer asserts the \
-             regime-exit SELF-HEAL (genlock_backward_regime_end); a subtree bump could ship an \
-             obs.dll whose hold-collapse is permanent again. Re-add the pwsh #1009 gate."
-        );
-    }
-
-    #[test]
-    fn windows_genlock_fast_workflow_gates_on_the_backward_step_recovery() {
-        // #147: the FAST hot-DLL workflow compiles the real vendored C, but a `git subtree pull`
-        // reverting the #147 guard to inert-but-still-compiling (e.g. dropping the re-anchor
-        // branch) would hot-swap a FREEZING obs.dll un-gated. The fast path must re-assert the
-        // same #147 tokens BEFORE its build, mirroring the slow gate.
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
-        assert!(
-            wf.contains("source->genlock_backward_steps++"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #147 — the FAST build does not assert the backward-step \
-             re-anchor counter (genlock_backward_steps); add the pwsh #147 gate, mirroring \
-             windows-genlock.yml."
-        );
-        assert!(
-            wf.contains("max_ts > wall_now + backward_margin"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #147/#269 [3]/#1009 — the FAST build does not assert \
-             the re-qualified backward-clock-step detection (max queued ts > wall_now + \
-             backward_margin); add the pwsh #147/#1009 gate."
-        );
-        assert!(
-            wf.contains("genlock_backward_regime_end("),
-            "{WINDOWS_GENLOCK_FAST_WF}: #1009 — the FAST build does not assert the regime-exit \
-             SELF-HEAL (genlock_backward_regime_end); a hot-swapped obs.dll could revert to the \
-             permanent hold-collapse. Add the pwsh #1009 gate, mirroring windows-genlock.yml."
-        );
-    }
-
-    // ---- #276 + #275 build gates (the #269 YAML lock-step) ---------------------
-
-    #[test]
-    fn windows_genlock_workflow_gates_on_the_multiview_divisor() {
-        // #278: the slow PRODUCTION build (which builds the frontend, where OBSProjector.cpp
-        // lives) must re-assert the adaptive budget-skip tokens in pwsh BEFORE the 150-min
-        // build — this Linux Rust guard can't compile on the runner, and a `git subtree pull`
-        // could revert the decouple to inert-but-still-compiling, shipping an obs.dll/frontend
-        // that lets the multiview steal the 60fps program budget again.
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-        assert!(
-            wf.contains("if (obs_display_should_skip(effective_divisor, display->render_frame_counter, ewma, elapsed, budget,"),
-            "{WINDOWS_GENLOCK_WF}: #278/#293/#756 — the production build no longer asserts the \
-             adaptive budget-skip gate with the frame_counter-carrying signature \
-             (obs_display_should_skip call); re-add the pwsh gate."
-        );
-        assert!(
-            wf.contains("return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;"),
-            "{WINDOWS_GENLOCK_WF}: #293 — the production build no longer asserts the anti-starvation \
-             floor in obs-display-budget.h; re-add the pwsh gate (the multiview could freeze)."
-        );
-        assert!(
-            wf.contains("if (render_divisor > 1 && (frame_counter % render_divisor) != 0)"),
-            "{WINDOWS_GENLOCK_WF}: #756 — the production build no longer asserts the hard \
-             cadence-floor term in obs-display-budget.h; re-add the pwsh gate (a cheap \
-             monitoring display would never actually throttle)."
-        );
-        assert!(
-            wf.contains("display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;"),
-            "{WINDOWS_GENLOCK_WF}: #278 — the production build no longer asserts the render-cost \
-             EWMA update; re-add the pwsh #278 gate."
-        );
-        assert!(
-            wf.contains("if (isMultiview) obs_display_set_render_divisor(GetDisplay(), 2)"),
-            "{WINDOWS_GENLOCK_WF}: #278 — the production build no longer asserts the multiview \
-             projector marking render_divisor=2; re-add the pwsh #278 gate."
-        );
-    }
-
-    #[test]
-    fn windows_genlock_fast_workflow_gates_on_the_multiview_divisor() {
-        // #278: the FAST build compiles only libobs (obs.dll), so it can't COMPILE the
-        // OBSProjector.cpp change — but it must still source-text assert the libobs adaptive
-        // gate + the frontend call (a text guard, no build) so a subtree pull reverting #278
-        // fails here on the fast path too, mirroring the slow gate (the #269 lock-step rule).
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
-        assert!(
-            wf.contains(
-                "if (obs_display_should_skip(effective_divisor, display->render_frame_counter, ewma, elapsed, budget,"
-            ),
-            "{WINDOWS_GENLOCK_FAST_WF}: #278/#293/#756 — the FAST build does not assert the \
-             adaptive budget-skip gate with the frame_counter-carrying signature \
-             (obs_display_should_skip call); add the pwsh gate, mirroring windows-genlock.yml."
-        );
-        assert!(
-            wf.contains("return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #293 — the FAST build does not assert the anti-starvation \
-             floor in obs-display-budget.h; add the pwsh gate (the multiview could freeze)."
-        );
-        assert!(
-            wf.contains("if (render_divisor > 1 && (frame_counter % render_divisor) != 0)"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #756 — the FAST build does not assert the hard \
-             cadence-floor term in obs-display-budget.h; add the pwsh gate (a cheap monitoring \
-             display would never actually throttle)."
-        );
-        assert!(
-            wf.contains("display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #278 — the FAST build does not assert the render-cost \
-             EWMA update; add the pwsh #278 gate."
-        );
-        assert!(
-            wf.contains("if (isMultiview) obs_display_set_render_divisor(GetDisplay(), 2)"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #278 — the FAST build does not assert the multiview \
-             render_divisor=2 call; add the pwsh #278 gate."
-        );
-    }
-
-    #[test]
-    fn windows_genlock_workflow_gates_on_the_burn_bulk_fill() {
-        // #275: the production build must assert the cheaper bulk-fill burn render (the
-        // strih/stream genlock_burn at 60fps), so a subtree pull can't revert it to the slow
-        // per-pixel path that overran the 60fps budget.
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-        assert!(
-            wf.contains("std::memset(row, 0xFF,"),
-            "{WINDOWS_GENLOCK_WF}: #275 — the production build no longer asserts the bulk-fill \
-             burn render (per-row white memset); re-add the pwsh #275 gate."
-        );
-    }
-
-    #[test]
-    fn windows_genlock_fast_workflow_gates_on_the_burn_bulk_fill() {
-        // #275: the FAST build COMPILES burn-qr.hpp (DistroAV) — assert the bulk-fill token
-        // too so a revert to per-pixel fills fails on the fast path, mirroring the slow gate.
-        let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
-        assert!(
-            wf.contains("std::memset(row, 0xFF,"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #275 — the FAST build does not assert the bulk-fill burn \
-             render; add the pwsh #275 gate, mirroring windows-genlock.yml."
         );
     }
 }

@@ -79,8 +79,8 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
   rate-limited per run (`CameraBoxIgnoredOriginLog`, one line per run per minute of frame time).
   The list is parity-pinned to the Rust ids and the python mirrors
   (`tests/av_sync_dock_reserved_origin_1404.rs`, `tests/python/test_reserved_origin_runs_1404.py`),
-  behaviour by `camera-box-selftest.cpp`, the wiring also by the pwsh step "Assert dock never pairs
-  a reserved origin QR (issue 1404)" in both windows-genlock workflows. Live after a FULL-bundle
+  behaviour by `camera-box-selftest.cpp`, the wiring also (until issue 1505) by the pwsh step "Assert
+  dock never pairs a reserved origin QR (issue 1404)" in both windows-genlock workflows. Live after a FULL-bundle
   deploy on the stream box.
   **The clip's AUDIO marker reached the dock anyway (issue 1470).** Its QR was filtered, but the
   clip's sound carries the painter's marker format with only an 8-bit index, and the stream

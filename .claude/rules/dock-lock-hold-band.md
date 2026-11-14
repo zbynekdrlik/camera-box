@@ -2,8 +2,6 @@
 paths:
   - "src/av_sync_dock.rs"
   - "vendor/av-sync-dock/src/camera-box-audio.hpp"
-  - "tests/av_sync_dock_lock_926.rs"
-  - "tests/av_sync_dock_cpp_mirror_gate.rs"
 ---
 
 # `DockLockCorrector` hold-band tuning (#942)

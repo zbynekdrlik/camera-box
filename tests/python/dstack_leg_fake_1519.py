@@ -9,7 +9,7 @@ FIX = REPO / "tests" / "fixtures" / "dstack_leg_1519"
 
 def fake_dstack_leg_env(tmp_path):
     base = Path(tmp_path) / "dstack-mirror"
-    d = base / "v0.6.119" / "tools" / "linux"
+    d = base / "v0.6.129" / "tools" / "linux"
     d.mkdir(parents=True, exist_ok=True)
     for f in ("dante-leg.nft", "dante-leg-notrack.nft"):
         (d / f).write_bytes((FIX / f).read_bytes())

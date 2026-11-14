@@ -247,8 +247,8 @@ as the cluster estimator itself: `obs:tests/vendored/tests/av_sync_dock_audit_lo
 that needs RED→GREEN proof without a rig.
 
 **Correction to the general "frontend C++ is invisible to PR CI" framing (CLAUDE.md's genlock
-gotcha applies to the OBS core/frontend, NOT this dock):** `vendor/av-sync-dock/**` has its OWN
-automatic pre-merge compile gate — `windows-genlock-fast.yml`'s "Configure/Compile-check
+gotcha applies to the OBS core/frontend, NOT this dock):** `vendor/av-sync-dock/**` had its OWN
+automatic pre-merge compile gate until issue 1505 retired camera-box's Windows workflows — `windows-genlock-fast.yml`'s "Configure/Compile-check
 av-sync-dock" job fires on every `dev` push touching this tree and does a REAL MSVC build of the
 whole plugin against the genlocked OBS SDK (see `#188` in that workflow). So a dock-only change
 gets a genuine compile proof on the SAME push-to-dev cycle as everything else — dispatching the
@@ -524,6 +524,10 @@ still alive, check `journalctl`/the process's own log for the `CRITICAL #936: QP
 thread DIED` line before assuming the recording captured a healthy window.
 
 ## Dock DLL deploy path (#953/#955/#986, 2026-08-06) — the fast artifact + hot-swap recipe
+
+**History since issue 1505:** `windows-genlock-fast.yml` and its `avsyncdock-fast-dll` artifact are
+gone; a Windows box gets the dock DLL only inside the pinned obs release's Windows zip
+(`.claude/rules/obs-pinned-release.md`).
 
 `windows-genlock-fast.yml` uploads the compiled dock as artifact **`avsyncdock-fast-dll`**
 (added `aa4015e3c` — before that, NO artifact path existed and merged dock fixes silently never

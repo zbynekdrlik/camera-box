@@ -262,8 +262,8 @@ Read `gh issue view 1084 --comments` for the full root cause; the short version 
   regression nulling the inner drift to <1 ppm it has ~nothing to correct; recommend it stays
   OFF/report-only (a ±10ppm/7-min outer integrator on a now-slower inner loop could limit-cycle).
 - **Lock-step anchors** for a vendored-C revert: `tests/genlock_preload.rs::vendored_source::
-  asrc_uses_sliding_regression_estimator_1084` + byte-identical pwsh blocks in BOTH
-  `windows-genlock.yml` and `windows-genlock-fast.yml` (positive: the regression constants/fields/
+  asrc_uses_sliding_regression_estimator_1084` + (until issue 1505) byte-identical pwsh blocks in
+  BOTH `windows-genlock.yml` and `windows-genlock-fast.yml` (positive: the regression constants/fields/
   slope/flush; negative: `exp(-window_master_s`/`ASRC_TIME_CONSTANT_S` must be ABSENT).
 
 ## #1325's servo→swresample SIGN + the servo's MASTER clock — the bench's blind spot, closed
@@ -300,8 +300,8 @@ sample_delta > 0` (and the fast-source symmetry). Keep the negation in exactly O
 `compensation_sample_delta` mirror and every #929/#1016 quantization test stay UNCHANGED (do NOT
 negate inside the wrapper — that would conflate the sign fix with the quantization floor and break
 those tests). Lock-step anchor: `tests/genlock_preload.rs::vendored_source::
-asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325` + byte-identical pwsh blocks in BOTH
-`windows-genlock.yml` and `windows-genlock-fast.yml` (positive: `const uint64_t mixer_now_ns =
+asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325` + (until issue 1505) byte-identical pwsh blocks
+in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml` (positive: `const uint64_t mixer_now_ns =
 os_gettime_ns();` + the `-applied_ppm` call; negative: the pre-fix non-negated `applied_ppm,` call
 must be ABSENT). The `RealtimeAsrcCompensator` corrected-advance model itself is UNCHANGED by #1325.
 
@@ -345,8 +345,8 @@ and drifts it monotonically (~3 ms/h, 105→68 over 12.5 h) toward an eventual u
   `starved_blocks=%u (#803/#806/#960)` suffix so every dev1 `asrc:`-line parser (asio-starve-health,
   cg-chain-verify — both extract by name with `.*`) is unaffected.
 - **Lock-step anchors** for a vendored-C revert: `tests/genlock_preload.rs::vendored_source::
-  asrc_holds_buffer_level_with_integral_1335` + byte-identical pwsh blocks in BOTH
-  `windows-genlock.yml` and `windows-genlock-fast.yml` (constants + fold + update + telemetry).
+  asrc_holds_buffer_level_with_integral_1335` + (until issue 1505) byte-identical pwsh blocks
+  in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml` (constants + fold + update + telemetry).
 - **C↔Rust parity is bit-identical** — proven by a standalone `cc` lift of asrc-compensator.c with a
   main running the SAME 12 h buffer sim as the Rust probe: both produce setpoint 99.652, mean 100.000,
   peak 1.789, integral −0.0773, last 98.885 (identical to the last decimal). Reuse that lift for any
@@ -390,8 +390,8 @@ actuator FIGHT and A/V floats by the trim size between runs (the exact owner com
   85.700000.
 - **Lock-step anchor:** `tests/genlock_preload.rs::asrc_setpoint_follows_sync_offset_1335` pins the
   new C decl + `.c` body + the obs-source.c call site byte-exact (squished). No new pwsh gate — the
-  function rides the existing genlock build; add the 3-copy pwsh lock-step only if a future change
-  needs a windows-genlock gate.
+  function rides the existing genlock build (and since issue 1505 camera-box has no Windows build or
+  pwsh gate at all).
 
 ## #1335 follow-up 2 — step-tolerant regression + fast bounded level restore + a LEVEL P term
 

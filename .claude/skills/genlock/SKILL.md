@@ -8,6 +8,15 @@ description: >
 
 # Genlock
 
+**Since issue 1505 (14.11.2026) camera-box has no Windows OBS build of its own.** The workflows
+`windows-genlock.yml`, `windows-genlock-fast.yml` and `windows-manifest-gate.yml` (and their artifacts
+`obs-genlock-windows-x64`, `obs-genlock-fast-dll`, `distroav-fast-dll`, and every pwsh lock-step
+mirror in them) are deleted. Every Windows OBS box (resolume-snv; resolume-pp + grading-pp when home)
+deploys ONLY the pinned obs release's Windows zip (`scripts/obs-release.pin`, routing
+`scripts/lib/genlock-windows-pin.sh`, `.claude/rules/obs-pinned-release.md`); a pin without the zip
+refuses a Windows box by name and `--fast` is refused for Windows boxes. imag keeps
+`linux-genlock.yml`. Every Windows-build / FAST-DLL / pwsh-mirror instruction below is HISTORY.
+
 ## #257 — PRODUCTION-SAFE HARD-LOCK (the CURRENT state; supersedes the env model below)
 
 **GOTCHA (2026-07-18, live-event #797 debugging): the vendored libndi runtime IGNORES
@@ -96,7 +105,7 @@ more** — the old env knobs were removed in #257. The current model:
   the capability marker.
 
 The `#235` env model and the `STALE-ENV TRAP` notes below are HISTORY (pre-#257) — there is no
-genlock env to lose any more. Tests: `tests/genlock_preload.rs`, `tests/distroav_genlock_lockdown.rs`,
+genlock env to lose any more. Tests: `tests/genlock_preload.rs`, `obs:tests/vendored/tests/distroav_genlock_lockdown.rs`,
 `tests/launch_obs_genlock.rs`, `tests/rig_mode.rs`, `tests/drift_guard.rs`, `tests/burn_payload_parity.rs`.
 
 **PLAYBOOK HYGIENE (when you kill an env var / identifier):** grep the WHOLE playbook —
@@ -309,7 +318,7 @@ Camera→strih hops: genlock tick active but camera ingests are NOT genlock_fifo
 Rollback = stop OBS, robocopy backups back over `C:\Program Files\obs-studio` + the
 ProgramData distroav, clear `%APPDATA%\obs-studio\.sentinel\*`, relaunch.
 
-## GOTCHA — a vendored obs-websocket change deploys ONLY via the FULL windows-genlock build (#806, 2026-08-01)
+## (HISTORY until issue 1505) GOTCHA — a vendored obs-websocket change deploys ONLY via the FULL windows-genlock build (#806, 2026-08-01)
 
 A change under `vendor/obs-studio/plugins/obs-websocket/` (e.g. #806's `SetAsrcOuterBiasPpm`/
 `GetAsrcOuterBiasPpm` request pair) has NO fast deploy path and NO Linux compile coverage:
@@ -333,7 +342,7 @@ A change under `vendor/obs-studio/plugins/obs-websocket/` (e.g. #806's `SetAsrcO
   `vendor/<plugin>/**` change the same way — check whether FAST stages that DLL before assuming a
   hot-swap deployed it.
 
-## FULL-BUNDLE in-place deploy runbook (#726 session, 2026-07-14) — the AHK-watchdog gotcha
+## (HISTORY until issue 1505) FULL-BUNDLE in-place deploy runbook (#726 session, 2026-07-14) — the AHK-watchdog gotcha
 
 When to full-bundle vs obs.dll-only: a **struct change** to `obs_source` (e.g. #726's
 `genlock_last_known_n`) is technically ABI-safe as an **obs.dll-only** swap (distroav + the frontend
@@ -470,7 +479,7 @@ std::string + std::ostringstream — the SAME `<string>`/`<sstream>` dependency 
 risk; note `<sstream>` is `#ifdef _WIN32` in OBSBasic.cpp but the genlock build target is
 Windows-only; prefer `__DATE__`
 over CMake/config-header date plumbing since the full frontend build is 150-min and not
-locally compilable). Guard = `tests/obs_titlebar_newlevel.rs` (NON-probe, default-feature
+locally compilable). Guard = `tests/obs_titlebar_newlevel.rs` (now `obs:tests/vendored/tests/obs_titlebar_newlevel.rs`; NON-probe, default-feature
 Linux test) + the lock-step pwsh
 source-anchor gate in BOTH `windows-genlock{,-fast}.yml` (the FAST path doesn't build the
 frontend but still source-text-gates the token, same as the #276/#278 OBSProjector gate).
@@ -484,7 +493,7 @@ in `vendor/obs-studio/frontend/widgets/NewlevelBuildDate.hpp`, guarded
 `if (compileDate.size() < 11) return "unknown";` before any indexing/`substr`.
 `NewlevelBuildDate()` keeps the pinned anchor line `const std::string d = __DATE__;` then
 `return newlevel_iso_date(d);` — so the two `windows-genlock{,-fast}.yml` source gates +
-`tests/obs_titlebar_newlevel.rs` stay GREEN with NO lock-step change.
+`obs:tests/vendored/tests/obs_titlebar_newlevel.rs` stay GREEN with NO lock-step change.
 **THE LESSON — the OBS FRONTEND (`OBSBasic.cpp` + all of `frontend/`) compiles ONLY on the
 150-min `windows-genlock.yml`; neither the fast build nor normal PR CI compiles it.** A frontend
 C++ bug is therefore INVISIBLE to PR CI until the supervisor's full rebuild. Extract ANY
@@ -502,7 +511,7 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   cannot catch stale-BYTES-of-the-right-version (that was #119: a pre-#97 DistroAV of
   version 6.2.1 → preload inert) — **#122 (below) closes that** with a per-component
   BUILD-SHA + capability check.
-- **per-component SHA manifest (#120)** — the windows-genlock build emits
+- **per-component SHA manifest (#120)** — the windows-genlock build (retired, issue 1505) emitted
   `stage/BUNDLE_MANIFEST.json` via `scripts/genlock-manifest.sh` (unit-tested
   `tests/genlock_manifest.rs`): `components[]` = each rebuilt component's pinned
   version + vendored subtree commit (DistroAV version cross-checked vs
@@ -633,12 +642,12 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   re-calibration — only the calibrated ms value changes, which is tracked live, not in the
   manifest.**
 
-GOTCHA: the 150-min `windows-genlock.yml` is `workflow_dispatch`-only (can't run
+GOTCHA (until issue 1505 retired it): the 150-min `windows-genlock.yml` was `workflow_dispatch`-only (can't run
 per-PR), so manifest LOGIC is proven on the Linux `test` job; editing
 `windows-genlock-fast.yml` itself triggers the fast Windows build (its `paths:` lists
 the workflow file), which then runs the manifest gate on a real built obs.dll.
 
-GOTCHA (workflow source-token gates): BOTH Windows workflows re-assert the genlock patch
+GOTCHA (workflow source-token gates, until issue 1505 retired both Windows workflows): BOTH Windows workflows re-asserted the genlock patch
 tokens in pwsh BEFORE their build (the Linux Rust guards in `tests/genlock_preload.rs` are
 probe-gated, can't compile on the runner) — keep them in LOCK-STEP. The slow
 `windows-genlock.yml` and the FAST `windows-genlock-fast.yml` must each carry the #136 AND
@@ -861,7 +870,7 @@ The lag CANCELS OBS↔OBS (strih→stream measured correctly = 187 ms). It BREAK
 (cam→strih timecode gave nonsense 17.7 ms / negative). Fix B′ unlocks exact cam→strih
 measurement.
 
-## CI exact-anchor guards live in YAML too (not just tests) — #269 gotcha
+## (HISTORY until issue 1505) CI exact-anchor guards live in YAML too (not just tests) — #269 gotcha
 A vendored-C refactor that changes a pinned genlock call-site SHAPE breaks the
 `regex::Escape` `-notmatch` source guards in BOTH places — update ALL in the same change:
 - `tests/genlock_preload.rs` (the Rust vendored-source guards), AND

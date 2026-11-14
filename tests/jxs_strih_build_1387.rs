@@ -108,12 +108,6 @@ fn no_other_distroav_build_turns_the_source_on() {
     for other in ["linux-distroav-compile-check", "linux-genlock-build"] {
         assert!(!job(&wf, other).contains("CAMERA_BOX_JXS"), "{other}");
     }
-    for win in [
-        ".github/workflows/windows-genlock.yml",
-        ".github/workflows/windows-genlock-fast.yml",
-    ] {
-        assert!(!read(win).contains("CAMERA_BOX_JXS_SOURCE"), "{win}");
-    }
 }
 
 #[test]
