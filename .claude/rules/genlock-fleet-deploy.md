@@ -417,8 +417,10 @@ verify). Every Windows deploy is a FULL one (issue 1522 removed the obs.dll-only
   `distroav_dll_sha256` → `drift-guard.sh --compare` matches it to the manifest's `obs-plugins/64bit/
   distroav.dll` BY BASENAME. So Option A makes the gathered ProgramData sha equal the manifest sha.
 - **Runtime ENABLE of the distroav compare is separate (issue 1100 / issue 1082 ENFORCE):** the gate
-  auto-sources the FAST obs.dll-only manifest, so distroav is labelled SKIPPED at runtime until a
-  distroav-bearing (FULL) manifest is auto-sourced — do NOT "fix" the FAST manifest to add distroav.
+  used to auto-source the FAST obs.dll-only manifest, so distroav read SKIPPED at runtime. Issue 1505
+  retired that Windows FAST/FULL manifest auto-source (an operator still passes
+  `VERSION_GATE_MANIFEST` / `VERSION_GATE_ALT_MANIFEST`); an obs.dll-only manifest given there still
+  reads distroav SKIPPED, by design.
 
 ## imag post-swap restart HANDS OFF to imag-obs.service — never a raw setsid/nohup launch (#789 residual)
 
@@ -489,11 +491,13 @@ running obs64 re-locks `bin\64bit`, and the robocopy dies on ERROR 32 sharing vi
 The top-level CLAUDE.md documents the `.find()`/`!contains()` anchor-collision class for
 `recording-e2e.sh` / `rig-mode.sh`. It applies IDENTICALLY to `build_windows_deploy_program`'s emitted
 PowerShell: `tests/deploy_genlock_fleet.rs` asserts both POSITIVE (`p.contains("robocopy")`) and
-NEGATIVE (`windows_fast_program_is_obs_dll_only`: fast stream `!p.contains("robocopy")`) anchors on the
-emitted program TEXT — including comments. Adding a NEW comment to a keep-alive/AHK/copy block that
-merely SPELLS a word an existing negative anchor forbids breaks that test even though the code is
-correct. Live: a `# (1b)` comment saying "mid-robocopy" put the literal `robocopy` into the (comment-
-carrying) fast-mode stream program and broke `!p.contains("robocopy")`. Before adding a comment near
+NEGATIVE (since issue 1522 `windows_program_refuses_fast_mode_and_carries_no_fast_gate_1522`'s
+`!full.contains(...)` list, e.g. `(0f)`, `obs.dll ONLY`) anchors on the emitted program TEXT —
+including comments. Adding a NEW comment to a keep-alive/AHK/copy block that merely SPELLS a word an
+existing negative anchor forbids breaks that test even though the code is correct. Live (issue 1140,
+when a FAST program still existed): a `# (1b)` comment saying "mid-robocopy" put the literal
+`robocopy` into the (comment-carrying) fast-mode stream program and broke its `!p.contains("robocopy")`
+anchor. Before adding a comment near
 any emitted block, grep the test file for `!p.contains(` / `!stream.contains(` and keep those words out
 of the comment (reworded to "during the byte copy"). New `# (1b)`/`# (8b)`-style step markers must also
 be UNIQUE in the emitted program (`grep -c` = 1) so an ordering `.find()` anchor can't latch the wrong one.
@@ -640,7 +644,7 @@ bytes for stream and resolume; design comment 6014590298):
   relaunch still needs the save-trigger checklist in `rig-state-inspection.md` (issue 1333).
 
 **Tests** (`tests/python/test_deploy_clean_close_win_1367.py`, CI's `pytest tests/python`): the
-emitted program for stream + resolume, FULL + FAST (order, the 45 s bound, the force only in the
+emitted program for stream + resolume, FULL only since issue 1522 (order, the 45 s bound, the force only in the
 named branch, the (1c) hook on stream only, the read-back, one shared fragment), a pwsh parse of
 every program, a token scan banning the syntax pwsh 7 accepts and Windows PowerShell 5.1 rejects
 (`&&` `||` `??` `?.` the ternary), and the fragment RUN in pwsh against a stdlib fake obs-websocket

@@ -259,10 +259,10 @@ def test_every_program_parses_and_uses_no_powershell_7_only_syntax_1302(tmp_path
             f = tmp_path / f"{box}-{abi.replace(':', '_') or 'unknown'}.ps1"
             f.write_text(_program(box, abi))
             files.append(str(f))
-    for fn, abi in (("genlock_stats_abi_marker_ps", "4:1"), ("genlock_stats_abi_marker_ps", ""),
-                    ("genlock_stats_abi_clear_ps", "")):
-        f = tmp_path / f"{fn}-{len(files)}.ps1"
-        f.write_text(_lib(f'{fn} "$2"', abi).stdout)
+    for call, args in (('genlock_stats_abi_marker_ps "$2"', ("4:1",)), ('genlock_stats_abi_marker_ps "$2"', ("",)),
+                       ("genlock_stats_abi_clear_ps", ())):
+        f = tmp_path / f"printer-{len(files)}.ps1"
+        f.write_text(_lib(call, *args).stdout)
         files.append(str(f))
     scan = tmp_path / "scan.ps1"
     scan.write_text(

@@ -2256,9 +2256,9 @@ compare_observed() {
         [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
       elif [ -n "$o_distroav_sha" ] && [ -n "$a_distroav_sha" ]; then
         # #1346: only the alternate lists distroav. Report whether the box matches it, but keep it
-        # SKIPPED: a --fast deploy ships obs.dll only and leaves distroav from an older build, and
-        # distroav is not byte-reproducible across builds, so enforcing it here would false-refuse
-        # every correct fast deploy.
+        # SKIPPED: an obs.dll-only manifest names no distroav (the box's distroav may come from an
+        # older build), and distroav is not byte-reproducible across builds, so enforcing it here would
+        # false-refuse a correct box. (The Windows --fast deploy that shipped obs.dll only is retired.)
         local dav_vs_alt="differs from"
         [ "$o_distroav_sha" = "$a_distroav_sha" ] && dav_vs_alt="matches"
         printf '  %-20s SKIPPED  (observed %s; not in this obs.dll-only manifest — %s the alternate manifest entry %s, informational only: an alternate never switches on a check the primary skips)\n' \
