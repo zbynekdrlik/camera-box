@@ -304,7 +304,15 @@ fn fake_shading_release(dir: &Path) -> (PathBuf, PathBuf) {
 /// tree (`<tag>/tools/linux/<file>`), so the staging step never reaches the network.
 fn dstack_leg_filter_mirror(dir: &Path) -> PathBuf {
     let base = dir.join("dstack-mirror");
-    let d = base.join("v0.6.119/tools/linux");
+    // The tag comes from the pin itself, so a pin bump never leaves this mirror on an old tag.
+    let pin = fs::read_to_string(manifest_dir().join("scripts/dstack-leg-filter.pin")).unwrap();
+    let tag = pin
+        .lines()
+        .find_map(|l| l.strip_prefix("DSTACK_LEG_FILTER_TAG="))
+        .expect("DSTACK_LEG_FILTER_TAG in scripts/dstack-leg-filter.pin")
+        .trim()
+        .to_string();
+    let d = base.join(format!("{tag}/tools/linux"));
     fs::create_dir_all(&d).unwrap();
     for f in ["dante-leg.nft", "dante-leg-notrack.nft"] {
         fs::copy(
