@@ -3,29 +3,35 @@
 # scripts/lib/*.sh convention: sourcing runs in the CALLER's shell, so strict mode here would leak.
 #
 # scripts/lib/genlock-windows-pin.sh -- issue 1505: the Windows OBS boxes take the pinned obs release's
-# Windows zip (scripts/lib/obs-release.sh obs_release_windows_bundle) instead of an anchor run's
-# windows-genlock.yml artifact, once scripts/obs-release.pin carries OBS_RELEASE_WINDOWS_SHA256.
-# deploy-genlock-fleet.sh (< 1000-line budget) keeps only the calls; the routing lives here.
+# Windows zip (scripts/lib/obs-release.sh obs_release_windows_bundle), the ONLY source of their bytes:
+# camera-box's own windows-genlock build of vendor/ is retired, so a pin without the Windows zip refuses
+# a Windows box by name, never another build. deploy-genlock-fleet.sh (< 1000-line budget) keeps only
+# the calls; the routing lives here.
 #
-# What changes for a Windows box when the pin carries the zip:
-#   - its canonical SHA is the pin's commit (the markers the deploy program writes name it), never the
-#     anchor run's; --run-id is needed only for a box that still takes an anchor build (imag);
-#   - the staged tree is the verified, unzipped release (same layout as the windows-genlock stage, so
-#     build_windows_deploy_program -- the ONE Windows program -- reads it unchanged);
+# What this means for a Windows box:
+#   - its canonical SHA is the pin's commit (the markers the deploy program writes name it), never an
+#     anchor run's; --run-id is needed only for imag (linux-genlock.yml);
+#   - the staged tree is the verified, unzipped release (the stage layout build_windows_deploy_program
+#     -- the ONE Windows program -- reads);
 #   - the frontend's stats ABI pair comes from the pinned manifest's release block, never obs.h;
 #   - --fast is refused: the release ships the full bundle only.
 # Needs obs-release.sh + genlock-fleet-boxes.sh sourced by the caller.
 
-# fleet_win_split ROOT CSV -> two lines: the boxes of CSV that still take an anchor build, then the Windows
-# boxes that take the pinned release's zip (empty when the pin carries no Windows zip). rc 3 + a named line
-# when the pin names a Windows zip whose sha256 fields are malformed (never a silent vendor fallback).
+# fleet_win_split ROOT CSV -> two lines: the boxes of CSV that take an anchor build (imag), then the Windows
+# boxes, which take the pinned release's zip. rc 3 + a named line when CSV holds a Windows box and the pin
+# carries no Windows zip, or names one whose sha256 fields are malformed (never a vendor fallback).
 fleet_win_split() {
   local root="${1:?tree required}" b anchor="" win="" IFS=','
-  if ! obs_pin_has_windows "$root"; then printf '%s\n\n' "${2:-}"; return 0; fi
-  obs_pin_windows_sha256 "$root" >/dev/null && obs_pin_windows_manifest_sha256 "$root" >/dev/null || return 3
   for b in ${2:-}; do
     if [ "$(fleet_boxes_swap_obs_dll "$b")" = 1 ]; then win="${win:+$win,}$b"; else anchor="${anchor:+$anchor,}$b"; fi
   done
+  if [ -n "$win" ] && ! obs_pin_has_windows "$root"; then
+    echo "ERROR: ${win}: the pin carries no Windows zip (scripts/obs-release.pin has no OBS_RELEASE_WINDOWS_SHA256) -- camera-box's own windows-genlock build is retired (issue 1505), so a Windows box deploys only from the pinned obs release" >&2
+    return 3
+  fi
+  if [ -n "$win" ]; then
+    obs_pin_windows_sha256 "$root" >/dev/null && obs_pin_windows_manifest_sha256 "$root" >/dev/null || return 3
+  fi
   printf '%s\n%s\n' "$anchor" "$win"
 }
 
@@ -72,33 +78,25 @@ fleet_win_log_lines() {
   [ -z "$wboxes" ] || fleet_log_line "obs-$(obs_pin_tag "$root")" "$wsha" "$wboxes" "$mode"
 }
 
-# fleet_win_bundle_label ROOT MODE -> what STEP 0 of a Windows plan uploads: the pinned zip's name (unpacked
-# + verified) when the pin carries one, else the windows-genlock artifact of MODE.
+# fleet_win_bundle_label ROOT -> what STEP 0 of a Windows plan uploads: the pinned zip's name (unpacked +
+# verified).
 fleet_win_bundle_label() {
-  local tag
-  if obs_pin_has_windows "${1:?tree required}" && tag="$(obs_pin_tag "$1" 2>/dev/null)"; then
-    printf '%s (the pinned obs release, unzipped + verified)\n' "$(obs_release_windows_zip_name "$tag")"
-  else
-    fleet_windows_artifact "${2:-full}"
-  fi
+  printf '%s (the pinned obs release, unzipped + verified)\n' "$(obs_release_windows_zip_name "$(obs_pin_tag "${1:?tree required}")")"
 }
 
-# fleet_win_bundle_source ROOT STAGE WIN_STAGE -> where STEP 0's bytes come from. A pinned box: the cached,
-# sha-proved zip (its root is the stage layout), expanded on the box into WIN_STAGE -- the unzipped STAGE is a
+# fleet_win_bundle_source ROOT WIN_STAGE -> where STEP 0's bytes come from: the cached, sha-proved zip (its
+# root is the stage layout), expanded on the box into WIN_STAGE -- the unzipped tree the plan verified is a
 # mktemp dir the planner removes on exit; a --plan run never fetches, so a zip not cached yet is named as
-# such. Else: the downloaded windows-genlock artifact at STAGE.
+# such.
 fleet_win_bundle_source() {
   local root="${1:?tree required}" tag zip sha
-  if obs_pin_has_windows "$root" && tag="$(obs_pin_tag "$root" 2>/dev/null)"; then
-    zip="${OBS_RELEASE_CACHE:-${root%/}/obs-release}/${tag}/$(obs_release_windows_zip_name "$tag")"
-    sha="$(obs_pin_windows_sha256 "$root" 2>/dev/null)" || sha="UNREADABLE (scripts/obs-release.pin)"
-    if [ -f "$zip" ]; then
-      printf 'the cached pinned zip %s, sha256 %s -- upload it, check its sha256 there and Expand-Archive it into %s\n' \
-        "$zip" "$sha" "${3:-the box stage}"
-    else
-      printf 'the pinned zip is not cached yet at %s -- run this deploy once without --plan to fetch + prove it\n' "$zip"
-    fi
+  tag="$(obs_pin_tag "$root" 2>/dev/null)" || tag="UNREADABLE"
+  zip="${OBS_RELEASE_CACHE:-${root%/}/obs-release}/${tag}/$(obs_release_windows_zip_name "$tag")"
+  sha="$(obs_pin_windows_sha256 "$root" 2>/dev/null)" || sha="UNREADABLE (scripts/obs-release.pin)"
+  if [ -f "$zip" ]; then
+    printf 'the cached pinned zip %s, sha256 %s -- upload it, check its sha256 there and Expand-Archive it into %s\n' \
+      "$zip" "$sha" "${2:-the box stage}"
   else
-    printf 'staged locally at %s\n' "${2:-}"
+    printf 'the pinned zip is not cached yet at %s -- run this deploy once without --plan to fetch + prove it\n' "$zip"
   fi
 }

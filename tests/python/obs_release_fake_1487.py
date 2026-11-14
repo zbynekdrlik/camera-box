@@ -31,7 +31,9 @@ def fake_obs_pin_env(commit):
     d = Path(tempfile.mkdtemp(prefix="fake-obs-pin-"))
     atexit.register(shutil.rmtree, d, True)
     pin = d / "obs-release.pin"
-    pin.write_text(_pin_text(commit))
+    # issue 1505: a Windows box deploys only from the pin's Windows zip, so the plan pin names one too
+    pin.write_text(_pin_text(commit) + "OBS_RELEASE_WINDOWS_SHA256=%s\nOBS_RELEASE_WINDOWS_MANIFEST_SHA256=%s\n"
+                   % ("0" * 64, "0" * 64))
     return {"OBS_RELEASE_PIN_FILE": str(pin)}
 
 

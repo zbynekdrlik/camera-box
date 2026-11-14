@@ -37,13 +37,13 @@ set -euo pipefail
 # the Windows plan, append the fleet log; drive Windows via the printed win-* MCP program):
 #   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv] [--yes]
 #
-#   --run-id   the ANCHOR CI run id (any of the three genlock workflows) -- its headSha is the ONE
-#              canonical version every Windows / imag box converges to. The setup-strih (Linux OBS)
-#              boxes take the pinned obs release instead (scripts/obs-release.pin, issue 1487), so a
-#              Linux-only run needs no --run-id (nor --sha in plan mode).
-#   --full     deploy the full windows-genlock bundle (obs.dll + data + obs-plugins) -- the default;
-#              required for any vendor/<plugin>/** or frontend change (fast has no deploy path for it).
-#   --fast     deploy only the libobs hot-swap dll (obs.dll) -- a libobs-only change (§5b).
+#   --run-id   the ANCHOR CI run id (a linux-genlock.yml run) -- its headSha is the canonical version imag
+#              converges to. The setup-strih (Linux OBS) and the Windows OBS
+#              boxes take the pinned obs release instead (scripts/obs-release.pin, issues 1487 + 1505), so a
+#              run without imag needs no --run-id (nor --sha in plan mode).
+#   --full     the default; a Windows box takes the pinned obs release's whole Windows zip (issue 1505:
+#              camera-box's own windows-genlock build is retired, a pin without the zip refuses the box).
+#   --fast     refused for a Windows box (the release ships the full bundle only).
 #   --boxes    comma list of strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv (default:
 #              strih-snv,stream-snv -- strih-snv is
 #              the Linux strih since the M4 cut-over; the Windows `strih` arm is RETIRED, issue 1317;
@@ -103,24 +103,6 @@ RETENTION_KEEP=3
 
 # fleet_normalize_boxes CSV (the requested boxes in canonical order, deduped + validated; empty = the
 # default strih-snv,stream-snv) lives in scripts/lib/genlock-fleet-boxes.sh with the per-box table.
-
-# fleet_windows_artifact MODE -> the CI artifact name for the Windows genlock deploy.
-fleet_windows_artifact() {
-  case "${1:-}" in
-    full) echo "obs-genlock-windows-x64" ;;
-    fast) echo "obs-genlock-fast-dll" ;;
-    *) echo "fleet_windows_artifact: MODE must be full|fast" >&2; return 2 ;;
-  esac
-}
-
-# fleet_windows_workflow MODE -> the workflow file that produces the Windows artifact.
-fleet_windows_workflow() {
-  case "${1:-}" in
-    full) echo "windows-genlock.yml" ;;
-    fast) echo "windows-genlock-fast.yml" ;;
-    *) echo "fleet_windows_workflow: MODE must be full|fast" >&2; return 2 ;;
-  esac
-}
 
 fleet_linux_bundle_artifact()   { echo "obs-genlock-linux-x86_64"; }
 fleet_linux_distroav_artifact() { echo "distroav-linux-fast-so"; }
@@ -685,8 +667,8 @@ Windows plan):
   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv] [--yes]
 
   --run-id   the ANCHOR CI run id -- its headSha is the ONE canonical version every box converges to.
-  --full     full windows-genlock bundle (default; required for any plugin/frontend change).
-  --fast     libobs-only obs.dll hot-swap.
+  --full     default; a Windows box takes the pinned obs release's whole Windows zip (issue 1505).
+  --fast     refused for a Windows box (the release ships the full bundle only).
   --boxes    comma list of strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv (default:
              strih-snv,stream-snv -- the Windows `strih` PC is RETIRED (issue 1317); the PP Linux
              boxes, imag and resolume (RESOLUME-SNV, the traveling CG box) deploy ONLY when explicitly
@@ -728,12 +710,12 @@ emit_forced_table_audit_preflight() {
 PREFLIGHT
 }
 
-# emit the plan for one Windows box (STEP 0 upload -> the deploy program -> STEP 2 relaunch).
+# emit the plan for one Windows box (STEP 0 upload of the pinned zip -> the deploy program -> STEP 2 relaunch).
 emit_windows_plan() {
-  local box="$1" mode="$2" stage="$3" gsha="$4" dsha="$5" confirm="${6:-0}" abi="${7:-}"
+  local box="$1" mode="$2" gsha="$3" dsha="$4" confirm="${5:-0}" abi="${6:-}"
   local mcp ip has_ahk win_stage program artifact
   mcp="$(fleet_box_mcp "$box")"; ip="$(fleet_box_ip "$box")"; has_ahk="$(fleet_box_ahk_mode "$box")"
-  artifact="$(fleet_win_bundle_label "$HERE/.." "$mode")"
+  artifact="$(fleet_win_bundle_label "$HERE/..")"
   win_stage="C:\\stage-genlock-${gsha}"
   program="$(build_windows_deploy_program "$box" "$mode" "$win_stage" 'C:\Program Files\obs-studio' "$has_ahk" 'C:\obs-backup' "$RETENTION_KEEP" "$gsha" "$dsha" "$confirm" "$abi")"
   echo "# ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} ================="
@@ -743,7 +725,7 @@ emit_windows_plan() {
   # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
   emit_forced_table_audit_preflight "$box" "$ip"
   cat <<PLAN
-# STEP 0 (once per box): upload the downloaded '${artifact}' bytes ($(fleet_win_bundle_source "$HERE/.." "$stage" "$win_stage")) to
+# STEP 0 (once per box): upload the downloaded '${artifact}' bytes ($(fleet_win_bundle_source "$HERE/.." "$win_stage")) to
 #         the box at ${win_stage} via the ${mcp} MCP FileUpload (or sshpass scp -O of a zip +
 #         Expand-Archive on the box), then run the program below in the ${mcp} MCP Shell
 #         (timeout >= 360 s: the issue-1367 clean close may wait 30 s for a recording + 45 s for OBS):
@@ -825,7 +807,7 @@ main() {
   { read -r anchor_rest || true; read -r win_boxes || true; } <<<"$win_split"   # $() ate the empty 2nd line
   [ -z "$win_boxes" ] || { fleet_win_pin_mode_ok "$mode" || exit 2; win_sha="$lx_sha"; }
   [ -n "$run_id" ] || [ -n "$anchor_rest" ] || run_id="obs-$(obs_pin_tag "$HERE/..")"
-  [ -n "$run_id" ] || { echo "ERROR: --run-id is required (a Windows / imag box is in the list)" >&2; usage >&2; exit 2; }
+  [ -n "$run_id" ] || { echo "ERROR: --run-id is required (imag is in the list)" >&2; usage >&2; exit 2; }
 
   if [ "$plan" = 1 ]; then
     [ -n "$stage" ] || { echo "ERROR: --plan requires --stage (no network in plan mode)" >&2; exit 2; }
@@ -833,7 +815,7 @@ main() {
     [ -n "$sha_override" ] || { echo "ERROR: --plan requires --sha (no network in plan mode)" >&2; exit 2; }
     local sha="$sha_override" stats_abi=""
     [ -z "$anchor_rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")")" || exit 3
-    if [ -n "$win_sha" ]; then win_abi="$(fleet_win_pin_stats_abi "$HERE/.." "$stage")"; else win_sha="$sha"; win_abi="$stats_abi"; fi
+    [ -z "$win_sha" ] || win_abi="$(fleet_win_pin_stats_abi "$HERE/.." "$stage")"
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
     fleet_win_note "$HERE/.." "$win_boxes"
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
@@ -843,7 +825,7 @@ main() {
       # 1426: so does every setup-strih box (strih-pp, stream-pp), routed by the predicate execute uses.
       if fleet_box_runs_setup_strih "$b"; then emit_strih_lx_plan "$stage" "$lx_sha" "$run_id" "$b"; continue; fi
       case "$b" in
-        stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$stage" "$win_sha" "$win_sha" 0 "$win_abi" ;;
+        stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$win_sha" "$win_sha" 0 "$win_abi" ;;
         imag)            emit_imag_plan "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
       esac
     done )
@@ -859,8 +841,8 @@ main() {
   fi
 
   # --- execute mode -------------------------------------------------------------------------------
-  # Resolve the anchor headSha, resolve + download the SAME-SHA artifacts across the (separate)
-  # windows/linux workflows, emit the Windows plan (agent uploads + pastes into the win-* MCP Shell),
+  # Resolve the anchor headSha (imag's linux-genlock build), fetch + prove the pinned release's
+  # Windows zip, emit the Windows plan (agent uploads + pastes into the win-* MCP Shell),
   # ssh-deploy the setup-strih boxes + imag, and append one fleet-deploy log line. The worker never runs this; the supervisor
   # drives it live (the ticket stays OPEN until then).
   command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI required for execute mode" >&2; exit 3; }
@@ -872,7 +854,6 @@ main() {
     [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
     stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")" 1)" || exit 3
   fi
-  [ -n "$win_sha" ] || { win_sha="$sha"; win_abi="$stats_abi"; }
   echo "# anchor run $run_id -> canonical SHA $sha (the Linux OBS boxes: the pinned obs release $lx_sha); deploying: $boxes (mode $mode; retention --yes=$yes)"
   fleet_win_note "$HERE/.." "$win_boxes"
 
@@ -893,18 +874,10 @@ main() {
     genlock_stats_abi_stage "$STRIH_LX_PREP_WORK/bundle" "$(obs_release_stats_abi "$STRIH_LX_PREP_WORK/bundle" || true)" || exit 3
   fi
 
-  # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
+  # --- Windows: fetch + prove the pinned release's zip (issue 1505: the ONLY source, no other build) ---
   if [ -n "$win_boxes" ]; then
     obs_release_windows_bundle "$HERE/.." "$workdir/win" || { echo "ERROR: the pinned obs release's Windows bundle did not verify -- never another build" >&2; exit 3; }
     win_abi="$(fleet_win_pin_stats_abi "$HERE/.." "$workdir/win")"
-  elif [ "$want_win" = 1 ]; then
-    local win_wf win_art win_run
-    win_wf="$(fleet_windows_workflow "$mode")"; win_art="$(fleet_windows_artifact "$mode")"
-    win_run="$(gh run list --repo "$GENLOCK_REPO" --workflow "$win_wf" --json databaseId,headSha,conclusion --limit 50 2>/dev/null | fleet_pick_run_at_sha "$sha")" || true
-    [ -n "$win_run" ] || { echo "ERROR: no successful $win_wf run at $sha -- build the Windows artifact at that commit first (gh workflow run / a tag dispatch)" >&2; exit 3; }
-    gh run download "$win_run" --repo "$GENLOCK_REPO" -n "$win_art" -D "$workdir/win" \
-      || { echo "ERROR: download of $win_art (run $win_run) failed" >&2; exit 3; }
-    echo "# Windows artifact $win_art (run $win_run) downloaded to $workdir/win"
   fi
 
   # --- imag: download the same-SHA linux artifacts, scp the WHOLE bundle + ssh-run (issue 1026) -----
@@ -952,7 +925,7 @@ main() {
     # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
     # issue 1474: a box that took the Linux (setup-strih) arm above gets no Windows program -- the plan
     # arm's own routing predicate, so the two arms can never disagree.
-    ( IFS=','; for b in $boxes; do fleet_box_runs_setup_strih "$b" && continue; case "$b" in stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$workdir/win" "$win_sha" "$win_sha" "$yes" "$win_abi" ;; esac; done )
+    ( IFS=','; for b in $boxes; do fleet_box_runs_setup_strih "$b" && continue; case "$b" in stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$win_sha" "$win_sha" "$yes" "$win_abi" ;; esac; done )
   fi
 
   # --- imag: the ssh deploy of the bundle prepared above --------------------------------------------

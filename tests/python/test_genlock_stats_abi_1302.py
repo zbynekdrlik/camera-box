@@ -538,10 +538,11 @@ def test_the_marker_the_linux_writer_writes_passes_the_verdict_1302(tmp_path, wh
 
 # --- the planner ---------------------------------------------------------------------------------
 
-def _plan(tmp_path, mode, sha, boxes="resolume-snv"):
-    # issue 1505: these cases pin the VENDOR-build stats ABI path (vendor obs.h at the anchor SHA), which a
-    # Windows box takes only while the obs pin carries no Windows zip -- so the planner reads the real pin
-    # minus its OBS_RELEASE_WINDOWS_* lines (the pinned-zip path: tests/python/test_obs_release_windows_1505.py).
+def _plan(tmp_path, mode, sha, boxes="imag"):
+    # issue 1505: the VENDOR-build stats ABI path (vendor obs.h at the anchor SHA) is imag's only: camera-box's
+    # own Windows build is retired, a Windows box takes the pinned zip (tests/python/test_obs_release_windows_1505.py)
+    # and a pin without that zip refuses it. The planner reads the real pin minus its OBS_RELEASE_WINDOWS_*
+    # lines, so a Windows box in BOXES is refused here.
     pin = tmp_path / "obs-release-no-windows.pin"
     pin.write_text("".join(l + "\n" for l in (REPO / "scripts" / "obs-release.pin").read_text().splitlines()
                            if not l.startswith("OBS_RELEASE_WINDOWS_")))
@@ -550,39 +551,29 @@ def _plan(tmp_path, mode, sha, boxes="resolume-snv"):
                           env={**os.environ, "OBS_RELEASE_PIN_FILE": str(pin)})
 
 
-def test_plan_fast_reads_the_abi_of_the_deployed_commit_1302(tmp_path):
-    sha = _head_sha()
-    out = _repo_abi("OBS_GENLOCK_OUTPUT_STATS_VERSION")
-    r = _plan(tmp_path, "fast", sha)
-    assert r.returncode == 0, r.stderr
-    assert f"\n$abiNew    = '{_repo_abi()}'\n" in r.stdout
-    assert f"\n$abiNewOut = '{out}'\n" in r.stdout
-    assert f"genlock stats ABI of {sha}: v{_repo_abi()}, output stats v{out}" in r.stderr
-
-
-def test_plan_fast_refuses_an_unreadable_abi_1302(tmp_path):
-    r = _plan(tmp_path, "fast", "deadbeefdeadbeef")
-    assert r.returncode == 3, r.stdout + r.stderr
-    assert "cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr and "--fast" in r.stderr
-    assert "OBS_GENLOCK_OUTPUT_STATS_VERSION" in r.stderr
-    assert "$ErrorActionPreference" not in r.stdout
-
-
-def test_plan_full_records_the_abi_on_windows_and_imag_1302(tmp_path):
+def test_plan_full_records_the_abi_on_imag_1302(tmp_path):
     sha = _head_sha()
     stats, out = _repo_pair().split(":")
-    r = _plan(tmp_path, "full", sha, "resolume-snv,imag")
+    r = _plan(tmp_path, "full", sha, "imag")
     assert r.returncode == 0, r.stderr
-    assert f"Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt') @('{stats}', 'output_stats={out}')" in r.stdout
     assert f"genlock_write_markers \"$MARKER_DIR\" '{sha}' '{sha}' '' '{stats}:{out}'" in r.stdout
 
 
 def test_plan_full_with_an_unreadable_abi_removes_the_marker_1302(tmp_path):
-    r = _plan(tmp_path, "full", "deadbeefdeadbeef", "resolume-snv,imag")
+    r = _plan(tmp_path, "full", "deadbeefdeadbeef", "imag")
     assert r.returncode == 0, r.stderr
     assert "WARNING: cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr
-    assert "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" in r.stdout
     assert "genlock_write_markers \"$MARKER_DIR\" 'deadbeefdeadbeef' 'deadbeefdeadbeef' '' ''" in r.stdout
+
+
+@pytest.mark.parametrize("mode", ["full", "fast"])
+@pytest.mark.parametrize("boxes", ["resolume-snv", "imag,resolume-snv"])
+def test_plan_of_a_windows_box_without_the_pinned_zip_is_refused_never_a_vendor_build_1505(tmp_path, mode, boxes):
+    """issue 1505: the vendor obs.h path no longer reaches a Windows box -- the pin without its zip refuses it."""
+    r = _plan(tmp_path, mode, _head_sha(), boxes)
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "the pin carries no Windows zip" in r.stderr
+    assert "$ErrorActionPreference" not in r.stdout
 
 
 def test_execute_mode_stages_the_abi_before_strih_lx_is_touched_1302():
@@ -620,12 +611,6 @@ def test_plan_fast_without_a_windows_box_never_refuses_an_unknown_abi_1302(tmp_p
     assert r.returncode == 0, r.stdout + r.stderr
     assert ("WARNING: cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr) is warned
     assert "ERROR: cannot read" not in r.stderr
-
-
-@pytest.mark.parametrize("boxes", ["resolume-snv", "strih-snv,resolume-snv", "imag,resolume-snv"])
-def test_plan_fast_with_a_windows_box_refuses_an_unknown_abi_1302(tmp_path, boxes):
-    r = _plan(tmp_path, "fast", "deadbeefdeadbeef", boxes)
-    assert r.returncode == 3, r.stdout + r.stderr
 
 
 @pytest.fixture()

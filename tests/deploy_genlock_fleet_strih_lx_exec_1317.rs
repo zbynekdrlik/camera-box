@@ -73,7 +73,6 @@ case "$1 $2" in
   "run view") echo "$STUB_SHA" ;;
   "run list")
     case "$*" in
-      *windows-genlock*) [ -n "${STUB_NO_WIN_RUN:-}" ] && { echo '[]'; exit 0; } ;;
       *linux-genlock*) [ -n "${STUB_NO_LINUX_RUN:-}" ] && { echo '[]'; exit 0; } ;;
     esac
     printf '[{"databaseId":777,"headSha":"%s","conclusion":"success"}]\n' "$STUB_SHA" ;;
@@ -327,12 +326,14 @@ fn sha256_of(p: &Path) -> String {
 /// Issue 1487: a stand-in obs release, already in its cache dir, + the pin that matches it (commit =
 /// SHA), so the download step never reaches GitHub. `artifact_sha` writes another commit into the
 /// bundle's marker, `no_lib` leaves libobs.so.30 out of the manifest, `absent` publishes nothing.
-/// Returns (pin, cache, the libobs.so.30 sha256).
+/// Issue 1505: the release also carries its Windows zip (the only source of a Windows box's bytes);
+/// `no_win` leaves it, and its two pin fields, out. Returns (pin, cache, the libobs.so.30 sha256).
 fn fake_obs_release(
     dir: &Path,
     artifact_sha: Option<&str>,
     no_lib: bool,
     absent: bool,
+    no_win: bool,
 ) -> (PathBuf, PathBuf, String) {
     let stage = dir.join("fake-obs-stage");
     let files = [
@@ -392,11 +393,16 @@ fn fake_obs_release(
         .unwrap();
     assert!(st.success());
     fs::write(rel_dir.join("BUNDLE_MANIFEST.json"), &manifest).unwrap();
+    let win_pin = if no_win {
+        String::new()
+    } else {
+        fake_windows_zip(dir, &rel_dir)
+    };
     let pin = dir.join("fake-obs-pin");
     fs::write(
         &pin,
         format!(
-            "OBS_RELEASE_TAG={OBS_TAG}\nOBS_RELEASE_COMMIT={SHA}\nOBS_RELEASE_STRIH_SHA256={}\nOBS_RELEASE_MANIFEST_SHA256={}\n",
+            "OBS_RELEASE_TAG={OBS_TAG}\nOBS_RELEASE_COMMIT={SHA}\nOBS_RELEASE_STRIH_SHA256={}\nOBS_RELEASE_MANIFEST_SHA256={}\n{win_pin}",
             sha256_of(&tb),
             sha256_of(&rel_dir.join("BUNDLE_MANIFEST.json"))
         ),
@@ -408,6 +414,55 @@ fn fake_obs_release(
     (pin, cache, libsha)
 }
 
+/// Issue 1505: the release's Windows zip (`obs-windows-x64-<tag>.zip`, the windows stage layout with
+/// the files `obs_release_windows_bundle` requires) + its `WINDOWS_MANIFEST.json`, put straight into
+/// the cache dir REL_DIR so no fetch runs. Returns the two pin lines.
+fn fake_windows_zip(dir: &Path, rel_dir: &Path) -> String {
+    let stage = dir.join("fake-obs-win-stage");
+    let zip = rel_dir.join(format!("obs-windows-x64-{OBS_TAG}.zip"));
+    let st = Command::new("python3")
+        .arg("-I")
+        .arg("-c")
+        .arg(
+            r#"import hashlib, json, sys, zipfile
+from pathlib import Path
+stage, zp, man, tag, commit = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], sys.argv[5]
+nl = chr(10)
+files = {"bin/64bit/obs64.exe": "obs64", "bin/64bit/obs.dll": "libobs",
+         "obs-plugins/64bit/distroav.dll": "distroav", "obs-plugins/64bit/obs-vban.dll": "vban",
+         "obs-plugins/64bit/vlc-video.dll": "vlc", "GENLOCK_BUILD_SHA.txt": commit + nl,
+         "OBS_RELEASE.txt": nl.join(["tag=" + tag, "commit=" + commit, "version=" + tag[1:]]) + nl}
+for rel, text in files.items():
+    f = stage / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text)
+m = {"release": {"obs_tag": tag, "obs_commit": commit, "genlock_stats_version": 4,
+                 "genlock_output_stats_version": 1},
+     "files": [{"path": rel, "sha256": hashlib.sha256((stage / rel).read_bytes()).hexdigest()} for rel in files]}
+text = json.dumps(m, indent=2) + nl
+(stage / "BUNDLE_MANIFEST.json").write_text(text)
+man.write_text(text)
+with zipfile.ZipFile(zp, "w") as z:
+    for p in sorted(stage.rglob("*")):
+        if p.is_file():
+            z.write(p, p.relative_to(stage).as_posix())
+"#,
+        )
+        .arg(&stage)
+        .arg(&zip)
+        .arg(rel_dir.join("WINDOWS_MANIFEST.json"))
+        .arg(OBS_TAG)
+        .arg(SHA)
+        .status()
+        .unwrap();
+    assert!(st.success(), "the fake Windows zip");
+    format!(
+        "OBS_RELEASE_WINDOWS_SHA256={}\nOBS_RELEASE_WINDOWS_MANIFEST_SHA256={}\n",
+        sha256_of(&zip),
+        sha256_of(&rel_dir.join("WINDOWS_MANIFEST.json"))
+    )
+}
+
 fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
     let dir = tempfile::tempdir().expect("tempdir");
     let env_of = |k: &str| extra_env.iter().find(|(n, _)| *n == k).map(|(_, v)| *v);
@@ -416,6 +471,7 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
         env_of("STUB_ARTIFACT_SHA"),
         env_of("STUB_MANIFEST_NO_LIB").is_some(),
         env_of("STUB_NO_OBS_RELEASE").is_some(),
+        env_of("STUB_NO_WIN_ZIP").is_some(),
     );
     let (intercom_pin, intercom_tarball) = fake_intercom_release(dir.path());
     let (shading_pin, shading_cache) = fake_shading_release(dir.path());
@@ -838,13 +894,19 @@ fn strih_lx_preparation_failures_never_touch_the_box_1317() {
     }
 }
 
-/// Every requested box's artifact is resolved BEFORE the production strih is changed: a default
-/// strih-snv + Windows-box run with no Windows build at the SHA fails without touching strih-snv
-/// (the Windows box is resolume-snv: stream-snv runs the Linux stream role since issue 1462).
+/// Every requested box's bytes are resolved BEFORE the production strih is changed: a strih-snv +
+/// Windows-box run whose pin carries no Windows zip (camera-box's own Windows build is retired,
+/// issue 1505) fails without touching strih-snv (the Windows box is
+/// resolume-snv: stream-snv runs the Linux stream role since issue 1462).
 #[test]
 fn strih_lx_is_not_changed_when_another_box_cannot_be_resolved_1317() {
-    let r = run_exec_boxes("strih-snv,resolume-snv", &[("STUB_NO_WIN_RUN", "1")]);
+    let r = run_exec_boxes("strih-snv,resolume-snv", &[("STUB_NO_WIN_ZIP", "1")]);
     assert_eq!(r.code, 3, "err={}", r.err);
+    assert!(
+        r.err.contains("the pin carries no Windows zip"),
+        "named refusal:\n{}",
+        r.err
+    );
     assert!(
         !r.calls.contains("ssh ") && !r.calls.contains("rsync "),
         "strih-snv untouched:\n{}",
