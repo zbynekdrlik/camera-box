@@ -80,6 +80,11 @@ project; camera-box moves the pin. Only imag still runs camera-box's own `linux-
   LANE-RETURN (a separate cleanup of the FAST deploy program, `genlock_fast_abi_*` and their tests).
   `linux-genlock.yml`'s header comment still names the two moved tests: an edit to that workflow
   triggers its full Linux build, so the comment waits for the next real change there.
+- **Deploy-test fixtures carry the Windows zip too:** `tests/python/obs_release_fake_1487.py`
+  (`fake_obs_pin_env`, `fake_obs_release_env`) and the strih-snv execute harness
+  (`fake_windows_zip` in `tests/deploy_genlock_fleet_strih_lx_exec_1317.rs`) build a pin that names
+  one, so a test listing a Windows box is not refused. A test of the refusal strips the
+  `OBS_RELEASE_WINDOWS_*` lines (`STUB_NO_WIN_ZIP=1` in the Rust harness).
 - **Still on the vendor build:** imag (`linux-genlock.yml`) and the `vendor/**` tests below. The
   vendored OBS is removed only after a green E2E on the pin, in a separate change.
 
