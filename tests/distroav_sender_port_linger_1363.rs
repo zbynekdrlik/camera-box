@@ -49,8 +49,6 @@ const PORT_CPP: &str = "vendor/distroav/src/ndi-sender-port.cpp";
 const NDI_OUTPUT: &str = "vendor/distroav/src/ndi-output.cpp";
 const NDI_FILTER: &str = "vendor/distroav/src/ndi-filter.cpp";
 const CMAKELISTS: &str = "vendor/distroav/CMakeLists.txt";
-const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
-const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
 
 fn repo(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -389,36 +387,6 @@ fn port_identification_failure_has_its_own_label_never_warn_1363() {
         warn_sites[0].starts_with(NDI_OUTPUT),
         "issue 1363: the only `WARN-1363` log string must be the :5961 reserve line: {warn_sites:?}"
     );
-}
-
-#[test]
-fn windows_genlock_workflows_gate_on_the_1363_linger_patch() {
-    for wf in [WINDOWS_GENLOCK_WF, WINDOWS_GENLOCK_FAST_WF] {
-        let w = squish(&vendor_file(wf));
-        for tok in [
-            "#ifdef __linux__ ndi_sender_abort_connections_before_destroy(o->ndi_sender_port, name);",
-            "#ifdef __linux__ ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,",
-            "g_reserved_main_sender = ndi_sender_create_tracked(&send_desc, &g_reserved_main_port);",
-        ] {
-            assert!(
-                w.contains(tok),
-                "{wf}: issue 1363 — the build no longer asserts the `{tok}` SOURCE token; a subtree \
-                 bump could drop the Linux linger fix while the version pin still passes. Re-add the \
-                 pwsh source-patch gate (lock-step with this Rust guard)."
-            );
-        }
-        // Presence alone would pass on ONE surviving site; the gates must COUNT both sites.
-        for tok in [
-            "#ifdef __linux__ ndi_sender_abort_connections_before_destroy(o->ndi_sender_port, name);'))).Count -ne 2",
-            "#ifdef __linux__ ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,'))).Count -ne 2",
-        ] {
-            assert!(
-                w.contains(tok),
-                "{wf}: issue 1363 — the pwsh gate must COUNT both call sites of the abort token \
-                 (`[regex]::Matches(...).Count -ne 2`), not merely check presence: `{tok}`"
-            );
-        }
-    }
 }
 
 // ----------------------------------------------------------------------------------------------

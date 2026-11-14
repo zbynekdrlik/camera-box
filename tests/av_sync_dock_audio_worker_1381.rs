@@ -5,8 +5,8 @@
 //! AUDIO thread, re-decoded the marker window of the whole program mix on every push. With music on
 //! program the mixer fell 13-22 s behind real time, and the FOH VBAN feed turned into silence and
 //! dropped audio. `cb_mode_active` had been latched by ONE burn QR from a CG_CHAIN E2E run hours
-//! earlier and was never cleared. The fix, pinned here and by the pwsh step "Assert dock audio
-//! decode runs off the audio thread (issue 1381)" in BOTH windows-genlock workflows:
+//! earlier and was never cleared. The fix, pinned here (the Windows workflows' pwsh mirror was
+//! retired by issue 1505):
 //! - the audio callback only runs the gate and copies the block into a bounded FIFO
 //!   (`camera-box-audio-worker.hpp`); the decode, the pairing and the diag tick run on the worker;
 //! - the gate opens only while a camera-box QR was decoded within

@@ -1,8 +1,8 @@
 //! Issues 1372 + 1381 — EXECUTABLE C-vs-Rust parity gate for the obs-vban send pacing.
 //!
 //! The patched obs-vban send thread (`vendor/obs-vban/src/vban-output-thread.c`) calls the pure
-//! decision in `vendor/obs-vban/src/vban-pacing.h` on every wake. That plugin only compiles on the
-//! Windows CI runner, so this gate buys the verification back on Linux:
+//! decision in `vendor/obs-vban/src/vban-pacing.h` on every wake. Camera-box no longer builds that
+//! plugin (its Windows workflows were retired by issue 1505), so this gate verifies it on Linux:
 //!
 //! 1. It `#include`s the SHIPPED header by its absolute path (nothing is retyped) into a driver
 //!    and compiles it with `cc -Wall -Wextra -Wconversion -Wsign-conversion -Wformat=2 -Werror`.
@@ -622,59 +622,13 @@ fn the_scripts_reach_every_boundary_1381() {
 }
 
 #[test]
-fn the_paced_obs_vban_is_built_staged_and_wired_1372() {
+fn the_paced_obs_vban_is_wired_1372() {
     let read = |rel: &str| {
         fs::read_to_string(repo(rel)).unwrap_or_else(|e| panic!("issue 1372: read {rel}: {e}"))
     };
-    let full = read(".github/workflows/windows-genlock.yml");
-    let build = full
-        .find("- name: Build obs-vban (issue 1372)")
-        .expect("issue 1372: windows-genlock.yml no longer builds the vendored obs-vban");
-    let stage = full
-        .find("- name: Stage artifact")
-        .expect("windows-genlock.yml lost its Stage artifact step");
-    assert!(
-        build < stage,
-        "issue 1372: obs-vban must be built before the bundle is staged"
-    );
-    for needle in [
-        "working-directory: vendor/obs-vban",
-        "-Filter obs-vban.dll",
-        "Copy-Item $vbandll.FullName \"stage/obs-plugins/64bit/\"",
-        "Copy-Item -Recurse \"vendor/obs-vban/data/*\" \"stage/data/obs-plugins/obs-vban/\"",
-        "- name: Assert obs-vban send pacing present (issue 1372)",
-    ] {
-        assert!(
-            full.contains(needle),
-            "issue 1372: windows-genlock.yml lost `{needle}`"
-        );
-    }
-    let fast = read(".github/workflows/windows-genlock-fast.yml");
-    for needle in [
-        "- 'vendor/obs-vban/**'",
-        "- name: Compile-check obs-vban (build the plugin, issue 1372)",
-        "- name: Assert obs-vban send pacing present (issue 1372)",
-    ] {
-        assert!(
-            fast.contains(needle),
-            "issue 1372: windows-genlock-fast.yml lost `{needle}`"
-        );
-    }
-    // Both pwsh assert steps look for the CURRENT status line (issue 1381), not the old one.
-    for (name, yml) in [
-        ("windows-genlock.yml", &full),
-        ("windows-genlock-fast.yml", &fast),
-    ] {
-        assert!(
-            yml.contains("[regex]::Escape('\"obs-vban pacing: depth_ms=%.1f late_sends=%\"')"),
-            "issue 1381: {name}'s pacing assert does not look for the fixed-timeline status line"
-        );
-        assert!(
-            !yml.contains("underflows=%"),
-            "issue 1381: {name} still asserts the retired underflow status line"
-        );
-    }
-
+    // The Windows workflows that built and staged obs-vban.dll and mirrored this pin in pwsh
+    // were retired by issue 1505 (the Windows boxes run the pinned obs release); the vendored
+    // source pins below stay.
     // The send thread asks the pure decision, sleeps to the deadline or waits on the audio event,
     // sends silence packets, advances the frame counter across every dropped packet, and its
     // status line keeps a marker no other obs-vban line contains.

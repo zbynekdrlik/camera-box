@@ -37,8 +37,6 @@ fn squish(s: &str) -> String {
 
 const NDI_OUTPUT: &str = "vendor/distroav/src/ndi-output.cpp";
 const PLUGIN_MAIN: &str = "vendor/distroav/src/plugin-main.cpp";
-const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
-const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
 
 #[test]
 fn ndi_output_defines_the_pgm_first_port_reservation() {
@@ -109,27 +107,4 @@ fn module_post_load_reserves_the_main_output_port() {
          before ndiLib->destroy() (only the extern decl remains); a never-adopted PGM reservation \
          would leak the port. Re-apply the release call in obs_module_unload."
     );
-}
-
-#[test]
-fn windows_genlock_workflows_gate_on_the_pgm_first_port_patch() {
-    // The vendored crate is Linux-only and cannot compile on the windows-2022 runner, so both
-    // Windows genlock workflows (the full build AND the FAST path, which ships distroav.dll for
-    // hot-swap) re-assert the #1185 source tokens in pwsh — keeping this canonical Rust guard in
-    // lock-step. Drop the source check from either workflow and CI fails HERE. (Same lock-step
-    // convention as tests/distroav_timecode_patch.rs.)
-    for wf in [WINDOWS_GENLOCK_WF, WINDOWS_GENLOCK_FAST_WF] {
-        let w = squish(&vendor_file(wf));
-        assert!(
-            w.contains("ndi_output_reserve_main_sender("),
-            "{wf}: the build no longer asserts the #1185 ndi_output_reserve_main_sender SOURCE \
-             patch — a future subtree bump could drop the PGM-first-port reservation while the \
-             version pin still passes. Re-add the pwsh source-patch gate."
-        );
-        assert!(
-            w.contains("ndi_output_take_reserved_sender("),
-            "{wf}: the build no longer asserts the #1185 ndi_output_take_reserved_sender adoption \
-             SOURCE patch. Re-add the pwsh source-patch gate."
-        );
-    }
 }

@@ -15,7 +15,7 @@
 //! Fix class = `vendored-obs-frontend-crash-safety.md` #773 (guard-at-the-CONSUMER, early-return +
 //! loud `[distroav]` warn). Purely additive NULL guards, no happy-path behavior change → a
 //! **Rust source-anchor test ONLY, NO pwsh mirror** (that rule: a pure crash/NULL-safety guard is
-//! Rust-anchor-only; only a rig-critical BEHAVIORAL divergence gets a windows-genlock*.yml mirror).
+//! Rust-anchor-only; the Windows workflows' pwsh mirrors were retired by issue 1505).
 //!
 //! Why this test is std-only + runs offline: camera-box's `# airuleset:build-ok` bypass is disabled
 //! and the vendored C++ compiles only on CI, so per `.claude/rules/vendored-libobs-change-safety.md`
@@ -66,14 +66,14 @@ fn getproperties_null_guards_present_1224() {
         "missing the #1224 detached-finder-callback NULL/stale guard warn"
     );
 
-    // Regression: the #795 call site anchored by BOTH windows-genlock*.yml must stay intact at
+    // Regression: the #795 call site must stay intact at
     // both sites (my guards go into the function body + the lambda head, never the call text).
     let call_count = src
         .matches("genlock_ensure_saved_source_listed(source_list, s)")
         .count();
     assert_eq!(
         call_count, 2,
-        "the #795 genlock_ensure_saved_source_listed(source_list, s) call site (windows-genlock*.yml \
-         anchor) must stay intact at both call sites; found {call_count}"
+        "the #795 genlock_ensure_saved_source_listed(source_list, s) call site \
+         must stay intact at both call sites; found {call_count}"
     );
 }

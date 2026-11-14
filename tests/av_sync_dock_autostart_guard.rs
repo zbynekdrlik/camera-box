@@ -10,8 +10,8 @@
 //!
 //! `sync-test-dock.cpp`/`.hpp` include Qt + `obs-frontend-api.h` + the full plugin headers, so
 //! (like the rest of the vendored dock UI, and unlike the dependency-free `camera-box-audio.hpp` /
-//! `camera-box-video.hpp` mirrors) they are NOT compiled by this repo's Linux CI — only the
-//! separate ~150-min `windows-genlock-fast.yml` compile gate builds the real plugin. This is a
+//! `camera-box-video.hpp` mirrors) they are NOT compiled by this repo's Linux CI (the Windows
+//! workflows that built the real plugin were retired by issue 1505). This is a
 //! SOURCE-presence guard in the same convention as `av_sync_dock_qr_patch_guard.rs`
 //! (`genlock_release_cadence.rs` / `distroav_genlock_lockdown.rs`): reads the vendored C++ as text
 //! on default features, fails loudly if a future `git subtree pull` of av-sync-dock (or a careless

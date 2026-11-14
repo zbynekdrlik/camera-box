@@ -888,7 +888,7 @@ The all-cambox E2E (#312) switches each active cambox into strih PROGRAM sequent
 ALL camboxes capture the SAME painted source via the HDMI splitter, so ONE continuous stream
 recording must stay continuity-clean across every window — any cambox that drops shows as a break
 in ITS window. Phase-1 attributes per cambox by a SCHEDULE (no cambox-id in the pixels yet — that
-is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock build).
+is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock build, retired since issue 1505).
 
 - **Harness (drives the rig, supervisor — NOT this verdict code):** sequential
   `SetCurrentProgramScene` switch to each active cambox over strih OBS WS, logging

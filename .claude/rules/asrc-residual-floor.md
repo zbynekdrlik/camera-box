@@ -116,7 +116,7 @@ buffer; the call now passes `-applied_ppm`. The on-box discriminator that decide
 (stretch 18 vs a mixer needing 5 → grow 13) are individually wrong; both together flatten it. The
 sign gate: `src/asrc_compensation_quantization.rs::servo_applied_ppm_to_sample_delta` (parity:
 applied<0 ⇒ POSITIVE sample_delta); anchor: `tests/genlock_preload.rs::vendored_source::
-asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325` + both `windows-genlock*.yml`.
+asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325` (+ both `windows-genlock*.yml` until issue 1505).
 
 **CROSS-CHECK CHANGE — the `|estimated| ≈ |f_phase|` reading above is PRE-#1325 HISTORY on a FIXED
 build.** It held ONLY while the servo measured against the slewed wall clock. After the #1325 fleet

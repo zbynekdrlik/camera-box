@@ -4,7 +4,8 @@
 //! fallback branch) — the missing piece was purely a CI workflow to prove it compiles and to
 //! produce a deployable artifact.
 //!
-//! `.github/workflows/linux-genlock.yml` mirrors windows-genlock.yml's shape: a fast, narrowed
+//! `.github/workflows/linux-genlock.yml` has the shape of the retired (issue 1505) Windows
+//! workflow: a fast, narrowed
 //! compile-check job (proves the vendored C/C++ compiles with gcc/g++ — the thing ci.yml's
 //! Rust-only `test` job cannot do) plus the full production bundle job (real OBS + DistroAV,
 //! staged + manifested + uploaded). Deploying that artifact to imag-nb is #458's remaining
@@ -158,7 +159,7 @@ fn full_build_depends_on_the_compile_check() {
 
 /// Both jobs must configure DistroAV against an installed OBS SDK prefix — the #392 trick
 /// (install --component Development) so DistroAV's config-mode find_package(libobs) /
-/// find_package(obs-frontend-api) resolve. Mirrors windows-genlock.yml.
+/// find_package(obs-frontend-api) resolve.
 #[test]
 fn distroav_configured_against_installed_obs_sdk() {
     let wf = read(WF);
@@ -185,7 +186,7 @@ fn distroav_configured_against_installed_obs_sdk() {
 
 /// Browser/CEF stays OFF in the compile-check lane AND the imag-parity full bundle — imag-nb needs
 /// no browser source, and skipping CEF there keeps those two jobs fast (runnable on every push, not
-/// workflow_dispatch-only like the 150-min windows-genlock.yml). The strih variant
+/// workflow_dispatch-only). The strih variant
 /// (linux-genlock-build-strih) DELIBERATELY enables browser + fetches CEF as of issue 1317 — its ON
 /// coverage lives in tests/python/test_linux_genlock_strih_cef_1317.py. The count stays 2 because the
 /// strih configure uses the `${{ env.STRIH_ENABLE_BROWSER }}` form, not a literal `-DENABLE_BROWSER=OFF`.
@@ -267,8 +268,8 @@ fn full_bundle_generates_and_checks_the_sha_manifest() {
 }
 
 /// The workflow must trigger on push to dev over the vendored OBS/DistroAV paths (so a Linux
-/// build proves out automatically on every vendor change, same push-to-dev pre-merge-gate model
-/// as windows-genlock-fast.yml) AND remain workflow_dispatch-able for an on-demand re-run.
+/// build proves out automatically on every vendor change, a push-to-dev pre-merge-gate model)
+/// AND remain workflow_dispatch-able for an on-demand re-run.
 #[test]
 fn triggers_on_vendor_changes_and_dispatch() {
     let wf = read(WF);

@@ -16,7 +16,7 @@
 //! is what the QR latency instrument depends on.
 //!
 //! This is a SOURCE-level guard, not a runtime test (same convention as
-//! tests/genlock_preload.rs and tests/obs_updater_disabled.rs): the genlock patch
+//! tests/genlock_preload.rs and obs:tests/vendored/tests/obs_updater_disabled.rs): the genlock patch
 //! lives in the vendored C++ (`git log -- vendor/` is the patch series, per
 //! vendor/README.md). The risk it defends against is a future `git subtree pull`
 //! upstream release-bump (the `/update-av-stack` flow, #44) silently restoring the
@@ -47,8 +47,6 @@ fn squish(s: &str) -> String {
 }
 
 const NDI_OUTPUT: &str = "vendor/distroav/src/ndi-output.cpp";
-const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
-const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
 
 #[test]
 fn output_video_timecode_uses_real_wall_clock_not_synthesize() {
@@ -110,59 +108,5 @@ fn output_video_timecode_uses_real_wall_clock_not_synthesize() {
         "{NDI_OUTPUT}: #78 REVERTED — the audio output frame is stamping the stock \
          `NDIlib_send_timecode_synthesize` counter again. Re-apply the \
          real-wall-clock timecode patch."
-    );
-}
-
-#[test]
-fn windows_genlock_workflow_gates_on_the_timecode_patch() {
-    // #85: the Windows production-build workflow must gate the artifact on the #78
-    // SOURCE patch — the real-wall-clock emit timecode — BEFORE the 150-min build, so a
-    // future `git subtree pull` (#44) that restores `synthesize` fails fast rather than
-    // shipping a binary that reintroduces the ~150 ms lag. The canonical guard is the
-    // test above, but this crate is Linux-only (v4l/alsa/evdev) and cannot compile on
-    // the windows-2022 runner, so the workflow re-asserts the same source tokens in
-    // pwsh. This test keeps that pwsh gate in lock-step with the canonical assertion:
-    // drop the source check from the workflow and CI fails here. (Same lock-step
-    // convention as tests/obs_updater_disabled.rs and tests/genlock_preload.rs.)
-    let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
-
-    assert!(
-        wf.contains("video_frame.timecode = genlock_emit_timecode_100ns("),
-        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #78 \
-         real-wall-clock video emit-timecode SOURCE patch — a future subtree bump \
-         could restore `synthesize` and reship the ~150 ms lag while the version pin \
-         still passes. Re-add the pwsh source-patch gate."
-    );
-    assert!(
-        wf.contains("audio_frame.timecode = genlock_wall_now_100ns()"),
-        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #78 \
-         real-wall-clock audio emit-timecode SOURCE patch (#85). Re-add the pwsh \
-         source-patch gate."
-    );
-    assert!(
-        wf.contains("video_frame.timecode = NDIlib_send_timecode_synthesize"),
-        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts that the stock \
-         `synthesize` assignment is ABSENT from the output path (#85) — the negative \
-         guard that catches a silent #78 revert. Re-add the pwsh source-patch gate."
-    );
-    assert!(
-        wf.contains(
-            "const int64_t send_floor = genlock_floor_boundary_100ns(wall_now_100ns, fps);"
-        ),
-        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #1009 FLOOR emit \
-         stamp — a subtree bump could restore the future-biased ceil stamp (the issue-1007 \
-         hair-trigger arming) while the version pin still passes. Re-add the pwsh #1009 gate."
-    );
-    // #1009 review follow-up: the FAST workflow ships distroav.dll for hot-swap, so the
-    // floor-stamp gate must exist there too — a direct-dispatch hot-swap would otherwise
-    // bypass the slow build's gate entirely.
-    let wff = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
-    assert!(
-        wff.contains(
-            "const int64_t send_floor = genlock_floor_boundary_100ns(wall_now_100ns, fps);"
-        ),
-        "{WINDOWS_GENLOCK_FAST_WF}: the FAST build (which ships distroav.dll for hot-swap) \
-         does not assert the #1009 FLOOR emit stamp; add the pwsh gate, mirroring \
-         windows-genlock.yml."
     );
 }

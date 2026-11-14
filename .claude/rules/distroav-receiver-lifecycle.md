@@ -12,6 +12,11 @@ paths:
 
 # DistroAV NDI receiver-thread lifecycle — a `break` is a PERMANENT, reattach-proof death (#1080)
 
+**Since issue 1505 (14.11.2026)** camera-box's `windows-genlock*.yml` workflows and their pwsh mirrors
+are retired (the Windows OBS boxes deploy the pinned obs release's Windows zip). Every "pwsh-mirrored
+in both `windows-genlock*.yml`" below describes how a fix was guarded at the time; no new pwsh mirror
+is added in this repo.
+
 The one fact that governs every error path in `ndi_source_thread`
 (`vendor/distroav/src/ndi-source.cpp`):
 
@@ -46,9 +51,9 @@ a crate-root module to parity-check it. Make the gate self-contained (`distroav_
 protection against a `git subtree pull`); Facet B lifts the helper VERBATIM by signature → first
 `\n}\n`, compiles it with `cc -Werror -Wconversion -Wformat=2` against a tiny `<stdint.h>` stub, and
 runs a hand-written truth table (the truth table IS the spec) under `cargo test`. **Watch the truth
-table go RED under a scratch mutation** — a gate never seen fail is unproven (#1003). Mirror the key token anchors into BOTH
-`windows-genlock.yml` AND `windows-genlock-fast.yml` (the fast path hot-swaps `distroav.dll`
-un-gated, #912) — verify each pwsh literal offline against the `re.sub(r'\s+',' ',text)`-squished
+table go RED under a scratch mutation** — a gate never seen fail is unproven (#1003). Until issue 1505 the key token anchors were
+mirrored into BOTH `windows-genlock.yml` AND `windows-genlock-fast.yml` (the fast path hot-swapped
+`distroav.dll` un-gated, #912) — each pwsh literal verified offline against the `re.sub(r'\s+',' ',text)`-squished
 file (pwsh is not on dev1). A source anchor that only the truth table can't reach (e.g. an
 overflow shift-clamp on x86) still needs an explicit source-anchor assertion.
 

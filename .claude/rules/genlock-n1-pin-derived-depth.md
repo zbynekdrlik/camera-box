@@ -267,8 +267,8 @@ proof: COMPILE each parity test with `CARGO_MANIFEST_DIR=<scratch repo with the 
 file (20/20 RED at landing, 31/31 after review round 2 — the deep flag + its majority, the capped
 0, the re-measure, the auto-window, the booking, the fold and the applied audio delay each have a
 mutation; 0/20 when only the run-time env was set). The std-only
-`tests/genlock_shallow_depth_wiring_1367.rs` pins the wiring, mirrored in both
-`windows-genlock*.yml`.
+`tests/genlock_shallow_depth_wiring_1367.rs` pins the wiring (mirrored in both
+`windows-genlock*.yml` until issue 1505 retired them).
 
 **Bench pitfalls (issue 1367 review rounds 2-3 — both were shipped once and caught later).**
 - A scenario that changes the arrival mid-run can pass VACUOUSLY: a later relock (sender or OBS

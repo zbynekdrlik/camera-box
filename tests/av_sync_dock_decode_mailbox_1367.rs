@@ -21,8 +21,8 @@
 //! The source-anchor checks prove the output (`sync-test-output*.cpp`) is WIRED to it: the callback
 //! only publishes, the worker starts on output start and is stopped on stop/destroy, and the diag
 //! line reports `decode_dropped`. The dock compiles ONLY on the Windows runner, so these are ALSO
-//! mirrored by the pwsh step "Assert dock decode runs off the video-output thread" in BOTH
-//! windows-genlock workflows (`.claude/rules/av-sync-dock-anchor-refactor-safety.md`).
+//! once mirrored by a pwsh step in the Windows workflows, which issue 1505 retired
+//! (`.claude/rules/av-sync-dock-anchor-refactor-safety.md`).
 
 use std::path::PathBuf;
 use std::process::Command;

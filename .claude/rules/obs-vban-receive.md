@@ -517,7 +517,8 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   `STRIH_PROGRAM_VBAN_CHANNELS_FILE`;
   the hub-only rows of item 9 (the program
   rx, the hub's HDMI leg, the MiniFuse talkback) run only in its hub branch.
-- **Windows (review round 1):** both Windows genlock builds compile the same `vban-source.c`, so a
+- **Windows (review round 1):** both Windows genlock builds compiled the same `vban-source.c` (since
+  issue 1505 the Windows bytes are the pinned obs release's Windows zip), so a
   FULL deploy changes every Windows OBS's VBAN SOURCE too (R more latency, loss = silence). Read
   each Windows box's collections for `net.nagater.obs-vban.source` before that deploy (not read yet).
   The same for strih-snv / strih-pp (review round 2): their bundle loads `obs-vban.so` now, and a

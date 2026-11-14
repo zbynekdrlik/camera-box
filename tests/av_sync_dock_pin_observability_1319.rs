@@ -2,12 +2,11 @@
 //!
 //! The overnight A/V BAND false alarm (issue 1319) was caused by the dock estimator carrying a
 //! non-constant bias vs the recording-based verdict (a wrong-cluster QPSK-marker lag pick, most
-//! likely after a genlock pin change). The dock C++ compiles ONLY via the `windows-genlock*.yml`
-//! pwsh gate (no local compile path here), so this is a SOURCE-presence guard (same convention as
+//! likely after a genlock pin change). The dock C++ is not compiled by this repo's CI (the
+//! Windows workflows were retired by issue 1505), so this is a SOURCE-presence guard (same convention as
 //! `av_sync_dock_qr_patch_guard.rs`): it reads the vendored C++ as text and fails loudly if the two
-//! observability additions are ever dropped by a refactor / `git subtree pull`. Both are ALSO
-//! mirrored by a pwsh presence check in BOTH windows-genlock workflows (the two-language double
-//! coverage `.claude/rules/av-sync-dock-anchor-refactor-safety.md` mandates for a source anchor).
+//! observability additions are ever dropped by a refactor / `git subtree pull`. (The pwsh
+//! presence check in the Windows workflows was retired with them by issue 1505.)
 
 #[allow(dead_code)]
 #[path = "support/av_sync_dock_output.rs"]

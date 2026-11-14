@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# genlock-manifest.sh — emit the per-component SHA manifest for the windows-genlock bundle (#120).
+# genlock-manifest.sh — emit the per-component SHA manifest for a genlock bundle (#120; written for
+# the windows-genlock bundle, whose workflow issue 1505 retired).
 #
 # Part of EPIC #125 (robust version integrity). #119's root cause was a windows-genlock artifact
 # that shipped a pre-#97 DistroAV (a stale prebuilt DLL) while the version pins still passed: the
@@ -22,10 +23,10 @@
 # by sourcing this file) and a flow that runs only when executed directly. The source-guard at the
 # bottom (BASH_SOURCE != $0) lets the tests exercise the pure functions in isolation.
 #
-# Runs in the windows-genlock build's staging step (the windows-2022 runner ships git-bash, so
-# bash + sha256sum + git are available — the workflow already uses `shell: bash` for the cmake
-# steps) AND on the Linux per-PR CI (the Rust `test` job exercises it against a synthetic stage
-# dir, proving the manifest logic without the 150-min Windows build).
+# Until issue 1505 it ran in camera-box's own windows-genlock build's staging step (that workflow is
+# retired; the Windows OBS boxes now deploy the pinned obs release's Windows zip, whose manifest the
+# obs repo produces). It still runs on the Linux per-PR CI (the Rust `test` job exercises it against
+# a synthetic stage dir).
 #
 # Usage:
 #   scripts/genlock-manifest.sh --stage DIR [--readme PATH] [--buildspec PATH] [--build-sha SHA] \

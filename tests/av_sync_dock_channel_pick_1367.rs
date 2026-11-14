@@ -12,8 +12,8 @@
 //!   the existing tokens;
 //! - a switch of the paired channel is logged when it happens (rate-limited, with a count).
 //!
-//! The dock compiles ONLY on the Windows runner, so the same checks are mirrored by the pwsh step
-//! "Assert dock decodes the marker per channel (issue 1367)" in BOTH windows-genlock workflows
+//! The Windows workflows that mirrored these checks in pwsh were retired by issue 1505; the
+//! Windows boxes run the pinned obs release
 //! (`.claude/rules/av-sync-dock-anchor-refactor-safety.md`).
 
 #[path = "support/cpp_source.rs"]

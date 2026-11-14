@@ -12,12 +12,16 @@ paths:
   - "tests/av_sync_dock_reserved_origin_1404.rs"
   - "tests/genlock_preload.rs"
   - "tests/av_sync_dock_measure_share_1470.rs"
-  - ".github/workflows/windows-genlock.yml"
-  - ".github/workflows/windows-genlock-fast.yml"
 ---
 
 # Refactoring the dock-lock decision chain (`sync-test-output-audio.cpp` since issue 1386) breaks stale text-anchor
 # gates in THREE places, not one — and TWO of the three are invisible to default-feature local checks (#955)
+
+**Since issue 1505 (14.11.2026) the pwsh half of this rule is history.** camera-box's
+`windows-genlock.yml` / `windows-genlock-fast.yml` (and every pwsh "Assert dock ..." step in them)
+are retired; the Windows OBS boxes deploy the pinned obs release's Windows zip. Places 2 and 3 below
+and every "both workflows" / "pwsh step" / "pwsh copy" instruction in the later sections no longer
+exist in this repo: only the Rust anchors remain to be kept in sync.
 
 **Before restructuring the `if (act.apply && ...) { ... } else if (act.apply) { ... } else if
 (...) { ... } else { ... }`-shaped dock-lock decision chain in
@@ -30,9 +34,9 @@ Rust test file the top-level CLAUDE.md GOTCHA already warns about for `recording
    — a `#![cfg(feature = "probe")]`-gated Rust test. **Invisible to every default-feature check**
    (`cargo check`/`clippy`/`test` on default features never compiles this file at all — confirmed
    live: `cargo test --lib` shows nothing for it). Only an `--all-features` run (CI's `Test`) catches it.
-2. **`.github/workflows/windows-genlock-fast.yml`'s own pwsh "Assert dock lock corrector is
+2. **(retired, issue 1505) `.github/workflows/windows-genlock-fast.yml`'s own pwsh "Assert dock lock corrector is
    monitor-only by default" step.**
-3. **`.github/workflows/windows-genlock.yml`'s IDENTICAL pwsh step** (the two workflow files
+3. **(retired, issue 1505) `.github/workflows/windows-genlock.yml`'s IDENTICAL pwsh step** (the two workflow files
    duplicate this gate verbatim — always update both together).
 
 Steps 2 and 3 are ALSO invisible locally (PowerShell/pwsh gates only run on the Windows CI
@@ -87,7 +91,7 @@ test; `Windows genlock FAST` circles back separately) to discover the same misma
 effective in the #955 fix-up: the script caught that all three redesigned anchors matched BEFORE
 the second push, which then went green on the first try.
 
-## A NEW guard added to a camera-box emit site needs its OWN pwsh mirror too — check for a sibling precedent first (#999/#1005, 2026-08-11)
+## A NEW guard added to a camera-box emit site needed its OWN pwsh mirror too (#999/#1005, 2026-08-11; no pwsh mirror since issue 1505)
 
 Adding a brand-new `if (camerabox::cb_<something>(...))` guard around a camera-box `sync_found`
 emit site (not a decision-chain refactor — a genuinely NEW check, e.g. #1005's

@@ -213,9 +213,9 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   pairing recovery, split out in review round 1). The callback is ~298 lines: the next addition to
   it must split it further first.
 - **The glue anchors:** `tests/av_sync_dock_channel_pick_1367.rs` (with the shared
-  `tests/support/cpp_source.rs` helpers, also used by `av_sync_dock_decode_mailbox_1367.rs`) + the
-  pwsh step "Assert dock decodes the marker per channel (issue 1367)" in BOTH windows-genlock
-  workflows, which checks the same list (including the two ADJACENCY needles that pin the
+  `tests/support/cpp_source.rs` helpers, also used by `av_sync_dock_decode_mailbox_1367.rs`) + (until
+  issue 1505 retired them) the pwsh step "Assert dock decodes the marker per channel (issue 1367)" in
+  BOTH windows-genlock workflows, which checked the same list (including the two ADJACENCY needles that pin the
   `prev_channel` capture before the push and the switch note right after it), slicing the same three
   function bodies (the callback, `cb_ensure_audio_picker`, `cb_note_channel_switch`) with a
   brace-matching `Get-DockBody` helper (issue 1386: shared, in `vendor/av-sync-dock/test/dock-output-source.ps1`), so a slice never runs into the next function's comment. Replay the pwsh

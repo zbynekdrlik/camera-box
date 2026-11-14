@@ -127,11 +127,12 @@ pairs by frame_id, not by crossing time.
   - `plugin-macros.generated.h`, filled in from `src/plugin-macros.h.in`;
   - a 7-line `obsconfig.h` defining `OBS_DATA_PATH`, `OBS_PLUGIN_PATH`, `OBS_PLUGIN_DESTINATION`,
     `OBS_RELEASE_CANDIDATE` and `OBS_BETA`.
-  The Windows compile proof is `windows-genlock-fast.yml`'s av-sync-dock build.
+  The Windows compile proof was `windows-genlock-fast.yml`'s av-sync-dock build until issue 1505
+  retired it; the Windows bytes now come from the pinned obs release.
 - **The anchors**: `tests/av_sync_dock_decode_mailbox_1367.rs` slices `st_raw_video`'s
   balanced-brace body, comment-stripped, and bans the decoders, `quirc_` and
-  `signal_handler_signal(` in it. The pwsh step "Assert dock decode runs off the video-output
-  thread" in BOTH windows-genlock workflows mirrors it; see `av-sync-dock-anchor-refactor-safety.md`
+  `signal_handler_signal(` in it. Until issue 1505 the pwsh step "Assert dock decode runs off the
+  video-output thread" in BOTH windows-genlock workflows mirrored it; see `av-sync-dock-anchor-refactor-safety.md`
   for the three-place lock-step.
   - The pwsh slice is the brace-balanced body (`Get-DockBody`, issue 1386) WITH comments left in.
     A comment inside
@@ -240,9 +241,9 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
   and checks the decoder against a frozen copy of the pre-1381 kernel. Measured on the N100 (thread
   CPU): gate + copy <= 0.1 ms per stereo push for every signal (mean ~0.01 ms); worker 0.18-0.24 ms
   (music) / 0.56-0.7 ms (442 Hz tone), against 6.8 / 34.8 ms for the pre-1381 decoder.
-- Anchors: `tests/av_sync_dock_audio_worker_1381.rs` (comment-stripped) + the pwsh step "Assert
-  dock audio decode runs off the audio thread (issue 1381)" in both windows-genlock workflows
-  (comments kept). A comment inside `st_raw_audio` or `cb_audio_gate_and_publish` must never spell
+- Anchors: `tests/av_sync_dock_audio_worker_1381.rs` (comment-stripped) + (until issue 1505)
+  the pwsh step "Assert dock audio decode runs off the audio thread (issue 1381)" in both
+  windows-genlock workflows (comments kept). A comment inside `st_raw_audio` or `cb_audio_gate_and_publish` must never spell
   a banned call with its parenthesis (`blog(`, `->push(`, `obs_get_source_by_name(`, ...), and no
   comment may sit between the tokens of a multi-statement needle.
 
@@ -327,9 +328,9 @@ audio TU was at 1023 lines):
   are pinned. Its source is a ROOT node; the nested stream-snv `mbc` goes through
   `scene_audio_render` (same offset 0 when aligned; its divergences are limit 2). The render model
   renders every audio source (libobs's catch-all loop) and mixes only an active one. 6/7 mutants die there; "take the first tick" is equivalent there and dies in the self-test.
-- `tests/av_sync_dock_measure_share_1470.rs` (comment-stripped) + the pwsh step "Assert dock measures
-  only the measurement source's share (issue 1470)" in BOTH windows-genlock workflows (comments kept)
-  pin the wiring: 11/11 wiring mutants died in both languages. The 1381 step's `st_raw_audio` needle
+- `tests/av_sync_dock_measure_share_1470.rs` (comment-stripped) + (until issue 1505) the pwsh step
+  "Assert dock measures only the measurement source's share (issue 1470)" in BOTH windows-genlock
+  workflows (comments kept) pin the wiring: 11/11 wiring mutants died in both languages. The 1381 step's `st_raw_audio` needle
   moved with it (`... } if (cb_active) { return; }`) and its banned list covers `st_cb_mix_tick`.
 - Live acceptance (supervisor, after a FULL-bundle deploy on stream-snv): the OBS log shows `camera-box
   audio decode reads 'mbc''s own share of mix 0, never the whole mix (issue 1470)`; with the clip AND

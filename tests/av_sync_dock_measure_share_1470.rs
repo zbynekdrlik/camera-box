@@ -16,8 +16,7 @@
 //!
 //! The take rule and the two-emitter case end to end are the g++ self-test
 //! `vendor/av-sync-dock/test/measure-share-selftest.cpp`, which this file compiles and runs. The
-//! wiring is pinned here and by the pwsh step "Assert dock measures only the measurement source's
-//! share (issue 1470)" in BOTH windows-genlock workflows.
+//! wiring is pinned here (the Windows workflows' pwsh mirror was retired by issue 1505).
 
 use std::path::PathBuf;
 use std::process::Command;

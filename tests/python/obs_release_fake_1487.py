@@ -11,6 +11,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 
 TAG = "v9.9.5"
@@ -35,6 +36,33 @@ def fake_obs_pin_env(commit):
     pin.write_text(_pin_text(commit) + "OBS_RELEASE_WINDOWS_SHA256=%s\nOBS_RELEASE_WINDOWS_MANIFEST_SHA256=%s\n"
                    % ("0" * 64, "0" * 64))
     return {"OBS_RELEASE_PIN_FILE": str(pin)}
+
+
+def _windows_zip(tmp, rel_dir, commit):
+    """Issue 1505: the release's Windows zip + WINDOWS_MANIFEST.json in the cache dir REL_DIR (a Windows
+    box deploys only from it). Returns the two pin lines."""
+    stage = tmp / "fake-obs-win-stage"
+    files = {"bin/64bit/obs64.exe": "obs64\n", "bin/64bit/obs.dll": "libobs\n",
+             "obs-plugins/64bit/distroav.dll": "distroav\n", "obs-plugins/64bit/obs-vban.dll": "vban\n",
+             "obs-plugins/64bit/vlc-video.dll": "vlc\n", "GENLOCK_BUILD_SHA.txt": commit + "\n",
+             "OBS_RELEASE.txt": "tag=%s\ncommit=%s\nversion=%s\n" % (TAG, commit, TAG[1:])}
+    for rel, text in files.items():
+        f = stage / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+    man = {"release": {"obs_tag": TAG, "obs_commit": commit, "genlock_stats_version": 4,
+                       "genlock_output_stats_version": 1},
+           "files": [{"path": rel, "sha256": _sha(stage / rel)} for rel in files]}
+    text = json.dumps(man, indent=2) + "\n"
+    (stage / "BUNDLE_MANIFEST.json").write_text(text)
+    (rel_dir / "WINDOWS_MANIFEST.json").write_text(text)
+    zp = rel_dir / ("obs-windows-x64-%s.zip" % TAG)
+    with zipfile.ZipFile(zp, "w") as z:
+        for f in sorted(stage.rglob("*")):
+            if f.is_file():
+                z.write(f, f.relative_to(stage).as_posix())
+    return "OBS_RELEASE_WINDOWS_SHA256=%s\nOBS_RELEASE_WINDOWS_MANIFEST_SHA256=%s\n" % (
+        _sha(zp), _sha(rel_dir / "WINDOWS_MANIFEST.json"))
 
 
 def fake_obs_release_env(tmp_path, commit, artifact_sha=None):
@@ -66,7 +94,8 @@ def fake_obs_release_env(tmp_path, commit, artifact_sha=None):
     subprocess.run(["bash", "-c", 'tar -C "$1" -cf - . | zstd -q -o "$2"', "pack", str(stage), str(tb)], check=True)
     (rel_dir / "BUNDLE_MANIFEST.json").write_text(man_text)
     pin = tmp / "fake-obs-release.pin"
-    pin.write_text(_pin_text(commit, _sha(tb), _sha(rel_dir / "BUNDLE_MANIFEST.json")))
+    pin.write_text(_pin_text(commit, _sha(tb), _sha(rel_dir / "BUNDLE_MANIFEST.json"))
+                   + _windows_zip(tmp, rel_dir, commit))
     env = {"OBS_RELEASE_PIN_FILE": str(pin), "OBS_RELEASE_CACHE": str(tmp / "fake-obs-cache"),
            "OBS_RELEASE_URL": "file://%s" % (tmp / "no-obs-release")}
     return env, _sha(stage / "lib/x86_64-linux-gnu/libobs.so.30")

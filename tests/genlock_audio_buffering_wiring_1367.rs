@@ -6,8 +6,9 @@
 //!
 //! - The wiring anchors: `obs_reset_audio2` takes the pure plan (never the caller's fixed flag),
 //!   the reset log names the floor, `audio_callback` raises a floor first and keeps OBS's own
-//!   dynamic increase above it, and the increase is one loud named line. The same list is required
-//!   by the pwsh guard in both `windows-genlock*.yml` workflows.
+//!   dynamic increase above it, and the increase is one loud named line. (The Windows workflows that
+//!   mirrored this list in pwsh were retired by issue 1505; the Windows boxes run the pinned obs
+//!   release.)
 //! - A C LIFT of the shipped bytes: the reset block (`obs.c`), the tick decision (`obs-audio.c`
 //!   `audio_callback`) and the buffering functions (`obs-audio.c`, verbatim) compiled with a stub
 //!   and driven through a launch with its startup race, a late source, the low-latency toggle,
@@ -39,9 +40,7 @@ const OBS_AUDIO: &str = "vendor/obs-studio/libobs/obs-audio.c";
 const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
 const HEADER: &str = "vendor/obs-studio/libobs/obs-genlock-audio-buffering.h";
 
-/// `(file, squished needle)` — the wiring both this test and the pwsh guard in both
-/// `windows-genlock*.yml` workflows require. ONE list, so the two copies cannot drift apart. The
-/// pwsh variable per file is [`pwsh_var`].
+/// `(file, squished needle)` — the wiring this test requires.
 const WIRING: [(&str, &str); 12] = [
     (OBS_C, "#include \"obs-genlock-audio-buffering.h\""),
     (OBS_C, "audio->max_buffering_ticks = (int)genlock_buf.max_ticks;"),
@@ -76,20 +75,6 @@ const RETIRED: [(&str, &str); 2] = [
         OBS_C,
         "oai->fixed_buffering ? \"fixed\" : \"dynamically increasing\"",
     ),
-];
-
-fn pwsh_var(file: &str) -> &'static str {
-    match file {
-        OBS_C => "$obsc1367",
-        OBS_AUDIO => "$audio1367",
-        HEADER => "$hdr1367",
-        other => panic!("no pwsh variable for {other}"),
-    }
-}
-
-const WINDOWS_WORKFLOWS: [&str; 2] = [
-    ".github/workflows/windows-genlock.yml",
-    ".github/workflows/windows-genlock-fast.yml",
 ];
 
 #[test]
@@ -142,48 +127,6 @@ fn every_buffering_line_keeps_the_786_launch_gate_text_1367() {
         squish(&s).contains("blog(LOG_WARNING, \"genlock audio buffering ABOVE the floor"),
         "issue 1367: an increase above the floor must be LOUD (LOG_WARNING)"
     );
-}
-
-#[test]
-fn windows_workflows_guard_the_same_wiring_1367() {
-    for wf in WINDOWS_WORKFLOWS {
-        let text = read(wf);
-        for (file, needle) in WIRING {
-            let line = format!(
-                "{} -notmatch [regex]::Escape('{}')",
-                pwsh_var(file),
-                needle.replace('\'', "''")
-            );
-            assert!(
-                text.contains(&line),
-                "issue 1367: {wf} no longer guards `{needle}` ({file}) -- its pwsh copy drifted \
-                 from WIRING"
-            );
-        }
-        for (file, needle) in RETIRED {
-            let line = format!(
-                "{} -match [regex]::Escape('{}')",
-                pwsh_var(file),
-                needle.replace('\'', "''")
-            );
-            assert!(
-                text.contains(&line),
-                "issue 1367: {wf} no longer refuses the retired `{needle}` ({file})"
-            );
-        }
-        for (file, var) in [
-            (OBS_C, "$obsc1367"),
-            (OBS_AUDIO, "$audio1367"),
-            (HEADER, "$hdr1367"),
-        ] {
-            assert!(
-                text.contains(&format!(
-                    "{var} = (Get-Content \"{file}\" -Raw) -replace '\\s+', ' '"
-                )),
-                "issue 1367: {wf} does not load {file} into {var}"
-            );
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -170,9 +170,10 @@ A buffering hole brings no backlog and `t0` never moves.
   then). A late anchor gives the bench more margin than the real thread has: review rounds 1 and 2
   each found one, and the second made the 149 ms hole and the hole-then-stall cases honest.
 - The same test file pins the wiring:
-  - both `windows-genlock*.yml` files build the plugin and assert the patch, including the
-    `late_sends` status line and the `send_silence` call;
-  - the full build stages `obs-plugins/64bit/obs-vban.dll`;
+  - until issue 1505 both `windows-genlock*.yml` files built the plugin and asserted the patch,
+    including the `late_sends` status line and the `send_silence` call (those workflows are retired;
+    the Windows `obs-vban.dll` now comes in the pinned obs release's Windows zip);
+  - the full build staged `obs-plugins/64bit/obs-vban.dll`;
   - the thread calls the decision, sleeps to the deadline (`pacing_sleep_until`) or waits on the
     audio event (`vban_pacing_wait_ms`), zero-fills silence packets and advances `nuFrame` by the
     dropped packets, in the order drop and skip, audio packets, silence packets;
@@ -186,7 +187,7 @@ A buffering hole brings no backlog and `t0` never moves.
   - A bundle built before issue 1372 has no `obs-vban.dll`. The deploy then warns and leaves the
     box's copy in place.
 - `scripts/drift-guard.sh` `genlock_parity_consumed_paths` counts `vendor/obs-vban` as a Windows
-  path (the same lock-step with `windows-genlock-fast.yml` as av-sync-dock). A Linux strih
+  path (the same lock-step it had with the retired `windows-genlock-fast.yml` as av-sync-dock). A Linux strih
   (`version-integrity-gate.sh --strih-linux`) gets the Linux set, so a Windows-only obs-vban or
   av-sync-dock change never reads as a strih/stream parity DRIFT.
 

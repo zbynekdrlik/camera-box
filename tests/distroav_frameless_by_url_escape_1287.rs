@@ -53,8 +53,8 @@ fn squish(s: &str) -> String {
 
 // ----------------------------------------------------------------------------------------------
 // Facet A — source anchors (revert protection: a `git subtree pull` re-importing stock DistroAV
-// silently drops the whole patch; CI then fails loudly here. ALSO mirrored as pwsh token checks in
-// BOTH windows-genlock*.yml, because the fast path hot-swaps distroav.dll un-gated).
+// silently drops the whole patch; CI then fails loudly here. The pwsh mirror in the Windows
+// workflows was retired by issue 1505).
 // ----------------------------------------------------------------------------------------------
 
 #[test]
