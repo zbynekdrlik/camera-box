@@ -26,13 +26,16 @@ paths:
   - "tests/drm_output_view_mv_budget_1346.rs"
   - "vendor/obs-studio/libobs/obs-drm-output-view.c"
   - "tests/aux_sender_teardown_ordering_877.rs"
-  - ".github/workflows/windows-genlock.yml"
-  - ".github/workflows/windows-genlock-fast.yml"
   - "vendor/obs-studio/libobs/obs-audio.c"
   - "vendor/obs-studio/libobs/obs-genlock-mix-guard.h"
 ---
 
 # Changing the genlock C in `libobs` — CI is its first compile, so buy verification back (#1003)
+
+**Since issue 1505 (14.11.2026) camera-box has no Windows OBS build:** `windows-genlock.yml` /
+`windows-genlock-fast.yml` and their pwsh anchor steps are retired (the Windows boxes deploy the
+pinned obs release's Windows zip). Every "mirror it into both windows-genlock*.yml" / "both pwsh
+gates" instruction below is history; only the Rust anchors in this repo remain.
 
 The vendored C compiles only on CI, so CI is the first place a mistake surfaces. That is true of
 the *whole* file. It is NOT true of the pieces you actually add, and
@@ -113,7 +116,7 @@ needs the crate + `CARGO_TARGET_TMPDIR` and runs ONLY under `cargo test`. A vend
 DECISION helper that NOTHING in the Rust appliance calls (e.g. `genlock_reconnect_decision` in
 `vendor/distroav/src/ndi-source.cpp`, a DistroAV-receiver-loop-only choice) has no such authority to
 compare against — so DON'T invent a crate-root module just to have one. Instead make the whole gate
-**self-contained / std-only** (`tests/distroav_ndi_reconnect_767.rs`): it `fs::read_to_string`s the
+**self-contained / std-only** (`obs:tests/vendored/tests/distroav_ndi_reconnect_767.rs`): it `fs::read_to_string`s the
 vendored file, lifts the `static inline` helper by signature → first `\n}\n`, compiles it with `cc`
 against a tiny `<stdint.h>`/`<stdbool.h>` stub + a `main()` driving a hand-written **truth table**,
 and asserts each hardcoded expected bool. The truth table IS the spec (no Rust reference needed), so
@@ -248,8 +251,8 @@ Two habits that keep the anchors honest:
   chose to wrap and what a loop variable is called; a formatter bump then fails the gate with a
   misleading message. Prefer two short anchors over one long one.
 
-And whatever you anchor in `tests/genlock_release_cadence.rs`, mirror it into **both**
-`windows-genlock.yml` and `windows-genlock-fast.yml` (the issue-912 lesson). Their pwsh squishes
+Until issue 1505, whatever you anchored in `tests/genlock_release_cadence.rs` was mirrored into
+**both** `windows-genlock.yml` and `windows-genlock-fast.yml` (the issue-912 lesson; both retired). Their pwsh squishes
 whitespace the same way (`-replace '\s+', ' '` vs Rust's `split_whitespace().join(" ")`), so the
 same literal works in both — verify each one against the real squished C before committing: a
 wrong literal fails only on a Windows runner. `pwsh` is not on dev1's PATH, but a portable pwsh 7 is

@@ -50,7 +50,7 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
    carries the audit-line-only `audio_hold=off|latency|timecode|pending video_delay_ms=<smoothed>
    audio_health=<decide_audio_health, -1 = fps unknown>` (issue 1367), printed BEFORE
    `audio_enabled=` so `(long long)gs.audio_pairing_offset_ms);` stays the last argument (a
-   `genlock_lock_indicator_guards.rs` anchor). Parsed by `src/jitter_audit.rs` (additive,
+   `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs` anchor). Parsed by `src/jitter_audit.rs` (additive,
    forward-compatible; the three new keys are ignored there). Since ROZHODNUTÉ 5827497952 the line
    also carries `shallow_depth= shallow_capped= shallow_latches= audio_slew_ms= audio_slews=
    audio_steps= audio_withheld= audio_place_err_ms=` right after `n1_grows=` (audit-line-only;
@@ -84,9 +84,9 @@ complement u64/i64) on both sides.
 
 **Lock-step anchors** (the #269 3-copy discipline): `tests/genlock_preload.rs`
 (`audio_genlock_parity_present_1303` + the #1355 hold-change shift anchor), the std-only
-`tests/genlock_audio_timecode_placement_1367.rs` (every wiring seam), and the pwsh gate
-in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml`. A change to the wiring / the helper
-signatures / the audit tokens must update all of them.
+`tests/genlock_audio_timecode_placement_1367.rs` (every wiring seam), and, until issue 1505
+retired them, the pwsh gate in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml`. A change to
+the wiring / the helper signatures / the audit tokens must update all the remaining ones.
 
 ## Verification
 
@@ -316,8 +316,8 @@ asrc_process_audio slew, the offset reference, the audit tokens; the old uncondi
 `push_back = false; asrc_compensator_shift_level_target(&source->asrc, genlock_audio_place_shift_ms(…));`
 must stay ABSENT), the `tests/genlock_preload.rs` slew + placement anchors, the
 `genlock_n1_tick_wall_now(wall_now)` count of 3 + the count-1 tracker read in
-`tests/genlock_release_cadence.rs`, and the matching `-notmatch` / `-match` / `Count -ne 3` anchors
-in BOTH `windows-genlock*.yml`.
+`tests/genlock_release_cadence.rs`, and (until issue 1505) the matching `-notmatch` / `-match` / `Count -ne 3`
+anchors in BOTH `windows-genlock*.yml`.
 
 **The two-clock bench** (`src/genlock_audio_pairing_bench.rs`, a test-only child): wall and QPC
 clocks with 300 ms of drift over an hour, scripted depth changes of the FREE tracker (the N>=2
@@ -470,8 +470,8 @@ over a minute.
   its timer at now = 0 and the exact 600 s re-anchor. It also checks the bounded render-thread
   predicate.
   `tests/genlock_audio_step_hold_wiring_1381.rs` holds ONE needle list for the ingest, the helpers,
-  the render-thread freezes and the relock replay; both `windows-genlock*.yml` pwsh gates require
-  the same list. 36/36 C mutants (compensator 10, hold 26) and 20/20 wiring mutants are killed by
+  the render-thread freezes and the relock replay; both `windows-genlock*.yml` pwsh gates required
+  the same list until issue 1505. 36/36 C mutants (compensator 10, hold 26) and 20/20 wiring mutants are killed by
   the Rust gate AND the real pwsh lines. A mutant that only removes a write the code path already
   guarantees (the seeded flag at a placement, the out-of-band timer in the warm-up) was an equivalent
   mutant; those writes were removed rather than tested. The shared lift helpers live in
@@ -887,7 +887,7 @@ every other source out of it.
   gate `c_asrc_placement_matches_the_rust_authority_1425` in its own file
   `tests/genlock_audio_asrc_basis_parity_1425.rs` (the issue-1303 parity file is at the line budget);
   the one needle list `tests/genlock_audio_stamp_basis_wiring_1425.rs` (`STAMP_BASIS_WIRING` /
-  `_ABSENT`), required in both `windows-genlock*.yml` pwsh gates; and the two-clock bench
+  `_ABSENT`), required (until issue 1505) in both `windows-genlock*.yml` pwsh gates; and the two-clock bench
   `src/asrc_stamp_bench.rs` (mbc 128-sample /
   PulseAudio 1024-frame packets, −20/0/+20 ppm, an 8 h ±1 ppm wander, buffering 0..6 extra ticks, four
   launch phases): |A/V| ≤ 0.72 ms, spread ≤ 0.34 ms, 8 h drift ≤ 0.60 ms, 0 booked jumps under its
@@ -1034,8 +1034,8 @@ aggregates the per-source pairing-offset breach (`st.version >= 2 && st.audio_en
 |audio_pairing_offset_ms| > GENLOCK_AUDIO_PAIRING_BOUND_MS`, 33 ms) into that one facet — the twin of
 its existing qpc-drift reduction — so an unpaired audio leg turns the indicator DEGRADED (`audio
 unpaired: <src>`). The C↔Rust decision stays parity-gated (`tests/genlock_lock_state_parity.rs`, now
-a 2^8 flag sweep), lock-stepped by `tests/genlock_lock_indicator_guards.rs` +
-`tests/genlock_preload.rs` + the #1298 pwsh gate in BOTH `windows-genlock{,-fast}.yml`. Per the
+a 2^8 flag sweep), lock-stepped by `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs` +
+`tests/genlock_preload.rs` (+ the #1298 pwsh gate in BOTH `windows-genlock{,-fast}.yml` until issue 1505). Per the
 scope, audio disabled/absent never degrades (the `audio_enabled` guard); `decide_audio_health`'s
 AudioDisabledOnProgram + AsrcSaturated branches are NOT surfaced here (they need is-program-source /
 asrc-ppm data the v2 stats don't carry) — a followup. Full contract: `genlock-lock-indicator.md`.

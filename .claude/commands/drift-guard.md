@@ -119,9 +119,11 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    ```
 
    **Get the build-under-test's manifest** (the #120 `BUNDLE_MANIFEST.json` shipped inside the genlock
-   bundle) so the engine has the EXPECTED per-component SHA to compare against. It is in the
-   windows-genlock / windows-genlock-fast artifact for the deployed build's commit (CI runs can't reach
-   prod, so the agent downloads it on dev1):
+   bundle) so the engine has the EXPECTED per-component SHA to compare against. Until issue 1505 it
+   was in the windows-genlock / windows-genlock-fast artifact for the deployed build's commit (the
+   recipe below is that history). Since issue 1505 a Windows box runs the pinned obs release's Windows
+   zip, whose `BUNDLE_MANIFEST.json` is the manifest (`scripts/lib/obs-release.sh`
+   `obs_release_windows_bundle` fetches the zip by the pinned tag and proves it):
 
    ```bash
    # Full bundle (obs.dll + distroav.dll) — the deployed full stack:
@@ -272,7 +274,7 @@ deploy where even one non-DLL file is stale must never pass — deploy-from-clea
   auto-redeploy — genlock deploys are user-timed). Run it read-only any time:
   `./scripts/drift-guard.sh --check-imag`.
 - The OBS **auto-update dialog disabled** (#43) is a *build* property, not runtime-readable off a
-  running box, so it is guarded against the vendored source by `tests/obs_updater_disabled.rs`, not
+  running box, so it is guarded against the vendored source by `obs:tests/vendored/tests/obs_updater_disabled.rs` (the obs repo), not
   here. A box running stock OBS 32.2.0 instead of our genlock build USED to be indistinguishable by
   version alone — **#122 closes that**: step 1d reads each component's live BUILD SHA (obs.dll /
   distroav.dll Get-FileHash) + the genlock capability markers and step 2 fails on any mismatch vs the

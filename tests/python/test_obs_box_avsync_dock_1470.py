@@ -110,11 +110,10 @@ def test_a_dock_or_seed_change_reruns_the_linux_build():
 
 
 def test_the_linux_workflow_still_carries_no_pwsh_guard_copy():
-    # The dock's source anchors run as Rust tests in ci.yml (the twins of the windows pwsh steps);
-    # this workflow proves the gcc compile + link, never a third copy of the text guards.
+    # The dock's source anchors run in obs (obs:tests/vendored/tests/av_sync_dock_*.rs, issue
+    # 1505); this workflow proves the gcc compile + link, never a copy of the text guards.
     assert "shell: pwsh" not in WF.read_text()
-    twins = sorted(p.name for p in (REPO / "tests").glob("av_sync_dock_*.rs"))
-    assert "av_sync_dock_qr_patch_guard.rs" in twins and len(twins) >= 5
+    assert not (REPO / "tests" / "av_sync_dock_qr_patch_guard.rs").exists()
 
 
 def test_the_qt_runner_fails_loud_without_its_tools_and_proves_four_cases():

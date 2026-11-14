@@ -538,30 +538,9 @@ mod genlock_fifo_relabel_bench;
 // `tests/os_clock_discipline_parity_1372.rs`, which lifts it and runs it on a fake Win32 layer.
 pub mod os_clock_discipline;
 
-// Issues 1372 + 1381 — the send pacing of the vendored obs-vban VBAN output: a jitter buffer of a
-// configurable target depth (default 64 ms) whose packets leave at `t0 + n × packet_duration` on the
-// disciplined OBS clock, on a FIXED timeline: late audio leaves complete within a 100 ms grace,
-// past it silence on schedule is one counted discontinuity, and only counted drops remove audio.
-// Crate-root + std-only (Tier-0 verifiable); the C twin
-// `vendor/obs-vban/src/vban-pacing.h` is held identical by `tests/vban_pacing_parity_1372.rs`.
-pub mod vban_pacing;
-
-// Issue 1439 — the receive timeline of the vendored obs-vban VBAN SOURCE: packet n is stamped on a
-// line fitted to the sender's own clock (least squares over 64 s, late outliers not folded, rate
-// clamped to +/-500 ppm, slewed so stamps never jump) plus a FIXED reserve R (default 40 ms), so
-// the genlock ASRC resamples it on the stamp basis; a lost packet is silence for exactly its slot.
-// Crate-root + std-only (Tier-0 verifiable); the C twin
-// `vendor/obs-vban/src/vban-receive-timeline.h` is held identical by
-// `tests/vban_receive_timeline_parity_1439.rs`.
-pub mod vban_receive_timeline;
-
-// Issue 1439 (ROZHODNUTÉ 6352253147 item (b)) — the concealment of a short run of lost VBAN packets
-// in the obs-vban receive source: the previous packet's samples played again in the missing slot,
-// with raised-cosine crossfades in from the last sample handed out and out toward the packet that
-// ends the run (the timeline decides WHICH slot is concealed). Crate-root + std-only (Tier-0
-// verifiable); the C twin `vendor/obs-vban/src/vban-conceal.h` is held identical by
-// `tests/vban_conceal_parity_1439.rs`.
-pub mod vban_conceal;
+// Issues 1372, 1381 and 1439: the obs-vban pacing, receive-timeline and concealment Rust
+// authorities moved to obs with their parity gates (issue 1505): obs:tests/vendored/tests/support/
+// vban_{pacing,receive_timeline,conceal}*.rs, checked by obs:tests/vendored/tests/vban_*.rs.
 
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in

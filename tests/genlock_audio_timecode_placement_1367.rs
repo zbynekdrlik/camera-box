@@ -19,8 +19,8 @@
 //!
 //! Std-only on purpose: it runs under `cargo test` AND standalone
 //! (`CARGO_MANIFEST_DIR=<repo> rustc --test --edition 2021 tests/genlock_audio_timecode_placement_1367.rs`).
-//! Every anchor is whitespace-squished (the same `split_whitespace` form the pwsh gates in both
-//! `windows-genlock*.yml` use), so a reflow of the C does not break it.
+//! Every anchor is whitespace-squished (`split_whitespace`), so a reflow of the C does not break
+//! it.
 
 use std::fs;
 use std::path::PathBuf;

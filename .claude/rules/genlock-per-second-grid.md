@@ -43,7 +43,7 @@ phase_pinned_deadline` delegates). Rules for anyone touching it:
   the 1970 grid (2495), next slot off by one (31), fractional rate accepted (412).
 - **Anchors:** `deadline_and_render_tick_share_the_per_second_grid_1355` +
   `ts_align_deadline_is_phase_pinned_to_the_wall_grid_940` (`tests/genlock_release_cadence.rs`)
-  and both `windows-genlock*.yml` pwsh steps pin `return genlock_grid_floor_ns(deadline_ns,
+  and (until issue 1505) both `windows-genlock*.yml` pwsh steps pin `return genlock_grid_floor_ns(deadline_ns,
   interval_ns);`, the obs-video.c `next_wall = genlock_grid_next_boundary_ns(wall, interval_ns);`,
   the includes, and forbid the old `wall - (wall % interval_ns) + interval_ns`.
 - **A test helper that re-derives the step point by hand encodes the grid.**

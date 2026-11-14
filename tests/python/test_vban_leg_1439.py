@@ -267,7 +267,7 @@ class Box:
         # the oneshot that runs its ExecStart lines through the fake nft, the real netns render they list as
         self.dstack_dir = self.etc / "dstack"
         self.dstack_unit = self.etc / "systemd" / "system" / "dstack-dante-leg-filter.service"
-        mirror = tmp_path / "dstack-mirror" / "v0.6.119" / "tools" / "linux"
+        mirror = tmp_path / "dstack-mirror" / "v0.6.129" / "tools" / "linux"
         mirror.mkdir(parents=True, exist_ok=True)
         for f in ("dante-leg.nft", "dante-leg-notrack.nft"):
             (mirror / f).write_bytes((DSTACK_FIX / f).read_bytes())

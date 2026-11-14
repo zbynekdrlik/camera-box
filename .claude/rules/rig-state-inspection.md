@@ -18,8 +18,11 @@ never be reported as broken.
 
 ## 1. A merged `vendor/<plugin>/**` change is NOT live — check the deployed file's timestamp
 
-The dock plugin `obs-audio-video-sync-dock.dll` (and any other `vendor/<plugin>/**` DLL) has **no
-fast deploy path** — `windows-genlock-fast.yml` stages only `obs.dll` + `distroav.dll`. So a PR
+Since issue 1505 a Windows box runs only the pinned obs release's Windows zip, so a vendored change
+is live only after the obs project releases it, camera-box moves `scripts/obs-release.pin` and the
+deploy runs (`.claude/rules/obs-pinned-release.md`). Before that, the dock plugin
+`obs-audio-video-sync-dock.dll` (and any other `vendor/<plugin>/**` DLL) had **no fast deploy path**
+— the retired `windows-genlock-fast.yml` staged only `obs.dll` + `distroav.dll`. So a PR
 that changes `vendor/av-sync-dock/**`, passes CI, merges, and closes its issue changes **nothing
 on the rig**. #942 merged as `24ee66176` while both boxes were still running the DLL built
 `2026-08-01T20:29:06` — the pre-fix binary — and the ticket looked done.
@@ -89,6 +92,11 @@ NDI mapping and the imag program routing are re-enforced too; the burn state alo
 TEST surface. (The genuine leak class — a run cancelled before `cleanup()` — is #246/#844.)
 
 ## 5. The plain-ssh FULL-BUNDLE deploy recipe — how to actually MAKE a vendor plugin fix live (#942, 2026-08-02)
+
+**History since issue 1505:** the `windows-genlock*.yml` artifacts this recipe downloads no longer
+exist. A Windows box deploys the pinned obs release's Windows zip through
+`scripts/deploy-genlock-fleet.sh` (`.claude/rules/obs-pinned-release.md`); `--fast` is refused for it.
+The steps below stay as the record of the pre-1505 path.
 
 Trap 1 above says a merged `vendor/<plugin>/**` change is not live. This is the recipe that
 DEPLOYS it, run end-to-end over plain ssh (no MCP, no dev1 HTTP server) against both strih
@@ -160,7 +168,7 @@ either; a hand swap must make the same comparison first.
 
 When the merged vendor change touches ONLY `vendor/obs-studio/libobs/**` (compiles into `obs.dll`),
 the `windows-genlock-fast` artifact (`obs-genlock-fast-dll`: obs.dll + GENLOCK_BUILD_SHA.txt +
-fast manifest, ~1.3 MB) replaces steps 1-2 above — but FIRST prove the fast build's tree matches
+fast manifest, ~1.3 MB; retired with issue 1505) replaced steps 1-2 above — but FIRST prove the fast build's tree matches
 the merged head: `git diff <fast-build-sha> <merged-head> -- vendor/` must be EMPTY (the fast run
 may have fired on an earlier commit whose later siblings were Rust/tests-only). Copy the artifact's
 `GENLOCK_BUILD_SHA.txt` to the install root; do NOT copy its manifest (it lists only obs.dll —

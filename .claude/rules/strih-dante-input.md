@@ -203,3 +203,20 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     unit is restarted by step 13, the sysctl set live), restart the hub and OBS, then read both `media clock`
     rows `source=Internal` and measure the Dante path (rx_loss, holes, re_anchors) before and after.
 - Clocks + latency: `.claude/rules/audio-clock-map.md` (Dante on strih-snv).
+
+## "never reached our socket" losses: prove them with a capture before blaming a NIC (issue 1508, 13.11.2026)
+
+A dlink `RX packets missing from a flow ... never reached our socket ... socket_drops=0` line (and the
+`rx_loss` / `rx_gaps` it raised before dstack v0.6.125) was a REORDERED packet, not a lost one. The
+proof took one 10-min capture, and nothing else would have shown it:
+- `sudo timeout 600 tcpdump -i <leg> -n -B 16384 -s 96 -w /tmp/x.pcap "udp and src host <tx ip> and src port <tx port>"`
+  on the receiving box (one flow, ~3000 pkt/s, light).
+- The Dante audio payload carries its position: bytes 1-4 = seconds, bytes 5-8 = frame in the second
+  (step 32 per packet at 96 kHz, modulus 96000). Unwrap `sec * 96000 + frame` and look for positions
+  that are MISSING (a loss) vs ones that arrive behind a later one (a reorder). Count per-second packets
+  alone proves nothing (boundary jitter makes 2998-3002).
+- Result then: 0 positions missing over 1.8 M packets, 2928 reorders 1-5 deep, each <= 44 us late, and
+  every logged "loss" sat on a reorder. dlink wrote the packet to the ring (the audio was complete);
+  only its counter was wrong (dstack #278). Since obs v0.4.29 the status line carries `rx_reordered`
+  and `rx_loss` counts only holes still open at playout; since v0.4.30 `start_holes` holds the OBS-start
+  burst. `scripts/dante_input_continuity.py` reports both and gates neither (OPTIONAL tuple).

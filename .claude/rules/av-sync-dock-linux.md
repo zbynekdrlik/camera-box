@@ -30,8 +30,8 @@ step 4's bundle install carries it to every Linux OBS box (no second install pat
   the same). A local `g++ -std=gnu++11 -fsyntax-only` fails, `-std=gnu++17` is clean: syntax-check
   the TUs at gnu++17 with the stub `plugin-macros.generated.h` + `obsconfig.h`
   (`av-sync-dock-decode-worker.md`) and `-I/usr/include/x86_64-linux-gnu/qt6{,/QtCore,/QtWidgets,/QtGui}`.
-- The dock's source anchors stay the ci.yml Rust tests (`tests/av_sync_dock_*.rs`, the twins of the
-  Windows pwsh steps). `tests/linux_genlock_workflow_gate.rs` forbids `shell: pwsh` in linux-genlock.yml,
+- The dock's source anchors are Rust tests in obs since issue 1505
+  (`obs:tests/vendored/tests/av_sync_dock_*.rs`); camera-box keeps only the ones that test its own code. `tests/linux_genlock_workflow_gate.rs` forbids `shell: pwsh` in linux-genlock.yml,
   so never copy the pwsh dock steps there. Its `CMAKE_PREFIX_PATH` count (5) counts this configure.
 - The CEF strih job is ~2 h: a change to `scripts/obs_dock_state.py`, `tests/qt/**` or the fixtures
   re-runs it (the trigger list), because the real-Qt proof runs there on the boxes' Qt release.

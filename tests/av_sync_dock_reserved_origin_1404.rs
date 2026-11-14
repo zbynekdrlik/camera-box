@@ -9,9 +9,9 @@
 //! `CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS` (`camera-box-qr.hpp`) as its FIRST statement, and both
 //! callers drop such a QR entirely (no qrcode_found, no marker, not counted as decoded).
 //!
-//! Pinned here, by the pwsh step "Assert dock never pairs a reserved origin QR (issue 1404)" in
-//! BOTH windows-genlock workflows, and by the g++ self-test `camera-box-selftest.cpp` (a 911016 QR
-//! is not recorded, a painter QR is), which `tests/av_sync_dock_cpp_mirror_gate.rs` runs:
+//! Pinned here (the Windows workflows' pwsh mirror was retired by issue 1505) and by the g++
+//! self-test `camera-box-selftest.cpp` (a 911016 QR
+//! is not recorded, a painter QR is), which `obs:tests/vendored/tests/av_sync_dock_cpp_mirror_gate.rs` runs:
 //! - the dock's id list equals the Rust reserved origin ids (`BURN_RUN_ID_SONGPLAYER`,
 //!   `BURN_RUN_ID_CG`, `MEASUREMENT_CLIP_RUN_ID` in `src/probe/recording_latency.rs`);
 //! - the record starts with the predicate and returns false before touching the ring;

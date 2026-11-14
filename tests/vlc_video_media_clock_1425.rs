@@ -12,9 +12,10 @@
 //! - The mapping: `vlcs_media_clock_ns` lifted VERBATIM from `vlc-video-source.c` with the issue-1372
 //!   mapper lifted verbatim from `qpc-timestamp.h`, compiled under `-Werror` for the Windows branch
 //!   (`_WIN32` defined after the system headers) and the Linux one, against a truth table.
-//! - The bundle: every genlock configure builds the plugin (`-DENABLE_VLC=ON`), the Windows and both
-//!   Linux stage steps fail when it is missing, and the FULL fleet deploy backs the box's copy up and
-//!   byte-verifies the new one (FAST, obs.dll only, never touches it).
+//! - The bundle: both Linux genlock configures build the plugin (`-DENABLE_VLC=ON`) and both Linux
+//!   stage steps fail when it is missing (the Windows genlock workflows were retired by issue 1505:
+//!   the Windows boxes run the pinned obs release), and the FULL fleet deploy backs the box's copy up
+//!   and byte-verifies the new one (FAST, obs.dll only, never touches it).
 //!
 //! Std-only: it runs under `cargo test` AND standalone with plain rustc. FAILS LOUDLY (never skips)
 //! when no C compiler or no bash is present.
@@ -27,11 +28,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const VLC_SOURCE: &str = "vendor/obs-studio/plugins/vlc-video/vlc-video-source.c";
 const QPC_TIMESTAMP_H: &str = "vendor/obs-studio/libobs/util/windows/qpc-timestamp.h";
 const PLUGIN_DEPLOY: &str = "scripts/lib/genlock-plugin-deploy.sh";
-const WORKFLOWS: [&str; 3] = [
-    ".github/workflows/windows-genlock.yml",
-    ".github/workflows/windows-genlock-fast.yml",
-    ".github/workflows/linux-genlock.yml",
-];
+const LINUX_WF: &str = ".github/workflows/linux-genlock.yml";
 
 fn repo(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -201,38 +198,20 @@ fn a_vlc_stamp_lands_on_the_obs_media_clock_by_its_age_1425() {
 
 #[test]
 fn every_genlock_build_builds_and_stages_vlc_video_1425() {
-    for wf in WORKFLOWS {
-        let text = read(wf);
-        assert!(
-            !text.contains("-DENABLE_VLC=OFF"),
-            "issue 1425: {wf} builds OBS without the vlc-video plugin again"
-        );
-    }
+    let linux = read(LINUX_WF);
+    assert!(
+        !linux.contains("-DENABLE_VLC=OFF"),
+        "issue 1425: {LINUX_WF} builds OBS without the vlc-video plugin again"
+    );
     // the configure argument lines themselves (a comment may name the flag too)
-    let on = |wf: &str| {
-        read(wf)
+    assert_eq!(
+        linux
             .lines()
             .filter(|l| l.trim() == "-DENABLE_VLC=ON")
-            .count()
-    };
-    assert_eq!(on(WORKFLOWS[0]), 1, "issue 1425: the full Windows build");
-    assert_eq!(
-        on(WORKFLOWS[1]),
-        2,
-        "issue 1425: both fast-workflow configures (the obs.dll build and the compile gate)"
-    );
-    assert_eq!(
-        on(WORKFLOWS[2]),
+            .count(),
         2,
         "issue 1425: both Linux builds (imag parity and strih)"
     );
-    assert!(
-        read(WORKFLOWS[0]).contains(
-            "if (!(Test-Path \"stage/obs-plugins/64bit/vlc-video.dll\")) { Write-Error \"vlc-video.dll not built (issue 1425)"
-        ),
-        "issue 1425: the Windows stage step must fail when vlc-video.dll is missing"
-    );
-    let linux = read(WORKFLOWS[2]);
     assert_eq!(
         linux
             .matches("if [ ! -f \"$plugin_lib_dir/vlc-video.so\" ]; then echo \"ERROR: vlc-video.so not built (issue 1425)")
@@ -249,21 +228,20 @@ fn every_genlock_build_builds_and_stages_vlc_video_1425() {
     );
 }
 
-fn plugin_ps(func: &str, mode: &str) -> String {
+fn plugin_ps(func: &str) -> String {
     let out = Command::new("bash")
         .arg("-c")
-        .arg("set -euo pipefail; . \"$1\"; \"$2\" \"$3\"")
+        .arg("set -euo pipefail; . \"$1\"; \"$2\"")
         .arg("plugin-deploy")
         .arg(repo(PLUGIN_DEPLOY))
         .arg(func)
-        .arg(mode)
         .output()
         .unwrap_or_else(|e| {
             panic!("issue 1425: could not run bash ({e}); this gate must FAIL, never skip")
         });
     assert!(
         out.status.success(),
-        "issue 1425: {func} {mode} failed:\n{}",
+        "issue 1425: {func} failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).expect("utf-8")
@@ -271,14 +249,14 @@ fn plugin_ps(func: &str, mode: &str) -> String {
 
 #[test]
 fn the_full_deploy_backs_up_and_verifies_vlc_video_1425() {
-    let backup = plugin_ps("genlock_plugin_backup_ps", "full");
+    let backup = plugin_ps("genlock_plugin_backup_ps");
     assert!(
         backup.contains(
             "Copy-Item -Force (Join-Path $obsDir 'obs-plugins\\64bit\\vlc-video.dll') (Join-Path $backupDir 'vlc-video.dll.pre-789')"
         ),
         "issue 1425: the FULL deploy keeps the box's current vlc-video.dll for rollback:\n{backup}"
     );
-    let deploy = plugin_ps("genlock_plugin_deploy_ps", "full");
+    let deploy = plugin_ps("genlock_plugin_deploy_ps");
     for needle in [
         "$pfVlc = Join-Path $obsDir 'obs-plugins\\64bit\\vlc-video.dll'",
         "'(^|/)vlc-video\\.dll$'",
@@ -290,13 +268,6 @@ fn the_full_deploy_backs_up_and_verifies_vlc_video_1425() {
         assert!(
             deploy.contains(needle),
             "issue 1425: the FULL deploy no longer byte-verifies vlc-video.dll (`{needle}`):\n{deploy}"
-        );
-    }
-    for func in ["genlock_plugin_backup_ps", "genlock_plugin_deploy_ps"] {
-        let fast = plugin_ps(func, "fast");
-        assert!(
-            !fast.contains("Copy-Item") && !fast.contains("VERIFY vlc-video.dll"),
-            "issue 1425: a FAST (obs.dll-only) deploy never touches vlc-video:\n{fast}"
         );
     }
 }

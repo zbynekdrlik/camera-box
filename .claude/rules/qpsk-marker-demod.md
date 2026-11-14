@@ -85,7 +85,7 @@ the #689 silence/clipping class), so a weak matched/mad is a discrimination prob
 2. **Direct g++ self-test** — the C++ mirror's self-test is dependency-free STL: `g++ -std=c++17 -Wall
    -Wextra -Werror -o /tmp/st vendor/av-sync-dock/test/camera-box-selftest.cpp && /tmp/st` → `ALL PASS`.
    Add a CHECK for your new gate case; the "all 256 indices round-trip" case proves no real marker is
-   dropped. This is the SAME proof the `av_sync_dock_cpp_mirror_gate` CI job runs.
+   dropped. This is the SAME proof the `obs:tests/vendored/tests/av_sync_dock_cpp_mirror_gate.rs` CI job runs.
 To render an ARBITRARY (non-marker) word in a test, both sides expose a pure `marker_signal_for_word(word,p)`
 (Rust) / `marker_signal_from_word(word)` (C++ self-test); `marker_signal(index)` delegates to it.
 
@@ -212,10 +212,10 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   layout), `cb_note_channel_switch` and `cb_audio_diag_tick` (the ~10 s staleness / diag line /
   pairing recovery, split out in review round 1). The callback is ~298 lines: the next addition to
   it must split it further first.
-- **The glue anchors:** `tests/av_sync_dock_channel_pick_1367.rs` (with the shared
-  `tests/support/cpp_source.rs` helpers, also used by `av_sync_dock_decode_mailbox_1367.rs`) + the
-  pwsh step "Assert dock decodes the marker per channel (issue 1367)" in BOTH windows-genlock
-  workflows, which checks the same list (including the two ADJACENCY needles that pin the
+- **The glue anchors:** `obs:tests/vendored/tests/av_sync_dock_channel_pick_1367.rs` (with the shared
+  `tests/support/cpp_source.rs` helpers, also used by `obs:tests/vendored/tests/av_sync_dock_decode_mailbox_1367.rs`) + (until
+  issue 1505 retired them) the pwsh step "Assert dock decodes the marker per channel (issue 1367)" in
+  BOTH windows-genlock workflows, which checked the same list (including the two ADJACENCY needles that pin the
   `prev_channel` capture before the push and the switch note right after it), slicing the same three
   function bodies (the callback, `cb_ensure_audio_picker`, `cb_note_channel_switch`) with a
   brace-matching `Get-DockBody` helper (issue 1386: shared, in `vendor/av-sync-dock/test/dock-output-source.ps1`), so a slice never runs into the next function's comment. Replay the pwsh
