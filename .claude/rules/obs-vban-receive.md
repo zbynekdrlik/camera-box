@@ -754,7 +754,7 @@ outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender o
   decision relayed 13.11.2026: "Dante works on switch-on, one identical filter on every PC").**
   `scripts/lib/strih-dante-leg-filter.sh`. Every dstack device binds fixed ports from its slot (dstack >=
   0.6.117: slot k receives on 29800+64k..+31, sends from the next 32), so the file names no device.
-  - **The pin** `scripts/dstack-leg-filter.pin`: the tag (v0.6.119), its COMMIT (0da2241608ed: `58f7fa9e1a`
+  - **The pin** `scripts/dstack-leg-filter.pin`: the tag (v0.6.129, issue 1524: + the mDNS out rate limit, dstack#288), its COMMIT (0da2241608ed: `58f7fa9e1a`
     is the annotated TAG object, not a commit), the sha256 of `tools/linux/dante-leg.nft` and
     `tools/linux/dante-leg-notrack.nft`. `strih_dante_leg_filter_ensure ROOT` fetches both by the exact tag
     (raw.githubusercontent) into `<tree>/dstack-release/<tag>/` (git-ignored), proves each against the pin,
