@@ -18,7 +18,7 @@ never inline in the main script. The stats-ABI blocks live in `scripts/lib/genlo
 for the same reason (issue 1302), and since issue 1426 the box list itself (`fleet_normalize_boxes`,
 `fleet_deploy_order`) lives in `scripts/lib/genlock-fleet-boxes.sh` and the per-box Linux apply loop
 (`strih_lx_apply_all`) in `scripts/lib/strih-snv-deploy.sh`, and since issue 1505 the Windows
-pinned-zip routing in `scripts/lib/genlock-windows-pin.sh`; the script sits at 984 lines.
+pinned-zip routing in `scripts/lib/genlock-windows-pin.sh`; the script sits at 957 lines.
 
 ## A FAST deploy refuses an obs.dll with another stats ABI (issue 1302, design 6028838843, ROZHODNUTÉ 6030159870)
 
@@ -135,7 +135,7 @@ Full-path E2E at the `genlock_parity` preflight (the recurring #923/#932 pain).
   intended. To read the plan, pass `--plan --run-id ... --sha ... --stage ...` explicitly.
 
 - Pure builder functions emit each box's program; unit-tested by sourcing (`tests/deploy_genlock_fleet.rs`).
-- **Windows (strih/stream) is EMIT-ONLY** — a bash script cannot drive the `win-*` MCP
+- **Windows (resolume) is EMIT-ONLY** — a bash script cannot drive the `win-*` MCP
   (`win-ssh-vs-mcp` HARD rule), so it PRINTS the PowerShell program the agent pastes into the box's
   MCP Shell. **imag and strih-snv are Linux** (file copy + CLI = Context B), so execute mode actually
   ssh-deploys them (strih-snv: `scripts/lib/strih-snv-deploy.sh`, issue 1317 part 6 — below).
@@ -367,14 +367,15 @@ verify-strih.sh on the healthy box (24.9.2026) was ALL CLEAR in 9 s (inside the 
 setup-strih.sh that skips step 17 (it belongs to the provisioning lane) — returned as a follow-up
 candidate in the part-6 LANE-RETURN; until then do NOT "fix" the arm by ignoring setup's rc.
 
-## Same-SHA cross-workflow resolution — the heart of "one canonical version"
+## Same-SHA anchor resolution — only imag takes an anchor build now
 
-Windows and Linux genlock artifacts come from SEPARATE workflows with SEPARATE run-ids
-(`windows-genlock.yml` / `windows-genlock-fast.yml` vs `linux-genlock.yml`). So `--run-id` is only an
-ANCHOR: its `headSha` is read, then `fleet_pick_run_at_sha` picks each sibling workflow's SUCCESSFUL
-run AT THAT SAME SHA (`gh run list --json databaseId,headSha,conclusion | fleet_pick_run_at_sha SHA`).
-If no sibling run exists at the SHA, it fails loud (build it first — e.g. the tag-dispatch recipe in
-`rig-state-inspection.md`'s #923 note). This is what makes all three boxes converge to one commit.
+Since issue 1487 (Linux OBS boxes) and issue 1505 (Windows OBS boxes) every OBS box except imag
+deploys the pinned obs release (`.claude/rules/obs-pinned-release.md`); camera-box's own
+`windows-genlock*.yml` build is retired and a pin without the Windows zip refuses a Windows box.
+`--run-id` is the ANCHOR for imag only: its `headSha` is read, then `fleet_pick_run_at_sha` picks the
+SUCCESSFUL `linux-genlock.yml` run AT THAT SAME SHA (`gh run list --json databaseId,headSha,conclusion
+| fleet_pick_run_at_sha SHA`). No run at the SHA fails loud (build it first — the tag-dispatch recipe
+in `rig-state-inspection.md`'s #923 note). A run without imag needs no `--run-id`.
 
 ## GOTCHA — a Windows deploy that stops AHK MUST restart it (verified) BEFORE handing off to `launch-obs-genlock.sh`
 

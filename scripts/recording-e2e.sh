@@ -1112,41 +1112,12 @@ fi
 # deferred, #1082). shellcheck source=scripts/lib/manifest-autosource.sh
 . "$HERE/lib/manifest-autosource.sh"
 VERSION_GATE_REPO="${VERSION_GATE_REPO:-zbynekdrlik/camera-box}"
-# Windows FAST manifest (strih+stream share ONE build -> one manifest), keyed on strih's OWN reported
-# marker SHA. The gate applies this GLOBAL --manifest to BOTH --win-state boxes (strih AND stream), and
-# a manifest activates the obs_dll_sha256 byte compare AND the genlock_capability check on each box.
-# ENFORCED (#1100, the #758-shape second step): the auto-source runs UNCONDITIONALLY -- the #1082 opt-in
-# guard (which required BOTH boxes to ALREADY report obs_dll_sha256 + genlock_capability before sourcing
-# the manifest) is REMOVED, so a box that stops reporting its deployed obs.dll sha now flips to a
-# gate-blocking UNKNOWN (drift-guard compares a manifest sha vs an empty observed) instead of a silent
-# skip -- every box is REQUIRED to report its bytes. Precondition verified LIVE before the flip:
-# strih+stream both serve obs_dll_sha256 + distroav_dll_sha256 + genlock_capability on :8899, and the CI
-# FAST manifest at the fleet marker SHA carries the same obs.dll (the #770 on-box byte gather is now
-# deployed fleet-wide -- the #1067 port4455 class). The fetch stays best-effort: a gh/network failure
-# (or an unresolvable marker SHA) yields "" -> the manifest is omitted for THAT run (a fetch outage is
-# not a box-drift signal), never a false refuse. VERSION_GATE_MANIFEST (if pre-set) wins.
+# The Windows bundle manifest: issue 1505 retired camera-box's own windows-genlock build (a Windows
+# box deploys only from the pinned obs release's zip, and strih + stream are Linux boxes graded by the
+# linux_so_bytes row below), so nothing is auto-sourced here any more. An operator may still hand the
+# gate a manifest pair: VERSION_GATE_MANIFEST (--manifest) + VERSION_GATE_ALT_MANIFEST (--alt-manifest).
 AUTO_WIN_MANIFEST="${VERSION_GATE_MANIFEST:-}"
-if [ -z "$AUTO_WIN_MANIFEST" ]; then
-  AUTO_WIN_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" windows-genlock-fast.yml obs-genlock-fast-dll \
-    "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-fast-manifest.json")"
-fi
-# #1346: the two Windows CI workflows are not byte-reproducible -- for ONE marker sha the fast
-# obs.dll and the FULL windows-genlock bundle's bin/64bit/obs.dll differ, so the fast manifest alone
-# refused a correct full-bundle deploy. Also fetch the full bundle's manifest of the same build and
-# hand it to the gate as the ALTERNATE (a box is OK on either entry, DRIFT on neither). Skipped when
-# the operator pinned VERSION_GATE_MANIFEST (a pin is never widened); a failed fetch leaves it empty,
-# so the fast manifest is judged exactly as before. Keyed on strih's marker like the fast fetch (the
-# cross-box parity facet holds strih and stream on one build). Fetch helper (per-run cache + a
-# timeout on every gh call): scripts/lib/manifest-autosource.sh.
-AUTO_WIN_ALT_MANIFEST=""
-[ -z "${VERSION_GATE_MANIFEST:-}" ] && AUTO_WIN_ALT_MANIFEST="$(manifest_autosource_fetch_win_full "$VERSION_GATE_REPO" \
-  "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-full-manifest.json")"
-# Main ruling (issue comment 5829099220): the full manifest is judged ALONE only for a full-only build
-# (no successful fast run at the marker sha); a fast run whose manifest fetch failed is a fetch outage
-# and the byte pin is omitted for this run with a loud WARNING, never a refusal. An operator-pinned
-# VERSION_GATE_MANIFEST passes through unchanged (no alternate was fetched, no lookup is made).
-{ IFS= read -r AUTO_WIN_MANIFEST; IFS= read -r AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve "$VERSION_GATE_REPO" \
-  "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$AUTO_WIN_MANIFEST" "$AUTO_WIN_ALT_MANIFEST")
+AUTO_WIN_ALT_MANIFEST="${VERSION_GATE_ALT_MANIFEST:-}"
 # imag linux .so byte gather (ssh) + its own CI manifest, keyed on imag's marker SHA. The manifest is
 # fetched only when the .so gather actually returned SHAs, so a failed gather leaves the facet dormant.
 AUTO_IMAG_MANIFEST=""

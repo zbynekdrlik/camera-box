@@ -32,7 +32,7 @@
 //! `vstack:rig/core/src/genlock_backlog.rs` for the Tier-0-tested decision.
 //!
 //! This is a SOURCE-presence guard (same convention as tests/distroav_genlock_lockdown.rs,
-//! tests/obs_updater_disabled.rs): it runs on DEFAULT features (per-PR Linux CI + local
+//! obs:tests/vendored/tests/obs_updater_disabled.rs): it runs on DEFAULT features (per-PR Linux CI + local
 //! Tier-0), reads the vendored C as text, and fails loudly if a future `git subtree pull`
 //! (#44) — or any edit — silently reverts the cadence to the per-tick wall-compare release.
 

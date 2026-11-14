@@ -281,6 +281,13 @@ exported + unit-tested); only its USE as the opt-in guard is removed.
 
 ## #1346 — the FAST and FULL Windows builds are NOT byte-reproducible: the gate accepts either (`--alt-manifest`)
 
+**Issue 1505 retired camera-box's own Windows build and, with it, the E2E auto-source below**
+(`manifest_autosource_fetch_win_full`, `manifest_autosource_run_state`, `win_manifest_pair_*` and
+`tests/harness_windows_manifest_enforce_1100.rs` are gone). recording-e2e.sh now hands the gate only an
+operator pin: `VERSION_GATE_MANIFEST` (`--manifest`) and `VERSION_GATE_ALT_MANIFEST`
+(`--alt-manifest`). The gate's and drift-guard's `--alt-manifest` engine below is unchanged. The text
+below is the history of that auto-source.
+
 `windows-genlock-fast.yml` and `windows-genlock.yml` build the SAME source to DIFFERENT obs.dll bytes
 (same size). Build 54995646: fast `obs.dll` = `18ea7acf…`, full `bin/64bit/obs.dll` = `e454b134…`;
 build 8151a12ac: fast `a5374104…`, full `54048531…`. Their distroav.dll differs the same way (the
