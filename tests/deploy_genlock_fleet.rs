@@ -427,20 +427,37 @@ fn windows_full_program_does_the_three_surgical_robocopies() {
     );
 }
 
+/// issue 1522: the pinned obs release ships the full bundle only (issue 1505), so the builder has no
+/// obs.dll-only FAST program any more: a `fast` MODE is refused by name, rc 2, with no program on
+/// stdout, and the FULL program carries no trace of the retired step (0f) stats-ABI gate.
 #[test]
-fn windows_fast_program_is_obs_dll_only() {
-    let p = win_program("stream-snv", "fast", "0");
-    assert!(p.contains("obs.dll"), "fast deploy copies obs.dll:\n{p}");
-    assert!(
-        !p.contains("robocopy"),
-        "fast (libobs-only) deploy must NOT robocopy data/ or obs-plugins/ — obs.dll only:\n{p}"
+fn windows_program_refuses_fast_mode_and_carries_no_fast_gate_1522() {
+    let (code, out, err) = run_sourced_status(
+        &script(),
+        "build_windows_deploy_program stream-snv fast 'C:\\stage-genlock-RUN' \
+         'C:\\Program Files\\obs-studio' 0 'C:\\obs-backup' 3 SHA789 DSHA789",
     );
-    // markers are still written on a fast deploy
+    assert_eq!(code, 2, "a fast Windows program is refused:\n{out}\n{err}");
+    assert!(out.is_empty(), "a refused mode prints no program:\n{out}");
     assert!(
-        p.contains("GENLOCK_BUILD_SHA.txt"),
-        "fast deploy still writes the marker:\n{p}"
+        err.contains("mode 'fast' refused") && err.contains("full bundle only"),
+        "the refusal names the mode and why:\n{err}"
     );
+    let full = win_program("stream-snv", "full", "0");
+    for gone in [
+        "(0f)",
+        "FAST DEPLOY REFUSED",
+        "$abiNew",
+        "PSFAST",
+        "obs.dll ONLY",
+    ] {
+        assert!(
+            !full.contains(gone),
+            "the retired FAST step '{gone}' is gone:\n{full}"
+        );
+    }
 }
+
 /// issue 1115 — Option A: the FULL deploy ALSO ships the bundle's genlock distroav.dll to the REAL
 /// ProgramData OBS load path (backup + fail-closed byte verify), so the loaded plugin IS the
 /// canonical build and the byte-parity gather/compare against the manifest becomes real.
@@ -477,25 +494,6 @@ fn windows_full_deploys_distroav_to_programdata_load_path_1115() {
     assert!(
         p.contains("/XF distroav.dll"),
         "the Program Files obs-plugins shadow copy stays /XF-excluded:\n{p}"
-    );
-}
-
-/// issue 1115 — the FAST (obs.dll-only) bundle carries no distroav.dll, so a FAST deploy must never
-/// touch the ProgramData distroav (only a FULL bundle deploy ships the plugin).
-#[test]
-fn windows_fast_does_not_touch_programdata_distroav_1115() {
-    let p = win_program("stream-snv", "fast", "0");
-    assert!(
-        !p.contains(r"C:\ProgramData\obs-studio\plugins\distroav"),
-        "FAST (obs.dll-only) deploy must NOT touch the ProgramData distroav:\n{p}"
-    );
-    assert!(
-        !p.contains("distroav.dll.pre-789"),
-        "FAST deploy does not back up distroav (no distroav in the fast bundle):\n{p}"
-    );
-    assert!(
-        !p.contains("VERIFY distroav.dll"),
-        "FAST deploy has no distroav byte verify:\n{p}"
     );
 }
 
@@ -537,11 +535,6 @@ fn windows_full_byte_verifies_the_paced_obs_vban_1372() {
     assert!(
         p.contains("the bundle carries no obs-vban.dll (built before issue 1372)"),
         "an older bundle without obs-vban warns instead of failing:\n{p}"
-    );
-    let fast = win_program("stream-snv", "fast", "0");
-    assert!(
-        !fast.contains("VERIFY obs-vban.dll") && !fast.contains("obs-vban.dll.pre-789"),
-        "FAST (obs.dll-only) deploy never touches obs-vban:\n{fast}"
     );
 }
 

@@ -1,32 +1,25 @@
-"""issue 1302 -- a FAST genlock deploy refuses an obs.dll whose stats ABI differs from the frontend's.
+"""issue 1302 -- every full-bundle genlock deploy records its frontend's stats ABI (GENLOCK_STATS_ABI.txt).
 
-`deploy-genlock-fleet.sh --fast` swaps obs.dll alone and keeps the frontend (obs64.exe) of the last
-full-bundle deploy. The frontend allocates `struct obs_genlock_stats` AND `struct
-obs_genlock_output_stats` on its stack and passes no size, so a newer obs.dll that fills a bigger
-struct (OBS_GENLOCK_STATS_VERSION 3 -> 4, or a bumped OBS_GENLOCK_OUTPUT_STATS_VERSION) writes past
-the frontend's copy and OBS crashes. Live on 7.10.2026: stream ran a v3 build (a33d91a8e, its last
-deploy a FAST one) while dev carried v4. Design: issue 1302 comment 6028838843 (Approach 1, part 2);
-ROZHODNUTÉ 6030159870 item 1 extended the marker to the output-stats struct.
+The OBS frontend allocates `struct obs_genlock_stats` AND `struct obs_genlock_output_stats` on its
+stack and passes no size, so an obs.dll / libobs that fills a bigger struct than its frontend knows
+writes past the frontend's copy and OBS crashes. Design: issue 1302 comment 6028838843; ROZHODNUTÉ
+6030159870 item 1 extended the marker to the output-stats struct. Issue 1505 retired the Windows
+obs.dll-only FAST deploy (the pinned obs release ships the full bundle only), and issue 1522 removed
+its step-(0f) gate: every deploy ships the frontend with the library, so the pair is RECORDED, never
+compared at deploy time.
 
 The marker GENLOCK_STATS_ABI.txt is two lines: the stats version, then `output_stats=<N>`. The
 planner passes the pair as ONE value `<stats>:<output_stats>` (e.g. `4:1`).
 
 This suite pins:
   * the pure parts of scripts/lib/genlock-stats-abi.sh: the obs.h reader (the repo's own obs.h and a
-    synthetic two-commit repo), the read at a commit, and genlock_fast_abi_verdict over its vectors
-    (BOTH versions compared, the refusal names whichever struct differs, a one-line marker written
-    before the output-stats line refuses as missing output stats);
-  * the emitted PowerShell gate RUN in pwsh against a fake install dir, on the same vectors, with the
-    same verdict and the same refusal text as the bash decision;
-  * the emitted deploy program: FAST gates at step (0f), right after the path preflight and before
-    anything on the box changes (the obs-websocket read, the power plan, AutoHotkey64, the keep-alive
-    tasks, the stop, the backup, the copy); FULL records GENLOCK_STATS_ABI.txt next to the other
-    markers, or removes it when the planner could not read both versions; the whole FAST program, run
-    in pwsh against a box without the right marker, exits 13 having changed nothing; the marker the
-    FULL program writes passes the FAST gate;
-  * the planner: --plan reads both versions from `git show <sha>:vendor/obs-studio/libobs/obs.h`,
-    REFUSES --fast (exit 3) when it cannot, and warns + removes on --full; the old plan-time refusal
-    of an output-stats version other than 1 is gone (the gate compares it now);
+    synthetic two-commit repo), the read at a commit, and the marker reader
+    (genlock_stats_abi_pair_from_marker) over its vectors;
+  * the emitted FULL Windows program: the marker cleared at (3c) before the copy (fail-closed, run in
+    pwsh), recorded at (5b) next to the other markers or removed when the pair is unknown, and the
+    marker the (5b) writer writes read back as the same pair; no Windows FAST program and no (0f) gate;
+  * the planner: --plan reads imag's pair from `git show <sha>:vendor/obs-studio/libobs/obs.h`, and an
+    unreadable define warns + removes the marker (it never refuses a run);
   * the Linux legs: genlock_write_markers' 5th argument (and setup-imag.sh's inline copy, behaviour for
     behaviour), the staged bundle file, setup-strih.sh reading it back, the imag program.
 
@@ -51,9 +44,6 @@ SETUP_IMAG = SCRIPTS / "setup-imag.sh"
 SETUP_STRIH = SCRIPTS / "setup-strih.sh"
 OBS_H = REPO / "vendor" / "obs-studio" / "libobs" / "obs.h"
 BOXES = ["stream-snv", "resolume-snv"]
-FORCE_LINE = ("Get-Process obs64,obs-browser-page -ErrorAction SilentlyContinue | "
-              "Stop-Process -Force -ErrorAction SilentlyContinue")
-REQUIRED = ": a full-bundle deploy is required"
 
 
 def _utf8_locale():
@@ -112,11 +102,12 @@ def _pwsh():
     return pwsh
 
 
-def _program(box, mode, abi, stage="C:\\stage", obs_dir="C:\\Program Files\\obs-studio", backup="C:\\obs-backup"):
+def _program(box, abi, stage="C:\\stage", obs_dir="C:\\Program Files\\obs-studio", backup="C:\\obs-backup"):
+    """The FULL Windows deploy program (issue 1522: the builder refuses any other mode)."""
     r = _bash(
-        '. "$1"; build_windows_deploy_program "$2" "$3" "$4" "$5" "$(fleet_box_ahk_mode "$2")" "$6" '
-        '3 abc123 def456 0 "$7"',
-        FLEET, box, mode, stage, obs_dir, backup, abi,
+        '. "$1"; build_windows_deploy_program "$2" full "$3" "$4" "$(fleet_box_ahk_mode "$2")" "$5" '
+        '3 abc123 def456 0 "$6"',
+        FLEET, box, stage, obs_dir, backup, abi,
     )
     assert r.returncode == 0, r.stderr
     return r.stdout
@@ -203,186 +194,29 @@ def test_the_read_at_a_commit_refuses_what_it_cannot_read_1302(abi_repo, sha):
     assert r.stdout == "rc=1\n"
 
 
-# --- the decision ----------------------------------------------------------------------------------
-
-OK41 = "OK frontend stats ABI v4 == new obs.dll v4; frontend output stats ABI v1 == new obs.dll v1"
-NO_FILE = "missing (no GENLOCK_STATS_ABI.txt)"
-NO_OUT_LINE = "missing (no output_stats line in GENLOCK_STATS_ABI.txt)"
-BAD_LINE1 = "unreadable (line 1 of GENLOCK_STATS_ABI.txt is not a version)"
-BAD_LINE2 = "unreadable (line 2 of GENLOCK_STATS_ABI.txt is not output_stats=<version>)"
-TOO_LONG = "unreadable (GENLOCK_STATS_ABI.txt has more than two lines)"
-
-
-def _refused(stats=None, output=None):
-    """The expected refusal: one part per struct that differs, stats first, joined with '; '."""
-    parts = []
-    if stats:
-        parts.append("frontend stats ABI {}, new obs.dll {}".format(*stats))
-    if output:
-        parts.append("frontend output stats ABI {}, new obs.dll {}".format(*output))
-    return "REFUSED " + "; ".join(parts) + REQUIRED
-
-
-VERDICTS = [
-    ("4:1", "present", "4\r\noutput_stats=1\r\n", 0, OK41),
-    ("4:1", "present", " 4 \n output_stats = 1 \n\n", 0, OK41),
-    ("4:1", "present", "4\noutput_stats=1\n\x0b\x0c\n", 0, OK41),
-    ("44:1", "present", "4 4\noutput_stats=1", 0,
-     "OK frontend stats ABI v44 == new obs.dll v44; frontend output stats ABI v1 == new obs.dll v1"),
-    # only the stats struct differs: the refusal names it alone
-    ("4:1", "present", "3\r\noutput_stats=1\r\n", 1, _refused(stats=("v3", "v4"))),
-    ("3:1", "present", "4\noutput_stats=1", 1, _refused(stats=("v4", "v3"))),
-    # only the output stats struct differs: the refusal names it alone
-    ("4:2", "present", "4\r\noutput_stats=1\r\n", 1, _refused(output=("v1", "v2"))),
-    ("4:1", "present", "4\noutput_stats=2", 1, _refused(output=("v2", "v1"))),
-    # both differ: both named, stats first
-    ("4:2", "present", "3\noutput_stats=1", 1, _refused(stats=("v3", "v4"), output=("v1", "v2"))),
-    # a marker written before the output-stats line existed: REFUSED as missing output stats
-    ("4:1", "present", "4\r\n", 1, _refused(output=(NO_OUT_LINE, "v1"))),
-    ("4:1", "present", "4", 1, _refused(output=(NO_OUT_LINE, "v1"))),
-    ("4:1", "missing", "", 1, _refused(stats=(NO_FILE, "v4"), output=(NO_FILE, "v1"))),
-    ("4:1", "present", "", 1, _refused(stats=(BAD_LINE1, "v4"), output=(NO_OUT_LINE, "v1"))),
-    ("4:1", "present", "abc\noutput_stats=1", 1, _refused(stats=(BAD_LINE1, "v4"))),
-    ("4:1", "present", "04\noutput_stats=1", 1, _refused(stats=(BAD_LINE1, "v4"))),
-    ("4:1", "present", "output_stats=1\n4", 1, _refused(stats=(BAD_LINE1, "v4"), output=(BAD_LINE2, "v1"))),
-    ("4:1", "present", "4\noutput_stats=01", 1, _refused(output=(BAD_LINE2, "v1"))),
-    ("4:1", "present", "4\nOUTPUT_STATS=1", 1, _refused(output=(BAD_LINE2, "v1"))),
-    ("4:1", "present", "4\n1", 1, _refused(output=(BAD_LINE2, "v1"))),
-    ("4:1", "present", "4\noutput_stats=", 1, _refused(output=(BAD_LINE2, "v1"))),
-    ("4:1", "present", "4\noutput_stats=1\nx", 1, _refused(output=(TOO_LONG, "v1"))),
-    ("4:1", "present", "4\noutput_stats=1\noutput_stats=1", 1, _refused(output=(TOO_LONG, "v1"))),
-    # a lone CR is no line break: one line, which is not a version
-    ("4:1", "present", "4\routput_stats=1", 1, _refused(stats=(BAD_LINE1, "v4"), output=(NO_OUT_LINE, "v1"))),
-    # the new obs.dll's pair: each part unknown on its own
-    ("", "present", "4\noutput_stats=1", 1, _refused(stats=("v4", "unknown"), output=("v1", "unknown"))),
-    ("4", "present", "4\noutput_stats=1", 1, _refused(output=("v1", "unknown"))),
-    (":1", "present", "4\noutput_stats=1", 1, _refused(stats=("v4", "unknown"))),
-    ("4:", "present", "4\noutput_stats=1", 1, _refused(output=("v1", "unknown"))),
-    ("4:x", "present", "4\noutput_stats=1", 1, _refused(output=("v1", "unknown"))),
-    ("4:1:2", "present", "4\noutput_stats=1", 1, _refused(output=("v1", "unknown"))),
-    ("x", "missing", "", 1, _refused(stats=(NO_FILE, "unknown"), output=(NO_FILE, "unknown"))),
-    # review round 1: a version is ASCII digits only, in any locale (en_US.UTF-8 bash ranges such as
-    # [1-9] also match Arabic-Indic, superscript and fullwidth digits; the PowerShell gate never does)
-    ("٤:1", "present", "4\noutput_stats=1", 1, _refused(stats=("v4", "unknown"))),
-    ("4:¹", "present", "4\noutput_stats=1", 1, _refused(output=("v1", "unknown"))),
-    ("4:1", "present", "٤\noutput_stats=1", 1, _refused(stats=(BAD_LINE1, "v4"))),
-    ("4:1", "present", "4\noutput_stats=１", 1, _refused(output=(BAD_LINE2, "v1"))),
-]
-
-
-@pytest.mark.parametrize("new,state,text,rc,line", VERDICTS)
-def test_the_fast_verdict_1302(new, state, text, rc, line):
-    r = subprocess.run(
-        ["bash", "-c", 'set -euo pipefail; . "$1"; rc=0; genlock_fast_abi_verdict "$2" "$3" "$4" || rc=$?; echo "rc=$rc"',
-         "x", str(LIB), new, state, text],
-        capture_output=True, text=True, timeout=60, env={**os.environ, "LC_ALL": UTF8_LOCALE})
-    assert r.returncode == 0, r.stderr
-    assert r.stdout == f"{line}\nrc={rc}\n"
-
-
-def test_the_fast_verdict_refuses_a_bad_marker_state_1302():
-    r = _lib('rc=0; genlock_fast_abi_verdict 4:1 bogus "" || rc=$?; echo "rc=$rc"')
-    assert r.returncode == 0
-    assert r.stdout == "rc=2\n"
-    assert "MARKER_STATE" in r.stderr
-
-
-# --- the PowerShell gate, RUN in pwsh, against the bash decision ---------------------------------
-
-GATE_VECTORS = [
-    (b"4\r\noutput_stats=1\r\n", "4:1"), (b"4\noutput_stats=1", "4:1"),
-    (b" 4 \r\n output_stats=1 \r\n\r\n", "4:1"), (b"4\noutput_stats=1\n\x0b\x0c\n", "4:1"),
-    (b"3\r\noutput_stats=1\r\n", "4:1"), (b"4\r\noutput_stats=1\r\n", "4:2"), (b"3\r\noutput_stats=2\r\n", "4:1"),
-    (b"4\r\n", "4:1"), (b"", "4:1"), (b"abc\r\noutput_stats=1", "4:1"),
-    (b"\xef\xbb\xbf4\r\noutput_stats=1\r\n", "4:1"), (b"04\noutput_stats=1", "4:1"), (b"4\noutput_stats=01", "4:1"),
-    (b"4\nOUTPUT_STATS=1", "4:1"), (b"4\noutput_stats=1\nx", "4:1"), (b"output_stats=1\n4", "4:1"),
-    (b"4 4\r\noutput_stats=1\r\n", "44:1"), (b"4\routput_stats=1", "4:1"),
-    (None, "4:1"), (None, ""), (b"4\r\noutput_stats=1\r\n", ""), (b"4\r\noutput_stats=1\r\n", "4"),
-    (b"4\r\noutput_stats=1\r\n", "x"), (b"4\r\noutput_stats=1\r\n", ":1"), (b"4\r\noutput_stats=1\r\n", "4:1:2"),
-    # review round 1: non-ASCII digits (marker and pair) and a NUL byte are never a version
-    ("٤\noutput_stats=1\n".encode(), "4:1"), ("4\noutput_stats=１\n".encode(), "4:1"),
-    (b"4\r\noutput_stats=1\r\n", "٤:1"), (b"4\r\noutput_stats=1\r\n", "4:¹"),
-    (b"4\x00\r\noutput_stats=1\r\n", "4:1"), (b"4\r\noutput_stats=1\x00\r\n", "4:1"),
-]
-
-
-def _run_gate(pwsh, tmp_path, marker, new):
-    box = tmp_path / "obs"
-    box.mkdir()
-    if marker is not None:
-        (box / "GENLOCK_STATS_ABI.txt").write_bytes(marker)
-    gate = _lib('genlock_fast_abi_gate_ps fast "$2"', new)
-    assert gate.returncode == 0, gate.stderr
-    assert "(0f) issue 1302" in gate.stdout
-    script = tmp_path / "gate.ps1"
-    script.write_text("$ErrorActionPreference = 'Stop'\n"
-                      f"$obsDir = '{box}'\n" + gate.stdout + "\nWrite-Host 'HARNESS PAST THE GATE'\nexit 0\n")
-    return subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-File", str(script)],
-                          capture_output=True, text=True, timeout=120)
-
-
-@pytest.mark.parametrize("marker,new", GATE_VECTORS)
-def test_the_powershell_gate_decides_as_the_bash_verdict_1302(tmp_path, marker, new):
-    pwsh = _pwsh()
-    ps = _run_gate(pwsh, tmp_path, marker, new)
-    if marker is None:
-        sh = _lib('rc=0; genlock_fast_abi_verdict "$2" missing "" || rc=$?; echo "rc=$rc"', new)
-    else:
-        (tmp_path / "marker").write_bytes(marker)
-        # a bash string cannot hold a NUL byte; the gate reads one as a character that is neither
-        # whitespace nor a digit, which '?' is too (genlock_stats_abi_pair_from_marker maps it the same)
-        sh = _lib('rc=0; genlock_fast_abi_verdict "$2" present "$(tr \'\\000\' \'?\' < "$3")" || rc=$?; echo "rc=$rc"',
-                  new, tmp_path / "marker")
-    assert sh.returncode == 0, sh.stderr
-    line, rc = sh.stdout.splitlines()
-    if rc == "rc=0":
-        assert ps.returncode == 0, ps.stdout + ps.stderr
-        assert "HARNESS PAST THE GATE" in ps.stdout
-        assert f"stats ABI OK: {line[len('OK '):]} -- " in ps.stdout
-    else:
-        assert rc == "rc=1"
-        assert ps.returncode == 13, ps.stdout + ps.stderr
-        assert "HARNESS PAST THE GATE" not in ps.stdout
-        assert f"FAST DEPLOY REFUSED: {line[len('REFUSED '):]}. Nothing on this box was changed." in ps.stdout
-
-
-def test_the_full_mode_has_no_gate_1302():
-    r = _lib("genlock_fast_abi_gate_ps full 4:1")
-    assert r.returncode == 0 and r.stdout == ""
-
-
 # --- the emitted deploy program ------------------------------------------------------------------
 
 WRITE_ABI_41 = "Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt') @('4', 'output_stats=1')"
 
 
-@pytest.mark.parametrize("box", BOXES)
-def test_the_fast_program_gates_before_anything_changes_1302(box):
-    p = _program(box, "fast", "4:1")
-    gate = p.index("# (0f) issue 1302")
-    assert p.index("# (0) preflight") < gate
-    assert p.index("if (-not (Test-Path $obsDir))") < gate
-    # before the obs-websocket read, the power plan, AutoHotkey64, the keep-alive tasks, the stop,
-    # the backup and the obs.dll copy
-    for later in ("# (0a) issue 1367", "# (0b)", "# (1) ", "# (1b)", FORCE_LINE, "# (3) Back up",
-                  "New-Item -ItemType Directory", "try { Copy-Item -Force $src $dst }"):
-        assert gate < p.index(later), later
-    seg = p[gate:p.index("# (0a) issue 1367")]
-    assert "\n$abiNew    = '4'\n" in seg
-    assert "\n$abiNewOut = '1'\n" in seg
-    assert "$abiFile   = Join-Path $obsDir 'GENLOCK_STATS_ABI.txt'" in seg
-    assert "FAST DEPLOY REFUSED: $($abiRefused -join '; ')" + REQUIRED in seg
-    assert seg.index("FAST DEPLOY REFUSED") < seg.index("exit 13")
-    assert p.count("# (0f) issue 1302") == 1
-    # the fast deploy keeps the frontend, so it keeps the frontend's marker
-    assert "GENLOCK_STATS_ABI.txt is left as it is" in p
-    assert "Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" not in p
-    assert "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" not in p
+def test_the_fast_program_and_its_gate_are_gone_1522():
+    """issue 1522: the Windows FAST program and its step-(0f) stats-ABI gate are unreachable since issue
+    1505 (the pinned release ships the full bundle only), so they are removed, not kept as dead code;
+    the builder refuses a fast MODE by name (rc 2) and prints no program."""
+    for f in (LIB, FLEET, SCRIPTS / "lib" / "genlock-plugin-deploy.sh"):
+        text = f.read_text()
+        for gone in ("genlock_fast_abi_verdict", "genlock_fast_abi_gate_ps", "PSFAST", "FAST DEPLOY REFUSED"):
+            assert gone not in text, (f, gone)
+    r = _bash('. "$1"; rc=0; build_windows_deploy_program stream-snv fast "C:\\s" "C:\\o" 0 "C:\\b" 3 a b 0 4:1 || rc=$?; '
+              'echo "rc=$rc"', FLEET)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "rc=2\n", r.stdout
+    assert "mode 'fast' refused" in r.stderr
 
 
 @pytest.mark.parametrize("box", BOXES)
 def test_the_full_program_records_the_abi_next_to_the_build_sha_1302(box):
-    p = _program(box, "full", "4:1")
+    p = _program(box, "4:1")
     assert "(0f) issue 1302" not in p and "exit 13" not in p
     sha = p.index("Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_BUILD_SHA.txt')")
     abi = p.index(WRITE_ABI_41)
@@ -396,46 +230,39 @@ def test_the_full_program_records_the_abi_next_to_the_build_sha_1302(box):
 @pytest.mark.parametrize("box", BOXES)
 @pytest.mark.parametrize("abi", ["", "4", "4:", ":1", "4:x", "4:1:2", "04:1"])
 def test_the_full_program_removes_the_marker_when_the_abi_is_unknown_1302(box, abi):
-    """Only a complete pair is recorded: a marker that names one struct would let a fast deploy
-    through on a frontend whose other struct the planner never read."""
-    p = _program(box, "full", abi)
+    """Only a complete pair is recorded: a marker never names a struct the planner did not read."""
+    p = _program(box, abi)
     # the LAST removal: the one after the markers (a clear before the copy may come earlier)
     rm = p.rindex("Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')")
     assert p.index("Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_BUILD_SHA.txt')") < rm < p.index("# (6) sha256 verify")
     assert "Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" not in p
-    assert "a fast deploy will refuse until the next full-bundle deploy" in p
+    assert "removed until a deploy records a known pair" in p
 
 
-@pytest.mark.parametrize("mode", ["fast", "full"])
-@pytest.mark.parametrize("abi,stats,out", [
-    ("4'; Write-Host INJECTED; '", "", ""),
-    ("4:1'; Write-Host INJECTED; '", "4", ""),
-    ("4'; Write-Host INJECTED; ':1", "", "1"),
+@pytest.mark.parametrize("abi", [
+    "4'; Write-Host INJECTED; '",
+    "4:1'; Write-Host INJECTED; '",
+    "4'; Write-Host INJECTED; ':1",
     # a ':' inside the payload moves the split, never past the validation
-    ("4'; Write-Host C:\\INJECTED; '", "", ""),
+    "4'; Write-Host C:\\INJECTED; '",
 ])
-def test_an_injected_abi_never_reaches_the_program_1302(mode, abi, stats, out):
-    p = _program("stream-snv", mode, abi)
+def test_an_injected_abi_never_reaches_the_program_1302(abi):
+    p = _program("stream-snv", abi)
     assert "INJECTED" not in p
-    if mode == "fast":
-        assert f"\n$abiNew    = '{stats}'\n" in p
-        assert f"\n$abiNewOut = '{out}'\n" in p
-    else:
-        assert "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" in p
+    assert "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" in p
 
 
 def test_every_program_parses_and_uses_no_powershell_7_only_syntax_1302(tmp_path):
     files = []
     for box in BOXES:
-        for mode in ("fast", "full"):
-            for abi in ("4:1", ""):
-                f = tmp_path / f"{box}-{mode}-{abi.replace(':', '_') or 'unknown'}.ps1"
-                f.write_text(_program(box, mode, abi))
-                files.append(str(f))
-    for fn, mode, abi in (("genlock_fast_abi_gate_ps", "fast", "4:1"), ("genlock_stats_abi_marker_ps", "full", "4:1"),
-                          ("genlock_stats_abi_marker_ps", "full", ""), ("genlock_stats_abi_marker_ps", "fast", "4:1")):
-        f = tmp_path / f"{fn}-{len(files)}.ps1"
-        f.write_text(_lib(f'{fn} "$2" "$3"', mode, abi).stdout)
+        for abi in ("4:1", ""):
+            f = tmp_path / f"{box}-{abi.replace(':', '_') or 'unknown'}.ps1"
+            f.write_text(_program(box, abi))
+            files.append(str(f))
+    for call, args in (('genlock_stats_abi_marker_ps "$2"', ("4:1",)), ('genlock_stats_abi_marker_ps "$2"', ("",)),
+                       ("genlock_stats_abi_clear_ps", ())):
+        f = tmp_path / f"printer-{len(files)}.ps1"
+        f.write_text(_lib(call, *args).stdout)
         files.append(str(f))
     scan = tmp_path / "scan.ps1"
     scan.write_text(
@@ -457,83 +284,42 @@ def test_every_program_parses_and_uses_no_powershell_7_only_syntax_1302(tmp_path
     assert f"checked {len(files)} files, 0 problem(s)" in r.stdout
 
 
-@pytest.mark.parametrize("marker,want", [
-    (None, "frontend stats ABI missing (no GENLOCK_STATS_ABI.txt), new obs.dll v4; "
-           "frontend output stats ABI missing (no GENLOCK_STATS_ABI.txt), new obs.dll v1"),
-    (b"3\r\noutput_stats=1\r\n", "frontend stats ABI v3, new obs.dll v4"),
-    (b"4\r\noutput_stats=2\r\n", "frontend output stats ABI v2, new obs.dll v1"),
-    # the marker of a full deploy made before the output-stats line existed
-    (b"4\r\n", "frontend output stats ABI missing (no output_stats line in GENLOCK_STATS_ABI.txt), new obs.dll v1"),
-])
-def test_the_whole_fast_program_refuses_and_changes_nothing_1302(tmp_path, marker, want):
-    """The emitted FAST program, run whole in pwsh against a box without the right marker: exit 13 at
-    step (0f), before the obs-websocket read; the install, the stage and the backup root unchanged."""
-    stage = tmp_path / "stage"
-    stage.mkdir()
-    (stage / "obs.dll").write_bytes(b"NEW")
-    obs = tmp_path / "obs"
-    (obs / "bin" / "64bit").mkdir(parents=True)
-    (obs / "bin" / "64bit" / "obs.dll").write_bytes(b"OLD")
-    (obs / "GENLOCK_BUILD_SHA.txt").write_text("old\n")
-    if marker is not None:
-        (obs / "GENLOCK_STATS_ABI.txt").write_bytes(marker)
-    backup = tmp_path / "backup"
-    before = sorted((p.relative_to(tmp_path), p.read_bytes() if p.is_file() else None) for p in tmp_path.rglob("*"))
-    prog = tmp_path / "deploy.ps1"
-    prog.write_text(_program("stream-snv", "fast", "4:1", stage=str(stage), obs_dir=str(obs), backup=str(backup)))
-    r = subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", str(prog)],
-                       capture_output=True, text=True, timeout=180)
-    assert r.returncode == 13, r.stdout + r.stderr
-    assert f"FAST DEPLOY REFUSED: {want}{REQUIRED}. Nothing on this box was changed." in r.stdout
-    assert "issue 1367 clean close" not in r.stdout + r.stderr
-    after = sorted((p.relative_to(tmp_path), p.read_bytes() if p.is_file() else None)
-                   for p in tmp_path.rglob("*") if p != prog)
-    assert after == before
-    assert not backup.exists()
-
-
-@pytest.mark.parametrize("new,refused", [("4:1", None), ("4:2", "frontend output stats ABI v1, new obs.dll v2"),
-                                         ("5:1", "frontend stats ABI v4, new obs.dll v5")])
-def test_the_marker_the_full_program_writes_passes_the_fast_gate_1302(tmp_path, new, refused):
+@pytest.mark.parametrize("pair", ["4:1", "12:3"])
+def test_the_marker_the_full_program_writes_reads_back_as_its_pair_1302(tmp_path, pair):
     """Writer and reader agree: the FULL program's step (5b), run in pwsh with the program's own
-    Write-MarkerAtomic, writes a marker the FAST step (0f) accepts for the same pair and refuses,
-    naming the struct, for another."""
+    Write-MarkerAtomic, writes a marker the bash reader (genlock_stats_abi_pair_from_marker) reads back
+    as the same pair."""
     box = tmp_path / "obs"
     box.mkdir()
-    full = _program("stream-snv", "full", "4:1")
+    full = _program("stream-snv", pair)
     writer = full[full.index("function Write-MarkerAtomic("):full.index("# (6) sha256 verify")]
-    gate = _lib('genlock_fast_abi_gate_ps fast "$2"', new)
-    assert gate.returncode == 0, gate.stderr
-    script = tmp_path / "roundtrip.ps1"
+    script = tmp_path / "writer.ps1"
     script.write_text("$ErrorActionPreference = 'Stop'\n"
                       f"$obsDir = '{box}'\n"
                       # the writer block also writes the other markers; they are harmless here
-                      + writer.replace("(Get-Date -Format o)", "'2026-10-07T00:00:00'")
-                      + "\n" + gate.stdout + "\nWrite-Host 'HARNESS PAST THE GATE'\nexit 0\n")
+                      + writer.replace("(Get-Date -Format o)", "'2026-10-07T00:00:00'") + "\nexit 0\n")
     r = subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", str(script)],
                        capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    stats, out = pair.split(":")
     # Set-Content ends each line in the platform newline: CRLF on the box, LF under pwsh on Linux
-    assert (box / "GENLOCK_STATS_ABI.txt").read_bytes().replace(b"\r\n", b"\n") == b"4\noutput_stats=1\n"
-    if refused is None:
-        assert r.returncode == 0, r.stdout + r.stderr
-        assert "HARNESS PAST THE GATE" in r.stdout
-    else:
-        assert r.returncode == 13, r.stdout + r.stderr
-        assert f"FAST DEPLOY REFUSED: {refused}{REQUIRED}." in r.stdout
+    assert (box / "GENLOCK_STATS_ABI.txt").read_bytes().replace(b"\r\n", b"\n") == f"{stats}\noutput_stats={out}\n".encode()
+    back = _lib('genlock_stats_abi_pair_from_marker < "$2"', box / "GENLOCK_STATS_ABI.txt")
+    assert back.returncode == 0, back.stderr
+    assert back.stdout == pair + "\n"
 
 
 @pytest.mark.parametrize("which", ["MARKERS", "SETUP_IMAG"])
-def test_the_marker_the_linux_writer_writes_passes_the_verdict_1302(tmp_path, which):
-    """The Linux leg's genlock_write_markers writes the marker the reference verdict accepts for the
-    same pair (the verdict's text is what the (0f) gate transcribes)."""
+def test_the_marker_the_linux_writer_writes_reads_back_as_its_pair_1302(tmp_path, which):
+    """The Linux leg's genlock_write_markers writes the marker the reader reads back as the same pair."""
     d = tmp_path / "m"
     src = MARKERS if which == "MARKERS" else SETUP_IMAG
     r = _markers('genlock_write_markers "$2" g d "" 4:1', d, which=src)
     assert r.returncode == 0, r.stderr
     assert (d / "GENLOCK_STATS_ABI.txt").read_bytes() == b"4\noutput_stats=1\n"
-    v = _lib('rc=0; genlock_fast_abi_verdict 4:1 present "$(cat "$2")" || rc=$?; echo "rc=$rc"',
-             d / "GENLOCK_STATS_ABI.txt")
-    assert v.stdout == OK41 + "\nrc=0\n", v.stderr
+    v = _lib('genlock_stats_abi_pair_from_marker < "$2"', d / "GENLOCK_STATS_ABI.txt")
+    assert v.returncode == 0, v.stderr
+    assert v.stdout == "4:1\n"
 
 
 # --- the planner ---------------------------------------------------------------------------------
@@ -579,7 +365,7 @@ def test_plan_of_a_windows_box_without_the_pinned_zip_is_refused_never_a_vendor_
 def test_execute_mode_stages_the_abi_before_strih_lx_is_touched_1302():
     s = FLEET.read_text()
     main = s[s.index("main() {"):]
-    resolve = main.index('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")" 1)" || exit 3',
+    resolve = main.index('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." 1)"',
                          main.index("# --- execute mode"))
     # issue 1487: the Linux boxes take the pinned obs release, its pair from the release's own manifest
     prepare = main.index('strih_lx_prepare "$lx_sha"')
@@ -596,7 +382,10 @@ def test_plan_reads_without_network_and_names_the_boxes_1302():
     plan = main[:main.index("# --- execute mode")]
     # issue 1505: only the boxes that still take an anchor build read the vendor obs.h (a Windows box on the
     # pinned zip reads its pair from the pinned manifest)
-    assert '[ -z "$anchor_rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$anchor_rest")")" || exit 3' in plan
+    assert '[ -z "$anchor_rest" ] || stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/..")"' in plan
+    # issue 1522: the resolve has no refusal path any more, so no caller gates on its rc
+    assert "genlock_stats_abi_resolve" not in main.replace('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/..")"', "") \
+        .replace('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." 1)"', "")
     # the execute mode's own Windows-box switch reads the same predicate (one place names the boxes)
     assert 'want_win="$(fleet_boxes_swap_obs_dll "$boxes")"' in main
 
@@ -604,9 +393,9 @@ def test_plan_reads_without_network_and_names_the_boxes_1302():
 @pytest.mark.parametrize("boxes,warned", [("imag", True), ("strih-snv", False), ("strih-snv,imag", True),
                                           ("stream-snv", False), ("strih-snv,stream-snv", False)])
 def test_plan_fast_without_a_windows_box_never_refuses_an_unknown_abi_1302(tmp_path, boxes, warned):
-    """--fast swaps an obs.dll only on resolume-snv (stream-snv is Linux since issue 1462); a Linux-only run
-    deploys the full bundle. issue 1487: the setup-strih boxes take the pinned obs release, whose pair is its
-    manifest's, so a run of only those boxes reads no vendor obs.h at all."""
+    """A run without a Windows box never refuses an unknown pair (issue 1522: no run does). issue 1487: the
+    setup-strih boxes take the pinned obs release, whose pair is its manifest's, so a run of only those boxes
+    reads no vendor obs.h at all; imag's unreadable pair warns and removes the marker."""
     r = _plan(tmp_path, "fast", "deadbeefdeadbeef", boxes)
     assert r.returncode == 0, r.stdout + r.stderr
     assert ("WARNING: cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr) is warned
@@ -635,9 +424,11 @@ def stale_clone(tmp_path):
 
 def test_execute_mode_fetches_origin_once_before_giving_up_1302(stale_clone):
     clone, sha4 = stale_clone
-    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast 1 || rc=$?; echo "rc=$rc"', sha4, clone)
-    assert r.stdout == "rc=3\n", r.stderr
-    r = _lib('genlock_stats_abi_resolve "$2" "$3" fast 1 1', sha4, clone)
+    # plan mode (no fetch): unreadable -> "" + the warning, never a refusal (issue 1522)
+    r = _lib('rc=0; out="$(genlock_stats_abi_resolve "$2" "$3")" || rc=$?; echo "rc=$rc out=$out"', sha4, clone)
+    assert r.stdout == "rc=0 out=\n", r.stderr
+    assert "WARNING: cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr
+    r = _lib('genlock_stats_abi_resolve "$2" "$3" 1', sha4, clone)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "4:1\n"
     assert "fetching origin once" in r.stderr
@@ -646,22 +437,21 @@ def test_execute_mode_fetches_origin_once_before_giving_up_1302(stale_clone):
 def test_an_abbreviated_sha_is_never_fetched_1302(stale_clone):
     """A fetch needs the full object id; a short SHA (every test SHA) never reaches the network."""
     clone, sha4 = stale_clone
-    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast 1 1 || rc=$?; echo "rc=$rc"', sha4[:12], clone)
-    assert r.stdout == "rc=3\n", r.stderr
+    r = _lib('rc=0; out="$(genlock_stats_abi_resolve "$2" "$3" 1)" || rc=$?; echo "rc=$rc out=$out"', sha4[:12], clone)
+    assert r.stdout == "rc=0 out=\n", r.stderr
     assert "fetching origin once" not in r.stderr
 
 
 @pytest.mark.parametrize("box", BOXES)
 def test_a_full_deploy_clears_the_marker_before_the_copy_1302(box):
     """A copy that fails half way must not leave a new frontend under the old marker."""
-    p = _program(box, "full", "4:1")
+    p = _program(box, "4:1")
     clear = p.index("# (3c) issue 1302")
     assert p.index("# (3) Back up") < clear < p.index("# (4) FULL bundle")
     seg = p[clear:p.index("# (4) FULL bundle")]
     assert "$abiStale = Join-Path $obsDir 'GENLOCK_STATS_ABI.txt'" in seg
     assert "if (Test-Path -LiteralPath $abiStale) { Remove-Item -LiteralPath $abiStale -Force -ErrorAction Stop }" in seg
     assert p.index("# (4) FULL bundle") < p.index(WRITE_ABI_41)
-    assert "(3c) issue 1302" not in _program(box, "fast", "4:1")
 
 
 @pytest.mark.parametrize("state,rc", [("file", 0), ("missing", 0), ("blocked", 1)])
@@ -673,7 +463,7 @@ def test_the_clear_before_the_copy_is_fail_closed_1302(tmp_path, state, rc):
     marker = box / "GENLOCK_STATS_ABI.txt"
     if state in ("file", "blocked"):
         marker.write_text("3\r\n")
-    block = _lib("genlock_stats_abi_clear_ps full").stdout
+    block = _lib("genlock_stats_abi_clear_ps").stdout
     assert "(3c) issue 1302" in block
     script = tmp_path / "clear.ps1"
     script.write_text("$ErrorActionPreference = 'Stop'\n"
@@ -706,7 +496,7 @@ def test_the_clear_before_the_copy_is_fail_closed_1302(tmp_path, state, rc):
 @pytest.mark.parametrize("boxes,want", [("stream-snv", "0"), ("resolume-snv", "1"), ("imag,resolume-snv", "1"),
                                         ("strih-snv,stream-snv", "0"), ("strih-snv", "0"), ("imag", "0"),
                                         ("strih-snv,imag", "0"), ("", "0"), ("strih", "0")])
-def test_the_per_box_table_names_the_boxes_a_fast_deploy_swaps_obs_dll_on_1302(boxes, want):
+def test_the_per_box_table_names_the_windows_boxes_1302(boxes, want):
     r = _bash('. "$1"; fleet_boxes_swap_obs_dll "$2"', SCRIPTS / "lib" / "genlock-fleet-boxes.sh", boxes)
     assert r.returncode == 0, r.stderr
     assert r.stdout == want + "\n"
@@ -715,8 +505,8 @@ def test_the_per_box_table_names_the_boxes_a_fast_deploy_swaps_obs_dll_on_1302(b
 def test_a_failed_fetch_names_why_1302(stale_clone):
     clone, _ = stale_clone
     absent = "b" * 40  # a well-formed commit id the origin does not have
-    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast 1 1 || rc=$?; echo "rc=$rc"', absent, clone)
-    assert r.stdout == "rc=3\n", r.stderr
+    r = _lib('rc=0; out="$(genlock_stats_abi_resolve "$2" "$3" 1)" || rc=$?; echo "rc=$rc out=$out"', absent, clone)
+    assert r.stdout == "rc=0 out=\n", r.stderr
     assert f"git fetch origin {absent} failed" in r.stderr
 
 
@@ -739,29 +529,20 @@ def output_repo(tmp_path_factory):
     return repo, shas
 
 
-@pytest.mark.parametrize("tag,mode,swaps,rc,out", [
-    ("out1", "fast", "1", 0, "4:1"), ("out2", "fast", "1", 0, "4:2"), ("none", "fast", "1", 3, ""),
-    ("out2", "full", "1", 0, "4:2"), ("out2", "fast", "0", 0, "4:2"),
-    ("none", "full", "1", 0, ""), ("none", "fast", "0", 0, ""),
-])
-def test_the_planner_reads_the_output_stats_version_too_1302(output_repo, tag, mode, swaps, rc, out):
-    """The gate now compares OBS_GENLOCK_OUTPUT_STATS_VERSION on the box, so the planner carries it in
-    the pair and never refuses a version by its value (the old plan-time stopgap, retired). Only an
-    UNREADABLE define refuses a fast obs.dll swap (it cannot be compared); any other run removes the
-    marker, naming the define it could not read."""
+@pytest.mark.parametrize("tag,out", [("out1", "4:1"), ("out2", "4:2"), ("none", "")])
+def test_the_planner_reads_the_output_stats_version_too_1302(output_repo, tag, out):
+    """The planner carries OBS_GENLOCK_OUTPUT_STATS_VERSION in the pair and never refuses a version by
+    its value (the old plan-time stopgap, retired). An UNREADABLE define never refuses either (issue
+    1522: no deploy compares the pair any more): the marker is removed, naming the define."""
     repo, shas = output_repo
-    r = _lib('rc=0; out="$(genlock_stats_abi_resolve "$2" "$3" "$4" "$5")" || rc=$?; echo "rc=$rc out=$out"',
-             shas[tag], repo, mode, swaps)
+    r = _lib('rc=0; out="$(genlock_stats_abi_resolve "$2" "$3")" || rc=$?; echo "rc=$rc out=$out"',
+             shas[tag], repo)
     assert r.returncode == 0, r.stderr
-    assert r.stdout == f"rc={rc} out={out}\n", r.stderr
+    assert r.stdout == f"rc=0 out={out}\n", r.stderr
     if tag == "none":
         assert "cannot read OBS_GENLOCK_OUTPUT_STATS_VERSION" in r.stderr
         assert "cannot read OBS_GENLOCK_STATS_VERSION" not in r.stderr
-    assert "deploy --full" not in r.stderr or rc == 3
-    if rc == 3:
-        # review round 1: the commit is in the checkout (its stats version read fine), so a fetch
-        # cannot help -- the refusal says so instead of sending the operator to git fetch
-        assert "fetch the commit" not in r.stderr and "deploy --full" in r.stderr, r.stderr
+    assert "ERROR" not in r.stderr and "deploy --full" not in r.stderr
 
 
 def test_the_plan_time_output_stats_stopgap_is_retired_1302():
@@ -782,7 +563,7 @@ def _write_markers_text(path):
 @pytest.mark.parametrize("path", [LIB, MARKERS, SETUP_IMAG], ids=["stats-abi", "markers", "setup-imag-inline"])
 def test_every_bash_version_pattern_names_ascii_digits_explicitly_1302(path):
     """Review round 1: a bash bracket RANGE ([0-9], [1-9]) follows the locale's collation, and under
-    en_US.UTF-8 it also matches non-ASCII digits the PowerShell gate refuses. Every bash `=~`
+    en_US.UTF-8 it also matches non-ASCII digits. Every bash `=~`
     pattern in the stats-ABI code spells its sets out instead -- no `X-Y` range inside any bracket
     (review round 2: the narrower first lint missed the `[A-Z_]` define-name check)."""
     for n, line in enumerate(_write_markers_text(path).splitlines(), 1):
@@ -801,7 +582,7 @@ def test_the_marker_read_back_never_aborts_its_caller_1302(tmp_path):
     assert (tmp_path / "out").read_text() == ""
 
 
-# --- the gate's premise: every stats struct change bumps a version the gate reads -----------------
+# --- the marker's premise: every stats struct change bumps the version the marker records ----------
 
 def _struct_body(name):
     """The body of `struct <name> {...};` in obs.h, comments stripped, whitespace collapsed."""
@@ -820,9 +601,9 @@ def _define(name):
 
 
 # The struct bodies the pinned versions describe (the first 16 hex digits of the sha256 of the body,
-# comments stripped, whitespace collapsed). A field change without a version bump would be invisible
-# to the fast-deploy gate (it compares versions), so a change here must bump the version AND update
-# the pin in the same commit.
+# comments stripped, whitespace collapsed). The marker records versions, so a field change without a
+# version bump would leave a box's marker naming the wrong layout: a change here must bump the version
+# AND update the pin in the same commit.
 STATS_STRUCT_PINS = {"4": "9d1269d58919eb2d"}
 OUTPUT_STATS_STRUCT_PINS = {"1": "ba0f22422814c0f1"}
 
@@ -833,22 +614,22 @@ def test_a_stats_struct_change_bumps_its_version_1302():
     digest = hashlib.sha256(_struct_body("obs_genlock_stats").encode()).hexdigest()[:16]
     assert STATS_STRUCT_PINS.get(version) == digest, (
         f"struct obs_genlock_stats changed (sha256 {digest}) at OBS_GENLOCK_STATS_VERSION {version}: a "
-        "struct change must bump OBS_GENLOCK_STATS_VERSION (the fast-deploy gate compares versions, issue "
+        "struct change must bump OBS_GENLOCK_STATS_VERSION (GENLOCK_STATS_ABI.txt records versions, issue "
         "1302), then pin the new body here")
 
 
 def test_an_output_stats_struct_change_bumps_its_version_1302():
     """The frontend keeps struct obs_genlock_output_stats on its stack too, filled by obs.dll with no
-    size. The fast-deploy gate records and compares OBS_GENLOCK_OUTPUT_STATS_VERSION (ROZHODNUTÉ
-    6030159870 item 1), so any version may ship -- but a field change without a bump would be
-    invisible to it, exactly like the source stats struct above."""
+    size. The marker records OBS_GENLOCK_OUTPUT_STATS_VERSION (ROZHODNUTÉ 6030159870 item 1), so a
+    field change without a bump would leave it naming the wrong layout, exactly like the source stats
+    struct above."""
     import hashlib
     version = _define("OBS_GENLOCK_OUTPUT_STATS_VERSION")
     digest = hashlib.sha256(_struct_body("obs_genlock_output_stats").encode()).hexdigest()[:16]
     assert OUTPUT_STATS_STRUCT_PINS.get(version) == digest, (
         f"struct obs_genlock_output_stats changed (sha256 {digest}) at OBS_GENLOCK_OUTPUT_STATS_VERSION "
-        f"{version}: a struct change must bump OBS_GENLOCK_OUTPUT_STATS_VERSION (the fast-deploy gate "
-        "compares versions, issue 1302), then pin the new body here")
+        f"{version}: a struct change must bump OBS_GENLOCK_OUTPUT_STATS_VERSION (GENLOCK_STATS_ABI.txt "
+        "records versions, issue 1302), then pin the new body here")
 
 
 # --- the Linux legs --------------------------------------------------------------------------------
@@ -873,7 +654,7 @@ def test_write_markers_records_or_removes_the_abi_1302(tmp_path, which):
         assert r.returncode == 0, r.stderr
         assert not (d / "GENLOCK_STATS_ABI.txt").exists(), args
     # anything but a complete pair (incl. a bare stats version, the value before this change) is
-    # removed with a note: a marker naming one struct would pass a fast deploy unchecked on the other
+    # removed with a note: a marker never names one struct alone
     for bad in ("4", "4x", "4:", ":1", "4:01", "4:1:2", "4:1 "):
         (d / "GENLOCK_STATS_ABI.txt").write_text("3\noutput_stats=1\n")
         r = _markers('genlock_write_markers "$2" g d "" "$3"', d, bad, which=which)
@@ -919,7 +700,14 @@ def test_the_staged_bundle_file_1302(tmp_path):
     (b"4\noutput_stats=1\n", "4:1"), (b"4\r\noutput_stats=1\r\n", "4:1"), (b"12\noutput_stats=3", "12:3"),
     (b"4\n", ""), (b"", ""), (b"4\noutput_stats=1\nx\n", ""), (b"4\noutput_stats=x\n", ""),
     (b"x\noutput_stats=1\n", ""), (None, ""),
-    # review round 1: a NUL byte or a non-ASCII digit is never a version (the gate refuses both)
+    # the shapes the retired (0f) gate read (issue 1522 kept them on the reader): whitespace inside a
+    # line and blank lines are ignored, a lone CR is no line break, every malformed line is unknown
+    (b" 4 \r\n output_stats = 1 \r\n\r\n", "4:1"), (b"4\noutput_stats=1\n\x0b\x0c\n", "4:1"),
+    (b"4 4\r\noutput_stats=1\r\n", "44:1"), (b"4\routput_stats=1", ""), (b"04\noutput_stats=1", ""),
+    (b"4\noutput_stats=01", ""), (b"4\nOUTPUT_STATS=1", ""), (b"4\n1", ""), (b"4\noutput_stats=", ""),
+    (b"output_stats=1\n4", ""), (b"4\noutput_stats=1\noutput_stats=1", ""), (b"abc\r\noutput_stats=1", ""),
+    (b"\xef\xbb\xbf4\r\noutput_stats=1\r\n", ""), ("4\noutput_stats=\uff11\n".encode(), ""),
+    # review round 1: a NUL byte or a non-ASCII digit is never a version
     (b"4\x00\noutput_stats=1\n", ""), (b"4\noutput_stats=1\x00\n", ""),
     ("٤\noutput_stats=1\n".encode(), ""), ("4\noutput_stats=¹\n".encode(), ""),
 ])

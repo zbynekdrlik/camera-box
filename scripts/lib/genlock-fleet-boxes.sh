@@ -35,7 +35,7 @@ fleet_box_mcp() {
 }
 # fleet_boxes_swap_obs_dll CSV -> 1 when the list holds a Windows box (one with a win-* MCP above AND a
 # windows-genlock fleet row: the boxes a --fast deploy swapped obs.dll on until issue 1505 refused
-# --fast for Windows boxes), else 0. issue 1302: the stats-ABI gate's scope. issue 1462: stream-snv runs the Linux stream role (its fleet row is
+# --fast for Windows boxes), else 0: the boxes fleet_win_split routes to the pinned zip. issue 1462: stream-snv runs the Linux stream role (its fleet row is
 # linux-genlock) and takes the setup-strih arm, so it never counts, whatever the MCP table still names.
 fleet_boxes_swap_obs_dll() {
   local b IFS=','

@@ -13,111 +13,90 @@ paths:
 **Line budget (issue 1372):** `tests/deploy_genlock_fleet.rs` pins `deploy-genlock-fleet.sh` under
 1000 lines. The FULL-mode plugin PowerShell blocks (distroav to its ProgramData load path, the paced
 obs-vban and, since issue 1425, vlc-video backups + byte-verifies) live in `scripts/lib/genlock-plugin-deploy.sh` as pure printers
-(`genlock_plugin_backup_ps` / `genlock_plugin_deploy_ps MODE`); add a new plugin's block there,
+(`genlock_plugin_backup_ps` / `genlock_plugin_deploy_ps`); add a new plugin's block there,
 never inline in the main script. The stats-ABI blocks live in `scripts/lib/genlock-stats-abi.sh`
 for the same reason (issue 1302), and since issue 1426 the box list itself (`fleet_normalize_boxes`,
 `fleet_deploy_order`) lives in `scripts/lib/genlock-fleet-boxes.sh` and the per-box Linux apply loop
 (`strih_lx_apply_all`) in `scripts/lib/strih-snv-deploy.sh`, and since issue 1505 the Windows
-pinned-zip routing in `scripts/lib/genlock-windows-pin.sh`; the script sits at 957 lines.
+pinned-zip routing in `scripts/lib/genlock-windows-pin.sh`; the script sits at 946 lines (issue 1522).
 
-## A FAST deploy refuses an obs.dll with another stats ABI (issue 1302, design 6028838843, ROZHODNUTÉ 6030159870)
+## Every full deploy records the frontend's stats ABI (issue 1302, design 6028838843, ROZHODNUTÉ 6030159870)
 
-`--fast` swaps obs.dll alone and keeps the frontend (obs64.exe) of the LAST full-bundle deploy. The
-frontend allocates `struct obs_genlock_stats` AND `struct obs_genlock_output_stats` on its stack and
-passes no size to `obs_source_get_genlock_stats` / `obs_output_get_genlock_stats`, so an obs.dll that
-fills a bigger struct writes past the frontend's copy and OBS crashes. Live 7.10.2026: stream ran a
-stats-v3 build (`a33d91a8e`, its last deploy a FAST one: the box's `BUNDLE_MANIFEST.json` 08:36, its
-SHA marker 14:58) while dev carried v4.
+The frontend (obs64.exe / `bin/obs`) allocates `struct obs_genlock_stats` AND `struct
+obs_genlock_output_stats` on its stack and passes no size to `obs_source_get_genlock_stats` /
+`obs_output_get_genlock_stats`, so a library that fills a bigger struct than its frontend knows writes
+past the frontend's copy and OBS crashes. Live 7.10.2026: stream ran a stats-v3 build after a FAST
+(obs.dll-only) deploy while dev carried v4.
+
+**There is no FAST deploy any more (issues 1505 + 1522).** The pinned obs release ships the full
+bundle only, so `--fast` is refused for a Windows box (exit 2, `fleet_win_pin_mode_ok`), and issue 1522
+removed what that made unreachable: the obs.dll-only copy step, the step-(0f) stats-ABI gate
+(`genlock_fast_abi_gate_ps`) with its bash reference decision (`genlock_fast_abi_verdict`), the FAST
+branches of the plugin and stats printers, and the rc-3 refusal of `genlock_stats_abi_resolve`.
+`build_windows_deploy_program` still takes MODE (every caller passes it) and REFUSES anything but
+`full` by name with rc 2 and no program. Every deploy now ships the frontend with the library, so the
+pair is RECORDED next to the build, never compared at deploy time. The `--fast` flag remains (the
+Linux boxes and imag deploy their full bundle whatever it says).
 
 - **The ABI is a PAIR: both struct versions.** The planner carries it as ONE value
-  `<stats>:<output_stats>` (e.g. `4:1`; `genlock_stats_abi_part` / `genlock_stats_abi_is_pair`), so no
-  pass-through call site in `deploy-genlock-fleet.sh` changed (line budget). The box marker
+  `<stats>:<output_stats>` (e.g. `4:1`; `genlock_stats_abi_is_pair`). The box marker
   `GENLOCK_STATS_ABI.txt` holds it as two lines: the stats version, then `output_stats=<N>`.
 - **Every full-bundle deploy the planner drives records the frontend's pair** in
   `GENLOCK_STATS_ABI.txt` next to `GENLOCK_BUILD_SHA.txt`:
   - The Windows program removes it at step (3c), right before the copy (`genlock_stats_abi_clear_ps`;
     fail-closed, `-ErrorAction Stop`, so a marker it cannot remove stops the program before the copy),
-    so a copy that fails half way reads as "missing".
-  - It writes the new pair at step (5b) (`genlock_stats_abi_marker_ps`, after the other markers, through
-    `Write-MarkerAtomic` with a two-element array: one CRLF line each).
+    so a copy that fails half way never names the new frontend's pair.
+  - It writes the new pair at step (5b) (`genlock_stats_abi_marker_ps PAIR`, after the other markers,
+    through `Write-MarkerAtomic` with a two-element array: one CRLF line each). A Windows box takes the
+    pair from the pinned release's manifest (`fleet_win_pin_stats_abi`, only when its release block
+    names the pin).
   - The Linux legs write it through `genlock_write_markers`' 5th argument, the pair. The imag program
     passes it. strih-snv gets it as `bundle/GENLOCK_STATS_ABI.txt` in the marker format, staged by the
-    planner after `strih_lx_prepare` (`genlock_stats_abi_stage`). `setup-strih.sh` reads it back from
-    the STAGE with `genlock_stats_abi_pair_from_marker` (it sources `genlock-stats-abi.sh`), never from
-    `/opt/obs-genlock`, which still holds the previous deploy's marker.
+    planner after `strih_lx_prepare` (`genlock_stats_abi_stage`, the pinned manifest's pair).
+    `setup-strih.sh` reads it back from the STAGE with `genlock_stats_abi_pair_from_marker` (it sources
+    `genlock-stats-abi.sh`), never from `/opt/obs-genlock`, which still holds the previous deploy's marker.
   - `setup-imag.sh`'s inline copy of `genlock_write_markers` does the same, behaviour for behaviour
     (pinned by the pytest); its own provisioning install cannot name the pair, so it REMOVES the marker.
   - Anything but a complete pair (a bare stats version too) removes the marker, with a note: a marker
-    naming one struct would let a fast deploy through unchecked on the other.
-- **The versions come from the deployed build's own obs.h.** `genlock_stats_abi_resolve` reads
-  `vendor/obs-studio/libobs/obs.h` AT the deployed commit from the checkout's object store (`show
+    never names one struct alone.
+- **imag's pair comes from its anchor build's own obs.h.** `genlock_stats_abi_resolve SHA REPO [FETCH]`
+  reads `vendor/obs-studio/libobs/obs.h` AT the deployed commit from the checkout's object store (`show
   <sha>:<path>`, plan AND execute mode, before any box is touched) and takes the ONE
-  `#define OBS_GENLOCK_STATS_VERSION` and the ONE `#define OBS_GENLOCK_OUTPUT_STATS_VERSION`.
+  `#define OBS_GENLOCK_STATS_VERSION` and the ONE `#define OBS_GENLOCK_OUTPUT_STATS_VERSION`. It is
+  called only for `anchor_rest` (imag: every other OBS box is on the pinned release).
   - Execute mode first fetches that ONE commit from origin when the stats define is unreadable (the
     commit is not in the checkout). Full 40-hex SHA only, `GIT_TERMINAL_PROMPT=0`, 120 s bound, git's
     own message kept on stderr when it fails. Plan mode never fetches, so a test's short SHA never
     reaches the network.
-  - Still unreadable (a missing / duplicate / malformed define, named in the message): a `--fast` that
-    swaps an obs.dll is REFUSED (exit 3: "fetch the commit or deploy --full" when the commit is not
-    in the checkout, "deploy --full" when its stats version read fine and only the output-stats
-    define is missing, since a fetch cannot help there). That is a box with a win-* MCP in the list:
-    `fleet_boxes_swap_obs_dll` in the per-box table, the one predicate main's own Windows switch reads
-    too.
-  - Any other run warns and the full-bundle programs REMOVE the box's marker, so a later fast deploy
-    refuses until a full deploy records a known pair.
-  - A readable version is carried as it is, whatever its value: the plan-time stopgap that refused a
-    Windows `--fast` unless the output-stats version was 1 (`GENLOCK_STATS_ABI_OUTPUT_COVERED`) is
-    retired, because the box gate compares that version now.
-- **The FAST program gates at step (0f)**, right after the `(0)` path preflight and BEFORE the
-  issue-1367 obs-websocket read, the power plan, AutoHotkey64, the keep-alive tasks, the stop, the
-  backup and the copy.
-  - Each struct that is not proven equal adds one part, the stats struct first, joined with `; `:
-    `FAST DEPLOY REFUSED: frontend stats ABI vN, new obs.dll vM; frontend output stats ABI vK, new
-    obs.dll vL: a full-bundle deploy is required. Nothing on this box was changed.` Then exit 13
-    (`Write-Host`, never `Write-Error`, so the number survives `$ErrorActionPreference = 'Stop'`).
-  - The box side of a part reads `missing (no GENLOCK_STATS_ABI.txt)`, `unreadable (line 1 of
-    GENLOCK_STATS_ABI.txt is not a version)`, `missing (no output_stats line in GENLOCK_STATS_ABI.txt)`
-    (a one-line marker written before ROZHODNUTÉ 6030159870), `unreadable (line 2 of
-    GENLOCK_STATS_ABI.txt is not output_stats=<version>)` or `unreadable (GENLOCK_STATS_ABI.txt has
-    more than two lines)` (fail-closed: a later format never passes an older gate).
-  - A FAST deploy leaves the marker as it is: it names the frontend, which it keeps.
-- **A reference decision and its transcription.** `genlock_fast_abi_verdict PAIR present|missing
-  TEXT` is the reference rule (no production path calls it); the (0f) PowerShell block, which is what
-  decides on the box, transcribes it. The marker is read as raw bytes, ASCII-decoded, split on LF,
-  every ASCII whitespace inside a line removed, blank lines skipped, `-cmatch '^[1-9][0-9]{0,8}$'` on
-  line 1 and `-cmatch '^output_stats=([1-9][0-9]{0,8})$'` on line 2 (case-sensitive like the bash
-  `=~`), compared as strings. The bash side is locale-independent too (review round 1):
-  `_genlock_stats_abi_marker_fields` strips the explicit ASCII set ` \t\r\v\f`, and every bash
-  `=~` pattern spells its sets out (`[123456789][0123456789]{0,8}`; the hex SHA set and the
-  define-name letters likewise). A bracket RANGE such as `[1-9]` follows the locale's collation, and
-  under en_US.UTF-8 it also matches Arabic-Indic, superscript and fullwidth digits the gate refuses;
-  a pytest refuses any `X-Y` range inside a bracket on a bash `=~` line of the stats-ABI code.
-  `genlock_stats_abi_pair_from_marker` reads a NUL byte as `?` (bash `read` would drop it silently;
-  the gate reads it as a non-digit), and an unreadable stdin reads as no marker, never an abort of
-  its caller. A pair that reaches the
-  builders is validated part by part first, so a quote in an operator `--sha` never reaches either
-  program.
-- **A struct change must bump its version** (the rule in obs.h's comment). The gate compares
-  versions, so the pytest pins each struct's body (comments stripped, the first 16 hex digits of its
-  sha256) to its version: a field change without a bump fails CI.
+  - Still unreadable (a missing / duplicate / malformed define, named in the message): a WARNING, the
+    pair is "" and the imag program REMOVES the box's marker. It never refuses a run (always rc 0).
+- **The marker reader is locale-independent** (review round 1 of issue 1302).
+  `genlock_stats_abi_pair_from_marker` / `_genlock_stats_abi_marker_fields` split on LF, strip the
+  explicit ASCII set ` \t\r\v\f` inside a line, skip blank lines, require line 1 a version and line 2
+  `output_stats=<version>` (case-sensitive), no third line, and read a NUL byte as `?` (bash `read`
+  would drop it silently); an unreadable stdin reads as no marker, never an abort of its caller. Every
+  bash `=~` pattern spells its sets out (`[123456789][0123456789]{0,8}`; the hex SHA set and the
+  define-name letters likewise): a bracket RANGE such as `[1-9]` follows the locale's collation, and
+  under en_US.UTF-8 it also matches Arabic-Indic, superscript and fullwidth digits; a pytest refuses
+  any `X-Y` range inside a bracket on a bash `=~` line of the stats-ABI code. A pair that reaches the
+  builders is validated first, so a quote in an operator `--sha` never reaches either program.
+- **A struct change must bump its version** (the rule in obs.h's comment). The marker records versions,
+  so the pytest pins each struct's body (comments stripped, the first 16 hex digits of its sha256) to
+  its version: a field change without a bump fails CI.
 - **Tests:** `tests/python/test_genlock_stats_abi_1302.py`:
-  - the reader (the repo's obs.h, a throwaway two-commit repo whose working tree differs), the
-    verdict vectors (each struct alone, both, the one-line marker, malformed lines, partial pairs);
-  - the (0f) block RUN in pwsh on 31 marker/pair vectors (incl. non-ASCII digits and NUL bytes)
-    against the bash verdict, run in a UTF-8 locale (en_US.UTF-8 where the box has it), same result,
-    same text; and the (5b) writer run in pwsh feeding the (0f) gate;
-  - the emitted program order for stream + resolume, a pwsh parse + PS-7-only token scan of every
-    program, the whole FAST program run in pwsh against a box without the right marker (exit 13, no
-    file changed);
-  - the `--plan` CLI, the execute-mode order and the Linux legs (the writer, the staged file, the
-    read-back, the round trip to the install dir).
+  - the reader (the repo's obs.h, a throwaway two-commit repo whose working tree differs), the marker
+    reader over its vectors (whitespace, CRLF, a lone CR, malformed lines, non-ASCII digits, NUL bytes);
+  - the FULL program for stream + resolume: (3c) before the copy and RUN in pwsh against a read-only
+    directory (fail-closed), (5b) after the build-SHA marker or the removal for an unknown pair, the
+    (5b) writer run in pwsh and read back by the bash reader as the same pair, a pwsh parse + PS-7-only
+    token scan of every program; the fast program and the (0f) gate gone, a fast MODE refused rc 2;
+  - the `--plan` CLI (imag's pair from obs.h, an unreadable one warned + removed), the execute-mode
+    order and the Linux legs (the writer, the staged file, the read-back, the round trip to the
+    install dir).
 
   A harness that runs bash with a variable value passes it as an ARGUMENT (`"$1"`), never inside
   the script text: the first draft interpolated an injection vector and its own `rm -rf /` ran (GNU
   rm refused the root). Injection vectors print `INJECTED`, never a destructive command.
-- **Deploy note:** the FIRST `--fast` on every box is refused until one full-bundle deploy has
-  recorded the two-line marker. A box whose marker was written before this change (one line) refuses
-  as "missing output stats" until its next full deploy. That is intended.
 
 # One canonical genlock deploy path across the whole rig (#789 bod 4 + bod 5)
 
@@ -426,7 +405,7 @@ therefore `/XF distroav.dll` on the Program-Files obs-plugins robocopy — that 
 path-mapped `Copy-Item` of the staged bundle's `obs-plugins\64bit\distroav.dll` → the ProgramData
 load path, a `distroav.dll.pre-789` backup alongside `obs.dll.pre-789`, and a fail-closed sha256
 verify of the DEPLOYED ProgramData DLL against the manifest's distroav entry (mirrors the obs.dll
-verify). FAST is obs.dll-only → the block is a no-op there (no distroav in the fast bundle).
+verify). Every Windows deploy is a FULL one (issue 1522 removed the obs.dll-only FAST program).
 
 - **DLL-scoped on purpose.** The `distroav\data\` tree is NOT mirrored: the byte-parity gate hashes
   only the DLL, and DistroAV data is stable across genlock rebuilds at the pinned 6.2.1. The
@@ -438,8 +417,10 @@ verify). FAST is obs.dll-only → the block is a no-op there (no distroav in the
   `distroav_dll_sha256` → `drift-guard.sh --compare` matches it to the manifest's `obs-plugins/64bit/
   distroav.dll` BY BASENAME. So Option A makes the gathered ProgramData sha equal the manifest sha.
 - **Runtime ENABLE of the distroav compare is separate (issue 1100 / issue 1082 ENFORCE):** the gate
-  auto-sources the FAST obs.dll-only manifest, so distroav is labelled SKIPPED at runtime until a
-  distroav-bearing (FULL) manifest is auto-sourced — do NOT "fix" the FAST manifest to add distroav.
+  used to auto-source the FAST obs.dll-only manifest, so distroav read SKIPPED at runtime. Issue 1505
+  retired that Windows FAST/FULL manifest auto-source (an operator still passes
+  `VERSION_GATE_MANIFEST` / `VERSION_GATE_ALT_MANIFEST`); an obs.dll-only manifest given there still
+  reads distroav SKIPPED, by design.
 
 ## imag post-swap restart HANDS OFF to imag-obs.service — never a raw setsid/nohup launch (#789 residual)
 
@@ -510,11 +491,13 @@ running obs64 re-locks `bin\64bit`, and the robocopy dies on ERROR 32 sharing vi
 The top-level CLAUDE.md documents the `.find()`/`!contains()` anchor-collision class for
 `recording-e2e.sh` / `rig-mode.sh`. It applies IDENTICALLY to `build_windows_deploy_program`'s emitted
 PowerShell: `tests/deploy_genlock_fleet.rs` asserts both POSITIVE (`p.contains("robocopy")`) and
-NEGATIVE (`windows_fast_program_is_obs_dll_only`: fast stream `!p.contains("robocopy")`) anchors on the
-emitted program TEXT — including comments. Adding a NEW comment to a keep-alive/AHK/copy block that
-merely SPELLS a word an existing negative anchor forbids breaks that test even though the code is
-correct. Live: a `# (1b)` comment saying "mid-robocopy" put the literal `robocopy` into the (comment-
-carrying) fast-mode stream program and broke `!p.contains("robocopy")`. Before adding a comment near
+NEGATIVE (since issue 1522 `windows_program_refuses_fast_mode_and_carries_no_fast_gate_1522`'s
+`!full.contains(...)` list, e.g. `(0f)`, `obs.dll ONLY`) anchors on the emitted program TEXT —
+including comments. Adding a NEW comment to a keep-alive/AHK/copy block that merely SPELLS a word an
+existing negative anchor forbids breaks that test even though the code is correct. Live (issue 1140,
+when a FAST program still existed): a `# (1b)` comment saying "mid-robocopy" put the literal
+`robocopy` into the (comment-carrying) fast-mode stream program and broke its `!p.contains("robocopy")`
+anchor. Before adding a comment near
 any emitted block, grep the test file for `!p.contains(` / `!stream.contains(` and keep those words out
 of the comment (reworded to "during the byte copy"). New `# (1b)`/`# (8b)`-style step markers must also
 be UNIQUE in the emitted program (`grep -c` = 1) so an ordering `.find()` anchor can't latch the wrong one.
@@ -661,7 +644,7 @@ bytes for stream and resolume; design comment 6014590298):
   relaunch still needs the save-trigger checklist in `rig-state-inspection.md` (issue 1333).
 
 **Tests** (`tests/python/test_deploy_clean_close_win_1367.py`, CI's `pytest tests/python`): the
-emitted program for stream + resolume, FULL + FAST (order, the 45 s bound, the force only in the
+emitted program for stream + resolume, FULL only since issue 1522 (order, the 45 s bound, the force only in the
 named branch, the (1c) hook on stream only, the read-back, one shared fragment), a pwsh parse of
 every program, a token scan banning the syntax pwsh 7 accepts and Windows PowerShell 5.1 rejects
 (`&&` `||` `??` `?.` the ternary), and the fragment RUN in pwsh against a stdlib fake obs-websocket
