@@ -116,6 +116,6 @@ parity users, the av-sync dock twins), and the consumer side of an OBS log contr
   `drm_output_program_1152` and `jxs_strih_build_1387` stay (they guard `linux-genlock.yml`).
 - **Not yet in obs, so they stay here** (checked against obs main's `tests/vendored/tests/`,
   13.11.2026): the `distroav_*` / `vban_*` source tests, the vendor-only `av_sync_dock_*`,
-  `genlock_lock_indicator_guards` and `distroav_stale_duplicate_retarget_1367` (obs has only its
+  `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs` and `obs:tests/vendored/tests/distroav_stale_duplicate_retarget_1367.rs` (obs has only its
   replay half). imag's `linux-genlock.yml` still compiles that `vendor/` tree, and nobody else runs
   them. Delete each one here only after obs carries it.

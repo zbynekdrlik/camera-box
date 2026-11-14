@@ -3,9 +3,7 @@ paths:
   - "src/av_sync_dock.rs"
   - "vendor/av-sync-dock/src/camera-box-audio.hpp"
   - "tests/av_sync_dock_latency_display_*.rs"
-  - "tests/av_sync_dock_cpp_mirror_gate.rs"
   - "tests/av_sync_dock_pairing_recover_1153.rs"
-  - "tests/av_sync_dock_channel_pick_1367.rs"
   - "vendor/av-sync-dock/src/camera-box-channel-pick.hpp"
 ---
 
@@ -15,7 +13,7 @@ paths:
 `dock_lock_display_offset_ms` / `dock_latency_display_ms` in `src/av_sync_dock.rs` are byte-for-byte
 mirrored by `cb_dock_lock_display_offset_ms` / `cb_dock_latency_display_ms` in
 `vendor/av-sync-dock/src/camera-box-audio.hpp` (the deployed dock is C++; it can't be rig-verified in
-CI). `tests/av_sync_dock_cpp_mirror_gate.rs` compiles the header standalone with
+CI). `obs:tests/vendored/tests/av_sync_dock_cpp_mirror_gate.rs` compiles the header standalone with
 `g++ -std=c++11 -Wall -Wextra -Werror` and runs `vendor/av-sync-dock/test/camera-box-selftest.cpp`,
 which cross-checks the C++ VALUES against the Rust results.
 - Changing a computed VALUE (e.g. adding an additive term to the negation) requires updating BOTH
@@ -23,7 +21,7 @@ which cross-checks the C++ VALUES against the Rust results.
   build (`.claude/rules/vendored-libobs-change-safety.md`). High-risk.
 - **Doc-comment / new-`const` / `constexpr` + `static_assert` changes are SAFE** — the self-test
   compares values only (a comment can't break `-Werror`; an unused `pub const` / `static_assert`-
-  referenced `constexpr` won't be flagged unused). Run `cargo test --test av_sync_dock_cpp_mirror_gate` (needs g++).
+  referenced `constexpr` won't be flagged unused). The gate runs in obs since issue 1505 (`cargo test --test av_sync_dock_cpp_mirror_gate` in obs's `tests/vendored` crate, needs g++).
 - Gotcha: making the additive constant load-bearing (`-x + ADDITIVE_MS`) is NOT free — for `x==0`
   it flips the result from IEEE `-0.0` to `+0.0`, interacting with `dock_latency_display_ms`'s own
   `-0.0→0.0` normalization. Keep such a constant DECORATIVE + guarded by a test unless a

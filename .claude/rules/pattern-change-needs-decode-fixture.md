@@ -46,7 +46,7 @@ must stay testable under default features — #921's version of the same fixture
    av-sync-dock-<issue>/*.y8`, ~2MB each at 1080p, well within this repo's existing binary-fixture
    norms (`tests/fixtures/burn-unreadable/` already carries 300KB-1.1MB PNGs + an `.mkv`).
 4. **Write a temp-compiled C++ harness** (same `Command::new(cxx)` twin-harness shape as
-   `tests/av_sync_dock_lock_926.rs` / `tests/av_sync_dock_cpp_mirror_gate.rs`) that `#include`s the
+   `obs:tests/vendored/tests/av_sync_dock_lock_926.rs` / `obs:tests/vendored/tests/av_sync_dock_cpp_mirror_gate.rs`) that `#include`s the
    REAL vendored headers and drives the REAL decode call sequence (top-band crop -> area-downscale
    -> quirc -> Otsu retry) — never a hand-simplified re-implementation, or the proof is worthless.
 
@@ -62,7 +62,7 @@ quirc is real vendored C and must be treated as such.
 **Fix:** compile each quirc `.c` file to a `.o` with a REAL C compiler (`cc`/`gcc`, respecting
 `$CC`), then link those objects together with the C++ harness object via `g++`/`c++` (respecting
 `$CXX`) — never pass a `.c` file to `g++` in the same invocation as the C++ harness source. See
-`tests/av_sync_dock_video_decode_921.rs`'s `real_optical_frames_decode_and_resize_is_cached` test
+`obs:tests/vendored/tests/av_sync_dock_video_decode_921.rs`'s `real_optical_frames_decode_and_resize_is_cached` test
 for the working two-compiler-then-link pattern (compile `quirc.c`/`decode.c`/`identify.c`/
 `version_db.c` with `cc -c`, compile the harness `.cpp` with `c++ -std=c++17 -c`, link all objects
 with `c++`).

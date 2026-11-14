@@ -3,7 +3,6 @@ paths:
   - "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.*"
   - "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp"
   - "tests/genlock_lock_state_parity.rs"
-  - "tests/genlock_lock_indicator_guards.rs"
   - "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.hpp"
   - "tests/genlock_phase_baseline_1302.rs"
   - "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.cpp"
@@ -29,7 +28,7 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 | Fast first idle classification (issue 1302) | `vstack:rig/core/src/genlock_lock_state/phase_events.rs` (`InputIdleClass`, `input_idle_class`, the `GENLOCK_IDLE_*` constants; unit cases in the `#[path]` child `genlock_lock_state/idle_tests.rs`) ↔ `GenlockLockState.hpp` (`genlock_input_idle_class` + the constants as macros, right after `genlock_input_new_phase_events`); the ring tick `genlock_idle_classify_tick` in `GenlockRecentEvents.cpp` (state `GenlockIdleClassifier`, the status bar member `genlockIdle`) | `tests/genlock_idle_class_1302.rs`: C-vs-Rust parity of the rule and its five constants (312 vectors) + a replay of the shipped ring tick and recent-event tick on six scenarios graded by the C decision, every tick's classes checked against a reference ring on the Rust authority. Guards: `genlock_lock_idle_first_classification_present_1302` + the issue-1302 idle-class pwsh block in both ymls. |
 | Per-output stats API | `obs.h` (`struct obs_genlock_output_stats`, `obs_output_set_genlock_wall_stamping`, `obs_output_get_genlock_stats`) + `obs-output.c` + `obs-internal.h` (two bool fields, bzalloc-zeroed) | DistroAV's `ndi-output.cpp` sets `wall_stamping=true` at `begin_data_capture` success, `false` at stop. |
 | The widget | `OBSBasicStatusBar.{hpp,cpp}` (`UpdateGenlockLabel`, `PollGenlockClock`) | A permanent `QLabel` + an ALWAYS-ON 1 Hz `QTimer` (NOT the stream-only `refreshTimer`). |
-| Vendored-source guards | `tests/genlock_lock_indicator_guards.rs` | std-only; the Linux-CI twin of the pwsh gates. |
+| Vendored-source guards | `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs` | std-only; the Linux-CI twin of the pwsh gates. |
 | Media-clock term (issue 1372 part D) | `vstack:rig/core/src/genlock_lock_state/media_clock.rs` (`MediaClock`, `MediaDiscipline`, `media_clock_window` (µs step band + time-weighted rate), `media_clock_window_ready`, `media_clock_verdict`; python mirror cross-checked by the same parity test) ↔ `GenlockLockState.hpp` (the `genlock_media_*` block after the qpc lift) + libobs `os_gettime_discipline()` (`util/platform.h`, `platform-windows.c`) | Parity: the decision grid × the three media verdicts + a 5th lift (`c_media_clock_matches_the_rust_authority_1372_part_d`); the libobs getter is checked read by read in `tests/os_clock_discipline_parity_1372.rs`. Guards: `genlock_lock_media_clock_term_present_1372_part_d` + (until issue 1505) the part-D pwsh block in both windows-genlock ymls. |
 | pwsh source-anchor gates (retired, issue 1505) | were in `windows-genlock.yml` + `windows-genlock-fast.yml` (`Assert in-OBS genlock LOCK indicator present (#1298)`) | Gone with those workflows; the Rust guards above remain. |
 | The JPEG XS indicator BESIDE it (issue 1387) | `widgets/GenlockJxsWidget.{hpp,cpp}` + `GenlockJxsReport.{hpp,cpp}` + `GenlockJxsState.hpp` ↔ `vstack:rig/core/src/genlock_jxs_state.rs` | Its own label + 1 Hz timer, added right after the LOCK label; it never touches the LOCK decision or the `genlock-lock:` family (design 6506884476 rejected merging transport into the LOCK states). Everything about it: `.claude/rules/jxs-link.md`, section "The in-OBS JPEG XS indicator". |
@@ -293,7 +292,7 @@ lowest)**; else LOCKED (green).
   step in the window) still DEGRADES `qpc_drift`. Why booking is right: the media clock never follows a step by design (issue 1372
   part A), and the render tick re-grids onto the stepped wall in one tick (`genlock-wall-step.md`),
   so a date step is no longer the genlock hazard this term was guarding. Anchors:
-  `tests/genlock_lock_indicator_guards.rs::qpc_drift_books_a_fleet_date_step_1372` + (until issue 1505)
+  `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs::qpc_drift_books_a_fleet_date_step_1372` + (until issue 1505)
   the issue-1372 pwsh block in both `windows-genlock*.yml`.
 - **A `obs:tests/vendored/tests/genlock_lock_json_guards.rs` needle for a REAL C++ quote uses Rust `\"`, not the
   escaped-JSON `\\\"` (#1299 Part 4).** The guards `squish()` the source then `.contains(needle)`.
@@ -307,7 +306,7 @@ lowest)**; else LOCKED (green).
 - **`genlock-lock:` is a new OBS-log family** (emitted on state/reason CHANGE, not every tick) —
   mutually non-substring with `genlock-fifo audit '`, `genlock-ndi-output audit '`,
   `genlock-ndi-filter audit '`, `genlock-relock`, `genlock-acquire-bracket '%s':` (guarded by
-  `tests/genlock_lock_indicator_guards.rs`, per `jitter-audit-parser.md`).
+  `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs`, per `jitter-audit-parser.md`).
 - **The parity gate's lift anchor must NOT appear in the header's own doc comment (#1298 session
   trap).** `tests/genlock_lock_state_parity.rs` (and any future lift of a pure decision from a
   `.hpp`) slices from `typedef enum genlock_lock_state {` through the function's closing brace. The

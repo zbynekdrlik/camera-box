@@ -173,7 +173,7 @@ The fix (all under this watchdog + its facet source):
   `matched << cands` is a bimodal tell) and emits a `pin-change observed <old> -> <new>` marker (a
   `-1`-sentinel `cb_last_seen_pin_ms`, gated on `>= 0 && !=` so the first read never fires) — a pin
   move is exactly when the cluster can re-pick a wrong QPSK marker lag. Guarded by
-  `tests/av_sync_dock_pin_observability_1319.rs` (source anchor) AND, until issue 1505 retired
+  `obs:tests/vendored/tests/av_sync_dock_pin_observability_1319.rs` (source anchor) AND, until issue 1505 retired
   those workflows, a pwsh presence check in BOTH `windows-genlock*.yml`. Root-causing the dock bias itself (the cluster lag pick after a pin write) is the
   remaining follow-up this observability enables.
 

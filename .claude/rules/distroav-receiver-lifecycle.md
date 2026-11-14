@@ -1,13 +1,6 @@
 ---
 paths:
   - "vendor/distroav/src/ndi-source.cpp"
-  - "tests/distroav_ndi_reconnect_767.rs"
-  - "tests/distroav_recv_create_retry_1080.rs"
-  - "tests/distroav_fresh_finder_connect_1096.rs"
-  - "tests/distroav_by_url_identity_verify_1180.rs"
-  - "tests/distroav_frameless_by_url_escape_1287.rs"
-  - "tests/distroav_stale_duplicate_retarget_1367.rs"
-  - "tests/support/ndi_source_lift_1367.rs"
 ---
 
 # DistroAV NDI receiver-thread lifecycle — a `break` is a PERMANENT, reattach-proof death (#1080)
@@ -46,8 +39,8 @@ Consequences for any change here:
 ## The std-only gate pattern for a DistroAV-receiver-loop-only decision helper
 
 A pure `static inline` decision/backoff helper here has NO Rust appliance consumer, so DON'T invent
-a crate-root module to parity-check it. Make the gate self-contained (`distroav_ndi_reconnect_767.rs`,
-`distroav_recv_create_retry_1080.rs`): Facet A `fs::read_to_string` source-anchors the tokens (revert
+a crate-root module to parity-check it. Make the gate self-contained (`obs:tests/vendored/tests/distroav_ndi_reconnect_767.rs`,
+`obs:tests/vendored/tests/distroav_recv_create_retry_1080.rs`): Facet A `fs::read_to_string` source-anchors the tokens (revert
 protection against a `git subtree pull`); Facet B lifts the helper VERBATIM by signature → first
 `\n}\n`, compiles it with `cc -Werror -Wconversion -Wformat=2` against a tiny `<stdint.h>` stub, and
 runs a hand-written truth table (the truth table IS the spec) under `cargo test`. **Watch the truth
@@ -65,7 +58,7 @@ the long-lived in-process NDI finder state is poisoned — cured only by an OBS 
 retry (which fires only on a NULL create) does not enter there and does not cure it.
 
 **The #1096 fix is now IMPLEMENTED in the reset block** (`ndi_source_thread`,
-`tests/distroav_fresh_finder_connect_1096.rs`): before `recv_create_v3`, resolve the source through
+`obs:tests/vendored/tests/distroav_fresh_finder_connect_1096.rs`): before `recv_create_v3`, resolve the source through
 a FRESH `NDIlib_find` per reset (`find_create_v2` → bounded `find_wait_for_sources` +
 `find_get_current_sources` → the pure `ndi_find_url_for_source_name` picker → copy the live
 `p_url_address` into `owned_source_url` → `find_destroy`) and connect BY-ADDRESS
@@ -133,7 +126,7 @@ can already be the wrong-sender port. And once frames flow, the #767 stale watch
 (`no_connections>0` + no new frame) — it never fires while the WRONG sender delivers frames happily.
 So a BY-URL bind has a wrong-source lock-in window that nothing else closes.
 
-**The #1180 fix (LANDED, `ndi_source_thread`, `tests/distroav_by_url_identity_verify_1180.rs`).**
+**The #1180 fix (LANDED, `ndi_source_thread`, `obs:tests/vendored/tests/distroav_by_url_identity_verify_1180.rs`).**
 After a BY-URL bind (`connected_by_url_1180`, armed from `url_resolved_1096`) STARTS DELIVERING
 FRAMES (`frames_seen_since_reset_1180`), re-run a bounded FRESH finder (`NDI_IDENTITY_VERIFY_MAX_WAITS`,
 the same create→wait→read→`ndi_find_url_for_source_name`→destroy sequence #1096 uses, never under
@@ -303,7 +296,7 @@ stale window + `received=` flat + no `recv-timing #797` line for that input = th
 BY-URL is the cure for). Reading the log: `connect BY-URL` repeating with the SAME URL every stale
 window + `received=` flat + no `recv-timing #797` line for that input = this class.
 
-**The fix LANDED (#1287, `ndi_source_thread`, `tests/distroav_frameless_by_url_escape_1287.rs`).** A
+**The fix LANDED (#1287, `ndi_source_thread`, `obs:tests/vendored/tests/distroav_frameless_by_url_escape_1287.rs`).** A
 pure decision helper `ndi_force_by_name_after_frameless(connected_by_url, frames_seen_since_reset)`
 returns true iff the current bind was BY-URL AND delivered ZERO frames. BOTH reset-forcing arms —
 the `no_connections==0` arm and the #767 stale-while-connected arm — call it and, when true, set the
@@ -357,7 +350,7 @@ one finder's pick must be replayed under every reset × verify ordering, with an
 scenario ever ends on a wrong sender.
 
 **The fix (decision 6009040469, Approach 1b; `ndi_source_thread` + the helpers before it,
-`tests/distroav_stale_duplicate_retarget_1367.rs`): decide on EVIDENCE, never on finder order.** Two
+`obs:tests/vendored/tests/distroav_stale_duplicate_retarget_1367.rs`): decide on EVIDENCE, never on finder order.** Two
 live senders cannot share one URL, so a record of our name whose URL ANOTHER name also advertises in
 the same finder list is stale (`ndi_url_contested_1367`; live `avahi-browse` on 10.77.9.201 shows one
 name per URL, so the old port's new owner advertises it). A nameless record is no evidence.
@@ -441,7 +434,7 @@ multicast-reception class), NONE of them can reach the sender: the fresh finder 
 black. Live 15.9.2026: strih `NDI cam7` ran **607 identical BY-NAME cycles over 12 min** at `received=` Δ0
 while the sender emitted 60.0 fps and imag (finder healthy) recovered BY-URL in 6 s.
 
-**The fix LANDED (#1096 reopen, `ndi_source_thread`, `tests/distroav_by_url_fleet_fallback_1096.rs`),
+**The fix LANDED (#1096 reopen, `ndi_source_thread`, `obs:tests/vendored/tests/distroav_by_url_fleet_fallback_1096.rs`),
 vendored receiver side only.** When a reset's fresh finder resolves nothing and BY-NAME is not
 force-required, escalate through a BOUNDED BY-URL ladder before falling to by-name:
 - **(b) last-known-good:** `last_delivered_url_1096` persists the URL that actually DELIVERED frames on a
@@ -498,7 +491,7 @@ freshly-started av-thread; a `std::thread` spawn failure falls back to a synchro
 crash). All existing exit-path diagnostic log lines are kept **byte-identical** (they only PRINT now;
 the destroy is deferred — F2 of the review, deliberate) and a new mutually-non-substring `genlock-reap:`
 marker records each handoff. Anchors mirrored into BOTH `windows-genlock*.yml` (the fast path hot-swaps
-`distroav.dll` un-gated). Std-only gate + truth table: `tests/distroav_scene_switch_reinit_1320.rs`.
+`distroav.dll` un-gated). Std-only gate + truth table: `obs:tests/vendored/tests/distroav_scene_switch_reinit_1320.rs`.
 
 **Scoped to the EXIT path only.** The in-loop `reset_ndi_receiver` block's `recv_destroy` (a warm-
 receiver recreate) is the SAME defect class but runs on the av-thread and only contributes to the join
@@ -542,7 +535,7 @@ watchdog; note the static code says #767 *should* also fire here via the refresh
 did not for an hour — so the root cause of #767's own silence is not fully explained by static
 analysis, and the acceptance below must confirm live WHICH marker fires).
 
-**The fix (LANDED, `ndi_source_thread`, `tests/distroav_frameless_connected_1096.rs`):** record
+**The fix (LANDED, `ndi_source_thread`, `obs:tests/vendored/tests/distroav_frameless_connected_1096.rs`):** record
 `recv_bind_ns_1096 = os_gettime_ns()` at every successful `recv_create_v3`, and add the pure sibling
 `genlock_frameless_bind_reconnect_decision(genlock_active, no_connections, now_ns,
 frames_seen_since_reset, bind_ns, frameless_stale_ns)` — a STRICT COMPLEMENT of

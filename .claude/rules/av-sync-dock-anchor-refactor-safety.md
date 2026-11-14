@@ -5,13 +5,11 @@ paths:
   - "vendor/av-sync-dock/src/sync-test-output-internal.hpp"
   - "vendor/av-sync-dock/test/dock-output-source.ps1"
   - "tests/support/av_sync_dock_output.rs"
-  - "tests/av_sync_dock_output_sources_1386.rs"
   - "vendor/av-sync-dock/src/camera-box-audio.hpp"
   - "vendor/av-sync-dock/src/camera-box-audio-worker.hpp"
   - "vendor/av-sync-dock/src/camera-box-qr.hpp"
   - "tests/av_sync_dock_reserved_origin_1404.rs"
   - "tests/genlock_preload.rs"
-  - "tests/av_sync_dock_measure_share_1470.rs"
 ---
 
 # Refactoring the dock-lock decision chain (`sync-test-output-audio.cpp` since issue 1386) breaks stale text-anchor
@@ -96,7 +94,7 @@ the second push, which then went green on the first try.
 Adding a brand-new `if (camerabox::cb_<something>(...))` guard around a camera-box `sync_found`
 emit site (not a decision-chain refactor — a genuinely NEW check, e.g. #1005's
 `cb_corrected_video_ts_is_valid`) is easy to prove locally with a Rust structural text-anchor test
-(`tests/av_sync_dock_qr_patch_guard.rs`-style: assert the guard call text appears exactly N times,
+(`obs:tests/vendored/tests/av_sync_dock_qr_patch_guard.rs`-style: assert the guard call text appears exactly N times,
 assert the OLD unguarded form is gone) — but that Rust test alone is NOT the double coverage this
 file's own existing pattern already establishes. The dock output compiles ONLY via the
 `windows-genlock*.yml` pwsh gate (no local compile path at all, not even syntax), so the FULL
@@ -118,7 +116,7 @@ it.**
 `st_raw_audio_camera_box` no longer mixes channels: it calls `cb_ensure_audio_picker`, pushes every
 channel's plane to `camerabox::ChannelMarkerPicker` (`camera-box-channel-pick.hpp`), logs a pick
 switch through `cb_note_channel_switch` and ends with `cb_audio_diag_tick`. Its anchors live in
-`tests/av_sync_dock_channel_pick_1367.rs` AND the pwsh step "Assert dock decodes the marker per
+`obs:tests/vendored/tests/av_sync_dock_channel_pick_1367.rs` AND the pwsh step "Assert dock decodes the marker per
 channel (issue 1367)" in both windows-genlock workflows, which check the same list over the same
 three brace-balanced function bodies (the helper calls and their order, the plane hand-off, the
 picker lifecycle, the switch-log call into the pure `CbChannelSwitchLog`,
@@ -129,7 +127,7 @@ Moving or renaming any of those means editing all three places; the Rust test us
 
 ## The audio decode worker's anchors (issue 1381)
 
-`tests/av_sync_dock_audio_worker_1381.rs` + the pwsh step "Assert dock audio decode runs off the audio
+`obs:tests/vendored/tests/av_sync_dock_audio_worker_1381.rs` + the pwsh step "Assert dock audio decode runs off the audio
 thread (issue 1381)" in BOTH windows-genlock workflows pin the gate + FIFO copy in `st_raw_audio` /
 `cb_audio_gate_and_publish`, the worker handlers (`st_audio_block_run`, `st_audio_block_gap`,
 `st_audio_session_end`, `cb_audio_session_begin`, and `cb_audio_forget_lock` that both session
@@ -155,7 +153,7 @@ ids), the pwsh step "Assert dock never pairs a reserved origin QR (issue 1404)" 
 of the record's body, or inside the rate-limited `due(...)) blog(LOG_INFO,` call), and the signature
 needle of the issue-1381 audio step (`cb_refresh_measure_source(st, video_ts);` inside the record)
 in the Rust 1381 test and both workflows. Behaviour (the predicate, the ring, the log limiter) is
-the g++ `camera-box-selftest.cpp` block run by `tests/av_sync_dock_cpp_mirror_gate.rs`. A lane
+the g++ `camera-box-selftest.cpp` block run by `obs:tests/vendored/tests/av_sync_dock_cpp_mirror_gate.rs`. A lane
 proved the set with 9 mutants on a scratch copy (each killed by the Rust anchor, the pwsh step or
 the self-test).
 
@@ -195,7 +193,7 @@ the self-test).
   - A function MOVING between the output files therefore never breaks an anchor: the pwsh
     mutation run moved `cb_audio_forget_lock` to the video file and every step stayed green.
 - **Never read one output file on its own.** A new anchor uses the helpers.
-  `tests/av_sync_dock_output_sources_1386.rs` enforces it:
+  `obs:tests/vendored/tests/av_sync_dock_output_sources_1386.rs` enforces it:
   - fails: a non-comment workflow line naming one output file (judged by the union's own file
     rule, in any quote style or API); a glob over them (`sync-test-output-*.cpp`, which skips the
     lifecycle file and the internal header); a Rust path literal to one output file;
@@ -243,7 +241,7 @@ the self-test).
 
 ## The measurement-source share's anchors (issue 1470)
 
-`tests/av_sync_dock_measure_share_1470.rs` (comment-stripped) and the pwsh step "Assert dock measures
+`obs:tests/vendored/tests/av_sync_dock_measure_share_1470.rs` (comment-stripped) and the pwsh step "Assert dock measures
 only the measurement source's share (issue 1470)" in BOTH windows-genlock workflows (comments kept)
 pin the same list: `st_raw_audio` publishing nothing in camera-box mode, ONE caller of
 `cb_audio_gate_and_publish(st, ` and ONE `cb_audio_fifo.publish(`, the `st_cb_mix_tick` steps in order

@@ -15,9 +15,9 @@ name: Linux genlock build (vendored OBS + DistroAV, imag-nb parity)
 # Mirrors windows-genlock.yml's overall shape. The dozens of pwsh "assert genlock patch present"
 # guard steps in the Windows workflows exist ONLY because PowerShell can't run `cargo test` — the
 # SAME vendored-source assertions already run as real Rust tests on every push via ci.yml's `test`
-# job (tests/genlock_preload.rs, distroav_genlock_lockdown.rs, obs_titlebar_newlevel.rs,
-# burn_payload_parity.rs, distroav_timecode_patch.rs, distroav_source_config_lock.rs,
-# obs_updater_disabled.rs, av_sync_dock_qr_patch_guard.rs — see tests/*.rs), so this Linux
+# job (tests/genlock_preload.rs, obs:tests/vendored/tests/distroav_genlock_lockdown.rs, obs_titlebar_newlevel.rs,
+# burn_payload_parity.rs, obs:tests/vendored/tests/distroav_timecode_patch.rs, obs:tests/vendored/tests/distroav_source_config_lock.rs,
+# obs_updater_disabled.rs, obs:tests/vendored/tests/av_sync_dock_qr_patch_guard.rs — see tests/*.rs), so this Linux
 # workflow does NOT duplicate them as text-token guards. What THIS workflow proves that ci.yml
 # cannot: that the vendored C/C++ — including every non-Windows fallback branch the genlock
 # patches carry — actually COMPILES with gcc/g++ on Linux. ENABLE_BROWSER stays OFF for both jobs
