@@ -102,6 +102,8 @@ intercom-release/
 shading-release/
 # the pinned OBS release bundle (scripts/lib/obs-release.sh)
 obs-release/
+# issue 1519: dstack's pinned generic Dante-leg filter files (scripts/lib/strih-dante-leg-filter.sh)
+dstack-release/
 
 # issue 1417 -- the tally ESP firmware WiFi credentials (copy secrets.h.example, never commit it)
 tally/esp/WsTally/secrets.h

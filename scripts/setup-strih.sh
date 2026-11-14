@@ -124,6 +124,8 @@ else
   strih_nic_driver_apply "${HERE}/.." "$NIC_OOT" "$(strih_lx_nic_driver)" \
     || fail "rig NIC driver ${NIC_OOT}: the DKMS provisioning failed (above) -- the loaded module is untouched"
 fi
+step "1c" "Rig NIC stable name (issue 1502: a systemd .link from STRIH_NIC_RENAME, never a live rename)"
+strih_nic_rename_apply "$(strih_lx_nic_rename)" "$(strih_lx_nic_driver)" || fail "rig NIC rename: the .link file could not be written (above)"
 
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->

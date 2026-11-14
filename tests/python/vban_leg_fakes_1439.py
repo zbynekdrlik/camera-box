@@ -268,8 +268,46 @@ NFT = r'''
 import json, os, re, sys
 
 %(render)sp = os.environ["FAKE_STATE"]; s = json.load(open(p)); a = sys.argv[1:]
-s["log"].append(["nft"] + a)
+ns = os.environ.get("FAKE_NFT_NS") == "1"   # issue 1519: inside the fake `unshare -n` = a throwaway netns
+s["log"].append(["nft"] + (["@netns"] if ns else []) + a)
+tk = "nft_ns" if ns else "nft_other"
 def save(): json.dump(s, open(p, "w"))
+def fixture_blocks():
+    """issue 1519: the real nft 1.0.9 netns render of dstack's two pinned files, one block per table."""
+    out, cur = {}, None
+    for l in open(s["nft_fixture"]).read().split("\n"):
+        m = re.match(r"^table inet (\S+) \{$", l)
+        if m:
+            cur = m.group(1); out[cur] = []
+        if cur:
+            out[cur].append(l)
+            if l == "}":
+                cur = None
+    return {k: "\n".join(v) + "\n" for k, v in out.items()}
+if a[:1] == ["-D"]:
+    # issue 1519: `nft -D dante_leg=<iface> -f <file>` -- dstack's generic file, keyed on the leg's name
+    if s.get("nft_load_fail") and not ns:
+        sys.stderr.write("Error: Could not process rule\n"); save(); sys.exit(1)
+    iface = a[1].split("=", 1)[1]
+    text = open(a[a.index("-f") + 1]).read()
+    m = re.search(r"(?m)^table inet (\S+)$", text)
+    pinned = [open(f).read() for f in s.get("nft_fixture_files", [])]
+    if text in pinned:
+        block = fixture_blocks()[m.group(1)].replace('"zzleg0.70"', '"%s"' % iface)
+    else:
+        block = nft_render(text).replace("$dante_leg", '"%s"' % iface)
+    s.setdefault(tk, {})[m.group(1)] = block
+    save(); sys.exit(0)
+if a == ["list", "ruleset"] and not ns:
+    # issue 1519: the whole ruleset = a scripted extra (another firewall's NAT) + every loaded table
+    sys.stdout.write(s.get("nft_ruleset_extra", "") + "".join(s.get("nft_other", {}).values())
+                     + (s.get("nft_render") or "")); save(); sys.exit(0)
+if a[:3] == ["list", "table", "inet"] and a[3] in s.get(tk, {}):
+    sys.stdout.write(s[tk][a[3]]); save(); sys.exit(0)
+if ns:
+    sys.stderr.write("Error: No such file or directory\n"); save(); sys.exit(1)
+if a == ["delete", "table", "inet", "vban_dante70"] and s.get("nft_render") is not None:
+    s["nft_render"] = None; save(); sys.exit(0)
 if a[:1] == ["-f"]:
     text = open(a[1]).read()
     m = re.search(r"(?m)^table inet (\S+)$", text)
@@ -317,6 +355,20 @@ if verb == "is-active":
     if "-q" not in a: print("active" if u["active"] else "inactive")
     save(); sys.exit(0 if u["active"] else 3)
 if verb == "enable": u["enabled"] = True
+elif verb == "disable":
+    u["enabled"] = False
+    if "--now" in a: u["active"] = False
+elif verb == "stop": u["active"] = False
+elif verb in ("restart", "start") and args[1] in s.get("unit_files", {}):
+    # issue 1519: a unit that runs its ExecStart lines (the dstack leg filter loader) through the fake nft
+    import subprocess
+    save()
+    for line in open(s["unit_files"][args[1]]).read().splitlines():
+        if line.startswith("ExecStart="):
+            argv = line.split("=", 1)[1].split()
+            if subprocess.run(["nft"] + argv[1:]).returncode != 0:
+                s = json.load(open(p)); s["units"][args[1]]["active"] = False; save(); sys.exit(1)
+    s = json.load(open(p)); s["units"].setdefault(args[1], {"enabled": False, "active": False})["active"] = True
 elif verb in ("restart", "start"):
     u["active"] = True
     if s.get("unit_runs_nft"):
@@ -359,6 +411,16 @@ if a == ["-V"]:
 sys.exit(s.get("arping_rc", 0))
 '''
 
+UNSHARE = r'''
+import json, os, sys
+# issue 1519: `unshare -n CMD...` -- a fresh, empty network namespace for the fake nft
+p = os.environ["FAKE_STATE"]; s = json.load(open(p)); a = sys.argv[1:]
+s["log"].append(["unshare"] + a[:1]); s["nft_ns"] = {}; json.dump(s, open(p, "w"))
+assert a[0] == "-n", a
+os.environ["FAKE_NFT_NS"] = "1"
+os.execvp(a[1], a[1:])
+'''
+
 PGREP = r'''
 import json, os, sys
 p = os.environ["FAKE_STATE"]; s = json.load(open(p)); a = sys.argv[1:]
@@ -374,7 +436,17 @@ STREAM_SNV_PRE_1495 = {
     "STRIH_PROGRAM_VBAN_STREAMS": "stream", "STRIH_PROGRAM_VBAN_PORT": "6980", "STRIH_PROGRAM_VBAN_RESERVE_MS": "80",
     "STRIH_PROGRAM_VBAN_LEG": "mac:00:e0:4c:68:01:85", "STRIH_PROGRAM_VBAN_SENDER": "10.77.7.232",
     "STRIH_DANTE_DEVICES": "none",
+    # issues 1510 + 1513: no program Dante device = no latency terms and no TX
+    "STRIH_DANTE_NETWORK_LATENCY_MS": "none", "STRIH_DANTE_RECEIVE_BUFFER_MS": "none",
+    "STRIH_DANTE_TX": "none", "STRIH_DANTE_TX_TRACK": "none",
 }
+# issue 1502 moved stream-snv's rig NIC to a USB 2.5 GbE adapter renamed rig0; the issue-1439 / 1495 tests
+# replay the boxes BEFORE that move, on the onboard r8169 rig NIC enp56s0.
+STREAM_SNV_PRE_1502_NIC = {
+    "STRIH_NIC_DRIVER": "r8169", "STRIH_NIC_OOT_DRIVER": "none", "STRIH_NIC_MIN_USB_MBPS": "none",
+    "STRIH_NIC_MIN_LINK_MBPS": "1000", "STRIH_NIC_RENAME": "none",
+}
+STREAM_SNV_PRE_1495.update(STREAM_SNV_PRE_1502_NIC)
 BOXES = Path(__file__).resolve().parent.parent.parent / "scripts" / "strih-boxes"
 
 
@@ -412,7 +484,7 @@ def install(bin_dir, state_path, proc_sys):
     bin_dir.mkdir(parents=True, exist_ok=True)
     for name, body in (("nmcli", NMCLI), ("ip", IP), ("nft", NFT.replace("%(render)s", RENDER_SRC)),
                        ("systemctl", SYSTEMCTL.replace("%(render)s", RENDER_SRC)), ("sysctl", SYSCTL),
-                       ("arping", ARPING), ("pgrep", PGREP)):
+                       ("arping", ARPING), ("pgrep", PGREP), ("unshare", UNSHARE)):
         f = bin_dir / name
         f.write_text("#!%s\n%s" % (sys.executable, body))
         f.chmod(0o755)
@@ -430,6 +502,10 @@ def new_state(path, **over):
 
 def read_state(path):
     return json.loads(Path(path).read_text())
+
+
+def write_state(path, s):
+    Path(path).write_text(json.dumps(s))
 
 
 def calls(state, tool, *prefix):

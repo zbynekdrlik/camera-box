@@ -322,7 +322,7 @@ def test_a_failed_link_down_still_restores_the_leg_before_it_fails(tmp_path):
     s = b.st()
     assert fk.calls(s, "nmcli", "device", "reapply", VLAN_IF), "the rule came back"
     assert s["applied"][VLAN_IF]["ipv4.routing-rules"] == "priority 100 from %s table 70" % ADDR
-    assert s.get("nft_other", {}) == {}, "the retiring filter went"
+    assert "vban_dante70_retiring" not in s.get("nft_other", {}), "the retiring filter went"
     assert _arp_announces(s), "the leg still announced"
 
 

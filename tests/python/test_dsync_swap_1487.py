@@ -30,13 +30,13 @@ def src(expr):
 def test_the_pinned_shas_are_of_the_pinned_version():
     pin = re.search(r'DANTESYNC_VERSION_PIN:-([0-9.]+)', (SCRIPTS / "dantesync-version-gate.sh").read_text()).group(1)
     rel = (SCRIPTS / "lib/dsync-release.sh").read_text()
-    assert pin == "1.29.0"
+    assert pin == "1.35.2"
     assert re.search(r'DSYNC_PINNED_SHA_VERSION="\$\{DSYNC_PINNED_SHA_VERSION-([0-9.]+)\}"', rel).group(1) == pin
     assert len(re.findall(r'DSYNC_SHA256_[A-Z_]+="[0-9a-f]{64}"', rel)) == 4
 
 
 def test_a_binary_that_is_not_the_pinned_one_is_refused():
-    r = bash('. scripts/lib/dsync-release.sh; dsync_release_sha_ok dsync-linux-amd64 1.29.0 deadbeef; echo rc=$?')
+    r = bash('. scripts/lib/dsync-release.sh; dsync_release_sha_ok dsync-linux-amd64 1.35.2 deadbeef; echo rc=$?')
     assert "rc=1" in r.stdout and "the pin says" in r.stderr
     r = bash('. scripts/lib/dsync-release.sh; dsync_release_sha_ok dsync-linux-amd64 9.9.9 deadbeef; echo rc=$?')
     assert "rc=0" in r.stdout
@@ -94,10 +94,10 @@ class Box:
             self._stub(tool)
         self._findmnt()
         for name in ("dsync", "dantesync"):
-            (self.bin / name).write_text(f"#!/bin/sh\necho {name} 1.29.0\n")
+            (self.bin / name).write_text(f"#!/bin/sh\necho {name} 1.35.2\n")
             (self.bin / name).chmod(0o755)
         staged = self.root / "tmp/dsync-staged"
-        staged.write_text("#!/bin/sh\necho dsync 1.29.0\n")
+        staged.write_text("#!/bin/sh\necho dsync 1.35.2\n")
         staged.chmod(0o755)
         sha = subprocess.check_output(["sha256sum", str(staged)], text=True).split()[0]
         (self.root / "tmp/dsync-staged.sha256").write_text(f"{sha}  x\n")
@@ -129,7 +129,7 @@ class Box:
 
 
 def _upgrade_program(role="slave"):
-    r = src(f'dantesync_linux_upgrade_cmd 1.29.0 {role}')
+    r = src(f'dantesync_linux_upgrade_cmd 1.35.2 {role}')
     assert r.returncode == 0, r.stderr
     return r.stdout
 
@@ -239,13 +239,13 @@ def test_the_windows_finalize_touches_nothing_on_a_node_with_no_old_install():
 
 
 def test_the_windows_program_keeps_the_old_service_until_the_finalize():
-    ps = src("dantesync_windows_upgrade_ps 1.29.0 slave").stdout
+    ps = src("dantesync_windows_upgrade_ps 1.35.2 slave").stdout
     assert "sc.exe delete dantesync" not in ps
     assert ps.index("Set-Service -Name dantesync -StartupType Disabled") < ps.index("New-Service -Name dsync")
     assert ps.index("Rename-Item -LiteralPath 'C:\\ProgramData\\DanteSync'") < ps.index("Start-Service dsync")
     assert "[regex]::Escape('C:\\Program Files\\DanteSync\\dantesync.exe')" in ps
     assert "Invoke-DsyncSwapBack" in ps[ps.index("} catch {"):]
-    assert "https://github.com/zbynekdrlik/dsync/releases/download/v1.29.0/dsync-windows-amd64.exe" in ps
+    assert "https://github.com/zbynekdrlik/dsync/releases/download/v1.35.2/dsync-windows-amd64.exe" in ps
 
 
 def _pwsh():
@@ -269,11 +269,11 @@ def _win_swap(tmp, fail_start=False):
     (old_dir / "dantesync.exe").write_text("the 1.20.0 exe\n")
     exe, rel, temp = new_dir / "dsync.exe", tmp / "release.exe", tmp / "temp"
     temp.mkdir()
-    rel.write_text("the 1.29.0 exe\n")
+    rel.write_text("the 1.35.2 exe\n")
     r = src(f"DANTESYNC_WIN_EXE='{exe}'; DANTESYNC_WIN_BAK='{exe}.bak'; "
             f"DANTESYNC_WIN_TRAY_EXE='{tmp / 'no-tray.exe'}'; DANTESYNC_WIN_LEGACY_TRAY_EXE='{tmp / 'no-tray2.exe'}'; "
             f"DSYNC_LEGACY_WIN_EXE='{old_dir / 'dantesync.exe'}'; DSYNC_LEGACY_WIN_STATE='{old_state}'; DSYNC_WIN_STATE='{new_state}'; "
-            "dantesync_windows_upgrade_ps 1.29.0")
+            "dantesync_windows_upgrade_ps 1.35.2")
     assert r.returncode == 0, r.stderr
     program = tmp / "upgrade.ps1"
     program.write_text(r.stdout.replace("& $exe --version", "Write-Output 'version read'"))
@@ -316,7 +316,7 @@ def test_the_windows_swap_keeps_the_state_and_the_service_arguments(tmp_path):
     assert "PROGRAM THREW" not in out, out
     assert (new_state / "date-offset.json").read_text() == '{"seq":7}'
     assert not old_state.exists()
-    assert exe.read_text() == "the 1.29.0 exe\n"
+    assert exe.read_text() == "the 1.35.2 exe\n"
     assert calls[0] == "Stop-Service dantesync"
     assert calls[1] == "Set-Service dantesync Disabled"
     made = next(c for c in calls if c.startswith("New-Service "))

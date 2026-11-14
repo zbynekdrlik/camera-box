@@ -101,12 +101,16 @@ _obs_release_get() {
   printf '%s\n' "$file"
 }
 
-# obs_release_verify_tree DIR MANIFEST TAG COMMIT -> rc 0 when DIR is the release the manifest describes:
-# every listed file's sha256, the required files, OBS_RELEASE.txt + GENLOCK_BUILD_SHA.txt + the manifest's
-# release block naming TAG and COMMIT. rc 1 + every problem on stderr otherwise. Pure over the files.
+# obs_release_verify_tree DIR MANIFEST TAG COMMIT [REQUIRED...] -> rc 0 when DIR is the release the manifest
+# describes: every listed file's sha256, the required files (the strih list unless REQUIRED names others),
+# OBS_RELEASE.txt + GENLOCK_BUILD_SHA.txt + the manifest's release block naming TAG and COMMIT. rc 1 + every
+# problem on stderr otherwise. Pure over the files.
 obs_release_verify_tree() {
   local dir="${1:?dir required}" man="${2:?manifest required}" tag="${3:?tag required}" commit="${4:?commit required}" f bad=0
-  for f in "${OBS_RELEASE_REQUIRED[@]}"; do
+  shift 4
+  local -a req=("$@")
+  [ "${#req[@]}" -gt 0 ] || req=("${OBS_RELEASE_REQUIRED[@]}")
+  for f in "${req[@]}"; do
     [ -f "${dir}/${f}" ] || { echo "obs-release: ${tag} has no ${f}" >&2; bad=1; }
   done
   [ "$(tr -d '[:space:]' < "${dir}/GENLOCK_BUILD_SHA.txt" 2>/dev/null)" = "$commit" ] \
@@ -179,6 +183,70 @@ obs_release_bundle() {
     rm -rf "$dest"; return 1
   fi
   echo "obs-release: ${tag} (${commit}) unpacked into ${dest}, every manifest file verified" >&2
+}
+
+# --- issue 1505: the Windows OBS boxes (resolume-snv, later resolume-pp + grading-pp) take the same
+# release's `obs-windows-x64-<tag>.zip` (a portable rundir: bin/64bit, data, obs-plugins/64bit, the two
+# markers and BUNDLE_MANIFEST.json, the same layout as the windows-genlock.yml stage) with its own
+# WINDOWS_MANIFEST.json. The release's Windows .sha256 files read `<sha> *<name>` (git-bash); the first
+# token is the hash. The pin carries both sha256 beside the strih ones; a pin without them keeps the
+# Windows boxes on the vendor build (the planner's choice, scripts/lib/genlock-windows-pin.sh).
+OBS_RELEASE_WINDOWS_MANIFEST="WINDOWS_MANIFEST.json"
+# What the Windows deploy program reads beyond the manifest's own list (build_windows_deploy_program +
+# genlock-plugin-deploy.sh): the frontend, libobs, the three plugins it byte-verifies, the markers.
+OBS_RELEASE_WINDOWS_REQUIRED=(bin/64bit/obs64.exe bin/64bit/obs.dll obs-plugins/64bit/distroav.dll
+  obs-plugins/64bit/obs-vban.dll obs-plugins/64bit/vlc-video.dll GENLOCK_BUILD_SHA.txt OBS_RELEASE.txt)
+
+# obs_pin_has_windows ROOT -> rc 0 when the pin names a Windows zip (the key is present; its value is
+# proved by obs_pin_windows_sha256), rc 1 when it does not.
+obs_pin_has_windows() { [ -n "$(_obs_pin_field "${1:?tree required}" OBS_RELEASE_WINDOWS_SHA256)" ]; }
+obs_pin_windows_sha256() { _obs_pin_hex "${1:?tree required}" OBS_RELEASE_WINDOWS_SHA256 64; }
+obs_pin_windows_manifest_sha256() { _obs_pin_hex "${1:?tree required}" OBS_RELEASE_WINDOWS_MANIFEST_SHA256 64; }
+
+# obs_release_windows_zip_name TAG -> the Windows zip's asset name.
+obs_release_windows_zip_name() { printf 'obs-windows-x64-%s.zip\n' "${1:?tag required}"; }
+
+# obs_release_windows_bundle ROOT DEST -> unzip the pinned, proved Windows bundle into DEST (absent or empty)
+# with BUNDLE_MANIFEST.json = the pinned WINDOWS_MANIFEST.json bytes beside it, the tree checked file by
+# file. rc 0, or rc 1 + named lines and DEST removed. The obs_release_bundle twin; no fallback, ever.
+obs_release_windows_bundle() {
+  local root="${1:?tree required}" dest="${2:?destination required}" tag commit zipf man zsha msha
+  tag="$(obs_pin_tag "$root")" || return 1
+  commit="$(obs_pin_commit "$root")" || return 1
+  zsha="$(obs_pin_windows_sha256 "$root")" || return 1
+  msha="$(obs_pin_windows_manifest_sha256 "$root")" || return 1
+  if [ -e "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
+    echo "obs-release: ${dest} is not empty -- refusing to unzip over it" >&2; return 1
+  fi
+  command -v unzip >/dev/null 2>&1 || { echo "obs-release: unzip is required to unpack the ${tag} Windows bundle" >&2; return 1; }
+  zipf="$(_obs_release_get "$root" "$(obs_release_windows_zip_name "$tag")" "$zsha" 1)" || return 1
+  man="$(_obs_release_get "$root" "$OBS_RELEASE_WINDOWS_MANIFEST" "$msha" 0)" || return 1
+  # A second copy of a name would make unzip ask `replace?` on the operator's terminal mid-deploy, and
+  # which copy lands would depend on the answer: refuse it before anything is written (sha-pinned bytes,
+  # so this is defence in depth).
+  local dups
+  dups="$(unzip -Z1 "$zipf" 2>/dev/null | LC_ALL=C sort | uniq -d | head -n 3 || true)"
+  [ -z "$dups" ] || { echo "obs-release: ${zipf} carries a duplicate entry (${dups//$'\n'/, }) -- refused" >&2; return 1; }
+  mkdir -p "$dest" || { echo "obs-release: cannot create ${dest}" >&2; return 1; }
+  if ! unzip -q -n "$zipf" -d "$dest" </dev/null; then
+    rm -rf "$dest"; echo "obs-release: cannot unzip ${zipf}" >&2; return 1
+  fi
+  # The tree is copied onto a Windows box: a symlink entry is never staged.
+  if [ -n "$(find "$dest" -type l -print -quit 2>/dev/null)" ]; then
+    rm -rf "$dest"; echo "obs-release: the ${tag} Windows bundle carries a symlink -- refused" >&2; return 1
+  fi
+  # The zip carries its manifest as BUNDLE_MANIFEST.json (the name the Windows deploy program reads): it
+  # must be the pinned bytes, never a second, unproved list.
+  if [ -e "${dest}/${OBS_RELEASE_MANIFEST}" ]; then
+    cmp -s -- "$man" "${dest}/${OBS_RELEASE_MANIFEST}" \
+      || { rm -rf "$dest"; echo "obs-release: the zip's ${OBS_RELEASE_MANIFEST} is not the pinned manifest" >&2; return 1; }
+  else
+    cp -- "$man" "${dest}/${OBS_RELEASE_MANIFEST}" || { rm -rf "$dest"; echo "obs-release: cannot copy the manifest" >&2; return 1; }
+  fi
+  if ! obs_release_verify_tree "$dest" "${dest}/${OBS_RELEASE_MANIFEST}" "$tag" "$commit" "${OBS_RELEASE_WINDOWS_REQUIRED[@]}"; then
+    rm -rf "$dest"; return 1
+  fi
+  echo "obs-release: ${tag} (${commit}) Windows bundle unzipped into ${dest}, every manifest file verified" >&2
 }
 
 # obs_release_manifest_field DIR KEY -> the manifest's release.KEY (genlock_stats_version, ...), or nothing.

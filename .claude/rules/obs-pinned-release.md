@@ -3,6 +3,8 @@ paths:
   - "scripts/obs-release.pin"
   - "scripts/lib/obs-release.sh"
   - "scripts/lib/strih-snv-deploy.sh"
+  - "scripts/lib/genlock-windows-pin.sh"
+  - "tests/python/test_obs_release_windows_1505.py"
   - "scripts/deploy-genlock-fleet.sh"
   - "scripts/lib/e2e-linux-bytes.sh"
   - "scripts/lib/version-integrity-vendor-pin.sh"
@@ -39,13 +41,39 @@ obs project; camera-box moves the pin.
   another commit gets no manifest: UNKNOWN, refused); the vendor-pin alarm reads a box on the pin commit
   as OK without touching `vendor/`; drift-guard's `--compare strih_linux=1` takes the OBS / DistroAV
   versions from the pin. The cross-box parity still compares the boxes' markers.
-- **Still on the vendor build:** the Windows boxes (resolume-snv: `windows-genlock*.yml`), imag
-  (`linux-genlock.yml`), the Windows FAST/FULL manifest auto-source, and every `vendor/**` test. The
-  vendored OBS is removed only after a green E2E on the pin, in a separate change.
+- **The Windows boxes take the release's Windows zip (issue 1505).** The pin also carries
+  `OBS_RELEASE_WINDOWS_SHA256` (`obs-windows-x64-<tag>.zip`) and `OBS_RELEASE_WINDOWS_MANIFEST_SHA256`
+  (`WINDOWS_MANIFEST.json`). Their `.sha256` files read `<sha> *<name>` (git-bash); the first token is the
+  hash. `obs_release_windows_bundle ROOT DEST` is the `obs_release_bundle` twin: fetch by tag, the zip
+  proved against the pin AND its `.sha256`, the manifest against the pin, `unzip`, the zip's own
+  `BUNDLE_MANIFEST.json` must be the pinned manifest's bytes, every manifest file, the Windows required
+  files (`obs64.exe`, `obs.dll`, distroav / obs-vban / vlc-video, the two markers), the markers naming tag
+  + commit. Any failure removes DEST; no fallback to `windows-genlock*.yml`.
+  - The zip's layout is the windows-genlock `stage/` one (`bin/64bit`, `data`, `obs-plugins/64bit`,
+    markers, `BUNDLE_MANIFEST.json`), so the ONE Windows program `build_windows_deploy_program` reads
+    the unzipped tree unchanged (obs.dll verify, distroav to ProgramData + verify, obs-vban/vlc-video).
+  - The routing is `scripts/lib/genlock-windows-pin.sh` (the deploy script is at its line budget):
+    `fleet_win_split` sends a Windows box to the zip when the pin carries one; its markers name the pin
+    commit, `--run-id` / `--sha` are needed only for imag, `--fast` is refused (exit 2: the release ships
+    the full bundle only), the stats pair comes from the pinned manifest only when its release block
+    names the pin (plan mode reads it from `--stage`; another release = the marker is removed), and the
+    fleet log records the pinned boxes as `obs-<tag>`.
+  - STEP 0 of a pinned box names the cached, sha-proved zip `<tree>/obs-release/<tag>/obs-windows-x64-<tag>.zip`
+    (`fleet_win_bundle_source`): scp it to `C:\stage-genlock-<commit>`, check its sha256 on the box, `Expand-Archive`
+    it there (the zip's root is the stage layout). The unzipped tree the plan verified is a mktemp dir, gone on exit.
+    Then the deploy `.ps1` and the `launch-obs-genlock.sh --box resolume-snv --force` `.ps1` run by `-File`
+    (resolume-snv on v0.4.28, 13.11.2026: every DLL byte-verified, one obs64 in session 1, `:8899` LOCKED).
+  - A pin WITHOUT the two fields keeps the Windows boxes on the anchor run's windows-genlock artifact
+    (the vendor-path planner tests run against such a pin).
+- **Still on the vendor build:** imag (`linux-genlock.yml`), the Windows FAST/FULL manifest auto-source,
+  and every `vendor/**` test. `windows-genlock*.yml` is retired only after resolume-snv runs the pinned
+  zip and is read back (issue 1505 checklist). The vendored OBS is removed only after a green E2E on the
+  pin, in a separate change.
 
 ## Bumping the pin
 
-1. The tag, the commit, the two sha256 (`.sha256` of the tarball, `sha256sum BUNDLE_MANIFEST.json`),
+1. The tag, the commit, the two strih sha256 (`.sha256` of the tarball, `sha256sum BUNDLE_MANIFEST.json`),
+   the two Windows sha256 (`.sha256` of the zip and of `WINDOWS_MANIFEST.json`),
    the manifest's `release.versions` obs-studio / distroav, and `OBS_RELEASE_DSTACK_VERSION` = the dstack
    `plugins/dante-input/ffi/Cargo.lock` locks at the commit (issue 1485: dtray's `--print` threshold,
    `scripts/lib/dtray.sh`).

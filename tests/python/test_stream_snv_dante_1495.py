@@ -82,8 +82,10 @@ def test_stream_snv_is_one_nic_and_dante():
     assert f["STRIH_PROGRAM_VBAN_LEG_ADDR"] == "10.77.7.204"
     assert (f["STRIH_PROGRAM_VBAN_STREAMS"], f["STRIH_PROGRAM_VBAN_PORT"], f["STRIH_PROGRAM_VBAN_RESERVE_MS"]) == ("none",) * 3
     assert f["STRIH_PROGRAM_AUDIO_INPUT"] == "mbc", "the SNV stream tooling keys on the name"
-    assert f["STRIH_DANTE_DEVICES"] == "stream-obs=4440:8800:4455:30000-30031"
-    assert f["STRIH_NIC_DRIVER"] == "r8169"
+    assert f["STRIH_DANTE_DEVICES"] == "stream-obs=4440:8800:4455"   # issue 1519: no RX range
+    assert f["STRIH_PROGRAM_VBAN_SENDER"] == "none", "issue 1519: no VBAN on the Dante leg"
+    # issue 1502: the ONE rig NIC is now the USB 2.5 GbE adapter (r8152) renamed rig0; still one NIC
+    assert f["STRIH_NIC_DRIVER"] == "r8152" and f["STRIH_NIC_RENAME"] == "00:e0:4c:68:01:85=rig0"
     text = (BOXES / "stream-snv.env").read_text()
     for site in ("mbc-snv", "STREAM master"):
         assert site not in text, "the Dante transmitter names live only in the untracked site file"
@@ -98,7 +100,7 @@ def test_the_device_follows_the_role():
 def test_a_device_of_the_other_role_is_no_program_device(tmp_path):
     # strih-obs named on the stream box is not its program device: with the VBAN program facts none the load
     # refuses (the stream role needs ONE program source)
-    d = _boxes_with(tmp_path, "stream-snv", {"STRIH_DANTE_DEVICES": "strih-obs=4440:8800:4455:30000-30031"})
+    d = _boxes_with(tmp_path, "stream-snv", {"STRIH_DANTE_DEVICES": "strih-obs=4440:8800:4455"})
     r = _bash('strih_box_load stream-snv', env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode != 0 and "STRIH_PROGRAM_VBAN_STREAMS" in r.stderr, r.stderr
 
@@ -112,7 +114,10 @@ def test_a_dante_program_next_to_a_vban_program_is_refused(tmp_path):
 
 def test_the_vban_rollback_is_the_three_program_facts_and_no_device(tmp_path):
     d = _boxes_with(tmp_path, "stream-snv", {"STRIH_PROGRAM_VBAN_STREAMS": "stream", "STRIH_PROGRAM_VBAN_PORT": "6980",
-                                             "STRIH_PROGRAM_VBAN_RESERVE_MS": "80", "STRIH_DANTE_DEVICES": "none"})
+                                             "STRIH_PROGRAM_VBAN_RESERVE_MS": "80", "STRIH_DANTE_DEVICES": "none",
+                                             # issues 1510 + 1513: the four Dante terms go none with the device
+                                             "STRIH_DANTE_NETWORK_LATENCY_MS": "none", "STRIH_DANTE_RECEIVE_BUFFER_MS": "none",
+                                             "STRIH_DANTE_TX": "none", "STRIH_DANTE_TX_TRACK": "none"})
     r = _bash('strih_box_load stream-snv >/dev/null; if strih_program_dante_declared; then echo dante; else echo vban; fi; '
               'strih_lx_program_vban_leg', env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode == 0, r.stderr
@@ -138,9 +143,13 @@ def test_the_stream_box_toml_names_its_own_device_on_the_vlan(tmp_path):
     assert r.returncode == 0, r.stderr
     d = tomllib.loads(r.stdout)
     assert d["name"] == "stream-obs" and d["iface"] == "enp56s0.70" and d["network_rate"] == 96000
-    assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["rx_port_base"]) == (4440, 8800, 4455, 30000)
+    assert (d["arc_port"], d["cmc_port"], d["flows_port"]) == (4440, 8800, 4455)
+    assert "rx_port_base" not in d and "tx_port_base" not in d   # issue 1519: the fixed slot block
     assert [x["tx_channel"] for x in d["subscribe"]] == ["MIX-L", "MIX-R"]
     assert "sample_rate" not in d and "latency_ms" not in d
+    # issues 1510 + 1513: the named terms (P kept at 13.041666 ms) + the program TX to mbc
+    assert (d["network_latency_ms"], d["receive_buffer_ms"]) == (1.0, 12.041666)
+    assert (d["tx"], d["tx_track"]) == (["OBS program L", "OBS program R"], 1)
 
 
 def test_the_install_writes_the_stream_toml(tmp_path):

@@ -123,6 +123,10 @@ if ! declare -F shading_release_service >/dev/null; then
   # shellcheck source=scripts/lib/shading-release.sh
   . "$(dirname "${BASH_SOURCE[0]}")/shading-release.sh"
 fi
+if ! declare -F strih_dante_leg_filter_ensure >/dev/null; then   # issue 1519: dstack's pinned leg filter
+  # shellcheck source=scripts/lib/strih-dante-leg-filter.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-leg-filter.sh"
+fi
 if ! declare -p STRIH_PROGRAM_AUDIO_FILES >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/strih-program-audio.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-program-audio.sh"
@@ -316,7 +320,11 @@ if [ "${1:-}" = "--child" ]; then
   rm -f "$S/.runner.env"
   export PYTHONDONTWRITEBYTECODE=1   # issue 1426: no root-owned __pycache__ in the stage
   "$S/repo/scripts/setup-strih.sh" --box "$BOX" > "$S/setup-strih.log" 2>&1
-  echo "$?" > "$S/setup-strih.rc"
+  rc=$?
+  # issue 1515: whatever setup-strih wrote into the tree as root (the box's own release pin caches)
+  # goes back to the stage owner = the deploy user, so a later deploy's sweep can remove this stage.
+  chown -R --reference="$S" "$S/repo" || echo "run-setup: could not hand $S/repo back to the stage owner" >> "$S/setup-strih.log"
+  echo "$rc" > "$S/setup-strih.rc"
   exit 0
 fi
 [ "$(id -u)" = 0 ] || { echo "run-setup: must run as root" >&2; exit 2; }
@@ -559,9 +567,20 @@ _strih_lx_ssh() {
     "${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}" "$1"
 }
 
-_strih_lx_rsync() {  # SRC_DIR/ DEST_DIR/ -- --timeout=120 is rsync's own I/O-stall bound
-  sshpass -p "$STRIH_LX_PREP_PW" rsync -a --delete --timeout=120 -e "ssh $STRIH_LX_SSH_OPTS" \
-    "$1" "${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$2"
+_strih_lx_rsync() {  # SRC_DIR/ DEST_DIR/ [RSYNC_ARG...] -- --timeout=120 is rsync's own I/O-stall bound
+  local src="$1" dest="$2"; shift 2
+  sshpass -p "$STRIH_LX_PREP_PW" rsync -a --delete --timeout=120 "$@" -e "ssh $STRIH_LX_SSH_OPTS" \
+    "$src" "${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$dest"
+}
+
+# strih_lx_repo_rsync_filters -> the repo stage rsync's filter args, one per line (issue 1515). The
+# stage dir is keyed on the obs pin, so a redeploy at the same pin reuses it, and setup-strih (root)
+# has put the box's OWN per-box release pins into its release caches (strih-snv's shading REST pin).
+# `--delete` must never remove those: they are root-owned (rc 23 before any stop, 13.11.2026) and
+# sha-verified against the pin by the box's release step on every setup run. dev1's files still arrive.
+strih_lx_repo_rsync_filters() {
+  printf '%s\n' "--filter=P /shading-release/***" "--filter=P /intercom-release/***" "--filter=P /obs-release/***" \
+    "--filter=P /dstack-release/***"
 }
 
 _strih_lx_field() {  # KEY LINE -> the value of KEY=<value> in a read-back line
@@ -674,6 +693,8 @@ strih_lx_prepare() {
     || { _strih_lx_fail tree 1 3 "the pinned intercom release (above)"; return; }
   shading_release_service "$w/repo" >/dev/null \
     || { _strih_lx_fail tree 1 3 "the pinned shading release (above)"; return; }
+  strih_dante_leg_filter_ensure "$w/repo" >/dev/null \
+    || { _strih_lx_fail tree 1 3 "dstack's pinned Dante-leg filter, issue 1519 (above)"; return; }
   local hub_tag; hub_tag="$(strih_intercom_pin_tag "$w/repo")" || { _strih_lx_fail tree 1 3 "the intercom pin has no tag (above)"; return; }
   for b in "${box_list[@]}"; do
     STRIH_LX_BOX="$b"
@@ -754,7 +775,8 @@ strih_lx_apply() {
   # [stage] every byte on the box BEFORE anything is stopped.
   _strih_lx_rsync "$w/bundle/" "$stage/bundle/"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail stage "$rc" 4 "rsync of the bundle to $stage/bundle failed (rc 11/23 = the /tmp quota) -- OBS NOT stopped, the old build keeps running"; return; }
-  _strih_lx_rsync "$w/repo/" "$stage/repo/"; rc=$?
+  mapfile -t _repo_filters < <(strih_lx_repo_rsync_filters)
+  _strih_lx_rsync "$w/repo/" "$stage/repo/" "${_repo_filters[@]}"; rc=$?  # strih_lx_repo_rsync_filters
   [ "$rc" = 0 ] || { _strih_lx_fail stage "$rc" 4 "rsync of the provisioning tree to $stage/repo failed -- OBS NOT stopped, the old build keeps running"; return; }
   echo "# ${box}: staged $stage/{bundle,repo}"
 

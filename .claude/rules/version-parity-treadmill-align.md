@@ -227,3 +227,11 @@ while it runs or after it failed. Never `--status success` on the whole run: the
 tests make the run take 30+ minutes, while the E2E's own fetch now waits only for the windows-probe
 job, so the harness reaches `[0/8]` long before the run concludes (E2E run 41001425945: the
 frame-probe align found nothing). A red ci.yml still blocks the merge by itself.
+
+## A dev build left on ONE cambox after a live test refuses the release E2E (13.11.2026, PR 1520)
+
+A feature test that deploys the dev build to one camera (issue 1501's preview toggle on cam5 = 1.8.12
+while main was 1.8.11) leaves the fleet MIXED. The [0/8] auto-align aligns only a UNIFORM fleet, so the
+release E2E refuses at `camera-box-version-gate` (`cam5 1.8.12 PIN-DRIFT ... NEWER than main`) about a
+minute in. Before opening a release PR, put every tested box back on main:
+`CAMERA_SET="cam5" scripts/deploy-fleet.sh` (the main head's ci.yml artifact; it also checks the relay pin).

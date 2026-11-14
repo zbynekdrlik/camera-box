@@ -716,9 +716,15 @@ strih_operator_xrandr_providers() {
 
 # strih_operator_igpu_panel SYSFS -> `<connector> (<driver>)` of the first CONNECTED eDP connector whose
 # card is not driven by nvidia (strih-snv: `card2-eDP-2 (amdgpu)`), empty when there is none. NVIDIA's own
-# eDP port on a mux notebook (card1-eDP-1) never counts: a panel it drives needs no PRIME sink.
+# eDP port on a mux notebook (card1-eDP-1) never counts: a panel it drives needs no PRIME sink. A box
+# with no nvidia card at all prints nothing (stream-pp 13.11.2026: one AMD GPU drives X and its own
+# panel, so there is no sink to miss).
 strih_operator_igpu_panel() {
-  local c st drv
+  local c st drv d has_nvidia=0
+  for d in "${1:-/sys}"/class/drm/card*/device/driver; do
+    if [ "$(basename -- "$(readlink -f -- "$d" 2>/dev/null)")" = nvidia ]; then has_nvidia=1; fi
+  done
+  [ "$has_nvidia" = 1 ] || return 0
   for c in "${1:-/sys}"/class/drm/card*-eDP-*; do
     [ -r "$c/status" ] || continue
     st="$(cat -- "$c/status" 2>/dev/null)" || continue

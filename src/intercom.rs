@@ -102,10 +102,15 @@ pub fn run_power_button_monitor(
         }
     };
 
+    crate::preview_tap::install_preview_toggle_signal();
     while running.load(Ordering::Relaxed) {
         let now_ms = clock.elapsed().as_millis() as u64;
         if let Some(a) = classifier.tick(now_ms) {
             act(a, &last_path);
+        }
+        // owner 13.11.2026: `systemctl kill -s SIGUSR1 --kill-whom=main camera-box` = one double press
+        if crate::preview_tap::take_preview_toggle_request() {
+            act(crate::button_press::PressAction::Double, "SIGUSR1");
         }
         for (path, fd) in &devices {
             let n = unsafe {

@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from intercom_release_fake_1487 import fake_release_env  # noqa: E402
 from shading_release_fake_1487 import fake_service_env  # noqa: E402
 from obs_release_fake_1487 import TAG as OBS_TAG, fake_obs_pin_env, fake_obs_release_env  # noqa: E402
+from dstack_leg_fake_1519 import fake_dstack_leg_env  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 FLEET = REPO / "scripts" / "deploy-genlock-fleet.sh"
@@ -217,6 +218,7 @@ def _execute(tmp_path, boxes, extra=None):
     }, home=str(home))
     env.update(fake_release_env(tmp_path))
     env.update(fake_service_env(tmp_path))
+    env.update(fake_dstack_leg_env(tmp_path))   # issue 1519: dstack's pinned leg filter, staged by the deploy
     obs_env, libsha = fake_obs_release_env(tmp_path, SHA)   # issue 1487: the pinned obs release
     env.update(obs_env)
     env["STUB_LIBSHA"] = libsha

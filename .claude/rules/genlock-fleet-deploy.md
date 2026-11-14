@@ -17,7 +17,8 @@ obs-vban and, since issue 1425, vlc-video backups + byte-verifies) live in `scri
 never inline in the main script. The stats-ABI blocks live in `scripts/lib/genlock-stats-abi.sh`
 for the same reason (issue 1302), and since issue 1426 the box list itself (`fleet_normalize_boxes`,
 `fleet_deploy_order`) lives in `scripts/lib/genlock-fleet-boxes.sh` and the per-box Linux apply loop
-(`strih_lx_apply_all`) in `scripts/lib/strih-snv-deploy.sh`; the script sits at 958 lines.
+(`strih_lx_apply_all`) in `scripts/lib/strih-snv-deploy.sh`, and since issue 1505 the Windows
+pinned-zip routing in `scripts/lib/genlock-windows-pin.sh`; the script sits at 984 lines.
 
 ## A FAST deploy refuses an obs.dll with another stats ABI (issue 1302, design 6028838843, ROZHODNUTÉ 6030159870)
 
@@ -279,6 +280,17 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
 4. **stage** — `rsync -a --delete --timeout=120` bundle → `/tmp/genlock-stage-<sha>/bundle/`, tree →
    `…/repo/` (ONE per-sha dir the next sweep removes whole; the old fixed `/tmp/strih-snv-deploy-repo`
    is gone). **OBS is still running** — an rsync failure exits 4 BEFORE anything is stopped.
+   **A redeploy at the SAME obs pin reuses that stage dir (issue 1515).** setup-strih (root) puts the
+   box's OWN per-box release pins into `repo/shading-release/` etc. (strih-snv's REST shading pin), so
+   the repo rsync protects `/shading-release/` `/intercom-release/` `/obs-release/` from `--delete`
+   (`strih_lx_repo_rsync_filters`; without it: rc 23, live 13.11.2026), and the root child hands
+   `repo/` back with `chown -R --reference=<stage>` before `setup-strih.rc`, so the operator's sweep
+   can remove the stage later. A MANUAL `sudo verify-strih.sh` from the stage tree must run as
+   `sudo env PYTHONDONTWRITEBYTECODE=1 ./scripts/verify-strih.sh --box <box>` (the deploy's own does):
+   without it root writes `scripts/__pycache__` into the stage and the next same-pin deploy fails at
+   `[stage]` rc 23 again (live stream-snv 13.11.2026). A pytest of rsync behaviour needs stand-in files of DIFFERENT lengths:
+   rsync's quick check skips equal size + same-second mtime, and a same-user 0555 dir is no stand-in for
+   root ownership (rsync makes a dir it owns writable before deleting in it).
 5. **stop** — delegated to `/usr/local/bin/strih-obs-stop.sh` (plain mode = `systemctl --user stop`,
    so the unit `ExecStop` runs and `Restart=on-failure` stays quiet) + a bounded wait for the unit AND
    every `obs`. The deploy itself sends no signal; the stop code's own SIGTERM → grace → SIGKILL ladder

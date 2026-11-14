@@ -43,6 +43,11 @@ PUMP_WARN_MARKER = "engine pump lost or overran blocks"
 GATED = ("rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps", "rx_written_late",
          "re_anchors", "obs_dropped")
 NAMED = ("rx_late", "overruns", "late_blocks", "rx_packets", "blocks", "delivered_frames")
+# issue 1508: obs v0.4.29 (dstack #278) appends `rx_reordered`; a reorder is NOT a loss (the late packet is
+# played in its slot), so it is reported when both lines carry it and never gated; an older line lacks it.
+# obs v0.4.30 (dstack v0.6.126) appends `start_holes`: the reads before a flow's first packet (the OBS-start
+# burst), no longer in rx_holes; reported, never gated (the gate's window never contains an OBS start).
+OPTIONAL = ("rx_reordered", "start_holes")
 _FIELD_RE = re.compile(r"(?:^|\s)([a-z_]+)=(\S+)")
 _TS_RE = re.compile(r"^\d\d:\d\d:\d\d\.\d\d\d: ")
 
@@ -118,6 +123,10 @@ def decide(lines, start_idx, end_idx, device="strih-obs"):
         res["counters"][k] = {"before": b, "after": a, "delta": a - b}
         if k in GATED and a > b:
             res["failures"].append(f"{k} +{a - b}")
+    for k in OPTIONAL:
+        ob, oa = _int(before.get(k)), _int(closing.get(k))
+        if ob is not None and oa is not None and oa >= ob:
+            res["counters"][k] = {"before": ob, "after": oa, "delta": oa - ob}
     if res["counters"].get("delivered_frames", {}).get("delta", 1) == 0:
         res["unknown_reasons"].append("delivered_frames did not move: no Dante audio reached OBS in the window")
     if res["error_lines"]:

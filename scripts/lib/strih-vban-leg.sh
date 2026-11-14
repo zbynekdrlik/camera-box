@@ -59,9 +59,10 @@
 # strih_vban_leg_grade, read-only (never the link), through the caller's ok / bad / note (each rc 0).
 # Run verify as root (nft).
 #
-# Issue 1485: a box with STRIH_DANTE_DEVICES gets the Dante variant of parts 1-3 (strih-dante-leg.sh): the
-# real /24 with ipv4.route-table, the devices' ports through the filter, a loose rp_filter. It applies by
-# `connection modify` + `device reapply` like every other property: no VLAN create, no link change.
+# Issue 1485: a box with STRIH_DANTE_DEVICES gets the Dante variant of parts 1 and 3 (strih-dante-leg.sh): the
+# real /24 with ipv4.route-table and a loose rp_filter, applied by `connection modify` + `device reapply` like
+# every other property: no VLAN create, no link change. Issue 1519: its part 2 is dstack's GENERIC filter, a
+# pinned artifact (strih-dante-leg-filter.sh), which replaces the vban_dante70 table on such a box.
 #
 # Seams (tests/python/test_vban_leg_1439.py): STRIH_VBAN_LEG_SYSFS (/sys), STRIH_VBAN_LEG_PROC_SYS
 # (/proc/sys), STRIH_VBAN_LEG_NFT_FILE, STRIH_VBAN_LEG_UNIT_FILE, STRIH_VBAN_LEG_SYSCTL_FILE,
@@ -107,15 +108,12 @@ _strih_vban_leg_dport() { case "$1" in *,*) printf '{ %s }' "${1//,/, }" ;; *) p
 # _strih_vban_leg_plen -> the leg address's prefix length: 24 with Dante devices declared, else 32.
 _strih_vban_leg_plen() { if strih_dante_leg_declared; then echo 24; else echo 32; fi; }
 
-# _strih_vban_leg_devices -> the box fact STRIH_DANTE_DEVICES (`none` when unreadable).
-_strih_vban_leg_devices() { strih_lx_dante_devices 2>/dev/null || echo none; }
-
 # _strih_vban_leg_filter_words SENDER PORT -> what the leg's filter admits, for the setup + verify lines.
 _strih_vban_leg_filter_words() {
   local admits="only ping (no sender declared yet)"
   if [ "$1" != none ]; then admits="only ${1}'s VBAN to UDP ${2} + ping"; fi
   if strih_dante_leg_declared; then
-    printf '%s + the Dante devices (%s), out echo replies + Dante from the leg address\n' "${admits#only }" "$(_strih_vban_leg_devices)"
+    printf "dstack's generic Dante-leg filter (dstack %s, issue 1519)\n" "$(strih_dante_leg_filter_tag "$(_strih_dante_leg_root)" 2>/dev/null || echo '?')"
   else
     printf '%s, out only echo replies\n' "$admits"
   fi
@@ -176,19 +174,12 @@ strih_vban_leg_resolve() {
   esac
 }
 
-# strih_vban_leg_nft_text IF SENDER PORT [ADDR DEVICES] -> the ruleset file (nft -f), see the header; SENDER
-# `none` = only ping; ADDR + DEVICES (STRIH_DANTE_DEVICES) add the Dante rules (strih-dante-leg.sh). Its rule
-# text is exactly what nft 1.0.9 lists back (pinned against a netns render and the live strih-snv table by
-# the pytest).
+# strih_vban_leg_nft_text IF SENDER PORT -> the ruleset file (nft -f), see the header; SENDER `none` = only
+# ping. Its rule text is exactly what nft 1.0.9 lists back (pinned against a netns render and the live
+# strih-snv table by the pytest). A Dante leg never takes it (issue 1519: dstack's generic filter).
 strih_vban_leg_nft_text() {
   local ifc="${1:?interface required}" sender="${2:?sender required}" port="${3:?port required}"
-  local addr="${4:-}" dev="${5:-none}" dante_in="" dante_out="" net
   local vin="" voff="" what="only echo requests (no VBAN sender declared yet)"
-  if [ "$dev" != none ]; then
-    net="$(strih_vban_leg_net "$addr")"
-    dante_in="$(strih_dante_nft_input "$ifc" "$net" "$dev")"$'\n'
-    dante_out="$(strih_dante_nft_output "$ifc" "$addr" "$net")"$'\n'
-  fi
   if [ "$sender" != none ]; then
     vin="        iifname \"${ifc}\" ip saddr ${sender} udp dport $(_strih_vban_leg_dport "$port") counter accept"$'\n'
     voff="        iifname != \"${ifc}\" iifname != \"lo\" ip saddr ${sender} udp dport $(_strih_vban_leg_dport "$port") counter"$'\n'
@@ -206,14 +197,12 @@ strih_vban_leg_nft_text() {
     "        type filter hook input priority filter; policy accept;"
   printf '%s' "$vin"
   printf '%s\n' "        iifname \"${ifc}\" icmp type echo-request counter accept"
-  printf '%s' "$dante_in"
   printf '%s\n' "        iifname \"${ifc}\" counter drop"
   printf '%s' "$voff"
   printf '%s\n' "    }" \
     "    chain output {" \
     "        type filter hook output priority filter; policy accept;" \
     "        oifname \"${ifc}\" icmp type echo-reply counter accept"
-  printf '%s' "$dante_out"
   printf '%s\n' "        oifname \"${ifc}\" counter drop" \
     "    }" \
     "}"
@@ -226,7 +215,7 @@ strih_vban_leg_nft_normalize() {
     -e 's/counter packets [0123456789]+ bytes [0123456789]+/counter/'
 }
 
-# strih_vban_leg_nft_expected IF SENDER PORT [ADDR DEVICES] -> what `nft list table inet vban_dante70` must read,
+# strih_vban_leg_nft_expected IF SENDER PORT -> what `nft list table inet vban_dante70` must read,
 # normalized: the ruleset file's table block (one source for both).
 strih_vban_leg_nft_expected() {
   strih_vban_leg_nft_text "$@" | sed -n '/^table .* {$/,$p' | strih_vban_leg_nft_normalize
@@ -405,16 +394,17 @@ _strih_vban_leg_put() {
   echo written
 }
 
-# _strih_vban_leg_filter_apply IF SENDER PORT ADDR -> the ruleset file, the oneshot (enabled), the live table.
+# _strih_vban_leg_filter_apply IF SENDER PORT -> the ruleset file, the oneshot (enabled), the live table; on a
+# Dante box dstack's generic filter instead (issue 1519, strih_dante_leg_filter_apply).
 _strih_vban_leg_filter_apply() {
-  local ifc="$1" sender="$2" port="$3" addr="$4" nf uf w1 w2 live want dev
-  dev="$(_strih_vban_leg_devices)"
+  local ifc="$1" sender="$2" port="$3" nf uf w1 w2 live want
   nf="$(_strih_vban_leg_nft_file)"; uf="$(_strih_vban_leg_unit_file)"
   if ! command -v nft >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nftables \
       || { echo "strih-vban-leg: nft is missing and nftables could not be installed" >&2; return 1; }
   fi
-  w1="$(_strih_vban_leg_put "$nf" 0644 "$(strih_vban_leg_nft_text "$ifc" "$sender" "$port" "$addr" "$dev")")" \
+  if strih_dante_leg_declared; then strih_dante_leg_filter_apply "$ifc"; return; fi
+  w1="$(_strih_vban_leg_put "$nf" 0644 "$(strih_vban_leg_nft_text "$ifc" "$sender" "$port")")" \
     || { echo "strih-vban-leg: could not write ${nf}" >&2; return 1; }
   w2="$(_strih_vban_leg_put "$uf" 0644 "$(strih_vban_leg_unit_text "$nf")")" \
     || { echo "strih-vban-leg: could not write ${uf}" >&2; return 1; }
@@ -425,7 +415,7 @@ _strih_vban_leg_filter_apply() {
   if ! systemctl is-enabled -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
     systemctl enable "$STRIH_VBAN_LEG_UNIT" || { echo "strih-vban-leg: could not enable ${STRIH_VBAN_LEG_UNIT}" >&2; return 1; }
   fi
-  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$dev")"
+  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port")"
   live="$(nft list table inet "$STRIH_VBAN_LEG_NFT_TABLE" 2>/dev/null | strih_vban_leg_nft_normalize || true)"
   if [ "$w1" = written ] || [ "$w2" = written ] || [ "$live" != "$want" ] \
      || ! systemctl is-active -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
@@ -438,6 +428,7 @@ _strih_vban_leg_filter_apply() {
   else
     echo "  table inet ${STRIH_VBAN_LEG_NFT_TABLE} live and unchanged"
   fi
+  strih_dante_leg_filter_remove   # issue 1519: a box that dropped its Dante devices loses dstack's filter
 }
 
 # _strih_vban_leg_sysctl_apply IF -> the drop-in, applied (when the interface exists), read back.
@@ -595,7 +586,7 @@ _strih_vban_leg_carrying_nic_leg() {
 _strih_vban_leg_retiring_filter() {
   local tmp rc=0
   tmp="$(mktemp)" || return 1
-  strih_vban_leg_nft_text "$1" "$2" "$3" "$4" "$(_strih_vban_leg_devices)" \
+  strih_vban_leg_nft_text "$1" "$2" "$3" \
     | sed "s/inet ${STRIH_VBAN_LEG_NFT_TABLE}\$/inet ${STRIH_VBAN_LEG_RETIRING_TABLE}/; s/inet ${STRIH_VBAN_LEG_NFT_TABLE} {\$/inet ${STRIH_VBAN_LEG_RETIRING_TABLE} {/" >"$tmp" || rc=1
   [ "$rc" = 1 ] || nft -f "$tmp" || rc=1
   rm -f "$tmp"
@@ -826,7 +817,7 @@ strih_vban_leg_install() {
       echo "  table inet ${STRIH_VBAN_LEG_RETIRING_TABLE} keeps the old NIC leg ${old} filtered until it is retired"
     fi
   fi
-  _strih_vban_leg_filter_apply "$ifc" "$sender" "$port" "$addr" || return 1
+  _strih_vban_leg_filter_apply "$ifc" "$sender" "$port" || return 1
   _strih_vban_leg_sysctl_apply "$ifc" || return 1
   # issue 1507: nothing but Dante on a Dante leg (wsdd binds every address, the leg's included)
   if [ "$(_strih_vban_leg_plen)" = 24 ]; then strih_vban_leg_wsdd_remove || return 1; fi
@@ -952,16 +943,17 @@ strih_vban_leg_grade() {
   fi
   if strih_dante_leg_declared; then
     ai="$(cat "${d}/rp_filter" 2>/dev/null || echo '?')"
-    if [ -z "$(_strih_dante_avahi_uid)" ]; then note "(vban-leg) dante: no avahi user, so no avahi drop in the filter"; fi
-    if [ "$ai" = 2 ]; then ok "(vban-leg) dante: ${ifc} rp_filter=2, the devices' ports through the filter below"
+    if [ "$ai" = 2 ]; then ok "(vban-leg) dante: ${ifc} rp_filter=2, the leg's traffic through dstack's filter below"
     else bad "(vban-leg) dante: ${ifc} rp_filter=${ai}, wants 2: a strict filter drops mDNS and the Dante groups (re-run setup-strih.sh step 13)"; fi
+    strih_dante_leg_filter_grade "$ifc"   # issue 1519: dstack's generic filter, no VBAN on a Dante leg
+    return 0
   fi
   # the filter: the unit, the live table, then the two counters over the window
   if ! l1="$(nft list table inet "$STRIH_VBAN_LEG_NFT_TABLE" 2>/dev/null)"; then
     bad "(vban-leg) filter: cannot read table inet ${STRIH_VBAN_LEG_NFT_TABLE} (missing, or verify-strih not run as root) -- ${STRIH_VBAN_LEG_UNIT} loads it"
     return 0
   fi
-  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port" "$addr" "$(_strih_vban_leg_devices)")"
+  want="$(strih_vban_leg_nft_expected "$ifc" "$sender" "$port")"
   if [ "$(printf '%s\n' "$l1" | strih_vban_leg_nft_normalize)" != "$want" ] \
      || [ "$(systemctl is-enabled "$STRIH_VBAN_LEG_UNIT" 2>/dev/null || true)" != enabled ] \
      || ! systemctl is-active -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
@@ -983,11 +975,7 @@ strih_vban_leg_grade() {
     if [ "$a2" -gt "$a1" ]; then
       ok "(vban-leg) vban: $((a2 - a1)) packets from ${sender} to UDP ${port} on ${ifc} in ${wait} s"
     else
-      if strih_program_dante_declared 2>/dev/null; then   # issue 1485: the program is on Dante, VBAN is only the hub's fallback
-        note "(vban-leg) vban: no VBAN from ${sender} on ${ifc} in ${wait} s -- this box takes its program from the Dante device $(strih_dante_input_device) (graded by (program-dante)); the console's VBAN is not needed"
-      else
-        bad "(vban-leg) vban: no VBAN from ${sender} arrived on ${ifc} in ${wait} s -- is the console ${sender} sending stream '${stream}' to ${addr}:${port}?"
-      fi
+      bad "(vban-leg) vban: no VBAN from ${sender} arrived on ${ifc} in ${wait} s -- is the console ${sender} sending stream '${stream}' to ${addr}:${port}?"
     fi
   fi
   if [[ "$o1" =~ ^[0123456789]+$ ]] && [[ "$o2" =~ ^[0123456789]+$ ]]; then

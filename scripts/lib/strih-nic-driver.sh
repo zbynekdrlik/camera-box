@@ -31,6 +31,10 @@
 # (/sys, the apply's closing read of the loaded version); `dkms`, `modinfo`,
 # `depmod`, `udevadm`, `apt-get` and `nmcli` are looked up on PATH.
 
+# issue 1502: the rig NIC's stable short name (setup step 1c + item 36's `(nic-rename)` rows).
+# shellcheck source=scripts/lib/strih-nic-rename.sh
+. "$(dirname "${BASH_SOURCE[0]}")/strih-nic-rename.sh"
+
 # The vendored driver. The names are pinned against vendor/realtek-r8152/dkms.conf by a test.
 STRIH_NIC_DRV_PACKAGE=realtek-r8152
 STRIH_NIC_DRV_VERSION=2.21.4
@@ -690,6 +694,7 @@ strih_nic_grade_rows() {
     fi
   fi
   nic="$(strih_lx_rig_nic "$sysroot" "$addrs" "$ip" 2>/dev/null || true)"
+  strih_nic_rename_grade_rows "$sysroot" "$nic" "" "$nicdrv"
   if [ -z "$nic" ]; then
     printf 'FAIL|(nic) cannot resolve the rig NIC (%s driver / %s) -- USB, link and NM pinning not graded\n' "$nicdrv" "$ip"
     return 0

@@ -10,6 +10,49 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Owner 13.11.2026: the preview switches by a command too, not only the button (an injected KEY_POWER
+/// also reaches logind, which powers the box off). `systemctl kill -s SIGUSR1 --kill-whom=main
+/// camera-box` = one double press: the handler only stores this flag, the power-button loop takes it.
+static PREVIEW_TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Ask for one preview flip (what the SIGUSR1 handler does).
+pub fn request_preview_toggle() {
+    PREVIEW_TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// Take a pending flip request: true once per request.
+pub fn take_preview_toggle_request() -> bool {
+    PREVIEW_TOGGLE_REQUESTED.swap(false, Ordering::Relaxed)
+}
+
+#[cfg(target_os = "linux")]
+static PREVIEW_SIGNAL_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+/// The SIGUSR1 handler: async-signal-safe, its whole body is one atomic store.
+#[cfg(target_os = "linux")]
+extern "C" fn handle_preview_toggle_signal(_sig: libc::c_int) {
+    request_preview_toggle();
+}
+
+/// Install the SIGUSR1 handler (idempotent; a no-op off Linux).
+pub fn install_preview_toggle_signal() {
+    #[cfg(target_os = "linux")]
+    PREVIEW_SIGNAL_INSTALLED.call_once(|| {
+        // SAFETY: a standard sigaction with a zeroed struct; the handler only stores an atomic flag.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = handle_preview_toggle_signal as *const () as libc::sighandler_t;
+            sa.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut sa.sa_mask);
+            if libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut()) != 0 {
+                tracing::warn!(
+                    "preview: could not install the SIGUSR1 preview toggle (issue 1501)"
+                );
+            }
+        }
+    });
+}
+
 /// Which picture the cameraman preview shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewSource {
@@ -188,6 +231,31 @@ mod tests {
     use super::*;
 
     const YUYV: u32 = u32::from_le_bytes(*b"YUYV");
+
+    /// Owner 13.11.2026: switch the preview by a command, not the button. One request = one flip, taken
+    /// once; a real SIGUSR1 after the install is a request (the handler only stores the flag).
+    #[test]
+    fn a_preview_toggle_request_is_taken_once_and_sigusr1_makes_one_1501() {
+        let _ = take_preview_toggle_request();
+        assert!(!take_preview_toggle_request());
+        request_preview_toggle();
+        assert!(take_preview_toggle_request());
+        assert!(
+            !take_preview_toggle_request(),
+            "one request flips the preview once"
+        );
+        install_preview_toggle_signal();
+        install_preview_toggle_signal(); // idempotent
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: raise is a plain POSIX call; the installed handler only stores an atomic flag.
+            assert_eq!(unsafe { libc::raise(libc::SIGUSR1) }, 0);
+            assert!(
+                take_preview_toggle_request(),
+                "SIGUSR1 is a preview toggle request"
+            );
+        }
+    }
 
     fn frame(width: u32, height: u32, stride: u32, fill: u8) -> Vec<u8> {
         let mut v = vec![0xEE; (stride * height) as usize];

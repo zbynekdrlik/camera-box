@@ -133,6 +133,65 @@ fn the_pinned_manifest_is_the_releases_and_carries_the_pinned_versions() {
     }
 }
 
+/// Issue 1505: the Windows OBS boxes take the pinned release's Windows zip. Its sha256 is the release's
+/// own `.sha256` (the git-bash `<sha> *<name>` form), and the manifest is pinned by sha256: its release
+/// block names the tag + commit and lists the files the Windows deploy program byte-verifies.
+#[test]
+fn the_pinned_windows_zip_and_manifest_are_the_releases() {
+    let tag = pin("OBS_RELEASE_TAG");
+    let name = format!("obs-windows-x64-{tag}.zip");
+    let side = String::from_utf8(asset(&format!("{name}.sha256"))).unwrap();
+    assert_eq!(
+        side.trim(),
+        format!("{} *{name}", pin("OBS_RELEASE_WINDOWS_SHA256")),
+        "refresh OBS_RELEASE_WINDOWS_SHA256"
+    );
+    let bytes = asset("WINDOWS_MANIFEST.json");
+    assert_eq!(
+        sha256(&bytes),
+        pin("OBS_RELEASE_WINDOWS_MANIFEST_SHA256"),
+        "refresh OBS_RELEASE_WINDOWS_MANIFEST_SHA256"
+    );
+    let man_side = String::from_utf8(asset("WINDOWS_MANIFEST.json.sha256")).unwrap();
+    assert_eq!(
+        man_side.trim(),
+        format!(
+            "{} *WINDOWS_MANIFEST.json",
+            pin("OBS_RELEASE_WINDOWS_MANIFEST_SHA256")
+        )
+    );
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let rel = &v["release"];
+    assert_eq!(rel["obs_tag"], tag.as_str());
+    assert_eq!(rel["obs_commit"], pin("OBS_RELEASE_COMMIT").as_str());
+    assert_eq!(
+        rel["versions"]["obs-studio"],
+        pin("OBS_RELEASE_OBS_STUDIO_VERSION").as_str()
+    );
+    assert_eq!(
+        rel["versions"]["distroav"],
+        pin("OBS_RELEASE_DISTROAV_VERSION").as_str()
+    );
+    let files = v["files"].as_array().expect("files");
+    for want in [
+        "bin/64bit/obs64.exe",
+        "bin/64bit/obs.dll",
+        "obs-plugins/64bit/distroav.dll",
+        "obs-plugins/64bit/obs-vban.dll",
+        "obs-plugins/64bit/vlc-video.dll",
+        "GENLOCK_BUILD_SHA.txt",
+        "OBS_RELEASE.txt",
+    ] {
+        assert!(
+            files.iter().any(|f| f["path"] == want),
+            "the Windows release has no {want}"
+        );
+    }
+    for k in ["genlock_stats_version", "genlock_output_stats_version"] {
+        assert!(rel[k].as_u64().unwrap_or(0) > 0, "{k}");
+    }
+}
+
 /// Issue 1485: the dstack version the pinned release's dante_input runs (the dtray `--print` threshold
 /// reads it from the pin, `scripts/lib/dtray.sh`) is the one the commit's FFI Cargo.lock locks: the RELEASE
 /// TAG of its git source (`?tag=vX.Y.Z#`), the same kind of value as DTRAY_DEVICE_FIRST_DSTACK.

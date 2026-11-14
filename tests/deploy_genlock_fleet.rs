@@ -1142,18 +1142,16 @@ fn usage_errors_exit_two() {
     // --plan requires --stage and --sha (no network in plan mode)
     let (c3, _o, _e) = run_script(&["--plan", "--run-id", "R"]);
     assert_eq!(c3, 2, "--plan requires --stage and --sha");
-    // no --run-id with a Windows box in the list (issue 1487: a Linux-only run needs none, its boxes
-    // take the pinned obs release)
-    let (c4, _o, _e) = run_script(&[
-        "--plan",
-        "--stage",
-        "/tmp",
-        "--sha",
-        "S",
-        "--boxes",
-        "resolume-snv",
-    ]);
+    // no --run-id with an anchor-built box in the list (issue 1487: a Linux-only run needs none, its
+    // boxes take the pinned obs release; issue 1505: neither does a Windows box once the pin carries
+    // the Windows zip -- only imag still takes an anchor build)
+    let (c4, _o, _e) = run_script(&["--plan", "--stage", "/tmp", "--sha", "S", "--boxes", "imag"]);
     assert_eq!(c4, 2, "missing --run-id");
+    let (c5, _o, e5) = run_script(&["--plan", "--stage", "/tmp", "--boxes", "resolume-snv"]);
+    assert_eq!(
+        c5, 0,
+        "a pinned Windows box needs no --run-id / --sha: {e5}"
+    );
 }
 
 // ============================================================================================

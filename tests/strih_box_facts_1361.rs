@@ -154,6 +154,13 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_JXS_PROGRAM_PIN_MS",
     // issue 1466: the operator desktop session (openbox | xfce).
     "STRIH_DESKTOP",
+    // issues 1510 + 1513: the program Dante device's named latency terms + the program TX.
+    "STRIH_DANTE_NETWORK_LATENCY_MS",
+    "STRIH_DANTE_RECEIVE_BUFFER_MS",
+    "STRIH_DANTE_TX",
+    "STRIH_DANTE_TX_TRACK",
+    // issue 1502: the rig NIC's stable short name (`<mac>=<name>` | none).
+    "STRIH_NIC_RENAME",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -207,13 +214,13 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_PROGRAM_VBAN_PORT=none",
         "STRIH_PROGRAM_VBAN_RESERVE_MS=none",
         "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk",
-        // issue 1439 (supervisor 23.10.2026 10:31): VLAN 70 tagged on the rig NIC; Ableton-FOH sends the
-        // hub's fohabl-strih (6980) and the strih OBS's strih-obs (6981) to it.
+        // issue 1439 (supervisor 23.10.2026 10:31): VLAN 70 tagged on the rig NIC. Issue 1519: VBAN on the
+        // Dante leg is retired (dstack's generic filter), so no sender.
         "STRIH_PROGRAM_VBAN_LEG=vlan:70",
         "STRIH_PROGRAM_VBAN_LEG_ADDR=10.77.7.202",
-        "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,6981",
-        // issue 1485: the hub's Dante device + the coming OBS device, each with its own ports.
-        "STRIH_DANTE_DEVICES=strih-snv-intercom=4441:8801:4456:30100-30131 strih-obs=4440:8800:4455:30000-30031",
+        "STRIH_PROGRAM_VBAN_SENDER=none",
+        // issue 1485: the hub's Dante device + the OBS device; issue 1519: no RX range (the fixed slot blocks).
+        "STRIH_DANTE_DEVICES=strih-snv-intercom=4441:8801:4456 strih-obs=4440:8800:4455",
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
         "STRIH_CAMERA_DEV1_NET=direct",
@@ -237,6 +244,13 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_JXS_PROGRAM_PIN_MS=none",
         // issue 1466: strih-snv stays on the openbox kiosk until its turn.
         "STRIH_DESKTOP=openbox",
+        // issues 1510 + 1513: P = 1 + 12.041666 ms, today's; strih-obs sends nothing.
+        "STRIH_DANTE_NETWORK_LATENCY_MS=1",
+        "STRIH_DANTE_RECEIVE_BUFFER_MS=12.041666",
+        "STRIH_DANTE_TX=none",
+        "STRIH_DANTE_TX_TRACK=none",
+        // issue 1502: strih-snv's rig NIC keeps its kernel name.
+        "STRIH_NIC_RENAME=none",
         "LOADED=strih-snv",
     ] {
         assert!(

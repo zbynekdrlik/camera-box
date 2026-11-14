@@ -40,6 +40,8 @@ def _facts(tmp_path, **kv):
     f = d / "stream-snv.env"
     t = f.read_text()
     kv.setdefault("STRIH_PROGRAM_VBAN_LEG", "vlan:70")
+    for k, v in fk.STREAM_SNV_PRE_1502_NIC.items():  # the 9.11 box: the onboard rig NIC, before issue 1502
+        kv.setdefault(k, v)
     for k, v in kv.items():
         t, n = re.subn(r"(?m)^%s=.*$" % k, "%s=%s" % (k, v), t)
         assert n == 1, k
@@ -171,9 +173,11 @@ def test_the_old_leg_stays_filtered_until_it_is_retired(tmp_path):
     nft = [c for c in s["log"] if c[0] == "nft"]
     loads = [i for i, c in enumerate(s["log"]) if c[:2] == ["nft", "-f"]]
     assert len(loads) >= 1 and any(c[1:] == ["delete", "table", "inet", "vban_dante70_retiring"] for c in nft), nft
-    assert s.get("nft_other", {}) == {}, "removed once the old leg is gone"
+    assert "vban_dante70_retiring" not in s.get("nft_other", {}), "removed once the old leg is gone"
     first_up = next(i for i, c in enumerate(s["log"]) if c[0] == "nmcli" and "connection" in c and "up" in c)
-    main_load = next(i for i, c in enumerate(s["log"]) if c[:3] == ["systemctl", "restart", "vban-dante70-filter.service"])
+    # issue 1519: the real stream-snv is a Dante box, so its main filter is dstack's generic one
+    main_load = next(i for i, c in enumerate(s["log"]) if c[:2] == ["systemctl", "restart"]
+                     and c[2] in ("vban-dante70-filter.service", "dstack-dante-leg-filter.service"))
     retiring = [i for i in loads if i < first_up and i < main_load]
     assert retiring, "loaded before the main table moves to the VLAN and before the VLAN comes up"
     assert "keeps the old NIC leg %s filtered" % NIC_IF in r.stdout

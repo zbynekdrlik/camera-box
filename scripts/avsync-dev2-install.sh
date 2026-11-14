@@ -48,7 +48,7 @@ UNITS=(avsync-measure-dev2@.service avsync-measure-dev2@.timer)
 # issue 1441: the measurer's sourced libs (scripts/lib/ -> dev2:~/avsync/scripts/lib/). The venue
 # table needs obs-fleet.sh (the dial host) and strih-box-facts.sh (the fact-file parser), and the fact
 # files themselves ship to dev2:~/avsync/scripts/strih-boxes/ (strih_box_dir = <lib>/../strih-boxes).
-LIB_FILES=(avsync-measure.sh avsync-venues.sh obs-fleet.sh strih-box-facts.sh)
+LIB_FILES=(avsync-measure.sh avsync-venues.sh obs-fleet.sh strih-box-facts.sh strih-box-dante-facts.sh)
 # The pre-issue-1441 single unit, retired by --install.
 OLD_UNITS=(avsync-measure-dev2.service avsync-measure-dev2.timer)
 
