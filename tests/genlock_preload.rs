@@ -2617,7 +2617,7 @@ mod vendored_source {
         // The pure decision + its C mirror gained an additive `audio_unpaired` facet + an
         // `AudioPairing` reason (parity-gated), and the statusbar widget aggregates the per-source
         // pairing-offset breach into that facet. (Full LOCK-term anchors: the #1298 3-copy
-        // lock-step in tests/genlock_lock_indicator_guards.rs.)
+        // lock-step in obs:tests/vendored/tests/genlock_lock_indicator_guards.rs.)
         let hdr = squish(&vendor_file(
             "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
         ));
@@ -3299,7 +3299,7 @@ mod vendored_source {
 
         let output = squish(&super::av_sync_dock_output::source());
         // #955: the Write/Suggest/RailWarn/Quiet decision is now a pure extracted function
-        // (cb_dock_lock_outcome(), tests/av_sync_dock_outcome_955.rs proves its OWN behavior
+        // (cb_dock_lock_outcome(), obs:tests/vendored/tests/av_sync_dock_outcome_955.rs proves its OWN behavior
         // byte-identically); this file only needs to prove the CALLER actually wires the real
         // cb_dock_lock_may_actuate() seam into it -- not a hardcoded true/false -- and that the
         // resulting `switch` genuinely gates the write behind the Write case.
