@@ -157,7 +157,7 @@ pub fn top_band_decode_plan(frame_w: u32, frame_h: u32) -> TopBandPlan {
 /// an hours-long production session — a plausible contributor to video-QR decode reliability
 /// WORSENING with dock uptime (issue 921's own diagnostic: 55.6% shortly after launch, ~2% at
 /// steady state), distinct from the decode geometry/algorithm itself (proven correct on real
-/// captured frames — see `tests/av_sync_dock_video_decode_921.rs`). Mirrored byte-for-byte in
+/// captured frames — see `obs:tests/vendored/tests/av_sync_dock_video_decode_921.rs`). Mirrored byte-for-byte in
 /// `camerabox::CbQrResizeCache` (`camera-box-video.hpp`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct QrResizeCache {
@@ -699,7 +699,7 @@ impl DockLockCorrector {
 /// source-text grep away from a silent regression (the #942 fix-up review's own counter-example:
 /// moving the actuator write into the monitor-only branch still passed every existing text-anchor
 /// test) — gets a real behavioral test. Mirrors `cb_dock_lock_outcome()` in
-/// `vendor/av-sync-dock/src/camera-box-audio.hpp`; see `tests/av_sync_dock_outcome_955.rs` for the
+/// `vendor/av-sync-dock/src/camera-box-audio.hpp`; see `obs:tests/vendored/tests/av_sync_dock_outcome_955.rs` for the
 /// C++ twin harness. This does NOT change `decide()`'s own hold-band/step/cooldown math at all
 /// (`.claude/rules/dock-lock-hold-band.md`) — it only names the decision the caller already makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -931,7 +931,7 @@ pub enum DockStaleTransition {
 /// advanced for `threshold_ns`.
 ///
 /// Pure/stateful, mirrored byte-for-byte by `camera-box-audio.hpp::CbDockInputStaleness` and
-/// cross-checked by the committed C++ self-test (`av_sync_dock_cpp_mirror_gate`). Fed once per diag
+/// cross-checked by the committed C++ self-test (`obs:tests/vendored/tests/av_sync_dock_cpp_mirror_gate.rs`). Fed once per diag
 /// tick with the current cumulative counters + the audio-thread clock. Display-layer only — it never
 /// touches the demod, the cluster, or the gate.
 #[derive(Debug, Clone, Copy)]
@@ -1075,7 +1075,7 @@ impl DockPairingRecovery {
 /// evidence line in the OBS log.
 ///
 /// Pure/stateful, mirrored byte-for-byte by `camera-box-audio.hpp::CbDockPairingWatchdog` and
-/// cross-checked by the committed C++ self-test (`av_sync_dock_cpp_mirror_gate`). Fed once per
+/// cross-checked by the committed C++ self-test (`obs:tests/vendored/tests/av_sync_dock_cpp_mirror_gate.rs`). Fed once per
 /// diag tick with the current cumulative counters + the audio-thread clock.
 #[derive(Debug, Clone, Copy)]
 pub struct DockPairingWatchdog {
