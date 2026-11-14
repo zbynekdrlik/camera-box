@@ -228,21 +228,20 @@ fn every_genlock_build_builds_and_stages_vlc_video_1425() {
     );
 }
 
-fn plugin_ps(func: &str, mode: &str) -> String {
+fn plugin_ps(func: &str) -> String {
     let out = Command::new("bash")
         .arg("-c")
-        .arg("set -euo pipefail; . \"$1\"; \"$2\" \"$3\"")
+        .arg("set -euo pipefail; . \"$1\"; \"$2\"")
         .arg("plugin-deploy")
         .arg(repo(PLUGIN_DEPLOY))
         .arg(func)
-        .arg(mode)
         .output()
         .unwrap_or_else(|e| {
             panic!("issue 1425: could not run bash ({e}); this gate must FAIL, never skip")
         });
     assert!(
         out.status.success(),
-        "issue 1425: {func} {mode} failed:\n{}",
+        "issue 1425: {func} failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).expect("utf-8")
@@ -250,14 +249,14 @@ fn plugin_ps(func: &str, mode: &str) -> String {
 
 #[test]
 fn the_full_deploy_backs_up_and_verifies_vlc_video_1425() {
-    let backup = plugin_ps("genlock_plugin_backup_ps", "full");
+    let backup = plugin_ps("genlock_plugin_backup_ps");
     assert!(
         backup.contains(
             "Copy-Item -Force (Join-Path $obsDir 'obs-plugins\\64bit\\vlc-video.dll') (Join-Path $backupDir 'vlc-video.dll.pre-789')"
         ),
         "issue 1425: the FULL deploy keeps the box's current vlc-video.dll for rollback:\n{backup}"
     );
-    let deploy = plugin_ps("genlock_plugin_deploy_ps", "full");
+    let deploy = plugin_ps("genlock_plugin_deploy_ps");
     for needle in [
         "$pfVlc = Join-Path $obsDir 'obs-plugins\\64bit\\vlc-video.dll'",
         "'(^|/)vlc-video\\.dll$'",
@@ -269,13 +268,6 @@ fn the_full_deploy_backs_up_and_verifies_vlc_video_1425() {
         assert!(
             deploy.contains(needle),
             "issue 1425: the FULL deploy no longer byte-verifies vlc-video.dll (`{needle}`):\n{deploy}"
-        );
-    }
-    for func in ["genlock_plugin_backup_ps", "genlock_plugin_deploy_ps"] {
-        let fast = plugin_ps(func, "fast");
-        assert!(
-            !fast.contains("Copy-Item") && !fast.contains("VERIFY vlc-video.dll"),
-            "issue 1425: a FAST (obs.dll-only) deploy never touches vlc-video:\n{fast}"
         );
     }
 }
