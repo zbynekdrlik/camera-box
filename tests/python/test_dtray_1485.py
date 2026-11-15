@@ -69,12 +69,12 @@ def _install(tmp_path, home=None, env=None):
 
 def test_the_shipped_pin_names_the_dstack_release():
     pin = dict(ln.split("=", 1) for ln in PIN.read_text().splitlines() if ln)
-    assert pin == {"DTRAY_RELEASE_TAG": "v0.6.19", "DTRAY_RELEASE_ASSET": "dtray-v0.6.19-linux-x86_64",
-                   "DTRAY_RELEASE_SHA256": "408d6cea7e70a4e682ba51776994dfa37d4db4a6fa78a97a1f94ce17121d88bd",
+    assert pin == {"DTRAY_RELEASE_TAG": "v0.6.143", "DTRAY_RELEASE_ASSET": "dtray-v0.6.143-linux-x86_64",
+                   "DTRAY_RELEASE_SHA256": "e8e707bc75a3604faa689ce4cf7806940964e0278f7256f06522366078ded846",
                    "DTRAY_DEVICE_FIRST_DSTACK": "v0.6.13"}
     r = _dt('dtray_release_url', env={"DTRAY_RELEASE_BASE": ""})
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "https://github.com/zbynekdrlik/dstack/releases/download/v0.6.19/dtray-v0.6.19-linux-x86_64"
+    assert r.stdout == "https://github.com/zbynekdrlik/dstack/releases/download/v0.6.143/dtray-v0.6.143-linux-x86_64"
 
 
 def test_the_intercom_and_obs_pins_name_their_dstack_version():
