@@ -157,9 +157,19 @@ until the fleet-parity watchdog. Now:
   imag is linux-genlock with no fact file and keeps its own setup-imag path. A new venue's Linux OBS
   box is one fleet row + one fact file; no planner edit.
 - **Order + default:** `fleet_deploy_order` = the setup-strih boxes in fleet row order, then
-  stream-snv, imag, resolume-snv. The default `--boxes` stays `strih-snv,stream-snv`; the PP boxes are
-  named explicitly (`--boxes strih-pp,stream-pp`). resolume-pp has no deploy path (no win-* MCP) and is
-  refused like an unknown box.
+  stream-snv, imag, resolume-snv, resolume-pp, grading-pp. The default `--boxes` stays
+  `strih-snv,stream-snv`; the PP boxes are named explicitly (`--boxes strih-pp,stream-pp`).
+- **The PP Windows boxes (issue 1505):** resolume-pp (`win-resolume-pp`, `resolume-pp.lan`, AHK `guard`,
+  title profile `cg`) and grading-pp (`win-grading-pp`, the PP grading notebook, computer name
+  NOTEBOOKASUS, no DNS name from dev1 so its fleet row dials `10.76.8.62`, AHK `0`, NO title check: its
+  obs64 title reads the projector `Projektor - Program`). Both are explicit-only, take the pinned zip
+  through the unchanged Windows program, and get a generic STEP -1 identity line
+  (`fleet_box_identity_confirm_note`: confirm `$env:COMPUTERNAME` = the `OBS_FLEET_IDENTITY` name in
+  the box's MCP Shell). Adding another Windows box = its fleet row + its arm in `fleet_box_mcp` /
+  `fleet_box_ip` / `fleet_deploy_order` + the two `case` lists in deploy-genlock-fleet.sh.
+  **grading-pp loads DistroAV from `Program Files\obs-plugins\64bit`** (no ProgramData copy, read
+  15.11.2026), so the program's step 6b leaves that old DLL beside the new ProgramData one: deal with
+  that shadow before its first deploy (issue 1505 comment 6902000892).
 - **Dial the fleet NAME, never the venue IP.** A PP box is dialled at its obs-fleet row host
   (`strih-pp.lan` / `stream-pp.lan`, which dev1 reaches through companion-pp), via `fleet_box_ip`. The
   fact file's `STRIH_IP` (10.77.8.x) is the box's address on its own venue LAN and is not routable from

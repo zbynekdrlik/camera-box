@@ -295,6 +295,14 @@ link never pages. The nightly 04:00 date step's 5-min DEGRADED never pages eithe
 `harness_obs_fleet_list_1296.rs` uses `strih-zz` as its "unknown override" name since strih-pp is
 a real row now.
 
+**issue 1505: `grading-pp|10.76.8.62|windows-genlock|traveling`** (the PP grading notebook) is the one
+traveling row that dials an ADDRESS: no DNS name for it resolves from dev1 (grading-pp(.lan),
+notebookasus(.lan) all fail, read 15.11.2026), and 10.76.8.62 is its DHCP 10.77.8.62 through the
+companion-pp route, the address its `win-grading-pp` MCP answers on. `OBS_FLEET_IDENTITY` declares its
+computer name `NOTEBOOKASUS`, so an identity-checking reader reads UNKNOWN if the lease moves. It is in
+NO facet (only the genlock deploy + launch planners read it). The python twin and
+`tests/python/test_pp_windows_boxes_1505.py` pin the row.
+
 ## The last Windows-strih remnants — retired in issue 1317 part 4 (23.9.2026)
 
 Each routes on the ONE resolver above; the Windows branch is kept (a future Windows strih / the

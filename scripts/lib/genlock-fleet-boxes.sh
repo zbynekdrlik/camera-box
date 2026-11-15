@@ -28,10 +28,18 @@ _fleet_box() { obs_fleet_canonical_name "${1:-}"; }
 # resolume-snv); rc 2 for any other name (a Linux box has no win-* MCP). issue 1474: only while the
 # box's fleet row class is windows-genlock -- stream-snv is linux-genlock since issue 1462, so on the
 # real fleet it names no MCP; a fleet whose stream box is Windows gets win-stream-snv again.
+# issue 1505: the PP Windows OBS boxes resolume-pp (the PP CG PC) and grading-pp (the PP grading
+# notebook) are registered too, so the deploy + launch planners emit their pinned-zip programs.
 fleet_box_mcp() {
   local b; b="$(_fleet_box "${1:-}")"
   [ "$(obs_fleet_class "$b" 2>/dev/null || true)" = "windows-genlock" ] || return 2
-  case "$b" in stream-snv) echo "win-stream-snv" ;; resolume-snv) echo "win-resolume" ;; *) return 2 ;; esac
+  case "$b" in
+    stream-snv)   echo "win-stream-snv" ;;
+    resolume-snv) echo "win-resolume" ;;
+    resolume-pp)  echo "win-resolume-pp" ;;
+    grading-pp)   echo "win-grading-pp" ;;
+    *)            return 2 ;;
+  esac
 }
 # fleet_boxes_swap_obs_dll CSV -> 1 when the list holds a Windows box (one with a win-* MCP above AND a
 # windows-genlock fleet row: the boxes a --fast deploy swapped obs.dll on until issue 1505 refused
@@ -58,7 +66,7 @@ fleet_boxes_swap_obs_dll() {
 fleet_box_ip() {
   local b; b="$(_fleet_box "${1:-}")"
   case "$b" in
-    stream-snv|resolume-snv) obs_fleet_host "$b" && echo || return 2 ;;
+    stream-snv|resolume-snv|resolume-pp|grading-pp) obs_fleet_host "$b" && echo || return 2 ;;
     imag)                    echo "imag" ;;
     strih-snv)               fleet_strih_lx_ip ;;
     *)                       fleet_box_runs_setup_strih "$b" || return 2; obs_fleet_host "$b" && echo || return 2 ;;
@@ -77,8 +85,9 @@ fleet_box_runs_setup_strih() {
 
 # fleet_deploy_order -> every box the deploy planner accepts, in its canonical order, one per line:
 # the setup-strih boxes in obs-fleet row order (strih-snv, strih-pp, stream-pp), then the Windows
-# stream-snv, imag and the traveling Windows resolume-snv (issue 1426). A new venue's Linux OBS box is
-# one fleet row + one fact file, no edit here. resolume-pp has no deploy path yet (no win-* MCP).
+# stream-snv, imag and the traveling Windows resolume-snv (issue 1426), then the PP Windows boxes
+# resolume-pp and grading-pp (issue 1505). A new venue's Linux OBS box is one fleet row + one fact
+# file, no edit here.
 fleet_deploy_order() {
   local line b seen=" "
   while IFS= read -r line; do
@@ -87,7 +96,7 @@ fleet_deploy_order() {
   done <<EOF
 ${OBS_FLEET}
 EOF
-  for b in stream-snv imag resolume-snv; do
+  for b in stream-snv imag resolume-snv resolume-pp grading-pp; do
     case "$seen" in *" $b "*) ;; *) printf '%s\n' "$b" ;; esac
   done
 }
@@ -164,12 +173,21 @@ fleet_box_ahk_prefer() { case "$(_fleet_box "${1:-}")" in resolume-snv) echo "ln
 # builders' managed stop->restart-verified mode `1` is never chosen by a planner any more: whether the
 # watcher runs is the owner's choice. The obs-fleet `has_ahk` fact itself (what is INSTALLED, read by
 # the session watchdog and the self-heal builder) is unchanged.
-fleet_box_ahk_mode() { if [ "$(fleet_box_has_ahk "${1:-}")" = "1" ]; then echo "guard"; else echo "0"; fi; }
+# issue 1505: resolume-pp (no win-* MCP read yet) takes the resolume convention `guard` too without
+# claiming an installed watcher in the obs-fleet fact: guard stops AutoHotkey64 only if it runs and
+# never starts it, so it is safe whether or not the PP CG PC has one. grading-pp has none (read live
+# 15.11.2026), so it is `0` from the fact.
+fleet_box_ahk_mode() {
+  if [ "$(fleet_box_has_ahk "${1:-}")" = "1" ] || [ "$(_fleet_box "${1:-}")" = "resolume-pp" ]; then echo "guard"; else echo "0"; fi
+}
 
 # fleet_box_obs_profile BOX -> the OBS profile the launch program expects in the window title
 # (`build <short sha> - <label>: <profile>`, the label localized, issue 1372): resolume's cg OBS runs profile `cg`. rc 2
 # (no output) for a box with no pinned profile -- its launch program carries no title identity check.
-fleet_box_obs_profile() { case "$(_fleet_box "${1:-}")" in resolume-snv) echo "cg" ;; *) return 2 ;; esac; }
+# issue 1505: resolume-pp runs the cg OBS like resolume-snv. grading-pp's profile is `Grading`, but its
+# obs64 window title reads its projector (`Projektor - Program`, read live 15.11.2026), so a title
+# check would fail a good launch: no profile, no check.
+fleet_box_obs_profile() { case "$(_fleet_box "${1:-}")" in resolume-snv|resolume-pp) echo "cg" ;; *) return 2 ;; esac; }
 
 # fleet_resolume_identity_confirm_note -> the IDENTITY-CONFIRM preamble the resolume deploy plan
 # prints (issue 1295). RESOLUME-SNV is a TRAVELING box addressed by HOSTNAME, and resolume.lan
@@ -190,6 +208,25 @@ fleet_resolume_identity_confirm_note() {
 #                (gci "$env:APPDATA\obs-studio\basic\profiles" -Directory).Name   # expect 'cg'
 #                # or over OBS-WS: GetVersion + the 'cg' profile / cg_scenes collection
 #         Proceed to STEP 0 ONLY once the resolved address is confirmed to be RESOLUME-SNV.
+NOTE
+}
+
+# fleet_box_identity_confirm_note BOX -> the STEP -1 identity confirm a Windows plan prints before STEP 0.
+# resolume-snv keeps its own note above (the .201 `bridge` collision); every other TRAVELING Windows
+# box (issue 1505: resolume-pp, grading-pp -- the PP boxes, DHCP-addressed) gets one generic line naming
+# its address, its MCP and the computer name OBS_FLEET_IDENTITY declares. A fixed box prints nothing.
+# Pure (no I/O); always rc 0, so a caller's `set -e` never trips on a box without a note.
+fleet_box_identity_confirm_note() {
+  local b want mcp host; b="$(_fleet_box "${1:-}")"
+  if [ "$b" = "resolume-snv" ]; then fleet_resolume_identity_confirm_note; return 0; fi
+  [ "$(obs_fleet_home_check "$b" 2>/dev/null || true)" = "traveling" ] || return 0
+  want="$(obs_fleet_expected_identity "$b" 2>/dev/null)" || want="<undeclared in OBS_FLEET_IDENTITY>"
+  mcp="$(fleet_box_mcp "$b" 2>/dev/null)" || mcp="<no win-* MCP>"
+  host="$(obs_fleet_host "$b" 2>/dev/null)" || host="<no fleet row>"
+  cat <<NOTE
+# STEP -1 (${b} -- box IDENTITY confirm, issue 1505): ${b} is a TRAVELING box at ${host} (a DHCP
+#         address/name of its venue). Before STEP 0, confirm in the ${mcp} MCP Shell that
+#         \$env:COMPUTERNAME is ${want}; proceed ONLY when it is.
 NOTE
 }
 
