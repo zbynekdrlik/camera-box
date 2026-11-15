@@ -220,3 +220,15 @@ proof took one 10-min capture, and nothing else would have shown it:
   only its counter was wrong (dstack #278). Since obs v0.4.29 the status line carries `rx_reordered`
   and `rx_loss` counts only holes still open at playout; since v0.4.30 `start_holes` holds the OBS-start
   burst. `scripts/dante_input_continuity.py` reports both and gates neither (OPTIONAL tuple).
+
+## What an OBS restart does to the stream A/V (issue 1527, 15.11.2026)
+
+- Before obs v0.4.39 the dante-input program audio re-latched at each OBS start on whichever OBS
+  audio tick its first chunk met, so one stream OBS restart could move the stream A/V by a whole tick
+  (21.8 ms measured on v0.4.32).
+- Since obs v0.4.39 every chunk carries dlink's play time (`chunks carry dlink's play time` at start,
+  0 re-anchors, 0 play_at_steps). Four starts on stream-snv read -48.0 / -45.7 / -43.2 / -44.5 ms on the
+  stream av-sync dock: a spread of 4.8 ms, inside its ~±2 ms sample noise per run. An OBS restart is
+  no longer an A/V step; a move of a tick after a restart is a regression to report to obs.
+- Never pin an obs whose dlink failed obs's soak gate (v0.6.140 did); the stream TX underruns wait
+  for a soak-passed dlink >= v0.6.143.
