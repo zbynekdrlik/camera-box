@@ -12,7 +12,7 @@ paths:
 ## The grid
 
 Every genlocked sender stamps on the PER-SECOND grid: slot `k` of whole second `S` is
-`S + floor(k · 1 s / fps)` (`src/ndi.rs floor_boundary_100ns`, DistroAV
+`S + floor(k · 1 s / fps)` (`vstack:rig/core/src/genlock_stamp.rs floor_boundary_100ns`, DistroAV
 `genlock_floor_boundary_100ns`). Until #1355 the receiver floored its ts-align deadline
 (`genlock_phase_pin_deadline`) and its render tick (`genlock_next_deadline`) on the grid counted
 from 1970, `(t / interval) · interval`. At 30 fps `30 × 33_333_333 = 999_999_990 ns`, so that

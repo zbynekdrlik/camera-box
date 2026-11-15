@@ -28,11 +28,11 @@ pub mod ndi;
 // (#1113) genlock capture->emit pacing gate — the pure wall-clock decimation math extracted out of
 // the 2555-line `ndi.rs` (issue-1111 review). Linux-gated in lock-step with `ndi` (whose
 // NDI-timecode grid it complements); pure `u64` logic otherwise, Tier-0 tests on the Linux `test`
-// CI job (default features), mirroring the `genlock_stamp` / `dupe_decimation` sibling precedents.
+// CI job (default features), mirroring the `dupe_decimation` sibling precedent.
 #[cfg(target_os = "linux")]
 pub mod genlock_pacing;
-// #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Linux-gated because it reuses
-// the ndi boundary math; its Tier-0 tests run on the Linux `test` CI job (default features).
+// #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Portable since it moved to
+// rig-core with its own copy of the floor boundary math; its tests run in vstack's CI.
 // Issue 1372: it also holds the capture loop's mono->realtime stamp offset (`StampOffset`), re-sampled
 // in the frame the wall clock steps. Issue 1487: it lives in vstack's rig-core (portable there).
 pub use rig_core::genlock_stamp;
