@@ -2817,8 +2817,14 @@ fn bkshading_unit_text_is_the_system_service_unit() {
         "must run as the operator: {out}"
     );
     assert!(
-        out.contains("ExecStart=/opt/bkshading/bkshading --config /etc/bkshading/bkshading.toml"),
-        "ExecStart must be the installed binary + --config: {out}"
+        out.contains("ExecStart=/opt/bkshading/bkshading --config /etc/bkshading/bkshading.toml --layout-file /var/lib/bkshading/bkshading-layout.json"),
+        "ExecStart must be the installed binary + --config + the layout in the state dir: {out}"
+    );
+    // shading v0.2.7: the /next/ panel saves its layout; the service runs as the operator, who cannot
+    // write /etc/bkshading, so systemd gives it /var/lib/bkshading (issue 1529).
+    assert!(
+        out.contains("StateDirectory=bkshading\n"),
+        "the layout's state dir must be a systemd StateDirectory: {out}"
     );
     assert!(
         out.contains("Restart=on-failure"),
