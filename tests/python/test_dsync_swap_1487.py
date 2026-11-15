@@ -207,17 +207,18 @@ def test_the_canary_is_never_the_master_and_the_master_goes_last():
 
 
 @pytest.mark.parametrize("node", ["mbc", "fohabl"])
-def test_a_node_dsync_upgrades_itself_stays_a_clock_row_outside_the_roll(node):
-    r = bash(f'. scripts/lib/dantesync-fleet.sh; dantesync_fleet_self_upgraded {node}; echo rc=$?; '
-             f'dantesync_fleet_field {node} role')
-    assert "rc=0" in r.stdout and r.stdout.split()[-1] in ("video", "audio")
+def test_a_node_dsync_upgrades_itself_is_no_row_at_all(node):
+    """issue 1487, 15.11.2026: mbc + fohabl went to dsync completely -- no row, so nothing here rolls,
+    pins or grades them; the self-upgraded middle state (a row the roll skips) is gone."""
+    r = bash(f'. scripts/lib/dantesync-fleet.sh; dantesync_fleet_field {node} role; echo rc=$?; '
+             'declare -F dantesync_fleet_self_upgraded >/dev/null; echo fn=$?; echo "v=${DSYNC_SELF_UPGRADED_NODES-unset}"')
+    assert r.stdout.split() == ["rc=1", "fn=1", "v=unset"], r.stdout + r.stderr
 
 
-def test_a_rolled_node_is_not_a_self_upgraded_one():
-    r = bash('. scripts/lib/dantesync-fleet.sh; dantesync_fleet_self_upgraded resolume-snv; echo rc=$?; '
-             'dantesync_fleet_self_upgraded ""; echo rc=$?; dantesync_fleet_self_upgraded alex-nb; echo rc=$?')
-    # issue 1487 (12.11.2026): dsync cannot log in to alex-nb, so camera-box rolls it again
-    assert r.stdout.split() == ["rc=1", "rc=1", "rc=1"]
+def test_alex_nb_stays_a_rolled_row():
+    # issue 1487 (12.11.2026): dsync cannot log in to alex-nb, so camera-box rolls it
+    r = bash('. scripts/lib/dantesync-fleet.sh; dantesync_fleet_field alex-nb role')
+    assert r.stdout.split() == ["audio"], r.stdout + r.stderr
 
 
 def test_a_windows_node_already_moved_reads_the_new_location():

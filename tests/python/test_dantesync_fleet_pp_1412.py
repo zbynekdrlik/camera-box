@@ -30,12 +30,6 @@ import sys
 
 import pytest
 
-@pytest.fixture(autouse=True)
-def _every_node_rolled(monkeypatch):
-    """issue 1487: these tests use mbc / fohabl as their rolled nodes."""
-    monkeypatch.setenv("DSYNC_SELF_UPGRADED_NODES", "")
-
-
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _LIB = _ROOT / "scripts" / "lib" / "dantesync-fleet.sh"
 _PY = _ROOT / "scripts" / "dantesync_fleet.py"
@@ -257,7 +251,7 @@ def test_the_pp_nodes_are_never_fixed_or_obsfleet_nodes(tmp_path):
     r = _bash(tmp_path, 'echo "F=$(dantesync_fleet_fixed_names)"; echo "O=$(dantesync_fleet_names homegate=obsfleet)";'
                         ' echo "R=$(dantesync_fleet_names homegate=reach)"; echo "M=$(dantesync_fleet_master_names)"')
     out = dict(ln.split("=", 1) for ln in r.stdout.splitlines())
-    assert out["F"] == "mbc fohabl"  # issue 1487: iem-snv + companion-snv are dsync's
+    assert out["F"] == ""  # issue 1487: iem-snv + companion-snv, and since 15.11.2026 mbc + fohabl, are dsync's
     assert out["O"] == "strih-snv stream-snv resolume-snv"
     # issue 1413: the Poprad camboxes are `reach` rows too (test_dantesync_fleet_pp_cams_1413.py)
     assert out["R"] == "cam1 cam4 cam6 cam7 strih-pp stream-pp alex-nb"  # issue 1487: no resolume-pp
@@ -283,9 +277,8 @@ def _stub_bin(tmp_path, versions):
 
 
 _PIN = re.search(r'DANTESYNC_VERSION_PIN="\$\{DANTESYNC_VERSION_PIN:-([0-9.]+)\}"', _GATE.read_text()).group(1)
-_HOSTS = ["10.77.9.6%d" % n for n in range(1, 8)] + ["10.77.9.202", "10.77.9.204", "resolume.lan", "10.77.7.232",
-                                                   "10.77.7.30", "strih-pp.lan", "stream-pp.lan",
-                                                   "resolume-pp.lan"]
+_HOSTS = ["10.77.9.6%d" % n for n in range(1, 8)] + ["10.77.9.202", "10.77.9.204", "resolume.lan",
+                                                   "strih-pp.lan", "stream-pp.lan", "resolume-pp.lan"]
 
 
 def _gate(tmp_path, versions, home):
@@ -296,9 +289,8 @@ def _gate(tmp_path, versions, home):
     fleet.write_text("")
     env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=home, DANTESYNC_FLEET_CRED_FILE=str(tmp_path / "none.env"),
                DANTESYNC_VERSION_GATE_SSH_PASS="pw", DANTESYNC_TRAY_EXPECTED_SHA="a" * 64,
-               DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FOHABL_SSH_PASS="foh",
-               DANTESYNC_FLEET_SCAN_CMD="/bin/true")
-    for n in ("STREAM", "RESOLUME", "MBC", "FOHABL", "IEM_SNV", "RESOLUME_PP"):
+               DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FLEET_SCAN_CMD="/bin/true")
+    for n in ("STREAM", "RESOLUME", "IEM_SNV", "RESOLUME_PP"):
         env[f"DANTESYNC_TRAY_SHA_{n}"] = "a" * 64
     return subprocess.run(["bash", str(_GATE), "--pin", _PIN, "--fleet-file", str(fleet), "--fleet"],
                           capture_output=True, text=True, env=env)
@@ -310,8 +302,9 @@ def test_version_gate_fleet_reads_the_pp_boxes_while_they_are_reachable(tmp_path
     for name in ("strih-pp", "stream-pp"):
         assert f"  {name} " in r.stdout, (name, r.stdout)
     # issue 1413: 3 SNV cameras + dev1 + 5 SNV boxes + the 2 PP boxes; the PP cameras are away here
-    # (PP_HOME names only the PP boxes). issue 1487: iem-snv, companion-snv and resolume-pp are dsync's.
-    assert "GATE PASS — 11 box(es)" in r.stdout
+    # (PP_HOME names only the PP boxes). issue 1487: iem-snv, companion-snv, resolume-pp, mbc and
+    # fohabl are dsync's.
+    assert "GATE PASS — 9 box(es)" in r.stdout
     dials = (tmp_path / "dials.log").read_text().split()
     assert {"newlevel@strih-pp.lan", "newlevel@stream-pp.lan"} <= set(dials)
     assert "newlevel@resolume-pp.lan" not in dials
@@ -328,7 +321,7 @@ def test_version_gate_fleet_a_stale_pp_box_drifts(tmp_path):
 def test_version_gate_fleet_skips_unreachable_pp_boxes_and_still_passes(tmp_path):
     r = _gate(tmp_path, {h: _PIN for h in _HOSTS}, "strih-snv stream-snv resolume-snv")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "GATE PASS — 9 box(es)" in r.stdout  # issue 1487: iem-snv + companion-snv left the table
+    assert "GATE PASS — 7 box(es)" in r.stdout  # issue 1487: iem-snv, companion-snv, mbc, fohabl left the table
     for name in ("strih-pp", "stream-pp"):
         assert f"  {name} SKIPPED (unreachable" in r.stdout, r.stdout
     assert "resolume-pp" not in r.stdout, r.stdout  # issue 1487: no row, dsync's own
@@ -344,7 +337,7 @@ def _source_upgrade(tmp_path, body, **env):
 def test_upgrade_verifies_a_pp_node_against_the_pp_grandmaster(tmp_path):
     r = _source_upgrade(tmp_path, 'echo "S=[$(dantesync_gate_env_for stream-pp)]";'
                                   ' echo "M=[$(dantesync_gate_env_for strih-pp)]"; echo "V=[$(dantesync_gate_env_for cam3)]";'
-                                  ' echo "A=[$(dantesync_gate_env_for mbc)]"')
+                                  ' echo "A=[$(dantesync_gate_env_for alex-nb)]"')
     assert f"S=[RIG_GRANDMASTER_IP={PP_GM}]" in r.stdout, r.stdout + r.stderr
     assert f"M=[RIG_GRANDMASTER_IP={PP_GM}]" in r.stdout
     assert "V=[]" in r.stdout and "A=[RIG_GRANDMASTER_IP=10.77.7.104]" in r.stdout
@@ -375,7 +368,7 @@ def test_upgrade_fleet_dry_run_lists_the_reachable_pp_boxes(tmp_path):
     (b / "dantesync").write_text(f'#!/usr/bin/env bash\necho "dantesync {_PIN}"\n')
     (b / "dantesync").chmod(0o755)
     env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=PP_HOME, DANTESYNC_FLEET_CRED_FILE=str(tmp_path / "none.env"),
-               SSH_PASS="pw", CAMBOX_OFFLINE_ACK="", DANTESYNC_FOHABL_SSH_PASS="foh")
+               SSH_PASS="pw", CAMBOX_OFFLINE_ACK="")
     r = subprocess.run(["bash", str(_UPGRADE), "--fleet", "--dry-run", "--target", _PIN],
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
