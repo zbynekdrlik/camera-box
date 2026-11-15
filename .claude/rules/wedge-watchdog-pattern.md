@@ -1,6 +1,5 @@
 ---
 paths:
-  - "src/capture_wedge.rs"
   - "src/emit_freeze.rs"
   - "src/painter_wedge.rs"
   - "src/main.rs"
@@ -39,7 +38,7 @@ and it doesn't beat the external-watchdog approach on detection speed anyway.
    unconditional stamp is the discriminator: a genuine no-signal condition (unplugged HDMI, no
    frames) still returns from the syscall regularly, so the heartbeat keeps advancing; only a
    TRUE wedge (the syscall never returning at all) lets it go stale.
-2. **A pure decision module** (`src/capture_wedge.rs` is the canonical one — REUSE its
+2. **A pure decision module** (`vstack:av/capture/src/capture_wedge.rs` is the canonical one — REUSE its
    `evaluate_wedge(seconds_since_last_progress, threshold_s) -> WedgeVerdict` and `WedgeVerdict`
    enum verbatim for a new site; the threshold math is fully generic, nothing capture-specific is
    baked in. `src/painter_wedge.rs` mirrors this exact non-duplication choice). Each NEW site gets
@@ -89,7 +88,7 @@ leaves the other call site silently exposed to the identical bug.
 The 4-piece recipe above watches ONE signal: "did the blocking call RETURN?" (`#945` stamps its
 heartbeat after every `process_frame()` return, Ok OR Err). But a "dead output" can happen while
 that call keeps returning — `VideoCapture::process_frame` returns `Ok(())` on a
-`V4L2_BUF_FLAG_ERROR` buffer BEFORE the emit callback (`src/capture.rs`), so on a corrupted-but-
+`V4L2_BUF_FLAG_ERROR` buffer BEFORE the emit callback (`vstack:av/capture/src/capture.rs`), so on a corrupted-but-
 returning stream the `#945` heartbeat advances forever while NO good frame is emitted and the NDI
 sender publishes a frozen frame — every health signal green. `#945`'s return-based heartbeat
 structurally cannot see this; `#944` (`src/emit_freeze.rs`) adds the EMIT-side sibling.

@@ -82,7 +82,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/painter-display-mode.sh"
 # #656 prevention item 2: the "source camera capture-delivery-rate defective" preflight signal
 # (pure grep pattern + message formatter — the appliance itself does the fps math, see
-# src/capture_rate_health.rs). Used by the [0/8] preflight step below, before any deploy/record.
+# vstack:av/capture/src/capture_rate_health.rs). Used by the [0/8] preflight step below, before any deploy/record.
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"
 # #1133: the per-box capture-leg-health signal set — the appliance's own DEQUEUE-STALL / emit-gate
@@ -1714,7 +1714,7 @@ print(imag_scenes.drm_output_lease_connector(imag_scenes._drm_output_config_text
 fi
 
 # Capture-delivery-rate preflight (#656 prevention item 2): the appliance's OWN capture loop
-# (src/capture_rate_health.rs) already WARNs when $CAMERA_NAME's captured fps has sustained a
+# (vstack:av/capture/src/capture_rate_health.rs) already WARNs when $CAMERA_NAME's captured fps has sustained a
 # >1% deviation from its negotiated rate for 6 consecutive 5s report windows — the exact #656
 # root cause (cam1's ShadowCast 2 silently delivering ~64fps instead of 60fps, producing a
 # persistent ~4Hz content-duplicate judder only caught after the fact via tick-pattern
@@ -1843,7 +1843,7 @@ cambox_egress_pacing_e2e_report "$LEG_HEALTH_TARGETS" "$CAM_PW"
 # source camera captures at the right RATE, but is BLIND to a camera capturing at that rate yet
 # BLURRED (slow shutter 1/60 / anti-flicker — the #216 class: 16.7 ms exposure smears the moving
 # dual-QR → optically undecodable → a 175 s optical-read gap, no frame loss the rate check can see).
-# Read the source box's head-end rough= capture telemetry (src/capture.rs luma_roughness, #1079) and
+# Read the source box's head-end rough= capture telemetry (vstack:av/capture/src/capture.rs luma_roughness, #1079) and
 # fail-fast NAMED (Slovak) when it is SUSTAINED below the calibrated floor. Plain statement (never
 # $()/pipeline) so its `exit 1` propagates. NOTEs (never aborts) on thin data / an ssh hiccup — the
 # fleet reachability gate owns genuine unreachability, and the owner's hardest constraint is that a

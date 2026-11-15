@@ -1,8 +1,6 @@
 ---
 paths:
-  - "src/genlock_stamp.rs"
   - "src/genlock_pacing.rs"
-  - "src/capture_phase.rs"
   - "src/ndi.rs"
   - "vendor/distroav/src/ndi-output.cpp"
   - "vendor/distroav/src/ndi-source.cpp"
@@ -20,18 +18,18 @@ The load-bearing invariants the contract pins to this code (keep them honest):
 
 - **Timecode = FLOOR boundary, 100 ns since the Unix epoch — never ceil, never
   `NDIlib_send_timecode_synthesize`, never 0, never a monotonic counter.** `floor_boundary_100ns`
-  (`src/ndi.rs`) and its #1009 doctrine comment; `genlock_emit_timecode_100ns`
-  (`src/genlock_stamp.rs`); the OBS-as-sender twin `genlock_emit_timecode_100ns` /
+  (`vstack:rig/core/src/genlock_stamp.rs` since issue 1487) and its #1009 doctrine comment; `genlock_emit_timecode_100ns`
+  (`vstack:rig/core/src/genlock_stamp.rs`); the OBS-as-sender twin `genlock_emit_timecode_100ns` /
   `genlock_floor_boundary_100ns` (`vendor/distroav/src/ndi-output.cpp`). A ceil/future stamp
   trips the receiver's issue-147 backward-step guard (the 2026-08-07 −900 ms collapse, #1009).
 - **The grid is the PER-SECOND grid** — slot `k` of whole second `S` is `S + floor(k·1 s/fps)`
   (contract §3/§4, corrected in #1355 from a `k · interval`-from-1970 wording that contradicted
   this very reference code). The receiver deadline + render tick use the same grid since #1355
-  (`vstack:rig/core/src/genlock_grid.rs` ↔ `obs-genlock-grid.h`); `src/ndi.rs` tests pin `floor_boundary_100ns`
+  (`vstack:rig/core/src/genlock_grid.rs` ↔ `obs-genlock-grid.h`); rig-core's tests (`vstack:rig/core/src/genlock_stamp.rs`) pin `floor_boundary_100ns`
   == `genlock_grid::per_second_floor` over a day. A sender stamping `k · interval_100ns` from 1970 walks 1 µs/s at 30 fps (4 µs/s at 60 — a
   whole frame in ~0.4 days); check SongPlayer + the cg OBS against contract §4.
 - **A locked 1:1 camera stamps + paces its TRACKED slot** (issue 1367 slice D2,
-  `src/capture_phase.rs`, `.claude/rules/capture-phase-tracker.md`): the floor of the slot middle
+  `vstack:av/capture/src/capture_phase.rs`, `.claude/rules/capture-phase-tracker.md`): the floor of the slot middle
   from the smoothed capture phase, up to 500 us after the smoothed capture instant and still before
   the emit instant, and the gate decides on that same slot (contract §4 + §5 say so). Seeding and
   over-rate cameras keep the raw capture stamp + poll-time gate.

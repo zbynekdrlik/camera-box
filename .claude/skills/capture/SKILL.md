@@ -1,9 +1,9 @@
 ---
 name: capture
-description: V4L2 capture controls (saturation/contrast/hue) — the certified COLOUR set applied at every capture open for ALL grabber models (#745, retiring the #729 model-gated zero-touch policy), device-state persistence, runtime grabber-model detection, NZXT CAM4 no-controls, and the testable apply path. Load before touching src/capture.rs control logic or diagnosing grayscale/colour-tint cameras.
+description: V4L2 capture controls (saturation/contrast/hue) — the certified COLOUR set applied at every capture open for ALL grabber models (#745, retiring the #729 model-gated zero-touch policy), device-state persistence, runtime grabber-model detection, NZXT CAM4 no-controls, and the testable apply path. Load before touching vstack:av/capture/src/capture.rs control logic or diagnosing grayscale/colour-tint cameras.
 ---
 
-# V4L2 capture controls (src/capture.rs)
+# V4L2 capture controls (vstack:av/capture/src/capture.rs)
 
 ## Issue 1430 (29.10.2026) — the Cam Link 4K delivers LIMITED range; never re-scale it
 
@@ -27,7 +27,7 @@ NDI (issue 1387 comments 6487982922 / 6488036928), never another NDI format expe
 **camera-box now enforces the certified COLOUR set (`color_production_controls()` — `RangeScaled
 { reference_pct: 50 }` for saturation+contrast, NEVER hue) at every capture open, for EVERY
 grabber model** — `ShadowCast2`, `Elgato4kS`, `NzxtSignalHd60`, AND `Unknown` all resolve through
-the SAME `documented_controls_for_model(model)` arm now (`src/capture.rs`). The #729 model-gated
+the SAME `documented_controls_for_model(model)` arm now (`vstack:av/capture/src/capture.rs`). The #729 model-gated
 "zero-touch unless documented need" default below is SUPERSEDED, kept only as history.
 
 **Why:** the user's binding 2026-07-13 requirement — cards WILL get swapped between boxes at
@@ -54,7 +54,7 @@ fallback (never dead code).
 **Live swap-test acceptance (rig-provable):** set garbage via `v4l2-ctl --set-ctrl=
 contrast=20,saturation=200` on a card, `systemctl restart camera-box`, then `v4l2-ctl --get-ctrl`
 must show the card's own defaults with ZERO manual repair — same self-healing philosophy as the
-#150/#257 genlock lockdown. Unit-level acceptance: `src/capture.rs`'s
+#150/#257 genlock lockdown. Unit-level acceptance: `vstack:av/capture/src/capture.rs`'s
 `elgato_swap_smeared_state_resets_to_manufacturer_neutral_at_open_745` (a pre-smeared FakeDevice
 ends at its queried default after `apply_controls_with`) and
 `nzxt_swap_smeared_state_is_graceful_warn_and_continue_745` (same set against a control-less
@@ -192,7 +192,7 @@ captured?" question is answered automatically, not by eye.
 
 ## Colour-capture metric — the #299 always-on grayscale watchdog
 
-`mean_chroma(frame, width, height, stride) -> (f32, f32)` in `src/capture.rs`
+`mean_chroma(frame, width, height, stride) -> (f32, f32)` in `vstack:av/capture/src/capture.rs`
 returns `(mean |U-128|, mean |V-128|)` over the captured YUYV422 frame. Neutral
 grey is U=V=128 → both ≈ 0; a coloured source pushes them up. `is_color_frame(u,v)`
 classifies via `CHROMA_COLOR_THRESHOLD = 2.0` LSB (named const). `main.rs` samples
@@ -415,7 +415,7 @@ fidelity; a full, lossless fix is not possible with the 4 controls this card exp
 
 **#729 follow-up (2026-07-13) — the partial-saturation compromise WAS implemented as the
 documented-proven-need exception, once the achievable tradeoff was measured.** See
-`elgato_4k_s_corrective_controls()` in `src/capture.rs` and the dedicated section below for the
+`elgato_4k_s_corrective_controls()` in `vstack:av/capture/src/capture.rs` and the dedicated section below for the
 empirical tuning method + the certified value. The magnitude CAN be reduced to a healthy-band
 chroma reading; genuine colour fidelity is reduced by the same proportion (it's not free) — this
 was accepted and shipped as the new Elgato 4K S default, not left to "the church's call", because

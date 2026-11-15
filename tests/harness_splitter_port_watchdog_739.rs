@@ -15,6 +15,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use tempfile::tempdir;
 
+#[path = "support/vstack.rs"]
+mod vstack;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -284,12 +287,12 @@ fn driver_lone_grey_box_with_no_reachable_sibling_never_pages() {
 #[test]
 fn noise_threshold_watchdog_mirror_matches_rust_const_1099() {
     // #1099: the watchdog's NOISE_ROUGHNESS_THRESHOLD default MUST stay in lock-step with the Rust
-    // source-of-truth src/capture.rs::NOISE_ROUGHNESS_THRESHOLD (bash cannot read the const, so it
+    // source-of-truth vstack:av/capture/src/capture.rs::NOISE_ROUGHNESS_THRESHOLD (bash cannot read the const, so it
     // mirrors the literal). A future const change that forgets the mirror would silently desync the
     // dev1 gate from the appliance classifier; this pins them (mirrors the repo's other const-mirror
     // parity gates). Normalised numerically so 40.0 == 40.
-    let rust =
-        std::fs::read_to_string(manifest_dir().join("src/capture.rs")).expect("read capture.rs");
+    // Issue 1487: capture.rs lives in the pinned vstack tag (av-capture).
+    let rust = vstack::read("av/capture/src/capture.rs");
     let sh =
         std::fs::read_to_string(manifest_dir().join("scripts/splitter-port-alert-watchdog.sh"))
             .expect("read watchdog");

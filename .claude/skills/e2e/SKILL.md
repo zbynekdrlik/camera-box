@@ -1602,7 +1602,7 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
     calibration ticket's job is to get the THRESHOLD right, not to fix what it measures.
 - **#656 CLOSED (2026-07-10)** — root cause was cam1's ShadowCast 2 silently delivering ~64fps
   instead of its negotiated 60.000fps (fixed live via a USB unbind/rebind reset, no physical
-  access). Two permanent preventions shipped: an appliance-side WARN (`src/capture_rate_health.rs`)
+  access). Two permanent preventions shipped: an appliance-side WARN (`vstack:av/capture/src/capture_rate_health.rs`)
   once captured fps sustains >1% deviation for 30s, and an E2E preflight
   (`scripts/lib/capture-rate-guard.sh`) that greps the source camera's journal for that WARN and
   fails fast before burning a 30-min run on an already-defective grabber.
@@ -1946,7 +1946,7 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
    occurrence); `#707 genlock emit-gate SKIPPED N boundary interval(s)` means a clock discontinuity
    (a DanteSync NTP/PTP step, or a stalled poll) leapt `ndi::genlock_emit_gate`'s boundary past
    frame(s) that were never emitted. Neither firing during a confirmed emit-rate deficit rules both
-   out and points elsewhere (capture-side queuing, scheduling). See `src/send_stall.rs` /
+   out and points elsewhere (capture-side queuing, scheduling). See `vstack:rig/core/src/send_stall.rs` /
    `ndi::boundary_skip_count` for the pure decisions.
 5. **Painter-common-source discriminator (#707, 2026-07-13) — two cheap checks, EXISTING data,
    before hypothesizing a per-box defect.** If a breach window's `copies`/`gaps` COULD be a

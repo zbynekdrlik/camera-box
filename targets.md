@@ -130,7 +130,7 @@ supervisor runbook is `.claude/rules/resolume-cg-obs.md`). Box facts:
 ### Grabber cards — LIVE fleet assignment (verified 2026-07-12 via V4L2 `card` string, #728)
 
 **A physical card can move between boxes without the hostname changing — this table can drift.**
-`grabber_model_for_hostname` in `src/capture_rate_health.rs` is the OPERATIONAL/historical
+`grabber_model_for_hostname` in `vstack:av/capture/src/capture_rate_health.rs` is the OPERATIONAL/historical
 convention only; the code no longer trusts it blindly — `capture_rate_health::resolve_grabber_model`
 resolves the ACTUAL runtime card via `capture::query_card_name` (VIDIOC_QUERYCAP) at every boot and
 prefers that over this table whenever it's available. Re-verify with

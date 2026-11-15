@@ -79,7 +79,7 @@ The missing axis is **spatial structure**: a real picture has strongly correlate
 random static does not.
 
 `camera-box` now logs a per-frame **spatial-roughness** term on the `capture chroma:` line
-(`src/capture.rs::luma_roughness` — the mean `|Y0 − Y1|` adjacent-pixel luma delta over the same #299
+(`vstack:av/capture/src/capture.rs::luma_roughness` — the mean `|Y0 − Y1|` adjacent-pixel luma delta over the same #299
 subsample; low for structured content, high for noise):
 `capture chroma: u_dev=X.X v_dev=Y.Y rough=R.R -> colour|grayscale`. `splitter_health_parse_probe`
 parses `rough=` (6th field). As of #1099 `splitter_health_classify` also CLASSIFIES on it — a colour
@@ -134,7 +134,7 @@ verdict.
   `colour=1` high-rough. The Elgato no-signal purple-noise mode is the only content that would reach the
   classifier, and no Elgato box produced a no-signal episode in the window.
 
-**Threshold pick — `NOISE_ROUGHNESS_THRESHOLD = 40.0` (mirrored in `src/capture.rs` + the watchdog):**
+**Threshold pick — `NOISE_ROUGHNESS_THRESHOLD = 40.0` (mirrored in `vstack:av/capture/src/capture.rs` + the watchdog):**
 - ≥ 2× the fleet healthy colour p99 (18.5 → 37.0) — a data-first separation margin.
 - Above the measured healthy colour max (22.5) by 1.78× — no observed legitimate content, including
   cam2's high-frequency imag path, comes within 17 units.

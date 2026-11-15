@@ -11,8 +11,9 @@
 // lock-step. vban (pure UDP) and the probe tree (which the verdict needs) stay cross-platform.
 #[cfg(target_os = "linux")]
 pub use rig_core::affinity;
+// Issue 1487: the V4L2 capture device lives in vstack's av-capture (Linux only, like v4l).
 #[cfg(target_os = "linux")]
-pub mod capture;
+pub use av_capture::capture;
 #[cfg(target_os = "linux")]
 pub mod config;
 #[cfg(target_os = "linux")]
@@ -27,15 +28,14 @@ pub mod ndi;
 // (#1113) genlock capture->emit pacing gate — the pure wall-clock decimation math extracted out of
 // the 2555-line `ndi.rs` (issue-1111 review). Linux-gated in lock-step with `ndi` (whose
 // NDI-timecode grid it complements); pure `u64` logic otherwise, Tier-0 tests on the Linux `test`
-// CI job (default features), mirroring the `genlock_stamp` / `dupe_decimation` sibling precedents.
+// CI job (default features), mirroring the `dupe_decimation` sibling precedent.
 #[cfg(target_os = "linux")]
 pub mod genlock_pacing;
-// #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Linux-gated because it reuses
-// the ndi boundary math; its Tier-0 tests run on the Linux `test` CI job (default features).
+// #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Portable since it moved to
+// rig-core with its own copy of the floor boundary math; its tests run in vstack's CI.
 // Issue 1372: it also holds the capture loop's mono->realtime stamp offset (`StampOffset`), re-sampled
-// in the frame the wall clock steps.
-#[cfg(target_os = "linux")]
-pub mod genlock_stamp;
+// in the frame the wall clock steps. Issue 1487: it lives in vstack's rig-core (portable there).
+pub use rig_core::genlock_stamp;
 // (#889) dupe-preferring decimation for the genlock capture->emit gate — a fast/over-rate
 // grabber's internal-buffer repeat gets preferentially shed over the genuine unique tick next to
 // it. Linux-gated because it wraps the ndi boundary math (`genlock_pacing::genlock_emit_gate`) and is
@@ -363,7 +363,8 @@ pub mod av_sync_decode_plan;
 // ~64fps instead of a configured 60fps, #656's cam1 ShadowCast 2 root cause) rather than a
 // momentary blip. No probe deps, so it unit-tests Tier-0; `src/main.rs`'s capture loop calls it
 // every ~5s report window and logs a WARN when it fires.
-pub mod capture_rate_health;
+// Issue 1487: lives in vstack's av-capture.
+pub use av_capture::capture_rate_health;
 
 // #663 — capture-delivery-rate SELF-HEAL: given a `capture_rate_health::should_warn`-confirmed
 // sustained deviation, decides WHEN to automatically USB-reset the defective grabber (rate-limited
@@ -477,7 +478,8 @@ mod genlock_n2_grid_bench;
 // instead of a 15-20 s burst of random flips. `main.rs` stamps the NDI timecode and drives the
 // emit gate (`dupe_decimation::DecimationGate::note_stamp_slot`) from it while it is locked and
 // 1:1. Crate-root + std-only (Tier-0).
-pub mod capture_phase;
+// Issue 1487: lives in vstack's av-capture (with `source_phase`).
+pub use av_capture::capture_phase;
 
 // Issue 1367 slice D2 — the two-clock bench of the capture phase tracker: a +-16 ppm camera with
 // the measured crossing-burst jitter through the REAL poll-time gate (today) and the stamp-driven
@@ -611,7 +613,8 @@ pub mod shutdown;
 // emit-rate-deficit family has never had (only the downstream 5s-averaged emitted-fps symptom
 // was ever measured). No probe deps, so it unit-tests Tier-0; `ndi::NdiSender::
 // send_frame_data_with_timecode` times the real call and WARNs via this decision.
-pub mod send_stall;
+// Issue 1487: lives in vstack's rig-core.
+pub use rig_core::send_stall;
 
 // #1242 — per-camera NDI SEND stagger inside the genlock frame slot (pure decision): camera N hands
 // its frame to the NDI SDK (N-1) x STAGGER_US after its emit-gate decision so the seven per-tick
@@ -645,7 +648,8 @@ const _: () =
 // capture-side half of the observability pair `send_stall` started on the NDI-send side. No probe
 // deps, so it unit-tests Tier-0; `main.rs`'s own capture loop times the real dequeue (via
 // `capture::FrameInfo::dequeue_duration_ms`) and WARNs via this decision.
-pub mod capture_stall;
+// Issue 1487: lives in vstack's av-capture.
+pub use av_capture::capture_stall;
 
 // #726 — presentation-cadence EVENNESS metric (pure decision). Given the per-frame painted-tick
 // sequence in RECORDED order (the same `SegmentFrame.tick` data `probe::recording_segments::
@@ -840,7 +844,8 @@ pub mod asrc_compensation_quantization;
 // loop's blocking V4L2 dequeue has gone stale long enough to treat the loop as provably dead.
 // No probe deps, so it unit-tests Tier-0; `src/main.rs`'s capture loop + a dedicated watchdog
 // thread call into it.
-pub mod capture_wedge;
+// Issue 1487: lives in vstack's av-capture.
+pub use av_capture::capture_wedge;
 
 // #944 — emit/output-liveness self-watchdog: the pure decision + message for whether the NDI
 // output has gone frozen (the capture thread's blocking dequeue is still returning, but no good

@@ -91,7 +91,7 @@ fn grep_count(pattern_fn: &str, fx: &str) -> u32 {
 fn dequeue_stall_pattern_matches_real_capture_stall_warn() {
     let pat = run_ok("leg_health_dequeue_stall_grep_pattern");
     assert_eq!(pat.trim(), "#707 V4L2 capture DEQUEUE STALL");
-    // the real src/capture_stall.rs::capture_stall_warning line shape:
+    // the real vstack:av/capture/src/capture_stall.rs::capture_stall_warning line shape:
     let line = "WARN camera_box: #707 V4L2 capture DEQUEUE STALL: 26.4ms (configured frame interval 16.7ms @ 60.0fps, >= 1.5x budget) — the blocking V4L2 dequeue (VIDIOC_DQBUF) itself took this long (see #707)";
     let (_o, ok) = run_sourced_status(&format!(
         "printf '%s\\n' '{line}' | grep -E \"$(leg_health_dequeue_stall_grep_pattern)\" >/dev/null"

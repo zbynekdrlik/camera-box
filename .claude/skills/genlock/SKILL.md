@@ -1223,7 +1223,7 @@ cam4 ~56ms, a 15.78ms spread) then leaks straight into the stamp. A genlock rece
 FIFO release on stamp-time cannot equalize that real hardware skew — cutting between cameras
 visibly shifts perceived video timing (the root cause behind repeated A/V-cut complaints).
 
-**Fix (`src/genlock_stamp.rs`, pure):** `capture_realtime_100ns(capture_monotonic_100ns,
+**Fix (`vstack:rig/core/src/genlock_stamp.rs`, pure):** `capture_realtime_100ns(capture_monotonic_100ns,
 mono_to_real_offset_100ns)` converts the V4L2 buffer's OWN kernel `CLOCK_MONOTONIC` timestamp
 (`metadata.timestamp`, assumed `TIMESTAMP_MONOTONIC` per the V4L2 default — not runtime-verified
 against `metadata.flags`, a known non-blocking gap) to wall-clock via a periodically-resampled

@@ -89,7 +89,7 @@ JOURNAL_WINDOW="${SPLITTER_WATCH_JOURNAL_WINDOW:-120}" # freshness window (s) fo
 CONFIRM_THRESHOLD="${SPLITTER_WATCH_CONFIRM_THRESHOLD:-2}"
 ALERT_THROTTLE_PASSES="${SPLITTER_WATCH_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
 
-# #1099: the calibrated purple-noise roughness threshold. MIRRORS src/capture.rs
+# #1099: the calibrated purple-noise roughness threshold. MIRRORS vstack:av/capture/src/capture.rs
 # NOISE_ROUGHNESS_THRESHOLD (bash cannot read the Rust const) -- keep the two in lock-step. Calibrated
 # 16.9.2026 from ~38.1k live COLOUR samples (fleet healthy-colour p99 18.5, max 22.5; grayscale <=14.7;
 # analytic noise floor ~73): 40.0 clears 2x the healthy p99 and the healthy max (1.78x) while below the

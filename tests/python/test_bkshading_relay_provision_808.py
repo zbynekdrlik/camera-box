@@ -16,7 +16,7 @@ toolchain, no root, no apt, no real systemd — the impure ops are fully overrid
  - the pure helper's derive/parse/compose are correct;
  - the systemd unit + script + helper AGREE on the bin path / port / env path / unit name so the
    three sources of truth cannot silently drift;
- - the env default AGREES with the appliance's `requested_capture_denominator` default (src/capture.rs);
+ - the env default AGREES with the appliance's `requested_capture_denominator` default (vstack:av/capture/src/capture.rs, issue 1487);
  - `--install` is ENABLE-ONLY (never `systemctl start`/`restart`) per provisioning-scripts.md;
  - Bluetooth appears NOWHERE (owner hard rule).
 Runnable directly (`python3 tests/python/test_bkshading_relay_provision_808.py`) or under pytest.
@@ -27,12 +27,14 @@ import shutil
 import subprocess
 import tempfile
 
+import vstack_src
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 SCRIPT = os.path.join(REPO, "scripts", "bkshading-provision-relay.sh")
 LIB = os.path.join(REPO, "scripts", "lib", "bkshading-relay-runtime.sh")
 UNIT = os.path.join(REPO, "systemd", "bkshading-relay.service")
-CAPTURE_RS = os.path.join(REPO, "src", "capture.rs")
+CAPTURE_RS = "av/capture/src/capture.rs"  # inside the pinned vstack tag (issue 1487)
 
 BIN_PATH = "/usr/local/bin/bkshading-relay"
 ENV_PATH = "/etc/bkshading/relay.env"
@@ -190,8 +192,7 @@ def test_unit_tasksmax_bounds_the_fork_blast_radius_issue_1309():
 def test_default_capture_fps_matches_appliance_requested_denominator():
     # One source of truth: the env default must equal the appliance's own default so a box with no
     # capture-fps drop-in reports the SAME rate it actually grabs at.
-    with open(CAPTURE_RS, encoding="utf-8") as f:
-        cap = f.read()
+    cap = vstack_src.read(CAPTURE_RS)
     assert "unwrap_or(60)" in cap, "appliance default changed — update the relay env default too"
     assert DEFAULT_FPS == "60"
 

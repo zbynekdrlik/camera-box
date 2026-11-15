@@ -7,13 +7,13 @@
 #
 # WHY this exists on top of the #656 capture-delivery-rate preflight (capture-rate-guard.sh):
 # the #656 preflight greps ONLY for the appliance's own `#656 capture-delivery-rate DEFECTIVE`
-# WARN, which src/capture_rate_health.rs emits ONLY once captured fps has broken its per-model
+# WARN, which vstack:av/capture/src/capture_rate_health.rs emits ONLY once captured fps has broken its per-model
 # tolerance (>9% for the ShadowCast 2, widened in #685). The #1130/#1110 incident had cam1
 # delivering 61-63 fps (~2-5% over 60) — INSIDE that tolerance — so the DEFECTIVE WARN never fired
 # and the [0/8] preflight said "ok: no sustained capture-rate defect", even though the box was, for
 # HOURS, emitting genuine degradation signals from ENTIRELY DIFFERENT producers that the #656
 # preflight never looks at:
-#   * src/capture_stall.rs  -> `#707 V4L2 capture DEQUEUE STALL: N.Nms ...` (the blocking
+#   * vstack:av/capture/src/capture_stall.rs  -> `#707 V4L2 capture DEQUEUE STALL: N.Nms ...` (the blocking
 #     VIDIOC_DQBUF itself stalled -> a capture-device/driver/USB fault)
 #   * src/emit_skip_log.rs  -> `#707 genlock emit-gate SKIPPED boundaries in N gate call(s)
 #     totalling M boundary interval(s) ...` (frames that were never emitted)
@@ -27,7 +27,7 @@
 # HONEST NUANCE (#1130 comment body 1/4, issue #909): the VISIBLE judder from that incident was
 # ultimately EXONERATED as an emit-gate regression (#1111, fixed by deploying dev.481), not these
 # signals — and cam1's chronic 61-64 fps OVER-RATE is NOT itself a defect (it is absorbed by the
-# genlock emit-gate / wall-pacing decimation; that is exactly why src/capture_rate_health.rs's
+# genlock emit-gate / wall-pacing decimation; that is exactly why vstack:av/capture/src/capture_rate_health.rs's
 # `#717 SUSTAINED band` is deliberately report-only, issue #909). BUT the DEQUEUE-STALL / emit-SKIP
 # / EPROTO signals WERE real degraded-state signals either way (the box genuinely stalled/skipped;
 # EPROTO/DQBUF remain a "secondary observation, monitor" item on #1110). So:
@@ -71,7 +71,7 @@
 # ---------------------------------------------------------------------------------------------
 
 # REPORT-ONLY diagnostic (was HARD-fail signal 1 until #1133): a blocking VIDIOC_DQBUF that itself
-# stalled (src/capture_stall.rs). The DEQUEUE STALL COUNT is NO LONGER a gate — it was gating on the
+# stalled (vstack:av/capture/src/capture_stall.rs). The DEQUEUE STALL COUNT is NO LONGER a gate — it was gating on the
 # wrong quantity. VIDIOC_DQBUF is a BLOCKING call that WAITS for the next frame, so its duration
 # measures whether the capture thread arrives at the dequeue EARLY (a well-protected thread finishes
 # its work in a fraction of a ms, arrives early and legitimately waits ~a whole frame interval → ~8ms
