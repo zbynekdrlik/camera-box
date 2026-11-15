@@ -2,7 +2,7 @@
 every PC"): the Dante leg runs dstack's GENERIC stateful filter, a pinned artifact, and the devices bind their
 fixed slot flow ports (dstack >= 0.6.117), so camera-box writes no RX range any more.
 
-  * scripts/dstack-leg-filter.pin: dstack tag v0.6.129, its commit, the sha256 of tools/linux/dante-leg.nft and
+  * scripts/dstack-leg-filter.pin: dstack tag v0.6.141, its commit, the sha256 of tools/linux/dante-leg.nft and
     tools/linux/dante-leg-notrack.nft. strih_dante_leg_filter_ensure fetches both by the exact tag into
     <tree>/dstack-release/<tag>/, proves them against the pin, no fallback;
   * setup-strih step 13 on a Dante box (facts STRIH_DANTE_DEVICES) installs them under /etc/dstack/, loads them
@@ -35,7 +35,7 @@ from test_vban_leg_1439 import (  # noqa: E402
 REPO = HERE.parent.parent
 PIN = REPO / "scripts" / "dstack-leg-filter.pin"
 FIX = REPO / "tests" / "fixtures" / "dstack_leg_1519"
-NFT_SHA = "79a69df5e87680921d3494b53805478f50d0ca322e3e188984d82c0a0fad809f"
+NFT_SHA = "dfb59c9573cce8bdeb25b32a6d9dad6e252bd43d41abd258e8786ac00bdfcb50"
 NOTRACK_SHA = "81eb810b7102bd7af1e5a8341804af585d367fc4dd353943c034107957e7114e"
 UNIT = "dstack-dante-leg-filter.service"
 OLD_UNIT = "vban-dante70-filter.service"
@@ -51,8 +51,8 @@ def _pin():
 
 def test_the_pin_names_v0_6_119_its_commit_and_both_files():
     p = _pin()
-    assert p == {"DSTACK_LEG_FILTER_TAG": "v0.6.129",
-                 "DSTACK_LEG_FILTER_COMMIT": "fb6d292f69f677e16cc83943ff64e28732bcbe81",
+    assert p == {"DSTACK_LEG_FILTER_TAG": "v0.6.141",
+                 "DSTACK_LEG_FILTER_COMMIT": "355aaf74c141e4f73cbdb2f5d198e577d8d7c1c3",
                  "DSTACK_LEG_FILTER_NFT_SHA256": NFT_SHA, "DSTACK_LEG_FILTER_NOTRACK_SHA256": NOTRACK_SHA}
 
 
@@ -61,7 +61,7 @@ def test_the_test_copies_are_the_pinned_bytes():
     assert hashlib.sha256((FIX / "dante-leg-notrack.nft").read_bytes()).hexdigest() == NOTRACK_SHA
 
 
-def _mirror(tmp_path, tag="v0.6.129", tamper=False):
+def _mirror(tmp_path, tag="v0.6.141", tamper=False):
     """A file:// mirror laid out like raw.githubusercontent.com/<repo>/<tag>/tools/linux/<file>."""
     d = tmp_path / "mirror" / tag / "tools" / "linux"
     d.mkdir(parents=True)
@@ -82,7 +82,7 @@ def _ensure(tmp_path, url):
 def test_ensure_fetches_both_files_by_the_tag_and_proves_them(tmp_path):
     r, cache = _ensure(tmp_path, _mirror(tmp_path))
     assert r.returncode == 0, r.stderr
-    d = cache / "v0.6.129"
+    d = cache / "v0.6.141"
     assert r.stdout.strip() == str(d)
     assert hashlib.sha256((d / "dante-leg.nft").read_bytes()).hexdigest() == NFT_SHA
     assert hashlib.sha256((d / "dante-leg-notrack.nft").read_bytes()).hexdigest() == NOTRACK_SHA
@@ -94,13 +94,13 @@ def test_ensure_fetches_both_files_by_the_tag_and_proves_them(tmp_path):
 def test_ensure_refuses_bytes_that_are_not_the_pin_and_keeps_nothing(tmp_path):
     r, cache = _ensure(tmp_path, _mirror(tmp_path, tamper=True))
     assert r.returncode != 0 and "dante-leg.nft" in r.stderr and NFT_SHA in r.stderr, r.stderr
-    assert not (cache / "v0.6.129" / "dante-leg.nft").exists()
-    assert not list((cache / "v0.6.129").glob("*.part"))
+    assert not (cache / "v0.6.141" / "dante-leg.nft").exists()
+    assert not list((cache / "v0.6.141").glob("*.part"))
 
 
 def test_ensure_without_a_mirror_fails_by_name_never_another_filter(tmp_path):
     r, _ = _ensure(tmp_path, "file://%s/nowhere" % tmp_path)
-    assert r.returncode != 0 and "v0.6.129" in r.stderr, r.stderr
+    assert r.returncode != 0 and "v0.6.141" in r.stderr, r.stderr
 
 
 def test_the_strih_deploy_stages_the_pinned_files_and_protects_them():
