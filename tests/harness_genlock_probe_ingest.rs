@@ -19,7 +19,7 @@
 //!
 //!   * #136 (timestamp-aligned release, now deployed with TS_ALIGN=1 on both boxes) REQUIRES
 //!     the frame to carry the wall-clock SOURCE timecode (`is_wallclock_ts` on
-//!     `next_frame->timestamp`, src/ndi.rs). With `ndi_sync=1` the frame carries the
+//!     `next_frame->timestamp`, vstack:av/ndi/src/ndi.rs). With `ndi_sync=1` the frame carries the
 //!     RECEIVER's monotonic ts, so the #136 ts-align path silently NO-OPS — the harness then
 //!     "proves" a path it never exercised.
 //!   * The live PRODUCTION genlock cam inputs (`NDI cam1/3/5`) ALL run `ndi_sync=2`

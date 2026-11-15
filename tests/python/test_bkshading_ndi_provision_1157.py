@@ -2,7 +2,7 @@
 """bkshading NDI-runtime provisioning + cross-platform discovery (issue 1157).
 
 M2 (issue 808) shipped the real libndi preview receiver behind `--features ndi`, but its
-`NdiLib::load()` was copied verbatim from the appliance's Linux-only `src/ndi.rs` — so it could
+`NdiLib::load()` was copied verbatim from the appliance's Linux-only `vstack:av/ndi/src/ndi.rs` — so it could
 never load on the strih PC (Windows), the service's ship target, where the runtime is
 `Processing.NDI.Lib.x64.dll` (documented at scripts/bundle-state-server.py). #1157 makes discovery
 cross-platform via a pure, unit-tested `ndi_paths` module, and adds a provision/verify script

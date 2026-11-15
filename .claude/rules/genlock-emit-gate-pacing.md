@@ -2,7 +2,6 @@
 paths:
   - "src/dupe_decimation/**"
   - "src/genlock_pacing.rs"
-  - "src/ndi.rs"
   - "src/emit_skip_log.rs"
 ---
 
@@ -16,7 +15,7 @@ The pacing GATE math lives in its own crate-root module `src/genlock_pacing.rs` 
 extracted verbatim out of the then-2555-line `ndi.rs`), gated `#[cfg(target_os="linux")]` in
 lock-step with `ndi`. Gotcha when you move doc-commented code between modules like this: BARE-name
 intra-doc links (`[`next_boundary_100ns`]`) that resolved inside `ndi.rs` BREAK in the new module —
-re-qualify them to `[`crate::ndi::…`]`. `ndi.rs` still owns the NDI-timecode grid
+re-qualify them to `[`crate::ndi::…`]` (or plain code text for an item private to another crate). `vstack:av/ndi/src/ndi.rs` (issue 1487) still owns the NDI-timecode grid
 (`next_boundary_100ns` / `fps_from_frame_rate`) the gate complements but does not depend on.
 
 - `genlock_pacing::genlock_emit_gate(now, next_boundary, interval)` → `(would_emit, next)` — the

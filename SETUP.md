@@ -114,7 +114,7 @@ sshpass -p 'newlevel' ssh root@<DEVICE_IP>
 
 ## Cluster clock synchronization (genlock prerequisite) — #8
 
-The software genlock in `src/ndi.rs` aligns every camera's NDI send timecode to **absolute
+The software genlock in `vstack:av/ndi/src/ndi.rs` aligns every camera's NDI send timecode to **absolute
 wall-clock frame boundaries** (`wait_for_next_boundary_100ns`). That only produces a *common*
 boundary across cameras if their wall clocks are synchronized to the **same reference**. If a
 node's clock is offset, every node computes a *different* boundary and the cameras are silently
@@ -198,7 +198,7 @@ needed — the setup path already writes the correct unit; cam3 just predated th
 
 ### Genlock boundary agreement across cameras (acceptance evidence)
 
-`wait_for_next_boundary_100ns(fps)` (`src/ndi.rs`) computes each camera's next frame boundary
+`wait_for_next_boundary_100ns(fps)` (`vstack:av/ndi/src/ndi.rs`) computes each camera's next frame boundary
 **purely from that camera's own wall clock** (`get_wall_clock_100ns` → `(now/second)*second +
 frame_n*10_000_000/fps`). The boundary is therefore a deterministic function of the wall clock
 alone: **two cameras whose wall clocks agree to within Δ compute the same absolute frame boundary
@@ -220,7 +220,7 @@ does not yet exist):
   **44× tighter than the 16.7 ms (60 fps) frame period** (and the worst single-node offset, cam2's
   382 µs against UTC, is itself ~44× under one frame). The cluster's wall-clock genlock boundary
   divergence is well inside one frame on every camera; the genlock clock assumption stated in
-  `src/ndi.rs:62-65` holds across cam1-4.
+  `vstack:av/ndi/src/ndi.rs:62-65` holds across cam1-4.
 
 The continuous guard (`scripts/clock-offset-guard.sh`, exit non-zero if any node exceeds ±2 ms)
 keeps this bound — and therefore the boundary agreement — from silently regressing.

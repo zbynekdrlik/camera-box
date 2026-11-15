@@ -242,7 +242,7 @@ jobs:
         #   unit test and is covered by the on-device loopback E2E. The genlock
         #   fps math it calls (fps_from_frame_rate, next_boundary_100ns) is a
         #   separate, fully-mutation-tested pure function. Function-scoped, so
-        #   the rest of src/ndi.rs (conversions, boundary math) stays mutated.
+        #   the rest of vstack:av/ndi/src/ndi.rs (conversions, boundary math) stays mutated.
         # --exclude-re wall_clock_ns / run_capture_loop: the syscall wrapper and
         #   the async capture->NDI hardware loop are integration-only glue
         #   (verified by the on-device loopback E2E). The genlock DECISION logic

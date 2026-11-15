@@ -1888,7 +1888,7 @@ methods:**
 1. **SSH `hostname` on all 6 boxes directly**: `10.77.9.61`=`CAM1`, `.62`=`CAM2`, `.63`=`CAM3`,
    `.64`=`CAM4`, `.65`=`CAM5`, `.66`=`cam6` — i.e. box IP N has hostname `CAMN` (or `camN`), no
    reshuffle.
-2. **`os_hostname()` (src/main.rs) feeds the NDI sender name directly** (`src/ndi.rs`: sender =
+2. **`os_hostname()` (src/main.rs) feeds the NDI sender name directly** (`vstack:av/ndi/src/ndi.rs`: sender =
    `<hostname> (usb)`) — so box camN broadcasts NDI name `CAMN (usb)`, confirmed by the ORIGINAL
    (correct, still-standing) "strih NDI Input -> Camera Mapping (INVERTED)" table earlier in the
    genlock skill: `NDI src "CAM1 (usb)" == real camera CAM1 (10.77.9.61)`.

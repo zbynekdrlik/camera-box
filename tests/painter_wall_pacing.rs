@@ -3,7 +3,7 @@
 //! out of phase and the decimator skips ~13% of painted ids — which the new
 //! endpoint-sequence check then reports as (spurious) "missing" generator ids.
 //!
-//! `next_wall_boundary_ns` is the pure pacing math (mirrors src/ndi.rs's genlock
+//! `next_wall_boundary_ns` is the pure pacing math (mirrors vstack:av/ndi/src/ndi.rs's genlock
 //! boundary): given an absolute wall-clock ns and a frame period ns, the next
 //! aligned boundary is the strictly-next multiple of the period. Sharing this
 //! discipline with the decimator means every painted id lands on a tick the

@@ -2,9 +2,9 @@
 #
 # clock-offset-guard.sh — cluster clock-offset regression guard (#8).
 #
-# The software genlock in src/ndi.rs aligns every camera's NDI send timecode to ABSOLUTE
+# The software genlock in vstack:av/ndi/src/ndi.rs aligns every camera's NDI send timecode to ABSOLUTE
 # wall-clock frame boundaries (wait_for_next_boundary_100ns), which only yields a COMMON boundary
-# across nodes if their wall clocks are synchronized (src/ndi.rs:62-65 states this verbatim). The
+# across nodes if their wall clocks are synchronized (vstack:av/ndi/src/ndi.rs:62-65 states this verbatim). The
 # cluster is disciplined by DanteSync (strih = master; NTP anchor + PTP fine servo — see SETUP.md
 # "Cluster clock synchronization"). If a node's clock silently drifts past a fraction of the
 # 16.7 ms (60 fps) frame period, multi-camera genlock degrades with NO error and cross-node
@@ -1849,7 +1849,7 @@ clock-offset-guard.sh — cluster clock-offset regression guard (#8).
 
 Queries each REACHABLE Linux node's DanteSync-reported absolute clock offset (the periodic
 "[NTP] offset:+Nus" journald line) and FAILS LOUDLY if any node's |offset| exceeds the bound,
-so clock drift cannot silently re-break the wall-clock genlock in src/ndi.rs.
+so clock drift cannot silently re-break the wall-clock genlock in vstack:av/ndi/src/ndi.rs.
 
 Usage:
   scripts/clock-offset-guard.sh [--bound-us N] [--stability-us N] [--targets "name=ip name=ip ..."]

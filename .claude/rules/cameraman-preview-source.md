@@ -1,8 +1,6 @@
 ---
 paths:
-  - "src/preview_source.rs"
   - "src/ndi_display.rs"
-  - "src/ndi.rs"
 ---
 
 # Cameraman HDMI preview source — resolved from the LAN, never one baked box name (#1362)
@@ -11,7 +9,7 @@ paths:
 
 Every cambox shows the strih box's `interkom` NDI output on its HDMI monitor. This is the
 fleet-wide unconditional preview from the #528 ruling: no per-box config, no env knob. The source
-is RESOLVED on every (re)connect by the pure `src/preview_source.rs`:
+is RESOLVED on every (re)connect by the pure `vstack:av/ndi/src/preview_source.rs`:
 
 0. **The strih behind `strih.lan` (issue 1431, joint events).** The `STRIH-<box> (interkom)`
    output whose NDI address (the finder's `p_url_address`, `ip:port`) is the IP `strih.lan`
@@ -48,7 +46,7 @@ waits the 30 s window (`the_old_named_strih_is_still_picked_after_the_window_141
 
 ## Wiring (where the pieces live)
 
-- `NdiReceiver::connect_with(timeout, label, pick)` (`src/ndi.rs`) runs the ONE finder loop. On
+- `NdiReceiver::connect_with(timeout, label, pick)` (`vstack:av/ndi/src/ndi.rs`) runs the ONE finder loop. On
   every ~1 s pass it hands the discovered sources (`DiscoveredSource`: name + `p_url_address`,
   issue 1431) to `pick(sources, window_elapsed)` and connects to
   the EXACT name returned. A final pass with `window_elapsed == true` is guaranteed before it

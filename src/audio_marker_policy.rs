@@ -8,7 +8,7 @@
 //! `cargo check`/`clippy`/`test` never even attempt to compile it, so a change confined there has
 //! ZERO local verification path until CI runs (see the project CLAUDE.md's Local Build Policy
 //! section). This module is the PURE decision seam — the same pattern as `src/colour_scale.rs` /
-//! `src/reannounce.rs` / `src/motion_sweep.rs`: no I/O, no probe deps, so it unit-tests Tier-0.
+//! `vstack:av/ndi/src/reannounce.rs` / `src/motion_sweep.rs`: no I/O, no probe deps, so it unit-tests Tier-0.
 //! `frame-probe.rs` becomes a thin caller of these functions.
 //!
 //! ## The bug this closes (issue 984)

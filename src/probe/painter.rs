@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// #68: the strictly-next wall-clock frame boundary at or after `now_ns`, for a
-/// frame period of `period_ns`. Pure pacing math (mirrors src/ndi.rs's genlock
+/// frame period of `period_ns`. Pure pacing math (mirrors vstack:av/ndi/src/ndi.rs's genlock
 /// `next_boundary_100ns`): the painter must advance ids on the SAME absolute
 /// wall-clock boundaries the genlock decimator samples on, or the two equal-rate
 /// cadences drift out of phase and the decimator skips painted ids (~13% measured
@@ -342,7 +342,7 @@ pub fn run_painter(
 
     // #68: pace on absolute WALL-CLOCK frame boundaries in the multi-node path
     // (`wall_clock` true — the genlock-decimated camera path) so the painter ticks
-    // at the SAME phase as the genlock decimator (src/ndi.rs wall-boundary pacing).
+    // at the SAME phase as the genlock decimator (vstack:av/ndi/src/ndi.rs wall-boundary pacing).
     // A monotonic-paced 30 fps painter into a 60→30 wall-clock decimator drifts out
     // of phase and ~13% of ids are never sampled into NDI (measured live). For the
     // Phase-1 single-box loopback (`wall_clock` false) the painter+reader share one

@@ -13,7 +13,7 @@ paths:
 `zbynekdrlik/vstack` owns the JPEG XS link, the rig primitives, the QPSK marker protocol and, since
 v0.1.7 (vstack#8), the test-burn geometry (`burn-geom`: burn_regions, burn_quiet_zone, burn_tick_cache,
 colour_scale; re-exported at the old paths, the C++ parity tests stay here), and since v0.1.8/v0.1.9
-the cambox capture side. A `vstack:<path>` in this repo's prose is that path inside the pinned tag.
+the cambox capture side, since v0.1.10 the NDI side. A `vstack:<path>` in this repo's prose is that path inside the pinned tag.
 
 - **v0.1.8/v0.1.9 moved the capture side** (behaviour unchanged from camera-box dev 4ee558aba):
   - `rig_core::genlock_stamp` (portable now, `floor_boundary_100ns` is `pub` there; `src/ndi.rs`
@@ -27,9 +27,21 @@ the cambox capture side. A `vstack:<path>` in this repo's prose is that path ins
   - A test pinning a constant or a wiring line of `capture.rs` reads it through
     `vstack::read("av/capture/src/capture.rs")` (Rust) / `vstack_src.read(...)` (pytest).
 
+- **v0.1.10 moved the NDI side** (behaviour unchanged from camera-box dev 4ee558aba): the crate
+  `av-ndi` (`vstack:av/ndi`): `ndi` (Linux only; takes av-capture's `Frame`/`FrameRate`/`FrameInfo`
+  and rig-core's `floor_boundary_100ns`), `send_stagger`, `reannounce`, `preview_source` (portable,
+  so the Windows probe build still reaches them). New internal test seams there:
+  `usable_ipv4_addrs`, `NdiSender::maybe_reannounce_with`, `NdiReceiver::connect_with_lib`,
+  `run_mjpeg_decoder`, `uyvy_stride`; `maybe_reannounce` and `connect_with` keep their signatures.
+  - Kept here, on the re-exports: `ndi_display`, `tests/ndi_reannounce.rs`,
+    `tests/harness_send_stagger_1242.rs` and the probe binaries.
+  - `next_boundary_100ns` is crate-private in av-ndi: a doc comment here names it as plain code
+    text, never an intra-doc link.
+  - Tests that pin `ndi.rs` / `preview_source.rs` text read `av/ndi/src/...` from the tag.
+
 - **One pin:** `scripts/vstack-release.pin` (tag + commit). The tag is repeated on every vstack git
   dependency in root `Cargo.toml` (`camera-box-jxs`, `rig-core`, `qpsk-marker`, `burn-geom`,
-  `av-capture`, optional `svt-jpegxs-sys`). `tests/vstack_pin_1487.rs` fails until all of them and the lock agree.
+  `av-capture`, `av-ndi`, optional `svt-jpegxs-sys`). `tests/vstack_pin_1487.rs` fails until all of them and the lock agree.
 - **To bump:** edit the pin file and every tag, `cargo update -p rig-core`, run the suite. A new
   pin triggers linux-genlock.
 - **`src/lib.rs` keeps the old paths** with `pub use`, so `camera_box::genlock_wall_step` and the
