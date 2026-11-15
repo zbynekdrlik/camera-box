@@ -31,12 +31,6 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from dantesync_upgrade_harness_1372 import _ROOT, _TARGET, _UPGRADE, _at, _roll, _source  # noqa: E402
 
-@pytest.fixture(autouse=True)
-def _every_node_rolled(monkeypatch):
-    """issue 1487: these tests use mbc / fohabl as their rolled nodes."""
-    monkeypatch.setenv("DSYNC_SELF_UPGRADED_NODES", "")
-
-
 
 @pytest.fixture()
 def ps(tmp_path):

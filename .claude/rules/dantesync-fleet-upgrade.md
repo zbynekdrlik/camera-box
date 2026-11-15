@@ -101,12 +101,13 @@ sourcing), network/mutating flow below.
 ## `--fleet` (issue 1372)
 
 `--fleet` appends every node of `scripts/lib/dantesync-fleet.sh` not named by `--linux/--win/--local`
-(every camera, dev1, the OBS boxes, the audio-VLAN PCs mbc + fohabl), so a roll can no longer forget
-a box (mbc sat one release behind on 25.9.2026). A node whose fleet row names its own credential
-(fohabl, user `master`, `DANTESYNC_FOHABL_SSH_PASS`) is dialled with that value via `node_pass`
-(ssh AND scp); a missing value SKIPS the node, never dials it with `SSH_PASS`. Without an explicit
+(every camera, dev1, the OBS boxes, the PP boxes, alex-nb), so a roll can no longer forget a box (mbc
+sat one release behind on 25.9.2026; mbc + fohabl are dsync's since 15.11.2026, issue 1487, no rows,
+never rolled here). A node whose fleet row names its own credential (a credvar; fohabl's
+`DANTESYNC_FOHABL_SSH_PASS` was the only one) is dialled with that value via `node_pass` (ssh AND
+scp); a missing value SKIPS the node, never dials it with `SSH_PASS`. Without an explicit
 `NTP_MASTER`, the fleet's `ntp-master` row (strih-snv) gets the master-aware verify. An
-audio-role node (mbc, fohabl) is verified with `RIG_GRANDMASTER_IP` = the audio grandmaster
+audio-role node (alex-nb) is verified with `RIG_GRANDMASTER_IP` = the audio grandmaster
 (`dantesync_gate_env_for`), never the video one, so GM enforcement cannot fail its verify. Always
 `--fleet --dry-run` first. A roll also refreshes `dsync-tray.exe` on every Windows node, including
 one whose service is already on the target (next section); the version gate's report-only tray

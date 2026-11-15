@@ -14,6 +14,7 @@ against config.json bytes captured LIVE from the fleet on 25.9.2026 (fixtures/da
 import importlib.util
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import sys
@@ -33,7 +34,7 @@ _spec.loader.exec_module(df)
 # the env a hermetic run must not inherit from the operator's shell
 _CLEAN = ("DANTESYNC_FLEET", "OBS_FLEET", "OBS_FLEET_HOME", "DANTESYNC_AUDIO_GM_HOST",
           "RIG_GRANDMASTER_HOST", "RIG_GRANDMASTER_IP", "CAMBOX_OFFLINE_ACK",
-          "DANTESYNC_FOHABL_SSH_PASS", "DANTESYNC_FLEET_CRED_FILE")
+          "DANTESYNC_CREDPC_SSH_PASS", "DANTESYNC_FLEET_CRED_FILE", "DSYNC_GRADED_NODES")
 
 
 def _env(**over):
@@ -47,6 +48,12 @@ def _bash(tmp_path, body, **env):
     script = tmp_path / "run.sh"
     script.write_text(f"set -euo pipefail\n. '{_LIB}'\n{body}\n")
     return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=_env(**env))
+
+
+# issue 1487: no committed row names its own ssh credential since fohabl went to dsync (15.11.2026),
+# so the credvar tests run the committed table + ONE test-only row.
+_TABLE = re.search(r'DANTESYNC_FLEET="\$\{DANTESYNC_FLEET:-(.*?)\}"', _LIB.read_text(), re.S).group(1)
+_CRED_TABLE = _TABLE + "\ncredpc|10.77.7.31|windows|audio|always|master|DANTESYNC_CREDPC_SSH_PASS"
 
 
 def _with_env(monkeypatch, **env):
@@ -65,11 +72,14 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     assert r.returncode == 0, r.stderr
     names = [ln.split("|")[0] for ln in r.stdout.split()]
     assert names == ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "dev1", "strih-snv",
-                     "stream-snv", "resolume-snv", "mbc", "fohabl",
-                     "strih-pp", "stream-pp", "alex-nb"]  # issue 1487: resolume-pp is dsync's
+                     "stream-snv", "resolume-snv",
+                     "strih-pp", "stream-pp", "alex-nb"]  # issue 1487: resolume-pp, mbc, fohabl are dsync's
     rows = {ln.split("|")[0]: ln for ln in r.stdout.split()}
-    assert rows["mbc"] == "mbc|10.77.7.232|windows|audio|always|-|"
-    assert rows["fohabl"] == "fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS"
+    # issue 1487 (15.11.2026): the audio-VLAN PCs mbc + fohabl are dsync's completely -- no rows, and no
+    # row names its own ssh credential any more (fohabl's DANTESYNC_FOHABL_SSH_PASS went with it).
+    assert "mbc" not in rows and "fohabl" not in rows
+    assert not any(ln.split("|")[6] for ln in r.stdout.split())
+    assert "FOHABL" not in _LIB.read_text()
     # OBS-box addresses come from obs-fleet.sh (never a second literal); strih-snv is the NTP master
     assert rows["strih-snv"] == "strih-snv|10.77.9.202|linux|ntp-master|obsfleet|-|"
     assert rows["resolume-snv"] == "resolume-snv|resolume.lan|windows|video|obsfleet|-|"
@@ -167,42 +177,41 @@ def test_version_gate_arms(tmp_path):
         "strih-snv=op@10.77.9.202", "stream-snv=op@10.77.9.204",
         "strih-pp=op@strih-pp.lan", "stream-pp=op@stream-pp.lan"]
     # issue 1462: stream-snv is a Linux box since 22.10.2026
-    assert out["W"].split() == ["resolume-snv=op@resolume.lan",
-                                "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30",
-                                "alex-nb=alexnb@10.77.7.109"]
+    assert out["W"].split() == ["resolume-snv=op@resolume.lan", "alex-nb=alexnb@10.77.7.109"]
     assert out["D"] == "dev1"
 
 
 def test_present_drops_an_away_traveling_box(tmp_path):
     # OBS_FLEET_HOME pins who is home (the obs-fleet test seam): resolume away
-    r = _bash(tmp_path, 'dantesync_fleet_spec win op --present', OBS_FLEET_HOME="strih-snv stream-snv")
+    r = _bash(tmp_path, 'dantesync_fleet_spec win op --present', OBS_FLEET_HOME="strih-snv stream-snv alex-nb")
     assert "resolume-snv" not in r.stdout
-    assert "mbc=op@10.77.7.232" in r.stdout
+    assert "alex-nb=alexnb@10.77.7.109" in r.stdout
     r = _bash(tmp_path, 'dantesync_fleet_spec linux op --present', OBS_FLEET_HOME="strih-snv stream-snv")
     assert "stream-snv=op@10.77.9.204" in r.stdout
 
 
 def test_credential_is_referenced_by_name_never_a_literal(tmp_path):
-    r = _bash(tmp_path, 'echo "F=$(dantesync_fleet_cred_var_for_target master@10.77.7.30)";'
-                        ' echo "M=$(dantesync_fleet_cred_var_for_target op@10.77.7.232)"')
-    assert "F=DANTESYNC_FOHABL_SSH_PASS" in r.stdout
+    r = _bash(tmp_path, 'echo "F=$(dantesync_fleet_cred_var_for_target master@10.77.7.31)";'
+                        ' echo "M=$(dantesync_fleet_cred_var_for_target alexnb@10.77.7.109)"',
+              DANTESYNC_FLEET=_CRED_TABLE)
+    assert "F=DANTESYNC_CREDPC_SSH_PASS" in r.stdout
     assert "M=\n" in r.stdout + "\n"
-    # the committed lib names the variable, never a password value
-    assert "DANTESYNC_FOHABL_SSH_PASS=" not in _LIB.read_text()
+    # the committed lib never holds a password value
+    assert "_SSH_PASS=" not in _LIB.read_text()
 
 
 def test_credentials_load_from_the_file_parsed_not_sourced(tmp_path):
     cred = tmp_path / "creds.env"
     marker = tmp_path / "executed"
-    cred.write_text(f'# comment\nDANTESYNC_FOHABL_SSH_PASS="s3cret $(touch {marker})"\nOTHER_VAR=nope\n')
-    r = _bash(tmp_path, 'dantesync_fleet_load_credentials; echo "P=${DANTESYNC_FOHABL_SSH_PASS:-}"; echo "O=${OTHER_VAR:-}"',
-              DANTESYNC_FLEET_CRED_FILE=str(cred))
+    cred.write_text(f'# comment\nDANTESYNC_CREDPC_SSH_PASS="s3cret $(touch {marker})"\nOTHER_VAR=nope\n')
+    r = _bash(tmp_path, 'dantesync_fleet_load_credentials; echo "P=${DANTESYNC_CREDPC_SSH_PASS:-}"; echo "O=${OTHER_VAR:-}"',
+              DANTESYNC_FLEET_CRED_FILE=str(cred), DANTESYNC_FLEET=_CRED_TABLE)
     assert f"P=s3cret $(touch {marker})" in r.stdout
     assert "O=\n" in r.stdout + "\n"         # only row-named keys are taken
     assert not marker.exists()              # the value was never executed
     # an already-set environment value wins over the file
-    r = _bash(tmp_path, 'dantesync_fleet_load_credentials; echo "P=$DANTESYNC_FOHABL_SSH_PASS"',
-              DANTESYNC_FLEET_CRED_FILE=str(cred), DANTESYNC_FOHABL_SSH_PASS="from-env")
+    r = _bash(tmp_path, 'dantesync_fleet_load_credentials; echo "P=$DANTESYNC_CREDPC_SSH_PASS"',
+              DANTESYNC_FLEET_CRED_FILE=str(cred), DANTESYNC_CREDPC_SSH_PASS="from-env", DANTESYNC_FLEET=_CRED_TABLE)
     assert "P=from-env" in r.stdout
 
 
@@ -323,24 +332,27 @@ def _run_drift(tmp_path, stub, *args, **env):
 
 
 def test_orchestrator_reports_the_live_audio_drift(tmp_path):
-    stub = _fetch_stub(tmp_path, {"mbc": "mbc.json", "fohabl": "fohabl.json", "stream-snv": "stream-snv.json",
+    # issue 1487: the only audio row left is alex-nb, which dsync grades; an empty DSYNC_GRADED_NODES
+    # grades it here again, against the live mbc capture (the audio template is unchanged).
+    stub = _fetch_stub(tmp_path, {"alex-nb": "mbc.json", "stream-snv": "stream-snv.json",
                                   "resolume-snv": "stream-snv.json", "strih-snv": "strih-snv.json"})
-    r = _run_drift(tmp_path, stub)
+    r = _run_drift(tmp_path, stub, OBS_FLEET_HOME="strih-snv stream-snv resolume-snv alex-nb", DSYNC_GRADED_NODES="")
     assert r.returncode == 20, r.stdout + r.stderr
-    assert "node=mbc role=audio verdict=DRIFT" in r.stdout
+    assert "node=alex-nb role=audio verdict=DRIFT" in r.stdout
     assert "system.gm_allowlist: missing" in r.stdout
-    assert "DANTESYNC CONFIG DRIFT on: mbc fohabl" in r.stdout
+    assert "DANTESYNC CONFIG DRIFT on: alex-nb" in r.stdout
+    assert "node=mbc" not in r.stdout and "node=fohabl" not in r.stdout
     for name in ("cam1", "cam7", "dev1", "strih-snv", "stream-snv", "resolume-snv"):
         assert f"node={name} " in r.stdout and f"node={name} role=" in r.stdout
 
 
 def test_orchestrator_clean_fleet_exits_0(tmp_path):
     stub = _fetch_stub(tmp_path, {"stream-snv": "stream-snv.json", "resolume-snv": "stream-snv.json", "strih-snv": "strih-snv.json",
-                                  "mbc": "cam1.json", "fohabl": "cam1.json"})
+                                  "alex-nb": "cam1.json"})
     r = _run_drift(tmp_path, stub, "--only", "cam1 stream-snv strih-snv")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "OK: every read dantesync node" in r.stdout
-    assert "node=mbc" not in r.stdout
+    assert "node=alex-nb" not in r.stdout
 
 
 def test_orchestrator_unread_node_is_unknown_not_clean(tmp_path):

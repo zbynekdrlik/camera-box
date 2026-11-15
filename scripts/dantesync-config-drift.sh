@@ -24,7 +24,7 @@ set -euo pipefail
 # 1487) are SKIPPED; a node acked offline in rig-fleet.txt / CAMBOX_OFFLINE_ACK is EXCLUDED; any other
 # unread node is UNKNOWN, never a silent pass.
 #
-# CREDENTIALS: a node whose fleet row names a credvar (fohabl: DANTESYNC_FOHABL_SSH_PASS) is read with
+# CREDENTIALS: a node whose fleet row names a credvar (none today, issue 1487) is read with
 # that variable's value, taken from the environment or the dev1-local credential file
 # (DANTESYNC_FLEET_CRED_FILE, default ~/.config/camera-box/dantesync-fleet.env, mode 0600, never
 # committed). Unset -> that node reads UNKNOWN. Every other node uses DANTESYNC_CONFIG_DRIFT_SSH_PASS

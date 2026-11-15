@@ -76,24 +76,12 @@ tray's old unit, binary and release record.
 
 ## Scope
 
-`DSYNC_SELF_UPGRADED_NODES` (`mbc fohabl` since 12.11.2026): dsync upgrades these itself.
-They stay rows of the fleet table, so the clock watchdog and the drift check keep grading them on
-:8898, but the upgrader never rolls them (named or not), and the version gate never pins them. They may
-keep their state dir in place, so the drift check reads `/etc/dsync`, then `/etc/dantesync`.
-
-**Their version is still READ and NAMED (9.11.2026, mbc on 1.27.3 vs the pin 1.28.0 silenced the
-stream-snv program ~20 min with the version printed nowhere).** `dantesync-version-gate.sh --fleet`
-reads each one with the same `dsync --version` reader and prints it in its own section
-`-- nodes dsync upgrades itself (issue 1487, report-only, never blocks) --`, graded by the pure
-`dantesync_self_upgraded_verdict` on `release_version_order_word` (semver, never text): below the pin
-= `SELF-BEHIND (version=V pin=P; ...)` + a `!! DSYNC-SELF-UPGRADED WARNING` stderr line, at/above =
-`OK`, unread = `SELF-UNKNOWN` + a NOTE. The gate exit NEVER moves (our gate must not follow dsync's
-deploy cadence) and nothing rolls them. An unreachable `reach` one is `SKIPPED (unreachable`
-like a rolled node; one named on the command line is graded on the pin as before. The handover check
-(item `dantesync`) turns the rows into a Slovak `pozor:` note on its line and the summary
-(`rig-dev-handover-check.md`), and the 30-min `fleet-parity-alert-watchdog.sh` logs them (one
-`self-upgraded below the pin` line; never drift, never a catch-up roll, never a page). Tests:
-`tests/python/test_dsync_self_upgraded_version_1487.py`, `tests/python/test_fleet_parity_1426.py`.
+`DSYNC_SELF_UPGRADED_NODES` (dsync upgrades, camera-box only grades and reads the version into a
+report-only `SELF-BEHIND` gate section + a handover `pozor:` note) held mbc + fohabl from 12.11 to
+15.11.2026. It is GONE with every consumer (below): no node sits in that middle state any more, a node
+goes from graded-by-dsync straight to handed over. Its history: on 9.11.2026 mbc ran 1.27.3 below the
+pin 1.28.0 and silenced the stream-snv program ~20 min with the version printed nowhere, which is
+why that section existed; now dsync owns mbc's version and its own paging.
 
 **12.11.2026, dsync#179 (design 6837165923): dsync GRADES its nodes itself** (a dev1 user timer reads
 :8898 every 60 s on mbc, fohabl, iem-snv, companion-snv, alex-nb, resolume-pp and pages through airuleset
@@ -108,6 +96,15 @@ the only writer there. camera-box hands it over completely: no fleet row (no rol
 read, no clock watchdog), off `DSYNC_GRADED_NODES` (alex-nb stays), and `resolume-pp.lan` joined
 `DSYNC_FLEET_HANDED_OVER`, so the version gate's outside-fleet scan names it `HANDED-OVER`. Its
 obs-fleet row (issue 1426) is unrelated and stays.
+
+**15.11.2026, the same day: dsync takes mbc + fohabl completely** (dsync confirmed it grades both and
+upgrades them). No fleet rows (no roll, no pin, no report-only version row, no drift read, no clock
+watchdog), and their row addresses `10.77.7.232 10.77.7.30` joined `DSYNC_FLEET_HANDED_OVER`. With them
+went `DSYNC_SELF_UPGRADED_NODES` and its consumers (the version gate's `-- nodes dsync upgrades itself`
+section and `dantesync_self_upgraded_verdict`, the handover `pozor:` note, the upgrader's NOT ROLLED
+skip, the fleet-parity watchdog's `self-upgraded below the pin` log line). alex-nb STAYS a row: dsync
+still cannot reach it, so camera-box rolls + pins it and `DSYNC_GRADED_NODES=alex-nb` keeps it off
+camera-box's graders.
 
 **resolume-snv** moved on 2.11.2026 by dsync's own `install.ps1`, once. That is not a path: only
 camera-box moves rig boxes. It reads SAME at the new location, so the upgrader only checks its tray

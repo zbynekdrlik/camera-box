@@ -2,13 +2,14 @@
 
 dstack, 12.11.2026 (dsync#179 live): a dev1 user timer grades :8898 every 60 s on mbc, fohabl,
 iem-snv, companion-snv, alex-nb and resolume-pp and pages through airuleset notify. So camera-box
-  - drops the rows iem-snv + companion-snv, and since 15.11.2026 resolume-pp (dsync grades AND
-    upgrades them; the version gate's outside-fleet scan names them HANDED-OVER via
-    DSYNC_FLEET_HANDED_OVER),
+  - drops the rows iem-snv + companion-snv, and since 15.11.2026 resolume-pp, mbc and fohabl (dsync
+    grades AND upgrades them; DSYNC_FLEET_HANDED_OVER keeps the version gate's outside-fleet scan
+    from flagging them),
   - keeps alex-nb as a row for the fleet upgrader and the version gate (dsync cannot log in there
     yet), but `DSYNC_GRADED_NODES` drops it from the clock watchdog's default rosters (and so from
     the handover clock item) and from the config drift check: one grader per node,
-  - rolls alex-nb again (it left DSYNC_SELF_UPGRADED_NODES, now `mbc fohabl`).
+  - has no `DSYNC_SELF_UPGRADED_NODES` any more (dsync upgrades, camera-box grades): its last nodes,
+    mbc + fohabl, went to dsync completely on 15.11.2026, and the list went with its consumers.
 
 Tier-0: PATH stubs + fixture seams, no box, no network.
 """
@@ -51,16 +52,36 @@ def test_the_handed_over_nodes_are_no_rows_and_the_graded_one_stays(tmp_path):
     names = _bash(tmp_path, "dantesync_fleet_names").stdout.split()
     assert "iem-snv" not in names and "companion-snv" not in names
     assert "resolume-pp" not in names  # 15.11.2026: dsync grades AND upgrades it
+    assert "mbc" not in names and "fohabl" not in names  # 15.11.2026: dsync's completely
     assert "alex-nb" in names
 
 
-def test_the_defaults_of_the_three_dsync_lists(tmp_path):
-    r = _bash(tmp_path, 'printf "%s|%s|%s" "$DSYNC_SELF_UPGRADED_NODES" "$DSYNC_GRADED_NODES" '
+def test_the_defaults_of_the_dsync_lists(tmp_path):
+    r = _bash(tmp_path, 'printf "%s|%s|%s" "${DSYNC_SELF_UPGRADED_NODES-unset}" "$DSYNC_GRADED_NODES" '
                         '"$DSYNC_FLEET_HANDED_OVER"')
-    assert r.stdout == "mbc fohabl|alex-nb|iem-snv.lan companion-snv.lan resolume-pp.lan", r.stderr
+    assert r.stdout == ("unset|alex-nb|iem-snv.lan companion-snv.lan resolume-pp.lan 10.77.7.232 10.77.7.30"), r.stderr
 
 
-@pytest.mark.parametrize("name,rc", [("alex-nb", 0), ("resolume-pp", 1), ("strih-pp", 1), ("mbc", 1),
+def test_the_self_upgraded_mechanism_is_gone_with_its_consumers(tmp_path):
+    """issue 1487, 15.11.2026: no node sits in the dsync-upgrades-camera-box-grades middle state, so
+    its accessor, the gate's report-only section and the handover note are removed, not left empty."""
+    r = _bash(tmp_path, 'set +e; declare -F dantesync_fleet_self_upgraded >/dev/null; echo "fn=$?"')
+    assert r.stdout.strip() == "fn=1", r.stdout + r.stderr
+    gate = _GATE.read_text()
+    assert "dantesync_self_upgraded_verdict" not in gate and "nodes dsync upgrades itself" not in gate
+    assert "SELF-BEHIND" not in (_ROOT / "scripts" / "rig_dev_handover_decision.py").read_text()
+    assert "SELF-BEHIND" not in (_ROOT / "scripts" / "fleet-parity-alert-watchdog.sh").read_text()
+    assert "self_upgraded" not in _UPGRADE.read_text()
+
+
+@pytest.mark.parametrize("host,rc", [("10.77.7.232", 0), ("10.77.7.30", 0), ("10.77.7.109", 1),
+                                     ("10.77.7.3", 1), ("10.77.7.300", 1)])
+def test_the_audio_vlan_pcs_are_handed_over_by_their_row_address(tmp_path, host, rc):
+    r = _bash(tmp_path, f'set +e; dantesync_fleet_handed_over "{host}"; echo "rc=$?"')
+    assert r.stdout.strip() == f"rc={rc}", r.stderr
+
+
+@pytest.mark.parametrize("name,rc", [("alex-nb", 0), ("resolume-pp", 1), ("strih-pp", 1), ("mbc", 1), ("fohabl", 1),
                                      ("alex", 1), ("", 1)])
 def test_dsync_graded_accessor(tmp_path, name, rc):
     r = _bash(tmp_path, f'set +e; dantesync_fleet_dsync_graded "{name}"; echo "rc=$?"')
@@ -125,12 +146,13 @@ def test_the_drift_check_never_reads_a_dsync_graded_node(tmp_path):
     stub.chmod(0o755)
     fleet = tmp_path / "rig-fleet.txt"
     fleet.write_text("")
-    r = subprocess.run(["bash", str(_DRIFT_SH), "--fleet-file", str(fleet), "--only", "cam2 alex-nb resolume-pp"],
+    r = subprocess.run(["bash", str(_DRIFT_SH), "--fleet-file", str(fleet), "--only", "cam2 alex-nb resolume-pp mbc fohabl"],
                        capture_output=True, text=True,
                        env=_env(DANTESYNC_CONFIG_DRIFT_FETCH_CMD=str(stub), OBS_FLEET_HOME="alex-nb resolume-pp",
                                 DANTESYNC_FLEET_CRED_FILE=str(tmp_path / "none.env")))
     assert "node=alex-nb role=audio verdict=SKIPPED (graded by dsync" in r.stdout, r.stdout + r.stderr
     assert "node=resolume-pp" not in r.stdout, r.stdout  # 15.11.2026: no row, handed over to dsync
+    assert "node=mbc" not in r.stdout and "node=fohabl" not in r.stdout, r.stdout
     assert log.read_text().split() == ["cam2"], log.read_text()
 
 
@@ -153,26 +175,29 @@ def _stub_bin(tmp_path, versions):
 
 _HOSTS = ["10.77.9.6%d" % n for n in (2, 3, 5)] + ["10.77.9.202", "10.77.9.204", "resolume.lan",
                                                    "10.77.7.232", "10.77.7.30", "resolume-pp.lan", "10.77.7.109"]
+_DSYNC_OWNED = ("resolume-pp.lan", "10.77.7.232", "10.77.7.30")
 _HOME = "strih-snv stream-snv resolume-snv resolume-pp alex-nb"
 
 
-def test_the_upgrader_still_rolls_alex_nb_and_never_resolume_pp(tmp_path):
+def test_the_upgrader_still_rolls_alex_nb_and_never_the_nodes_dsync_owns(tmp_path):
     v = {h: _PIN for h in _HOSTS}
-    v["resolume-pp.lan"] = "1.8.10"
-    v["10.77.7.109"] = "1.8.10"
+    for h in _DSYNC_OWNED + ("10.77.7.109",):
+        v[h] = "1.8.10"
     b = _stub_bin(tmp_path, v)
     env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=_HOME, DANTESYNC_FLEET_CRED_FILE=str(tmp_path / "none.env"),
-               SSH_PASS="pw", CAMBOX_OFFLINE_ACK="", DANTESYNC_FOHABL_SSH_PASS="foh")
+               SSH_PASS="pw", CAMBOX_OFFLINE_ACK="")
     r = subprocess.run(["bash", str(_UPGRADE), "--fleet", "--dry-run", "--target", _PIN],
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert re.search(r"^\s+alex-nb\s+win\s+1\.8\.10\s+-> NEWER", r.stdout, re.M), r.stdout
-    # 15.11.2026: dsync upgrades resolume-pp itself, so camera-box never lists or dials it
-    assert "resolume-pp" not in r.stdout, r.stdout
-    assert "resolume-pp.lan" not in (tmp_path / "dials.log").read_text().split()
+    # 15.11.2026: dsync upgrades resolume-pp, mbc and fohabl itself, so camera-box never lists or dials them
+    assert not re.search(r"^\s*(resolume-pp|mbc|fohabl)\s", r.stdout, re.M), r.stdout
+    assert "NOT ROLLED" not in r.stdout
+    dials = {d.split("@", 1)[-1] for d in (tmp_path / "dials.log").read_text().split()}
+    assert not dials & set(_DSYNC_OWNED), dials
 
 
-def test_the_version_gate_still_pins_alex_nb_and_never_resolume_pp(tmp_path):
+def test_the_version_gate_still_pins_alex_nb_and_never_the_nodes_dsync_owns(tmp_path):
     v = {h: _PIN for h in _HOSTS}
     v["10.77.7.109"] = "1.8.10"
     b = _stub_bin(tmp_path, v)
@@ -180,13 +205,14 @@ def test_the_version_gate_still_pins_alex_nb_and_never_resolume_pp(tmp_path):
     fleet.write_text("")
     env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=_HOME, DANTESYNC_FLEET_CRED_FILE=str(tmp_path / "none.env"),
                DANTESYNC_VERSION_GATE_SSH_PASS="pw", DANTESYNC_TRAY_EXPECTED_SHA="a" * 64,
-               DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FOHABL_SSH_PASS="foh", DANTESYNC_FLEET_SCAN_CMD="/bin/true")
-    for n in ("RESOLUME_SNV", "MBC", "FOHABL", "RESOLUME_PP", "ALEX_NB"):
+               DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FLEET_SCAN_CMD="/bin/true")
+    for n in ("RESOLUME_SNV", "RESOLUME_PP", "ALEX_NB"):
         env[f"DANTESYNC_TRAY_SHA_{n}"] = "a" * 64
     r = subprocess.run(["bash", str(_GATE), "--pin", _PIN, "--fleet-file", str(fleet), "--fleet"],
                        capture_output=True, text=True, env=env)
     assert r.returncode == 20, r.stdout + r.stderr
-    pinned = r.stdout[:r.stdout.index("-- nodes dsync upgrades itself")]
-    assert re.search(r"^\s+alex-nb\s+1\.8\.10\s+DRIFT", pinned, re.M), r.stdout
-    assert not re.search(r"^\s+resolume-pp\s", r.stdout, re.M), r.stdout
-    assert "resolume-pp.lan" not in (tmp_path / "dials.log").read_text().split()
+    assert re.search(r"^\s+alex-nb\s+1\.8\.10\s+DRIFT", r.stdout, re.M), r.stdout
+    assert not re.search(r"^\s+(resolume-pp|mbc|fohabl)\s", r.stdout, re.M), r.stdout
+    assert "nodes dsync upgrades itself" not in r.stdout and "SELF-" not in r.stdout + r.stderr
+    dials = {d.split("@", 1)[-1] for d in (tmp_path / "dials.log").read_text().split()}
+    assert not dials & set(_DSYNC_OWNED), dials

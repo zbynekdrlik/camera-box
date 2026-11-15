@@ -77,8 +77,9 @@ set -euo pipefail
 #   scripts/dantesync-fleet-upgrade.sh --help
 #
 # --fleet (issue 1372) adds every node of scripts/lib/dantesync-fleet.sh (every camera, dev1, the
-# OBS boxes) not already named by --linux/--win/--local -- so a roll can no longer forget a box. The
-# nodes dsync upgrades itself (DSYNC_SELF_UPGRADED_NODES, issue 1487) are never rolled here, named or not. A node whose fleet row names its own ssh credential (fohabl) is reached
+# OBS boxes) not already named by --linux/--win/--local -- so a roll can no longer forget a box. A
+# node dsync upgrades itself has no fleet row (issue 1487), so it is never rolled. A node whose fleet
+# row names its own ssh credential (a credvar) is reached
 # with that variable's value (env or the dev1-local credential file), every other node with SSH_PASS.
 # A traveling box that is away is skipped as before. Always run --fleet --dry-run first.
 #
@@ -336,7 +337,7 @@ dantesync_resolume_win_spec() {
 }
 
 # dantesync_gate_env_for NAME -> the env assignment the per-node verification gate needs (stdout,
-# one `KEY=VALUE` word, or nothing). issue 1372: an AUDIO-role node (mbc, fohabl) locks to the
+# one `KEY=VALUE` word, or nothing). issue 1372: an AUDIO-role node (alex-nb) locks to the
 # audio-VLAN grandmaster, so its dantesync-gate.sh run must compare gm_source_ip against THAT, never
 # the video grandmaster (which only stays harmless while DANTESYNC_GATE_GM_ENFORCE is off); issue
 # 1412: a venue-role node (video-pp, ntp-master-pp) the same against its venue's grandmaster. A
@@ -448,7 +449,7 @@ case "$TARGET" in
 esac
 
 # node_pass ADDR -> the ssh password for ADDR (user@ip): issue 1372 -- the value of the credvar the
-# node's dantesync-fleet row names (fohabl), else SSH_PASS. An unset credvar yields "" (the node's
+# node's dantesync-fleet row names (its credvar), else SSH_PASS. An unset credvar yields "" (the node's
 # ssh then fails loudly), never another node's password.
 node_pass() {
   local var
@@ -785,10 +786,6 @@ upgrade_node() {
 # NODES: name|kind|addr ; a node is skipped (EXCLUDED) if acked offline in rig-fleet.txt.
 declare -a NODES=()
 add_node() {  # NAME KIND ADDR
-  if dantesync_fleet_self_upgraded "$1"; then
-    log "  $1 NOT ROLLED (dsync upgrades this node itself; its clock stays graded on :8898)"
-    return 0
-  fi
   if cambox_offline_ack_is_acked "$1"; then
     log "  $1 EXCLUDED (acked offline: $(cambox_offline_ack_reason "$1"))"
     return 0
@@ -799,7 +796,7 @@ add_node() {  # NAME KIND ADDR
     log "  $1 SKIPPED (traveling box away or unreachable -- not home this pass; will roll when home)"
     return 0
   fi
-  # issue 1372: a node that needs its OWN ssh credential (fohabl) is never dialled without it.
+  # issue 1372: a node that needs its OWN ssh credential (a row's credvar) is never dialled without it.
   local credvar=""
   [ "$2" = "local" ] || credvar="$(dantesync_fleet_cred_var_for_target "$3")"
   if [ -n "$credvar" ] && [ -z "${!credvar:-}" ]; then
