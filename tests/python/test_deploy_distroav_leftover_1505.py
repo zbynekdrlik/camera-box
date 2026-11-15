@@ -52,7 +52,7 @@ def _sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 
-def _box(tmp, *, programdata, leftover, leftover_pdb=False, extra_leftover=None):
+def _box(tmp, *, programdata, leftover, leftover_pdb=False, extra_leftover=None, no_data=False):
     """A fixture box + stage. Returns (paths dict)."""
     stage, obs, pd_root, backup = tmp / "stage", tmp / "obs", tmp / "pd" / "distroav", tmp / "backup"
     for rel, text in {"obs-plugins/64bit/distroav.dll": "NEW distroav\n",
@@ -61,6 +61,8 @@ def _box(tmp, *, programdata, leftover, leftover_pdb=False, extra_leftover=None)
                       "data/obs-plugins/distroav/locale/en-US.ini": "Key=Value\n"}.items():
         (stage / rel).parent.mkdir(parents=True, exist_ok=True)
         (stage / rel).write_text(text)
+    if no_data:
+        shutil.rmtree(stage / "data")
     files = [{"path": rel, "sha256": _sha(stage / rel)} for rel in
              ("obs-plugins/64bit/distroav.dll", "obs-plugins/64bit/obs-vban.dll", "obs-plugins/64bit/vlc-video.dll")]
     (stage / "BUNDLE_MANIFEST.json").write_text(json.dumps({"files": files}))
@@ -172,3 +174,14 @@ def test_a_box_with_no_distroav_anywhere_is_still_refused(tmp_path):
     assert r.returncode != 0 and "HARNESS END" not in out, out
     assert "DistroAV is not installed where OBS loads it" in out
     assert not (box["pd"]).exists(), "nothing is created on a box that has no DistroAV at all"
+
+
+def test_creating_the_programdata_install_needs_the_bundle_data_tree(tmp_path):
+    """Review round 1: a DLL without its locale/data files is refused, not created silently."""
+    box = _box(tmp_path, programdata=False, leftover=True, no_data=True)
+    r = _run(tmp_path, box)
+    out = r.stdout + r.stderr
+    assert r.returncode == 4, out
+    assert "#1505 FAIL: the bundle carries no" in out and "HARNESS END" not in out
+    assert not box["pd"].exists(), "nothing created"
+    assert (box["plug"] / "distroav.dll").read_text() == "OLD fd25 distroav\n", "the box's DistroAV untouched"
