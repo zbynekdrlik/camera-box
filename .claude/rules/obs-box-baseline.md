@@ -227,6 +227,19 @@ strih-pp, 25.10.2026: OBS came up 48 s before dsync (the PP date master) stepped
   setup-strih step 2's restart of a changed unit takes that long. The first setup-strih run after
   this change rewrites the unit (Type= changed) and restarts dsync once per box: on strih-snv, the
   date master, schedule it in the nightly window (the date-master rule in strih-linux-provisioning.md).
+- **Never the notify unit over a dsync below 1.30** (it sends no READY: systemd would kill it at every
+  120 s start timeout, a flapping clock). `strih_dantesync_install` reads the installed binary's
+  `--version` first (`strih_dantesync_notify_binary_ok`, scripts/lib/strih-dantesync.sh) and refuses,
+  touching nothing, when it is older; roll the box with `dantesync-fleet-upgrade.sh`. An unreadable
+  version is a named WARN; no binary yet (a fresh box) needs no read.
+- **The worst case is a 120 s black boot, not 30 s.** dsync waits for its pinned `--interface` NIC
+  BEFORE its 30 s READY bound starts (v1.35.2 `src/main.rs`: the pinned wait at ~717, the ReadyGate at
+  ~871), and that wait is unbounded. A rig NIC that never appears (a missing cable, an unauthorized
+  Thunderbolt NIC, stream-snv's renamed USB `rig0`) leaves lightdm waiting until `TimeoutStartSec=120`;
+  `Wants=` then lets it start, and systemd restarts dsync every ~125 s while the NIC stays away.
+- **imag** gets the drop-in through `obs_box_kiosk`, but setup-imag writes its own dsync unit, still
+  `Type=simple`: there the drop-in only orders lightdm after dsync STARTED. imag is retired; move it onto
+  `strih_dantesync_unit_text` when it is provisioned again.
 - Grader row `kiosk` also needs `dsync_ready=1` (the drop-in byte-identical to its renderer).
 - Tests: `tests/python/test_dsync_ready_boot_order_1483.py`, the `dsync_ready` rows in
   `tests/obs_box_baseline_1357.rs`, the 1361 golden's `dantesync-unit` section.
