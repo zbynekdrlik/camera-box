@@ -755,7 +755,7 @@ outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender o
   `scripts/lib/strih-dante-leg-filter.sh`. Every dstack device binds fixed ports from its slot (dstack >=
   0.6.117: slot k receives on 29800+64k..+31, sends from the next 32), so the file names no device.
   - **A test fixture never types the leg-filter tag** (the strih-snv deploy tests' file:// mirror read a literal v0.6.119 and broke CI at the v0.6.129 bump, run 43584925476): it reads `DSTACK_LEG_FILTER_TAG` from the pin.
-  - **The pin** `scripts/dstack-leg-filter.pin`: the tag (v0.6.129, issue 1524: + the mDNS out rate limit, dstack#288), its COMMIT (fb6d292f69 for v0.6.129; read
+  - **The pin** `scripts/dstack-leg-filter.pin`: the tag (v0.6.141, issue 1531: + the query-only cap of 10/s before the 50/s mDNS out limit, dstack#288 step 2; v0.6.129 issue 1524 added the 50/s), its COMMIT (355aaf74 for v0.6.141; read
     `refs/tags/<tag>^{}`: the bare ref is the annotated TAG object, not a commit), the sha256 of `tools/linux/dante-leg.nft` and
     `tools/linux/dante-leg-notrack.nft`. `strih_dante_leg_filter_ensure ROOT` fetches both by the exact tag
     (raw.githubusercontent) into `<tree>/dstack-release/<tag>/` (git-ignored), proves each against the pin,
