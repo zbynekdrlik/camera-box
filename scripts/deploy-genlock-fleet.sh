@@ -31,11 +31,11 @@ set -euo pipefail
 #
 # Usage (planner mode -- print the whole fleet deploy plan, no network, from a pre-staged bundle):
 #   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-#       [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv]
+#       [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv,resolume-pp,grading-pp]
 #
 # Usage (execute mode -- resolve + download the same-SHA artifacts, ssh-deploy the setup-strih boxes + imag, emit
 # the Windows plan, append the fleet log; drive Windows via the printed win-* MCP program):
-#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv] [--yes]
+#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv,resolume-pp,grading-pp] [--yes]
 #
 #   --run-id   the ANCHOR CI run id (a linux-genlock.yml run) -- its headSha is the canonical version imag
 #              converges to. The setup-strih (Linux OBS) and the Windows OBS
@@ -44,13 +44,14 @@ set -euo pipefail
 #   --full     the default; a Windows box takes the pinned obs release's whole Windows zip (issue 1505:
 #              camera-box's own windows-genlock build is retired, a pin without the zip refuses the box).
 #   --fast     refused for a Windows box (the release ships the full bundle only).
-#   --boxes    comma list of strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv (default:
+#   --boxes    comma list of strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv,resolume-pp,grading-pp (default:
 #              strih-snv,stream-snv -- strih-snv is
 #              the Linux strih since the M4 cut-over; the Windows `strih` arm is RETIRED, issue 1317;
 #              strih-pp + stream-pp (issue 1426) take the same Linux arm with their own box name, dialled
 #              by their fleet NAME; a traveling box that does not answer is AWAY and skipped;
 #              resolume is a TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly
-#              named; imag was RETIRED, issue 1316 -- dropped from the default, still valid explicitly).
+#              named, as are the PP Windows boxes resolume-pp + grading-pp (issue 1505); imag was
+#              RETIRED, issue 1316 -- dropped from the default, still valid explicitly).
 #   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha (no network).
 #   --stage    local dir holding the (pre-)downloaded artifact bytes (plan mode / test seam).
 #   --sha      the canonical build SHA to stamp into the markers (plan mode override).
@@ -648,20 +649,21 @@ log line.
 
 Usage (plan -- print the whole fleet plan, no network, from a pre-staged bundle):
   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-      [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv]
+      [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv,resolume-pp,grading-pp]
 
 Usage (execute -- resolve + download the same-SHA artifacts, ssh-deploy the setup-strih boxes + imag, emit the
 Windows plan):
-  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv] [--yes]
+  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv,resolume-pp,grading-pp] [--yes]
 
   --run-id   the ANCHOR linux-genlock.yml run id for imag (optional without imag); the setup-strih
              and Windows boxes take the pinned obs release (scripts/obs-release.pin).
   --full     default; a Windows box takes the pinned obs release's whole Windows zip (issue 1505).
   --fast     refused for a Windows box (the release ships the full bundle only).
-  --boxes    comma list of strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv (default:
+  --boxes    comma list of strih-snv,strih-pp,stream-pp,stream-snv,imag,resolume-snv,resolume-pp,grading-pp (default:
              strih-snv,stream-snv -- the Windows `strih` PC is RETIRED (issue 1317); the PP Linux
              boxes, imag and resolume (RESOLUME-SNV, the traveling CG box) deploy ONLY when explicitly
-             named; a traveling box that does not answer over ssh is AWAY and skipped, issue 1426).
+             named; a traveling box that does not answer over ssh is AWAY and skipped, issue 1426;
+             the PP Windows boxes resolume-pp + grading-pp too, issue 1505).
   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha.
   --stage    local dir holding the (pre-)downloaded artifact bytes.
   --sha      the canonical build SHA to stamp into the markers (plan mode).
@@ -710,7 +712,7 @@ emit_windows_plan() {
   echo "# ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} ================="
   # resolume (issue 1295): emit the box-IDENTITY confirm preamble (STEP -1) before STEP 0 -- a
   # traveling DHCP box colliding with `bridge` at .201 must be resolved + identity-confirmed live.
-  [ "$box" = "resolume-snv" ] && fleet_resolume_identity_confirm_note
+  fleet_box_identity_confirm_note "$box"   # issue 1505: + a generic one for the traveling PP Windows boxes
   # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
   emit_forced_table_audit_preflight "$box" "$ip"
   cat <<PLAN
@@ -814,7 +816,7 @@ main() {
       # 1426: so does every setup-strih box (strih-pp, stream-pp), routed by the predicate execute uses.
       if fleet_box_runs_setup_strih "$b"; then emit_strih_lx_plan "$stage" "$lx_sha" "$run_id" "$b"; continue; fi
       case "$b" in
-        stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$win_sha" "$win_sha" 0 "$win_abi" ;;
+        stream-snv|resolume-snv|resolume-pp|grading-pp) emit_windows_plan "$b" "$mode" "$win_sha" "$win_sha" 0 "$win_abi" ;;
         imag)            emit_imag_plan "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
       esac
     done )
@@ -914,7 +916,7 @@ main() {
     # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
     # issue 1474: a box that took the Linux (setup-strih) arm above gets no Windows program -- the plan
     # arm's own routing predicate, so the two arms can never disagree.
-    ( IFS=','; for b in $boxes; do fleet_box_runs_setup_strih "$b" && continue; case "$b" in stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$win_sha" "$win_sha" "$yes" "$win_abi" ;; esac; done )
+    ( IFS=','; for b in $boxes; do fleet_box_runs_setup_strih "$b" && continue; case "$b" in stream-snv|resolume-snv|resolume-pp|grading-pp) emit_windows_plan "$b" "$mode" "$win_sha" "$win_sha" "$yes" "$win_abi" ;; esac; done )
   fi
 
   # --- imag: the ssh deploy of the bundle prepared above --------------------------------------------
