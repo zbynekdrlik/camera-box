@@ -13,7 +13,11 @@
 #                                     vlc-video.dll for rollback, BEFORE the step-(4) robocopy of
 #                                     obs-plugins\64bit overwrites them.
 #   genlock_plugin_deploy_ps       -- step (6b) #1115: deploy + byte-verify distroav.dll at its
-#                                     ProgramData load path; step (6c) issue 1372: byte-verify the
+#                                     ProgramData load path (issue 1505: created from the bundle on a
+#                                     box whose DistroAV lived only in Program Files); step (6e) issue
+#                                     1505: move a leftover Program Files distroav.dll/.pdb into the
+#                                     backup dir, fail-closed, and read back exactly one DistroAV;
+#                                     step (6c) issue 1372: byte-verify the
 #                                     paced obs-vban.dll the robocopy put into Program Files; step (6d)
 #                                     issue 1425: byte-verify the media-clock vlc-video.dll the same way.
 
@@ -44,8 +48,22 @@ genlock_plugin_deploy_ps() {
 #      DLL-scoped and DistroAV data is stable across genlock rebuilds at the pinned 6.2.1.
 $pdDistroav  = 'C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll'
 $srcDistroav = Join-Path $stage 'obs-plugins\64bit\distroav.dll'
+$pfDistroav  = Join-Path $obsDir 'obs-plugins\64bit\distroav.dll'
 if (-not (Test-Path $srcDistroav)) { Write-Error "staged distroav.dll not found at $srcDistroav -- the FULL bundle must carry it"; exit 4 }
-if (-not (Test-Path $pdDistroav))  { Write-Error "ProgramData distroav load path $pdDistroav not found -- DistroAV is not installed where OBS loads it"; exit 4 }
+if (-not (Test-Path -LiteralPath $pdDistroav)) {
+  # issue 1505: a box whose DistroAV lives only in Program Files (grading-pp, read 15.11.2026) gets the
+  # ProgramData install created from the bundle -- the DLL below plus its data tree here -- and step (6e)
+  # then moves the Program Files copy aside. A box with no DistroAV anywhere is still refused.
+  if (-not (Test-Path -LiteralPath $pfDistroav)) { Write-Error "ProgramData distroav load path $pdDistroav not found -- DistroAV is not installed where OBS loads it"; exit 4 }
+  $pdPluginDir = Split-Path (Split-Path (Split-Path $pdDistroav -Parent) -Parent) -Parent
+  New-Item -ItemType Directory -Force -Path (Split-Path $pdDistroav -Parent) | Out-Null
+  $srcDistroavData = Join-Path $stage 'data\obs-plugins\distroav'
+  if (Test-Path -LiteralPath $srcDistroavData) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $pdPluginDir 'data') | Out-Null
+    Copy-Item -Recurse -Force (Join-Path $srcDistroavData '*') (Join-Path $pdPluginDir 'data')
+  }
+  Write-Host "#1505: no ProgramData DistroAV on this box -- created $pdPluginDir from the bundle; the Program Files copy is moved aside in step (6e)."
+}
 # back up the pre-deploy ProgramData distroav.dll alongside obs.dll.pre-789 (instant rollback).
 Copy-Item -Force $pdDistroav (Join-Path $backupDir 'distroav.dll.pre-789') -ErrorAction SilentlyContinue
 # explicit path-mapped copy: staged bundle obs-plugins\64bit\distroav.dll -> the ProgramData load path.
@@ -62,6 +80,37 @@ if (Test-Path $manifest) {
   if (-not $matchD) { Write-Error "VERIFY FAIL: deployed distroav.dll bytes do not match the bundle manifest -- do NOT trust this box"; exit 4 }
 } else {
   Write-Warning "no BUNDLE_MANIFEST.json in $stage -- cannot byte-verify distroav.dll (marker-only)."
+}
+# (6e) issue 1505 -- ONE DistroAV per OBS. A leftover Program Files obs-plugins\64bit\distroav.dll (+ its
+#      .pdb) next to the ProgramData one would load a second, older DistroAV. MOVE it into this deploy's
+#      dated backup dir (no copy-then-delete: the backup IS the moved file). A move that fails stops the
+#      program here with exit 4, before the relaunch step, and the leftover stays where it was. A box with
+#      no leftover logs a no-op. Then the read-back: exactly one DistroAV copy, the ProgramData one.
+$pfLeftovers = @($pfDistroav, [System.IO.Path]::ChangeExtension($pfDistroav, '.pdb')) | Where-Object { Test-Path -LiteralPath $_ }
+if (@($pfLeftovers).Count -eq 0) { Write-Host "#1505: no leftover DistroAV in Program Files -- nothing to move." }
+foreach ($leftover in @($pfLeftovers)) {
+  $leftoverDst = Join-Path $backupDir ((Split-Path $leftover -Leaf) + '.programfiles.pre-789')
+  $moveError = ''
+  try {
+    Move-Item -LiteralPath $leftover -Destination $leftoverDst -Force -ErrorAction Stop
+  } catch {
+    $moveError = $_.Exception.Message
+  }
+  # Judge the move by the files, not only by the cmdlet: the leftover must be gone and its backup there.
+  if ($moveError -or (Test-Path -LiteralPath $leftover) -or -not (Test-Path -LiteralPath $leftoverDst)) {
+    if (-not $moveError) { $moveError = 'the file is still there after the move' }
+    Write-Host "#1505 FAIL: could not move the leftover $leftover to $leftoverDst ($moveError) -- OBS would load two DistroAV copies; NOT relaunching. Free the file and re-run the deploy." -ForegroundColor Red
+    exit 4
+  }
+  Write-Host "#1505: moved the leftover $leftover to $leftoverDst."
+}
+$pfDistroavLeft = @(Get-ChildItem -LiteralPath (Join-Path $obsDir 'obs-plugins') -Recurse -File -ErrorAction Stop | Where-Object { $_.Name -ieq 'distroav.dll' })
+$pdDistroavOk = Test-Path -LiteralPath $pdDistroav
+$distroavCopies = $pfDistroavLeft.Count + [int]$pdDistroavOk
+Write-Host "READBACK distroav copies=$distroavCopies programdata=$pdDistroavOk programfiles=$($pfDistroavLeft.Count)"
+if ((-not $pdDistroavOk) -or ($pfDistroavLeft.Count -ne 0)) {
+  Write-Host "#1505 FAIL: expected exactly one DistroAV (the ProgramData one); still under Program Files: $(@($pfDistroavLeft | ForEach-Object { $_.FullName }) -join ', ') -- NOT relaunching." -ForegroundColor Red
+  exit 4
 }
 PSDISTROAV
   echo
