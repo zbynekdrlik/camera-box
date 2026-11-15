@@ -395,8 +395,9 @@ The board's journal lives in RAM and its `/etc/fake-hwclock.data` stayed at 3.10
   its venue is where its relay registers. `remote_log_board_sink_ips <board>` (in
   `scripts/lib/remote-logging.sh`, the ONE issue-1311/1394 lib) = the `STRIH_IP` of every strih-role
   fact file whose `STRIH_BKSHADING_RELAYS` names `sbc-relay@register:<board>`, in file order. Today:
-  cam1-shading -> strih-pp, cam2-shading -> strih-snv, cam4-shading -> BOTH (the travelling board).
-  `remote_log_sink_ip camN` would be WRONG here: cam4-shading drives the SNV cam3 block.
+  cam1-shading -> strih-pp, cam2-shading -> strih-snv; cam4-shading is listed by no venue since
+  issue 1529 (strih-pp's cam4 block is the cambox relay), so the resolver refuses it by name.
+  `remote_log_sink_ip camN` would be WRONG here: a board's venue is its relay's, not a camera's.
 - **The wrapper picks the venue at each start.** `/usr/local/sbin/bkshading-journal-upload.sh`
   (`remote_log_board_upload_script_content`) probes each candidate's journal-remote port (19532, 3 s
   TCP connect) and execs `systemd-journal-upload --save-state=/run/... --url=http://<ip>:19532` on the

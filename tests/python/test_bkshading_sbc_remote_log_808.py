@@ -88,7 +88,9 @@ def test_every_live_board_resolves_to_the_strih_boxes_that_name_it():
         for e in _facts(f.name).get("STRIH_BKSHADING_RELAYS", "none").split():
             if "@register:" in e:
                 boards.add(e.split("@register:", 1)[1])
-    assert {"cam1-shading", "cam2-shading", "cam4-shading"} <= boards
+    # issue 1529: strih-pp's cam4 block moved to the cambox relay (its Orange is gone), so cam4-shading
+    # is listed by no venue any more; the two boards still in use must stay.
+    assert {"cam1-shading", "cam2-shading"} <= boards
     for board in sorted(boards):
         r = _bash('remote_log_board_sink_ips "$1"', board)
         assert r.returncode == 0, r.stderr
@@ -100,8 +102,10 @@ def test_each_board_gets_the_venue_that_lists_it():
     pp = _facts("strih-pp.env")["STRIH_IP"]
     assert _bash('remote_log_board_sink_ips cam2-shading').stdout.split() == [snv]
     assert _bash('remote_log_board_sink_ips cam1-shading').stdout.split() == [pp]
-    # issue 1452: cam3's camera moved onto cam3's own USB (10.11.2026), so only strih-pp lists cam4-shading.
-    assert _bash('remote_log_board_sink_ips cam4-shading').stdout.split() == [pp]
+    # issue 1529: no venue lists cam4-shading since strih-pp's cam4 block went to the cambox relay, so the
+    # resolver refuses it by name like any unlisted board (it comes back if `4=sbc-relay@register:cam4-shading` does).
+    r = _bash('remote_log_board_sink_ips cam4-shading')
+    assert r.returncode == 1 and r.stdout.split() == []
 
 
 def test_an_unlisted_or_bad_board_name_is_refused_by_name_never_guessed():
