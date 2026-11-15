@@ -47,6 +47,22 @@ boxes: setup-device had them, the fleet never got them.
   `cambox_zram_apply_program`, `cambox_hk_apply_program`, `ndi-discovery.sh --cambox-apply`) or a
   setup-device re-run, never a remote reboot (enable-only parts take effect at the next physical one).
 
+## A cambox cable moved to its other NIC = re-run the live apply (15.11.2026, cam3)
+
+dsync's unit pins `--interface <NIC>` (issue 1439) and waits for THAT NIC forever ("never another NIC"). cam3
+came back from a reboot with its cable on enp3s0 instead of enp1s0: dsync ran on NTP only, its clock 228 s off,
+and the release E2E's `[0/8]` clock gate refused (`NTP STALE` + `PTP DEGRADED`). Restarting dsync does NOT fix
+it. The fix is `scripts/cambox-ro-units-apply.sh --apply --box <camN>` (it resolves the cabled NIC on the box and
+rewrites the unit inside the ro window); the cold lock takes ~95 s, longer after a big NTP step, so its 150 s
+read-back can FAIL while dsync is still acquiring -- read `/status` again (PROD / ptp / the rig GM).
+
+## PP cameras from dev1: no ssh route on some days
+
+`scripts/bkshading-deploy-relay.sh --host 10.77.9.6x` (and the 10.76.9.x companion-pp path) can have no route from
+dev1 or strih-pp while the box still answers on its `linux-pp-camN` MCP. The fallback is the same pinned bytes
+over MCP: download the release asset on the box, `sha256sum -c` against the pin, swap + env inside a
+`ro_window_close_cmds` window (issue 1529, pp-cam6 15.11.2026).
+
 ## `setup-device.sh` never starts/restarts services live — it only writes files + `enable`s
 
 Every STEP that touches a systemd unit (camera-box.service at STEP 7, cam2-painter.service at
