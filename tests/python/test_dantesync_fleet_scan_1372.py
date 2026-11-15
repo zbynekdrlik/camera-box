@@ -70,7 +70,8 @@ def test_the_gate_names_a_node_outside_the_fleet_and_never_fails_on_it(tmp_path)
     assert "--known" in args and "10.77.9.202" in args  # the fleet targets are passed as known
     # every fleet row is known, also one the gate SKIPPED this run (a `reach` node away, live 13.10.2026:
     # resolume-pp read OUTSIDE-FLEET while it was skipped as unreachable)
-    # issue 1487: + the hosts dsync grades and upgrades itself (DSYNC_FLEET_HANDED_OVER)
+    # issue 1487: + the hosts dsync grades and upgrades itself (DSYNC_FLEET_HANDED_OVER; resolume-pp
+    # since 15.11.2026)
     for host in ("resolume-pp.lan", "strih-pp.lan", "iem-snv.lan", "companion-snv.lan"):
         assert host in args.split(), host
 
@@ -78,10 +79,12 @@ def test_the_gate_names_a_node_outside_the_fleet_and_never_fails_on_it(tmp_path)
 def test_a_node_handed_over_to_dsync_is_never_an_outside_fleet_alarm(tmp_path):
     """issue 1487: iem-snv + companion-snv left the fleet table for dsync; when the scan still sees
     them (by PTR name, also a trailing-dot or upper-case answer) the gate names them HANDED-OVER."""
-    r, _ = _gate(tmp_path, "UNKNOWN 10.77.7.114 iem-snv.lan\nUNKNOWN 10.77.9.205 COMPANION-SNV.lan.\n")
+    r, _ = _gate(tmp_path, "UNKNOWN 10.77.7.114 iem-snv.lan\nUNKNOWN 10.77.9.205 COMPANION-SNV.lan.\n"
+                           "UNKNOWN 10.76.8.201 resolume-pp.lan\n")
     assert "OUTSIDE-FLEET" not in r.stdout and "DANTESYNC-FLEET ALARM" not in r.stderr, r.stdout + r.stderr
     assert "10.77.7.114" in r.stdout and "HANDED-OVER" in r.stdout
     assert "10.77.9.205" in r.stdout
+    assert "10.76.8.201" in r.stdout  # resolume-pp, dsync's since 15.11.2026
     assert "  none           OK" in r.stdout
 
 

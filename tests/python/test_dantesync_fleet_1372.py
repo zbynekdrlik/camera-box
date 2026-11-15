@@ -66,7 +66,7 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     names = [ln.split("|")[0] for ln in r.stdout.split()]
     assert names == ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "dev1", "strih-snv",
                      "stream-snv", "resolume-snv", "mbc", "fohabl",
-                     "strih-pp", "stream-pp", "resolume-pp", "alex-nb"]
+                     "strih-pp", "stream-pp", "alex-nb"]  # issue 1487: resolume-pp is dsync's
     rows = {ln.split("|")[0]: ln for ln in r.stdout.split()}
     assert rows["mbc"] == "mbc|10.77.7.232|windows|audio|always|-|"
     assert rows["fohabl"] == "fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS"
@@ -169,7 +169,7 @@ def test_version_gate_arms(tmp_path):
     # issue 1462: stream-snv is a Linux box since 22.10.2026
     assert out["W"].split() == ["resolume-snv=op@resolume.lan",
                                 "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30",
-                                "resolume-pp=op@resolume-pp.lan", "alex-nb=alexnb@10.77.7.109"]
+                                "alex-nb=alexnb@10.77.7.109"]
     assert out["D"] == "dev1"
 
 
