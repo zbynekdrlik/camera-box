@@ -23,8 +23,9 @@ pub mod grab_record;
 #[cfg(target_os = "linux")]
 pub mod intercom;
 pub use rig_core::irq_offload;
+// Issue 1487: the NDI sender/receiver lives in vstack's av-ndi (Linux only there).
 #[cfg(target_os = "linux")]
-pub mod ndi;
+pub use av_ndi::ndi;
 // (#1113) genlock capture->emit pacing gate — the pure wall-clock decimation math extracted out of
 // the 2555-line `ndi.rs` (issue-1111 review). Linux-gated in lock-step with `ndi` (whose
 // NDI-timecode grid it complements); pure `u64` logic otherwise, Tier-0 tests on the Linux `test`
@@ -67,13 +68,14 @@ pub mod painter_mode;
 
 // #297 — NDI sender re-announce trigger (pure decision + network signature). Cross-platform
 // (no v4l/libc) so it unit-tests Tier-0; the Linux-only IO (interface read + sender re-create)
-// lives in `ndi`.
-pub mod reannounce;
+// lives in `ndi`. Issue 1487: lives in vstack's av-ndi.
+pub use av_ndi::reannounce;
 
 // #1362 — cameraman HDMI preview source resolution (the preferred name, else the ONE discovered
 // `STRIH-<box> (interkom)` output). Pure + cross-platform so it unit-tests Tier-0; the NDI finder
 // loop that feeds it lives in `ndi` and the display loop that drives it in `ndi_display`.
-pub mod preview_source;
+// Issue 1487: lives in vstack's av-ndi.
+pub use av_ndi::preview_source;
 // Issue 1501: the power button single/double press classifier and the cameraman preview's
 // source switch + local-camera frame tap. Pure std, Tier-0.
 pub mod button_press;
@@ -621,7 +623,8 @@ pub use rig_core::send_stall;
 // bursts no longer land on the strih-snv 2.5 GbE switch port at once. Camera number from the box's
 // own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
 // are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
-pub mod send_stagger;
+// Issue 1487: lives in vstack's av-ndi.
+pub use av_ndi::send_stagger;
 // Issue 1487: the camera-box binary's log filter names every crate that logs for it.
 pub mod log_filter;
 // Issue 1387: the JPEG XS link, in vstack since issue 1487 (`camera-box-jxs`): the pure wire
