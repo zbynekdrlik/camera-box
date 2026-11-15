@@ -13,7 +13,7 @@ one OBS to load. Now, on ANY Windows box:
 - a box with no leftover logs a no-op.
 
 These tests RUN the emitted step-6 plugin block (`genlock_plugin_deploy_ps`) in PowerShell 7 against
-fixture trees: the block is dot-sourced by a harness that sets the deploy program's own variables
+fixture trees: the block is inlined into a harness that sets the deploy program's own variables
 ($obsDir, $stage, $backupDir, $manifest), with the ProgramData load path rewritten to a temp dir. A
 missing pwsh FAILS (CI's ubuntu-latest ships it; dev1 has ~/.local/pwsh74/pwsh), never skips.
 """
@@ -87,12 +87,13 @@ def _run(tmp, box):
     hits = [i for i, ln in enumerate(code) if PD_LITERAL in ln]
     assert len(hits) == 1, "the code spells the ProgramData load path once (everything derives from it)"
     code[hits[0]] = code[hits[0]].replace(PD_LITERAL, str(box["pd"]))
-    (tmp / "block.ps1").write_text("\n".join(code) + "\n")
+    # The block is INLINED into one script, as in the real deploy program: an `exit` inside a
+    # dot-sourced file only leaves that file, so a dot-sourcing harness would run on past an `exit 4`.
     (tmp / "harness.ps1").write_text(
         "$ErrorActionPreference = 'Stop'\n"
         f"$stage = '{box['stage']}'\n$obsDir = '{box['obs']}'\n$backupDir = '{box['backup']}'\n"
         "$manifest = Join-Path $stage 'BUNDLE_MANIFEST.json'\n"
-        f". '{tmp / 'block.ps1'}'\nWrite-Host 'HARNESS END'\nexit 0\n")
+        + "\n".join(code) + "\nWrite-Host 'HARNESS END'\nexit 0\n")
     return subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", str(tmp / "harness.ps1")],
                           capture_output=True, text=True, timeout=120)
 
