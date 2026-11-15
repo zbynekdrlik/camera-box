@@ -24,7 +24,7 @@
 //!
 //! Every boundary here is a point of the ONE per-second genlock grid,
 //! [`crate::genlock_grid`]: slot `k` of whole second `S` is `S + floor(k * 1 s / fps)` — the SAME
-//! grid the camera stamps its NDI timecode on ([`crate::ndi::floor_boundary_100ns`]) and the
+//! grid the camera stamps its NDI timecode on ([`rig_core::genlock_stamp::floor_boundary_100ns`]) and the
 //! receiver floors its release deadline / render tick to. The latch and the resync are
 //! [`crate::genlock_grid::grid_next_boundary_ns`], the advance is the next grid point
 //! ([`genlock_advance_boundary`]), and lag / skip counts are grid SLOTS
@@ -55,7 +55,7 @@ use crate::genlock_grid::{grid_advance_ns, grid_next_boundary_ns, grid_steps_bet
 /// #707 B1 — the largest lag (in whole emit-boundary intervals) the emit gate absorbs by
 /// CATCHING UP one interval at a time (emitting each merely-late buffered frame for its own
 /// boundary) before it gives up and grid-resyncs (leaps forward, dropping the intervening
-/// boundaries). Grounded in the capture path: `src/capture.rs` opens a V4L2 mmap stream 4 buffers
+/// boundaries). Grounded in the capture path: `vstack:av/capture/src/capture.rs` opens a V4L2 mmap stream 4 buffers
 /// deep (`Stream::with_buffers(.., 4)`), so a CPU-starvation stall (the #752 log storm) can buffer
 /// AT MOST ~4 real captured frames before the device drops (capture-dropped increments) — a lag
 /// this size or smaller is a bounded buffered-drain whose frames must all be emitted, NOT a
@@ -292,7 +292,7 @@ mod tests {
 
     // (#1355) Every boundary in these tests is a point of the ONE per-second genlock grid (slot `k`
     // of whole second `S` is `S + floor(k * 1 s / fps)` — the grid the camera STAMPS on, see
-    // `crate::ndi::floor_boundary_100ns`), at a real 2026 date, far from 1970. The pre-#1355 tests
+    // `rig_core::genlock_stamp::floor_boundary_100ns`), at a real 2026 date, far from 1970. The pre-#1355 tests
     // used `k * I30` from 1970 and pinned the 1970-grid arithmetic (`now - now % I + I`,
     // `boundary + I`) — the very drift this ticket removes.
     const NS: u64 = 1_000_000_000;
@@ -315,7 +315,7 @@ mod tests {
     }
 
     /// The NDI stamp (in ns) the camera gives a frame captured at `t_ns`: the per-second floor in
-    /// 100 ns units — `crate::ndi::floor_boundary_100ns` (asserted identical in `src/ndi.rs`).
+    /// 100 ns units — `rig_core::genlock_stamp::floor_boundary_100ns` (asserted identical in vstack:rig/core/src/genlock_stamp.rs).
     fn stamp_ns(t_ns: u64, fps: u64) -> u64 {
         per_second_floor(t_ns / 100, fps, UNITS_100NS_PER_SECOND) * 100
     }
