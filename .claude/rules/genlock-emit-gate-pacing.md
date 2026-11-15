@@ -302,7 +302,7 @@ and `[4i/8align]` holds a stable cross-camera offset.
 ## #1167 — corrupted-slot MAKE-UP: fill the slot a pre-gate corruption drop vacated (the TENTH piece)
 
 A corrupted V4L2 buffer (`V4L2_BUF_FLAG_ERROR` / short) is dropped in
-`src/capture.rs::process_frame` with `return Ok(())` **BEFORE the callback**, so it NEVER reaches
+`vstack:av/capture/src/capture.rs::process_frame` with `return Ok(())` **BEFORE the callback**, so it NEVER reaches
 `DecimationGate::poll`. At an OVER-RATE that removes a would-be-emitted GOOD frame from the stream,
 and the over-rate absorption (`ShedAction::Retire` / `Drain` — advance the boundary, emit nothing)
 then SKIPS that 60 fps slot instead of filling it → emit under-runs by EXACTLY the corrupted rate

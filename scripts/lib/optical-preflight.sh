@@ -14,7 +14,7 @@
 # shutter still captures ~60 frames/s, just smeared). That is the #216 precedent (1/60 shutter →
 # 16.7 ms exposure = a full 60 Hz frame period → the moving dual-QR smears → optically undecodable →
 # a 175 s optical-read gap). This preflight reads the head-end `rough=` capture telemetry the
-# running camera-box service ALREADY logs (src/capture.rs luma_roughness, #1079: mean |Y0−Y1| of
+# running camera-box service ALREADY logs (vstack:av/capture/src/capture.rs luma_roughness, #1079: mean |Y0−Y1| of
 # adjacent luma pairs — HIGH for a crisp pattern, LOW when blur smears them) and aborts LOUD when it
 # is SUSTAINED at/below the calibrated floor. No decode tooling, no service stop (verified live
 # 2026-08-20: the cam boxes have no zbar and no probe binary), immune to the imag x264 OBSERVER

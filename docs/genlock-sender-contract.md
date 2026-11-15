@@ -148,10 +148,10 @@ The floor is not a detail: a ceil stamp dates every frame 0..1 interval into the
 future at the emit instant, leaving only network delay as margin against the receiver's
 backward-step guard — the cause of the −900 ms collapse noted above.
 
-*Reference implementation (camera-box):* `floor_boundary_100ns` (`src/ndi.rs:78`, the #1009
-FLOOR-never-ceil doctrine is documented at `src/ndi.rs:62-78`), applied in
-`genlock_emit_timecode_100ns` (`src/genlock_stamp.rs:46`) and stamped on the outgoing frame at
-`src/ndi.rs:1079`. OBS-as-sender does the identical floor: `vendor/distroav/src/ndi-output.cpp`
+*Reference implementation (camera-box):* `floor_boundary_100ns` (`vstack:rig/core/src/genlock_stamp.rs:298`, the #1009
+FLOOR-never-ceil doctrine is documented above it), applied in
+`genlock_emit_timecode_100ns` (`vstack:rig/core/src/genlock_stamp.rs:45`) and stamped on the outgoing frame at
+`src/ndi.rs:980`. OBS-as-sender does the identical floor: `vendor/distroav/src/ndi-output.cpp`
 stamps `video_frame.timecode = genlock_emit_timecode_100ns(...)` at `:613` (doctrine block
 `:34-60`). Since issue 1367 slice D2 a 1:1 camera whose capture phase tracker is locked floors the
 middle of its TRACKED slot instead of the raw capture instant (`capture_phase::stamp_instant_100ns`):
@@ -290,9 +290,9 @@ window cannot read as "flat" (`:47`).
 
 | Rule | Receiver / sender fact | Location (re-verify the symbol, not the line) |
 | --- | --- | --- |
-| §1 Clock | realtime + monotonic + one bracketed read per frame; offset resampled every 100 frames and in the frame the wall steps 2 ms or more | `src/main.rs:41,57,76`; `src/genlock_stamp.rs:94,112,142,169` |
+| §1 Clock | realtime + monotonic + one bracketed read per frame; offset resampled every 100 frames and in the frame the wall steps 2 ms or more | `src/main.rs:41,57,76`; `vstack:rig/core/src/genlock_stamp.rs` (`StampOffset`, `offset_resample_decision`) |
 | §2 Create | `clock_video/clock_audio=false`, progressive | `src/ndi.rs:628-629,1075` |
-| §4 Timecode | FLOOR boundary, 100 ns epoch | `src/ndi.rs:78,1079` (doctrine `:62-78`); `src/genlock_stamp.rs:46`; `vendor/distroav/src/ndi-output.cpp:613` (doctrine `:34-60`) |
+| §4 Timecode | FLOOR boundary, 100 ns epoch | `vstack:rig/core/src/genlock_stamp.rs` (`floor_boundary_100ns` + doctrine, `genlock_emit_timecode_100ns`); `src/ndi.rs:980`; `vendor/distroav/src/ndi-output.cpp:613` (doctrine `:34-60`) |
 | §5 Pacing | per-second grid gate, catch-up ≤ 8, resync, re-latch, repeat | `src/genlock_pacing.rs:62,79,92-100,150,165,262`; `vstack:rig/core/src/genlock_grid.rs` |
 | §6 Audio | raw wall-clock timecode, no snap | `vendor/distroav/src/ndi-output.cpp:697` |
 | §8 Acceptance | `genlock-fifo audit` counters + verdict | `src/jitter_audit.rs:41-52`; `src/resolume_playback.rs:46,47,56,71-75,91` |

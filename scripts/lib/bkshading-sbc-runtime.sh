@@ -49,7 +49,7 @@ bkshading_sbc_cross_linker_bin() { printf '%s\n' aarch64-linux-gnu-gcc; }
 # --- The SBC writes NO CAMERA_BOX_CAPTURE_FPS env (one-source-of-truth decision) ---
 
 # A cambox derives CAMERA_BOX_CAPTURE_FPS from its own camera-box.service.d drop-ins (mirroring
-# src/capture.rs requested_capture_denominator). An SBC has NO camera-box appliance and no drop-ins,
+# vstack:av/capture/src/capture.rs requested_capture_denominator). An SBC has NO camera-box appliance and no drop-ins,
 # and a handheld has no grab-rate comparison (its bkshading.example.toml record carries no
 # `grab_fps`) — so the SBC provision writes NO env file. The relay unit's `EnvironmentFile=-` makes
 # that graceful: absent file -> relay reports capture_fps=None -> the service falls back to the

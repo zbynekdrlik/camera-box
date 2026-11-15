@@ -1906,7 +1906,7 @@ fn steady_over_rate_no_hiccup_never_over_sheds_1145() {
 /// (#1167) Drive the REAL [`DecimationGate::poll`] with a TRUE-60 source over-captured at 62 fps
 /// (2 dupes/s so the unique rate is exactly 60) and inject a corrupted-buffer drop at the live
 /// ~0.8/s rate via [`DecimationGate::note_corrupted_frame`] (a corrupted buffer never reaches
-/// `poll` — `src/capture.rs::process_frame` drops it before the callback). Residence is 0
+/// `poll` — `vstack:av/capture/src/capture.rs::process_frame` drops it before the callback). Residence is 0
 /// (`now_mono == capture_mono`) to isolate the over-rate RETIRE path; the takt EMA still arms
 /// `sustained_over_rate`. Returns (emits, corrupted, dupe_emitted).
 ///
@@ -1933,7 +1933,7 @@ fn run_corrupted_over_rate_1167(
         let is_corrupt = i > 0 && corrupt_period > 0 && i % corrupt_period == corrupt_period - 1;
         if is_corrupt {
             // Corrupted buffer: dropped before the gate (never polled), exactly as
-            // `src/capture.rs::process_frame` does — main.rs then calls note_corrupted_frame.
+            // `vstack:av/capture/src/capture.rs::process_frame` does — main.rs then calls note_corrupted_frame.
             gate.note_corrupted_frame();
             corrupted += 1;
             continue;

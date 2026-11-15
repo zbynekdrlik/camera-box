@@ -32,9 +32,9 @@ bkshading_relay_env_path() { printf '%s\n' /etc/bkshading/relay.env; }
 # the CLI behind the Gphoto2Runner trait, keeping a clean ARM cross-build; see .claude/rules/bkshading.md).
 bkshading_relay_apt_package() { printf '%s\n' gphoto2; }
 
-# The appliance's own default grab rate. MUST equal src/capture.rs requested_capture_denominator's
+# The appliance's own default grab rate. MUST equal vstack:av/capture/src/capture.rs requested_capture_denominator's
 # `.unwrap_or(60)` so a box with no capture-fps drop-in reports the SAME rate it actually grabs at
-# (ONE source of truth — the python test pins this against src/capture.rs).
+# (ONE source of truth — the python test pins this against vstack:av/capture/src/capture.rs).
 bkshading_relay_default_capture_fps() { printf '%s\n' 60; }
 
 # Issue 1431: where every cambox relay announces itself (the issue-808 registration the handheld SBC uses).
@@ -68,7 +68,7 @@ bkshading_relay_capture_fps_from_dropins() {
   printf '%s\n' "$1" | grep -oE 'CAMERA_BOX_CAPTURE_FPS=[^[:space:]]+' | tail -1 | cut -d= -f2- || true
 }
 
-# Derive the effective capture fps to provision, mirroring src/capture.rs
+# Derive the effective capture fps to provision, mirroring vstack:av/capture/src/capture.rs
 # requested_capture_denominator(override): a positive integer wins, anything else falls back to the
 # appliance default (60). No grep/pipe (avoids the SIGPIPE-under-pipefail trap) — a pure `case`.
 bkshading_relay_effective_capture_fps() {
@@ -87,7 +87,7 @@ bkshading_relay_env_file_content() {
   cat <<EOF
 # /etc/bkshading/relay.env -- provisioned by scripts/bkshading-provision-relay.sh (issue 808/809).
 # CAMERA_BOX_CAPTURE_FPS: this box's grab-mode fps, derived from the appliance's own capture-fps
-# config (the SAME value src/capture.rs requested_capture_denominator uses). Read by the relay
+# config (the SAME value vstack:av/capture/src/capture.rs requested_capture_denominator uses). Read by the relay
 # (shading:bkshading/relay/src/main.rs) -> RelayState.capture_fps -> the service's issue-809 grab derive.
 # The relay's EnvironmentFile= line makes this file OPTIONAL: if it is absent the relay reports no
 # capture fps and the service falls back to the static grab_fps config instead of a wrong value.

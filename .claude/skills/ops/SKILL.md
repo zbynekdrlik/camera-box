@@ -1196,7 +1196,7 @@ Reinstall a pinned commit via `git+https://github.com/zbynekdrlik/remoteos-mcp.g
 
 ## #663 — capture-delivery-rate SELF-HEAL (automatic USB reset) + physical-fix escalation
 
-#656 shipped DETECT only (`src/capture_rate_health.rs` WARNs once captured fps sustains a >1%
+#656 shipped DETECT only (`vstack:av/capture/src/capture_rate_health.rs` WARNs once captured fps sustains a >1%
 deviation from the negotiated rate for 6 consecutive 5s windows, ~30s) — recovery still needed a
 human/agent to notice the WARN, SSH in, and manually run the USB reset. #663's live finding: that
 manual fix is only TEMPORARY — cam1's ShadowCast 2 recurred the SAME defect within hours, three

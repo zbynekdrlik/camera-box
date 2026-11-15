@@ -1,9 +1,7 @@
 ---
 paths:
   - "src/genlock_pacing.rs"
-  - "src/capture_stall.rs"
   - "src/dupe_decimation/**"
-  - "src/capture_phase.rs"
 ---
 
 **Issue 1367 slice D2 — on a stamp-driven stream** (`phase_lock=stamp` on the `#707 emit-1s`

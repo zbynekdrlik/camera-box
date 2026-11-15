@@ -4,7 +4,7 @@
 // ── (#1145) v2 tuning constants ──────────────────────────────────────────────
 
 /// (#1167) The largest corrupted-slot make-up DEFICIT the gate carries. Each corrupted buffer
-/// dropped in `src/capture.rs::process_frame` (before the emit gate) removes a would-be-emitted
+/// dropped in `vstack:av/capture/src/capture.rs::process_frame` (before the emit gate) removes a would-be-emitted
 /// GOOD frame from an over-rate stream, so its 60 fps slot would be absorbed by the over-rate
 /// shed machinery ([`ShedAction::Retire`] / [`ShedAction::Drain`] — advance the boundary, emit
 /// nothing) instead of filled → emit under-runs by exactly the corrupted rate (the strih FIFO

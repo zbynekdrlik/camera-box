@@ -12,13 +12,25 @@ paths:
 
 `zbynekdrlik/vstack` owns the JPEG XS link, the rig primitives, the QPSK marker protocol and, since
 v0.1.7 (vstack#8), the test-burn geometry (`burn-geom`: burn_regions, burn_quiet_zone, burn_tick_cache,
-colour_scale; re-exported at the old paths, the C++ parity tests stay here). A
-`vstack:<path>` in this repo's prose is that path inside the pinned tag.
+colour_scale; re-exported at the old paths, the C++ parity tests stay here), and since v0.1.8/v0.1.9
+the cambox capture side. A `vstack:<path>` in this repo's prose is that path inside the pinned tag.
 
-- **One pin:** `scripts/vstack-release.pin` (tag + commit). The tag is repeated on the four git
-  dependencies in root `Cargo.toml` (`camera-box-jxs`, `rig-core`, `qpsk-marker`, `burn-geom`, optional
-  `svt-jpegxs-sys`). `tests/vstack_pin_1487.rs` fails until all of them and the lock agree.
-- **To bump:** edit the pin file and the four tags, `cargo update -p rig-core`, run the suite. A new
+- **v0.1.8/v0.1.9 moved the capture side** (behaviour unchanged from camera-box dev 4ee558aba):
+  - `rig_core::genlock_stamp` (portable now, `floor_boundary_100ns` is `pub` there; `src/ndi.rs`
+    imports it, no copy here) and `rig_core::send_stall`;
+  - the crate `av-capture` (`vstack:av/capture`): `capture` (Linux only, with the `v4l` crate),
+    `capture_phase` (+ `source_phase`), `capture_rate_health`, `capture_stall`, `capture_wedge`. The
+    decision modules build for Windows, so the probe build can reach them.
+  - Kept here: `capture_rate_selfheal` (the box's own USB reset), `src/capture_phase_bench.rs`,
+    `tests/harness_capture_phase_wiring_1367.rs` and `tests/obs_frame_stamp_parity_1367.rs` (on the
+    re-exports). The stamp's own cases (the old `tests/obs_frame_stamp_1367.rs`) run in rig-core.
+  - A test pinning a constant or a wiring line of `capture.rs` reads it through
+    `vstack::read("av/capture/src/capture.rs")` (Rust) / `vstack_src.read(...)` (pytest).
+
+- **One pin:** `scripts/vstack-release.pin` (tag + commit). The tag is repeated on every vstack git
+  dependency in root `Cargo.toml` (`camera-box-jxs`, `rig-core`, `qpsk-marker`, `burn-geom`,
+  `av-capture`, optional `svt-jpegxs-sys`). `tests/vstack_pin_1487.rs` fails until all of them and the lock agree.
+- **To bump:** edit the pin file and every tag, `cargo update -p rig-core`, run the suite. A new
   pin triggers linux-genlock.
 - **`src/lib.rs` keeps the old paths** with `pub use`, so `camera_box::genlock_wall_step` and the
   binaries work unchanged. `qpsk_marker` is written `::qpsk_marker::qpsk_marker`: the leading `::`

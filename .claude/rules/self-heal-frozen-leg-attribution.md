@@ -2,7 +2,6 @@
 paths:
   - "src/self_heal_attribution.rs"
   - "src/frozen_leg.rs"
-  - "src/capture_rate_health.rs"
   - "src/capture_rate_selfheal.rs"
   - "scripts/lib/self-heal-attribution.sh"
   - "scripts/lib/capture-rate-guard.sh"

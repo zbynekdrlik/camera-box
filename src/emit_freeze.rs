@@ -4,7 +4,7 @@
 //! liveness — "did the blocking `VIDIOC_DQBUF` return?" — by stamping a heartbeat immediately
 //! after every `process_frame()` return (`src/main.rs`), and fires only when the dequeue never
 //! returns at all. But `VideoCapture::process_frame` returns `Ok(())` on a `V4L2_BUF_FLAG_ERROR`
-//! buffer (`src/capture.rs`: it logs the corrupted-buffer WARN, records the sequence, and returns
+//! buffer (`vstack:av/capture/src/capture.rs`: it logs the corrupted-buffer WARN, records the sequence, and returns
 //! *before* the emit callback is reached). So on a stream where every dequeue returns an
 //! Ok-but-corrupted buffer, the `#945` heartbeat keeps advancing (the loop is not wedged) while
 //! `emit_count` never moves — the NDI sender keeps its last good frame registered and a consumer

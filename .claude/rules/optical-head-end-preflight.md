@@ -13,7 +13,7 @@ is blind to.
 
 ## The signal — head-end `rough=`, NOT the imag verdict
 - The running `camera-box` service ALREADY logs `capture chroma: u_dev=.. v_dev=.. rough=N -> ..`
-  every ~5 s (`src/capture.rs::luma_roughness`, #1079): mean |Y0−Y1| of horizontally-adjacent luma
+  every ~5 s (`vstack:av/capture/src/capture.rs::luma_roughness`, #1079): mean |Y0−Y1| of horizontally-adjacent luma
   pairs — HIGH for a crisp high-contrast pattern, LOW when motion blur smears adjacent pixels. The
   painter dual-QR ADVANCES every 60 Hz flip (a MOVING pattern), so a slow shutter (16.7 ms exposure
   = a full frame period) smears consecutive ticks → low roughness AND optically undecodable.

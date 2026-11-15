@@ -2,7 +2,6 @@
 paths:
   - "src/send_stagger.rs"
   - "tests/harness_send_stagger_1242.rs"
-  - "src/capture_stall.rs"
 ---
 
 # Per-camera NDI SEND stagger (#1242)
