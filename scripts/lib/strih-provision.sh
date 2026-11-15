@@ -1082,8 +1082,9 @@ strih_install_bundle_prefix() {
 # unit-tested in tests/strih_provision_pure_functions.rs.
 
 # strih_dantesync_unit_text ROLE [ARGS] -> print the systemd unit text for the strih-snv dantesync
-# daemon (the EXACT cambox unit shape: Type=simple, Restart=always, RestartSec=5,
-# WantedBy=multi-user.target). ROLE is `server` (NTP master, the M4 default -- ExecStart is the BARE
+# daemon (the cambox unit shape: Restart=always, RestartSec=5, WantedBy=multi-user.target; since issue
+# 1483 Type=notify + NotifyAccess=main + TimeoutStartSec=120, the lines of dsync's own installer unit,
+# so systemd reports it started only once the boot date is placed and lightdm can order after it). ROLE is `server` (NTP master, the M4 default -- ExecStart is the BARE
 # `/usr/local/bin/dsync`, folding the live 10-ntp-master.conf drop-in into the unit) or `client`
 # (ExecStart `/usr/local/bin/dsync <ARGS>`, ARGS defaulting to the client args). `--service` is
 # NOT an installer flag -- it is a run mode, so it never appears here. Fail-closed via
@@ -1123,7 +1124,11 @@ After=network.target
 Wants=network.target
 
 [Service]
-Type=simple
+# issue 1483: dsync >= 1.30 sends READY=1 only once the boot date is placed (bounded at 30 s), so
+# lightdm, ordered After=dsync.service, starts the operator session and OBS on a placed wall.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=120
 ExecStart=/usr/local/bin/dsync${execargs}${iface}
 Restart=always
 RestartSec=5

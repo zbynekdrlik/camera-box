@@ -209,6 +209,30 @@ any dGPU + iGPU notebook has it.
   the install; the real gather with its paths moved; the row), the `gpu_wait` / `x_core` rows in
   `tests/obs_box_baseline_1357.rs`.
 
+## lightdm waits for dsync's placed boot date (kiosk facet, issue 1483)
+
+strih-pp, 25.10.2026: OBS came up 48 s before dsync (the PP date master) stepped its own wall back
+3.7 s, so the running OBS saw a 3.5 s wall step; it repeated on every boot. dsync >= 1.30 (the pin is
+1.35.2) sends READY=1 only once the boot date is placed, bounded at 30 s.
+
+- The OBS-box dsync unit (`strih_dantesync_unit_text`) is `Type=notify` + `NotifyAccess=main` +
+  `TimeoutStartSec=120`, the lines of dsync's own installer unit (`install.sh` at the pinned tag). The
+  cambox unit (`cambox_dsync_unit_text`) stays `Type=simple`.
+- `obs_box_kiosk` runs `obs_box_dsync_ready_install` right after the GPU wait:
+  `/etc/systemd/system/lightdm.service.d/55-obs-box-dsync-ready.conf` = `[Unit]` `After=dsync.service`
+  + `Wants=dsync.service`, through `obs_box_write_if_changed_rendered`, then a daemon-reload. The
+  `--user` strih-obs unit cannot order on a system unit, so the order lives on lightdm. Never
+  `Requires=`: a failed or timed-out dsync must still give the operator a desktop.
+- A `systemctl restart dsync` now returns only after READY (at most ~30 s after the loop starts), so
+  setup-strih step 2's restart of a changed unit takes that long. The first setup-strih run after
+  this change rewrites the unit (Type= changed) and restarts dsync once per box: on strih-snv, the
+  date master, schedule it in the nightly window (the date-master rule in strih-linux-provisioning.md).
+- Grader row `kiosk` also needs `dsync_ready=1` (the drop-in byte-identical to its renderer).
+- Tests: `tests/python/test_dsync_ready_boot_order_1483.py`, the `dsync_ready` rows in
+  `tests/obs_box_baseline_1357.rs`, the 1361 golden's `dantesync-unit` section.
+- Read-back (supervisor, a cold boot after a day off): `journalctl -b -u dsync` shows `[READY] the
+  wall is placed` before lightdm starts, and the first OBS log line is after it.
+
 ## The iGPU panel sink on the modesetting DDX (item `obs_box_igpu_sink_modesetting`, grader row `igpu-sink`, issue 1418)
 
 On an NVIDIA-primary notebook (PRIME nvidia-primary) NVIDIA renders the X screen and the iGPU scans

@@ -142,6 +142,7 @@ obs_box_baseline_gather_snippet() {
         obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
         obs_box_cpu_latency_bound_us rig_timezone_read obs_box_amdgpu_ddx_package obs_box_pkg_status \
         obs_box_gpu_ready_wait_path obs_box_gpu_ready_dropin_path obs_box_gpu_ready_wait_text obs_box_gpu_ready_dropin_text \
+        obs_box_dsync_ready_dropin_path obs_box_dsync_ready_dropin_text \
         obs_box_cpulist_expand obs_box_cpulist_compress obs_box_background_cpus obs_box_background_smt_shared \
         obs_box_background_slice_name obs_box_background_slice_path obs_box_background_dropin_path \
         obs_box_background_run_path obs_box_background_memory_high obs_box_background_slice_text \
@@ -280,6 +281,9 @@ echo "autologin=$(if grep -qxF "autologin-user=${U}" "$_al" 2>/dev/null && grep 
 # Xorg core dumps (an Xorg abort made lightdm fall back to the login screen).
 _gw="$(obs_box_gpu_ready_wait_path)"; _gd="$(obs_box_gpu_ready_dropin_path)"
 echo "gpu_wait=$(if [ -x "$_gw" ] && cmp -s "$_gw" <(obs_box_gpu_ready_wait_text) && cmp -s "$_gd" <(obs_box_gpu_ready_dropin_text); then echo 1; else echo 0; fi)"
+# issue 1483: lightdm ordered after dsync (its Type=notify READY = the boot date placed), byte-identical.
+_dd="$(obs_box_dsync_ready_dropin_path)"
+echo "dsync_ready=$(if cmp -s "$_dd" <(obs_box_dsync_ready_dropin_text); then echo 1; else echo 0; fi)"
 # One per crashed Xorg (systemd-coredump logs "terminated abnormally" and/or "dumped core" per crash). An
 # unreadable system journal (no PID 1 line this boot: a user outside adm/systemd-journal) prints empty,
 # never 0.
@@ -481,8 +485,8 @@ obs_box_baseline_verdict() {
     ok=0; [ "$(_obs_box_f lightdm)" = "install ok installed" ] && [ "$(_obs_box_f openbox)" = "install ok installed" ] \
         && [ -n "$(_obs_box_f dm)" ] && [ "$(_obs_box_f dm)" = "$(_obs_box_f dm_lightdm)" ] && [ "$(_obs_box_f autologin)" = 1 ] \
         && [ "$(_obs_box_f gdm3)" != "install ok installed" ] && [ "$(_obs_box_f gnome_shell)" != "install ok installed" ] \
-        && [ "$(_obs_box_f gpu_wait)" = 1 ] && [ "$(_obs_box_f x_core)" = 0 ] && ok=1
-    _obs_box_item kiosk "$ok" "lightdm='$(_obs_box_f lightdm)' openbox='$(_obs_box_f openbox)' display-manager=$(_obs_box_f dm) autologin->session=$(_obs_box_f autologin) gdm3='$(_obs_box_f gdm3)' gnome-shell='$(_obs_box_f gnome_shell)' gpu-ready wait installed=$(_obs_box_f gpu_wait) Xorg core dumps this boot=$(_obs_box_f x_core)"
+        && [ "$(_obs_box_f gpu_wait)" = 1 ] && [ "$(_obs_box_f dsync_ready)" = 1 ] && [ "$(_obs_box_f x_core)" = 0 ] && ok=1
+    _obs_box_item kiosk "$ok" "lightdm='$(_obs_box_f lightdm)' openbox='$(_obs_box_f openbox)' display-manager=$(_obs_box_f dm) autologin->session=$(_obs_box_f autologin) gdm3='$(_obs_box_f gdm3)' gnome-shell='$(_obs_box_f gnome_shell)' gpu-ready wait installed=$(_obs_box_f gpu_wait) dsync-ready order installed=$(_obs_box_f dsync_ready) Xorg core dumps this boot=$(_obs_box_f x_core)"
     # websocket -- python3-websocket installed AND importable by the system python3 (issue 1361): the
     # strih/imag OBS launchers run a websocket scene seeder and strih-obs-start.sh refuses to start OBS
     # without it

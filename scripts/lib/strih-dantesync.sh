@@ -73,7 +73,7 @@ strih_dantesync_dropins_present() {
 }
 
 # strih_dantesync_exec_start UNIT_TEXT -> the value of the unit's LAST `ExecStart=` line (systemd's
-# own reading for a Type=simple unit; an empty `ExecStart=` resets). Pure, no pipe. The value is taken
+# own reading for a simple/notify service unit; an empty `ExecStart=` resets). Pure, no pipe. The value is taken
 # verbatim: systemd strips quotes before exec, so a quoted argument would never equal the running
 # command line -- strih_dantesync_unit_text never emits one (the upstream host fact is quote-free).
 strih_dantesync_exec_start() {
