@@ -176,14 +176,18 @@ def test_the_launch_plan_names_the_box_mcp_and_host(box, mcp, host):
 def test_grading_pp_launch_has_no_title_check_and_names_its_missing_pin_baseline():
     out = _launch("--box", "grading-pp").stdout
     assert "$wantProfile" not in out, "its window title reads the projector: no title check"
-    assert "NOTE (issue 1505): role 'grading' has no latency-pins baseline" in out
+    assert "NOT APPLICABLE for grading-pp (issue 1505): role 'grading' has no latency-pins baseline" in out
+    assert "NOT APPLICABLE for grading-pp (issue 1505): no imag restart mark" in out
+    assert "latency_pins_verify.py --box grading" not in out and "mark-imag-restart.sh --box grading" not in out, \
+        "never a role-tool command that can only fail"
 
 
 def test_resolume_pp_launch_checks_the_cg_title_and_uses_the_resolume_pin_baseline():
     out = _launch("--box", "resolume-pp").stdout
     assert "$wantProfile = 'cg'" in out
     assert "latency_pins_verify.py --box resolume --host resolume-pp.lan" in out
-    assert "NOTE (issue 1505)" not in out
+    assert 'mark-imag-restart.sh --box resolume --reason "<why you relaunched>"' in out
+    assert "NOT APPLICABLE" not in out
 
 
 @pytest.mark.parametrize("bad", ["grading", "resolume-zz", "notebookasus"])

@@ -608,6 +608,18 @@ main() {
   # (stream / resolume), never a fleet name -- the role is the fleet name before its venue.
   role="$(obs_fleet_canonical_name "$box")"
   role="${role%%-*}"
+  # issue 1505: the role tools know strih|stream|imag|resolume only. grading-pp's role has no agreed-pins
+  # baseline and no imag restart mark, so its STEP 3b / STEP 5 lines say "not applicable" in place of
+  # a command that would only fail (the known roles print byte-identical commands).
+  local pins_line mark_line
+  case "$role" in
+    strih|stream|imag|resolume)
+      pins_line="python3 scripts/latency_pins_verify.py --box ${role} --host ${box_ip}"
+      mark_line="scripts/mark-imag-restart.sh --box ${role} --reason \"<why you relaunched>\"" ;;
+    *)
+      pins_line="NOT APPLICABLE for ${box} (issue 1505): role '${role}' has no latency-pins baseline -- skip STEP 3b."
+      mark_line="NOT APPLICABLE for ${box} (issue 1505): no imag restart mark for role '${role}' -- skip STEP 5." ;;
+  esac
 
   echo "# ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) ====="
   # resolume (issue 1295): the STEP-3/3b dev1-side WS ops below are keyed on the HOSTNAME
@@ -665,7 +677,7 @@ ${PROGRAM}
 #         committed agreed-pins baseline (scripts/latency-pins-baseline.json) — it NEVER overwrites
 #         (forcing would fight the operator). Run ON DEV1 (read-only WS, session-agnostic, per
 #         win-ssh-vs-mcp), NOT in the ${mcp} MCP Shell:
-#           python3 scripts/latency_pins_verify.py --box ${role} --host ${box_ip}
+#           ${pins_line}
 #         exit 0 = every agreed pin on baseline; exit 1 = drift (LOUD, names box+input+got+want — an
 #         ADVISORY signal, NOT a launch abort); exit 2 = a WS read failure (fail-closed). If the
 #         drift is a legitimate re-tune, record it by updating the baseline in a PR; if it is an
@@ -675,14 +687,8 @@ ${PROGRAM}
 #         (or use scripts/rig-mode.sh test|event, which does it for both boxes).
 # STEP 5 (#674): once STEP 2 confirms the relaunch succeeded, mark it on imag-nb's own journald so
 #         a future imag judder report can be time-correlated against this restart:
-#         scripts/mark-imag-restart.sh --box ${role} --reason "<why you relaunched>"
+#         ${mark_line}
 PLAN
-  # issue 1505: the role tools above know strih|stream|imag|resolume only; grading-pp's role has no
-  # agreed-pins baseline, so its STEP 3b / STEP 5 lines are named as not applicable, never run blind.
-  case "$role" in
-    strih|stream|imag|resolume) ;;
-    *) echo "# NOTE (issue 1505): role '${role}' has no latency-pins baseline and no imag restart mark -- skip STEP 3b and STEP 5 for ${box}." ;;
-  esac
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
