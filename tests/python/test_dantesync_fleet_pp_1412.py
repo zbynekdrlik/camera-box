@@ -418,7 +418,7 @@ def test_watchdog_reach_roster_default_is_the_pp_fleet():
 
 
 def test_watchdog_grades_the_pp_nodes_against_the_pp_grandmaster(tmp_path):
-    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM, "stream-pp.lan": PP_GM, "resolume-pp.lan": PP_GM}, PP_HOME)
+    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM, "stream-pp.lan": PP_GM}, PP_HOME)
     assert "reach='cam1 cam4 cam6 cam7 strih-pp stream-pp'" in err, err  # issue 1413 + issue 1487
     for name in ("strih-pp", "stream-pp"):
         assert f"{name} ({name}.lan): reachable=1 verdict=OK" in err, err
@@ -429,10 +429,11 @@ def test_watchdog_grades_the_pp_nodes_against_the_pp_grandmaster(tmp_path):
 def test_watchdog_grades_alex_nb_again_once_dsync_no_longer_does(tmp_path):
     """issue 1487: an empty DSYNC_GRADED_NODES puts the dsync-graded rows back on the reach roster;
     resolume-pp is no row at all since 15.11.2026, so it never comes back."""
-    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM, "stream-pp.lan": PP_GM, "resolume-pp.lan": PP_GM}, PP_HOME,
-                    DSYNC_GRADED_NODES="")
+    audio_gm = "10.77.7.104"
+    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM, "stream-pp.lan": PP_GM, "10.77.7.109": audio_gm},
+                    PP_HOME + " alex-nb", DSYNC_GRADED_NODES="", DANTESYNC_AUDIO_GM_HOST=audio_gm)
     assert "reach='cam1 cam4 cam6 cam7 strih-pp stream-pp alex-nb'" in err, err
-    assert "alex-nb away (unreachable" in err, err
+    assert "alex-nb (10.77.7.109): reachable=1 verdict=OK" in err, err
     assert "resolume-pp" not in err, err
 
 

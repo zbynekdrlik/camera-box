@@ -202,7 +202,7 @@ def test_a_finalize_on_a_clean_node_opens_no_window(tmp_path):
 
 
 def test_the_canary_is_never_the_master_and_the_master_goes_last():
-    assert src('dantesync_resolve_canary "strih-snv cam2 cam3" "resolume-pp" "" "strih-snv strih-pp"').stdout.split() == ["cam2", "resolume-pp"]
+    assert src('dantesync_resolve_canary "strih-snv cam2 cam3" "alex-nb" "" "strih-snv strih-pp"').stdout.split() == ["cam2", "alex-nb"]
     assert src('dantesync_masters_last "strih-snv cam3 strih-pp dev1" "strih-snv strih-pp"').stdout.split() == ["cam3", "dev1", "strih-snv", "strih-pp"]
 
 
