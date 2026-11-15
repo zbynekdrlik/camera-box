@@ -49,7 +49,6 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 | audiolag | `audio-lag-alert-watchdog.sh --dry-run` | `verdict=HEALTHY` | LAGGING/STALE/DRIFTING | SKIP/UNKNOWN |
 | genlock | `genlock-lock-alert-watchdog.sh --dry-run` | `verdict=HEALTHY` | DEGRADED/UNLOCKED | **UNKNOWN facet = UNKNOWN, NEVER forgot** |
 | dantesync | `dantesync-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
-| (dantesync note, issue 1487) | the same capture's `SELF-BEHIND` / `SELF-UNKNOWN` rows (the nodes dsync upgrades itself) | — | — | never a status: a Slovak `pozor: <node> beží dsync <v> pod pinom <pin> …` on the item line AND the summary (`Item(note_fn=…)`, `entry["notes"]`); the python only reads the gate's row, the gate orders the versions |
 | cambox | `camera-box-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
 | avlatency | `measurement-chain-latency.sh` (marker emit vs `mbc` relative onset) | `verdict=ALIGNED` | `verdict=DRIFTED` (>90 ms vs baseline) | monotonic-emit / no-baseline / **ambiguous-cadence** (#1332) / chain-silent (all <−60 dB) / <3 onsets / cam2 down / stream OBS down |
 | watchdogs | `systemctl --user` per timer in `lib/watchdog-roster.sh` (dev1-local, no ssh) | all enabled+active+fired <15 min → OK | disabled/inactive/never-run/stale → **SUPERVISOR** (`nezapnutý watchdog: …`, never `zabudol si`) | no unit file → UNKNOWN with names |
@@ -228,8 +227,10 @@ enabled=.. active=.. age_s=..`), and the pure `classify_watchdogs` decides it.
 - **Version items need fleet node specs.** `dantesync-version-gate.sh` /
   `camera-box-version-gate.sh` REFUSE (exit 1 → UNKNOWN) with no `--linux/--win` nodes. The
   dantesync item runs the gate with **`--fleet`** (issue 1372): the node set is the ONE declared
-  dantesync fleet (`scripts/lib/dantesync-fleet.sh` — every camera, dev1, the OBS boxes, mbc,
-  fohabl; fohabl's credential from the dev1-local cred file, UNKNOWN without it). The cambox item
+  dantesync fleet (`scripts/lib/dantesync-fleet.sh` — every camera, dev1, the OBS boxes, the PP
+  boxes, alex-nb; a row's own credvar from the dev1-local cred file, UNKNOWN without it). mbc +
+  fohabl are dsync's since 15.11.2026 (issue 1487), so the item reads neither, and the former
+  `pozor:` note on a self-upgraded node below the pin is gone with them. The cambox item
   still builds the active-cam `name=root@ip` spec by sourcing `camera-set.sh` in a `$()` subshell and
   uses `--no-main-pin` (relative peer parity = uniform build, no origin/main read).
 - **The alert-watchdogs log `verdict=`/`reachable=` to STDERR (via `log()`), not stdout** — the
