@@ -93,10 +93,10 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
     only row-named keys read). A missing value = that node reads UNKNOWN / is skipped — never dialled
     with an empty or a foreign password.
 - **The Poprad (PP) venue rows (issue 1412).** `strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|`
-  (the PP NTP master), `stream-pp|obs:stream-pp|linux|video-pp|reach|-|`,
-  `resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|` (no obs-fleet row; it runs no managed
-  OBS). Owner (11.10.2026): "a tiez tam nie je dantesync tam nie je updatnuty cize potrebujes zaradit
-  tento pc do updatovania". dev1 reaches the PP LAN (10.77.8.0/23) as 10.76.8.x through the
+  (the PP NTP master) and `stream-pp|obs:stream-pp|linux|video-pp|reach|-|`. Owner (11.10.2026): "a
+  tiez tam nie je dantesync tam nie je updatnuty cize potrebujes zaradit tento pc do updatovania".
+  resolume-pp was a row too (`resolume-pp.lan`, `video-pp`, `reach`) until 15.11.2026, when dsync took
+  it over (below). dev1 reaches the PP LAN (10.77.8.0/23) as 10.76.8.x through the
   companion-pp subnet router, so every PP row dials a NAME.
   - **GM per venue.** A venue role `video-<venue>` / `ntp-master-<venue>` (venue = lower-case ASCII
     letters + digits) locks to its venue's PTP grandmaster: `STRIH_DANTE_GM` of the ONE
@@ -135,6 +135,10 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
 - **iem-snv + companion-snv are NOT rows (issue 1487, 12.11.2026).** dsync grades and upgrades both
   itself (dsync#179). They were rows from 13.10.2026 (found outside every roll at 1.8.28 / 1.8.20) to
   12.11.2026; `DSYNC_FLEET_HANDED_OVER` keeps the outside-fleet scan from flagging them.
+- **resolume-pp is NOT a row (issue 1487, 15.11.2026).** dsync grades it and, since 15.11.2026, also
+  upgrades it over MCP; dsync is the only writer there. It joined `DSYNC_FLEET_HANDED_OVER` as
+  `resolume-pp.lan`. Its obs-fleet row (issue 1426, the build-parity facet) and the genlock deploy are
+  unrelated and unchanged.
 - **lv1 (10.77.7.100) is deliberately absent** (owner ROZHODNUTÉ 25.9.2026: an operational PC, on the
   network temporarily).
 - **The audio grandmaster** is `DANTESYNC_AUDIO_GM_HOST` (default 10.77.7.104 since the leader moved
@@ -179,8 +183,8 @@ with a `[ -n ]`-guarded accessor of the same shape:
 | list (default) | what dsync does | camera-box |
 |---|---|---|
 | `DSYNC_SELF_UPGRADED_NODES` (`mbc fohabl`), `dantesync_fleet_self_upgraded` | upgrades | grades (watchdog + drift); never rolls, never pins; the version gate `--fleet` reads the version into a report-only section (`SELF-BEHIND` below the pin), the handover relays it (`dsync-rename.md`) |
-| `DSYNC_GRADED_NODES` (`alex-nb resolume-pp`), `dantesync_fleet_dsync_graded` | grades (dsync#179) | rolls + pins (dsync cannot log in there until airuleset#1311); NEVER grades: `dantesync_fleet_graded_here "<names>"` filters every clock-watchdog default roster (CAM / OBS / FIXED / REACH / LOCAL; an explicit `DANTE_CLOCK_*_NODES` override is kept byte for byte), so the handover clock item never sees them either; the drift check prints `verdict=SKIPPED (graded by dsync` and fetches nothing |
-| `DSYNC_FLEET_HANDED_OVER` (`iem-snv.lan companion-snv.lan`), `dantesync_fleet_handed_over` | grades + upgrades | no row at all; the version gate's outside-fleet scan passes these hosts (+ their resolved IPs) as known, and an answering node whose PTR name matches one (same name or first label, case-insensitive, trailing dot ignored) prints `HANDED-OVER`, never `OUTSIDE-FLEET` / an ALARM |
+| `DSYNC_GRADED_NODES` (`alex-nb`; resolume-pp until 15.11.2026), `dantesync_fleet_dsync_graded` | grades (dsync#179) | rolls + pins (dsync cannot log in there until airuleset#1311); NEVER grades: `dantesync_fleet_graded_here "<names>"` filters every clock-watchdog default roster (CAM / OBS / FIXED / REACH / LOCAL; an explicit `DANTE_CLOCK_*_NODES` override is kept byte for byte), so the handover clock item never sees them either; the drift check prints `verdict=SKIPPED (graded by dsync` and fetches nothing |
+| `DSYNC_FLEET_HANDED_OVER` (`iem-snv.lan companion-snv.lan resolume-pp.lan`), `dantesync_fleet_handed_over` | grades + upgrades | no row at all; the version gate's outside-fleet scan passes these hosts (+ their resolved IPs) as known, and an answering node whose PTR name matches one (same name or first label, case-insensitive, trailing dot ignored) prints `HANDED-OVER`, never `OUTSIDE-FLEET` / an ALARM |
 
 One grader per node: a node graded by both dsync and camera-box pages twice (the reason for the split).
 Moving a node to dsync is one word in one list; tests:

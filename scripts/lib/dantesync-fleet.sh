@@ -85,11 +85,10 @@ fi
 #   iem-snv / companion-snv -- issue 1487: no longer rows here. dsync (the dstack project) grades and
 #                upgrades both itself; DSYNC_FLEET_HANDED_OVER below keeps the outside-fleet scan from
 #                flagging them. (Owner 13.10.2026 had found them outside every roll at 1.8.28 / 1.8.20.)
-#   strih-pp / stream-pp / resolume-pp -- issue 1412: the Poprad (PP) venue. strih-pp is the PP NTP
-#                master (scripts/strih-boxes/strih-pp.env: STRIH_DANTESYNC_ROLE=server), stream-pp and
-#                resolume-pp (Windows; its obs-fleet row, issue 1426, is only in the build-parity facet) follow it; all three lock to the PP PTP
-#                grandmaster (role `*-pp`). dev1 reaches the PP LAN as 10.76.8.x through the
-#                companion-pp subnet router, so the rows dial NAMES (strih-pp/stream-pp through their
+#   strih-pp / stream-pp -- issue 1412: the Poprad (PP) venue. strih-pp is the PP NTP
+#                master (scripts/strih-boxes/strih-pp.env: STRIH_DANTESYNC_ROLE=server), stream-pp
+#                follows it; both lock to the PP PTP grandmaster (role `*-pp`). dev1 reaches the PP
+#                LAN as 10.76.8.x through the companion-pp subnet router, so the rows dial NAMES (strih-pp/stream-pp through their
 #                obs-fleet rows), and their homegate is `reach`: an unreachable PP box is skipped,
 #                never a page or a failed gate. Owner (11.10.2026): "a tiez tam nie je dantesync tam
 #                nie je updatnuty cize potrebujes zaradit tento pc do updatovania".
@@ -97,6 +96,9 @@ fi
 #                locked to the audio grandmaster. A notebook comes and goes, so `reach`: read only
 #                while its ssh answers, never a page while it is away. Login alexnb with the fleet
 #                default password. Owner (23.10.2026): "zaradil ho medzi udrziavanu flotilu dantesyncov".
+#   resolume-pp -- issue 1487: no longer a row (since 15.11.2026). dsync grades AND upgrades it
+#                itself (over MCP); DSYNC_FLEET_HANDED_OVER below keeps the outside-fleet scan from
+#                flagging it. Its obs-fleet row (issue 1426, build-parity facet) is unrelated and stays.
 # The /24 nets dev1 scans for a dantesync node OUTSIDE this table (scripts/dantesync_fleet_scan.py,
 # dantesync-version-gate.sh --fleet; owner 13.10.2026: the IEM PC sat outside it unseen). dev1's view:
 # the SNV rig LAN + the audio VLAN, the PP LAN as 10.76.x through companion-pp.
@@ -110,7 +112,6 @@ mbc|10.77.7.232|windows|audio|always|-|
 fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS
 strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|
 stream-pp|obs:stream-pp|linux|video-pp|reach|-|
-resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|
 alex-nb|10.77.7.109|windows|audio|reach|alexnb|}"
 
 # issue 1487: the nodes dsync upgrades itself (its own release flow since the handover to the dsync
@@ -124,11 +125,12 @@ DSYNC_SELF_UPGRADED_NODES="${DSYNC_SELF_UPGRADED_NODES-mbc fohabl}"
 # version gate still read them) until dsync can log in there (airuleset#1311), but drops them from every
 # GRADING roster here -- the clock watchdog's defaults (and through it the handover clock item) and the
 # config drift check -- so one node never has two graders paging on it.
-DSYNC_GRADED_NODES="${DSYNC_GRADED_NODES-alex-nb resolume-pp}"
+DSYNC_GRADED_NODES="${DSYNC_GRADED_NODES-alex-nb}"
 
 # issue 1487: hosts that run dsync but are dsync's own (graded + upgraded by it, no row here). The
 # version gate's outside-fleet scan names them as handed over, never as an OUTSIDE-FLEET alarm.
-DSYNC_FLEET_HANDED_OVER="${DSYNC_FLEET_HANDED_OVER-iem-snv.lan companion-snv.lan}"
+# resolume-pp joined on 15.11.2026 (dsync upgrades it over MCP; dsync is the only writer there).
+DSYNC_FLEET_HANDED_OVER="${DSYNC_FLEET_HANDED_OVER-iem-snv.lan companion-snv.lan resolume-pp.lan}"
 
 # The audio-VLAN PTP grandmaster: an Audinate device, locked to the same clock as the video
 # grandmaster video-clock.lan (#1367 comment 5832526338). Since 25.9.2026 ~21:07 the leader is

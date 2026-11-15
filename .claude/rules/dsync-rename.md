@@ -103,6 +103,12 @@ alex-nb + resolume-pp stay rows that the upgrader rolls and the version gate pin
 there until airuleset#1311), but `DSYNC_GRADED_NODES` drops them from every grader; alex-nb left
 `DSYNC_SELF_UPGRADED_NODES`, so camera-box rolls it again.
 
+**15.11.2026: dsync upgrades resolume-pp itself** (over MCP, v1.35.4), on top of grading it; dsync is
+the only writer there. camera-box hands it over completely: no fleet row (no roll, no pin, no drift
+read, no clock watchdog), off `DSYNC_GRADED_NODES` (alex-nb stays), and `resolume-pp.lan` joined
+`DSYNC_FLEET_HANDED_OVER`, so the version gate's outside-fleet scan names it `HANDED-OVER`. Its
+obs-fleet row (issue 1426) is unrelated and stays.
+
 **resolume-snv** moved on 2.11.2026 by dsync's own `install.ps1`, once. That is not a path: only
 camera-box moves rig boxes. It reads SAME at the new location, so the upgrader only checks its tray
 and runs a finalize with nothing to do, and the gates read `C:\Program Files\dsync`.

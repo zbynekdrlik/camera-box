@@ -108,7 +108,7 @@ DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_graded_here "$(
 # drops out there).
 DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-$(dantesync_fleet_graded_here "$(dantesync_fleet_names homegate=obsfleet)")}"
 # issue 1487: every default below drops the nodes dsync grades itself (DSYNC_GRADED_NODES in
-# dantesync-fleet.sh: alex-nb, resolume-pp) -- one grader per node; an explicit override is kept as given.
+# dantesync-fleet.sh: alex-nb) -- one grader per node; an explicit override is kept as given.
 # issue 1372: the FIXED non-camera nodes -- the audio-VLAN PCs mbc + fohabl (Windows, always home).
 # Probed like any remote node; box-up = ssh :22; graded against their role's grandmaster.
 DANTE_CLOCK_FIXED_NODES="${DANTE_CLOCK_FIXED_NODES-$(dantesync_fleet_graded_here "$(dantesync_fleet_fixed_names)")}"
