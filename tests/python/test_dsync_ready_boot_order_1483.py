@@ -196,3 +196,64 @@ def test_the_kiosk_row_needs_the_dsync_ready_drop_in():
     missing = _kiosk_row("0")
     assert missing.startswith("kiosk|FAIL|") and "dsync-ready order installed=0" in missing
     assert _kiosk_row("").startswith("kiosk|FAIL|"), "an unread fact is never a pass"
+
+
+# --- review finding: never write the notify unit over a dsync that cannot send READY ---------------
+# A dsync below 1.30 never sends READY=1: under Type=notify systemd would kill it at every 120 s start
+# timeout (Restart=always, a flapping clock; on strih-snv the fleet DATE MASTER) and hold lightdm
+# 120 s each boot. setup-strih keeps an existing binary whatever its version, so step 2's install
+# refuses a notify unit over a binary that reports an older version, touching nothing.
+
+import sys  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_strih_dantesync_keep_running_1372 import Box  # noqa: E402
+
+
+def _binary_reporting(box, version_line):
+    box.bin.write_text("#!/bin/sh\n[ \"$1\" = --version ] && echo '%s'\nexit 0\n" % version_line)
+    box.bin.chmod(0o755)
+    return box
+
+
+def test_an_older_dsync_refuses_the_notify_unit_and_touches_nothing(tmp_path):
+    box = _binary_reporting(Box(tmp_path), "dsync 1.29.4").set_active(True)
+    r = box.run()
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert not box.unit.exists(), "no unit is written over a dsync that never sends READY"
+    calls = box.calls()
+    assert not any(c.split()[0] in ("daemon-reload", "restart", "start", "enable") for c in calls if c), calls
+    assert "1.29.4" in r.stderr and "1.30.0" in r.stderr, r.stderr
+    assert "dantesync-fleet-upgrade.sh" in r.stderr, r.stderr
+
+
+def test_a_ready_capable_dsync_gets_the_notify_unit(tmp_path):
+    box = _binary_reporting(Box(tmp_path), "dsync 1.35.2").set_active(False)
+    r = box.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Type=notify" in box.unit.read_text()
+    assert "start dsync" in box.calls()
+
+
+def test_exactly_the_first_ready_version_is_accepted(tmp_path):
+    box = _binary_reporting(Box(tmp_path), "dsync 1.30.0").set_active(False)
+    r = box.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert box.unit.exists()
+
+
+def test_an_unreadable_version_is_named_and_the_install_goes_on(tmp_path):
+    """A real dsync always answers --version; a silent one is named, never guessed old or new."""
+    box = Box(tmp_path).with_binary().set_active(False)
+    r = box.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert box.unit.exists()
+    assert "could not read the dsync version" in (r.stdout + r.stderr)
+
+
+def test_no_binary_yet_installs_the_unit_without_a_version_read(tmp_path):
+    box = Box(tmp_path)
+    r = box.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert box.unit.exists()
+    assert "could not read the dsync version" not in (r.stdout + r.stderr)
