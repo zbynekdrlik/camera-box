@@ -419,8 +419,9 @@ verify). Every Windows deploy is a FULL one (issue 1522 removed the obs.dll-only
 - **ONE DistroAV per OBS (issue 1505, step 6e).** A box whose DistroAV lives only in Program Files
   (grading-pp, read 15.11.2026: the 14.10 setup moved the stock ProgramData one to a backup) gets the
   ProgramData install CREATED by step 6b from the bundle (the DLL + the bundle's
-  `data\obs-plugins\distroav` tree; an existing install's data tree stays unmanaged); a box with no
-  DistroAV anywhere is still refused. Step 6e then MOVES a leftover `Program Files\obs-studio\
+  `data\obs-plugins\distroav` tree, refused with exit 4 before anything is created when the bundle has
+  none; an existing install's data tree stays unmanaged); a box with no DistroAV anywhere is still
+  refused. The leftover list is `@(@(...) | Where-Object ...)` so an empty result counts 0 on PS 5.1 too. Step 6e then MOVES a leftover `Program Files\obs-studio\
   obs-plugins\64bit\distroav.dll` (+ `.pdb`) into the deploy's dated backup dir as
   `<name>.programfiles.pre-789`, judged by the files (leftover gone, backup there), never by the cmdlet
   alone (pwsh 7 left a failed cross-dir move silent). A failed move = exit 4 before the relaunch step,
