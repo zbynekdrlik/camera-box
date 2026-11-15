@@ -1597,7 +1597,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=newlevel
-ExecStart=/opt/bkshading/bkshading --config /etc/bkshading/bkshading.toml
+# shading v0.2.7: the /next/ panel's layout (bkshading-layout.json) in a dir the operator can write
+StateDirectory=bkshading
+ExecStart=/opt/bkshading/bkshading --config /etc/bkshading/bkshading.toml --layout-file /var/lib/bkshading/bkshading-layout.json
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
