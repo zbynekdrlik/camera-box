@@ -323,8 +323,8 @@ show in dstack's shared tray `dtray`. Design comment 6609295433 (Approach 1). Th
 both roles (`STRIH_SESSION_APP_UNITS`, `OBS_BOX_STREAM_SESSION_APP_UNITS`), so every Linux workstation runs
 it. setup-strih.sh / verify-strih.sh carry no line of their own: it rides step 16d's loop and the grader.
 
-- **ONE pin, `scripts/dtray-release.pin`:** `DTRAY_RELEASE_TAG` (v0.6.19), `DTRAY_RELEASE_ASSET`
-  (`dtray-v0.6.19-linux-x86_64`), `DTRAY_RELEASE_SHA256` (the release's own sha256, read from
+- **ONE pin, `scripts/dtray-release.pin`:** `DTRAY_RELEASE_TAG` (v0.6.143, issue 1532: v0.6.19 refreshed every Dante record every 96 s, dstack#319), `DTRAY_RELEASE_ASSET`
+  (`dtray-v0.6.143-linux-x86_64`), `DTRAY_RELEASE_SHA256` (the release's own sha256, read from
   `gh release view <tag> -R zbynekdrlik/dstack` and the downloaded asset), `DTRAY_DEVICE_FIRST_DSTACK`
   (v0.6.13: a device on an older dstack is not discoverable). A bump edits the tag, asset and sha
   together and `tests/python/test_dtray_1485.py` pins the shipped values.
