@@ -728,7 +728,7 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
         "the server role must NOT carry the client --ntp-server args: {out}"
     );
     assert!(
-        out.contains("Type=simple")
+        out.contains("Type=notify")
             && out.contains("Restart=always")
             && out.contains("RestartSec=5")
             && out.contains("WantedBy=multi-user.target"),

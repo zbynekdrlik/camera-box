@@ -51,7 +51,7 @@ def test_the_server_unit_binds_the_rig_nic_and_has_no_wait_line():
     assert r.returncode == 0, r.stderr
     assert "ExecStart=/usr/local/bin/dsync --interface enp7s0\n" in r.stdout, r.stdout
     assert "ExecStartPre=" not in r.stdout, "dsync waits for the configured NIC itself"
-    for part in ("Type=simple", "Restart=always", "RestartSec=5", "WantedBy=multi-user.target"):
+    for part in ("Type=notify", "Restart=always", "RestartSec=5", "WantedBy=multi-user.target"):
         assert part in r.stdout, r.stdout
 
 
