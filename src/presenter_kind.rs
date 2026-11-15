@@ -1,6 +1,6 @@
 //! #464 — the pure Auto-fallback PRESENTER decision, extracted out of
 //! `probe::presenter::open_presenter`'s hardware I/O so it compiles + unit-tests on DEFAULT
-//! features (Tier-0) — the same crate-root pure-seam pattern as `src/reannounce.rs` /
+//! features (Tier-0) — the same crate-root pure-seam pattern as `vstack:av/ndi/src/reannounce.rs` /
 //! `src/colour_scale.rs` (see their doc comments for why these live at the crate root instead of
 //! inside the `probe` feature).
 //!

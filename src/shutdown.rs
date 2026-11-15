@@ -37,7 +37,7 @@
 //!
 //! The PURE half (the flag + [`painter_should_continue`]) is `std`-only and
 //! Tier-0-verifiable via a `rustc --test` replica (the repo pattern —
-//! `src/fb_blank.rs`, `src/reannounce.rs`, `src/colour_scale.rs`); the OS glue
+//! `src/fb_blank.rs`, `vstack:av/ndi/src/reannounce.rs`, `src/colour_scale.rs`); the OS glue
 //! ([`install`]) uses the crate's existing `libc` syscall layer and is
 //! `#[cfg(target_os = "linux")]` (the cameras are x86_64 Ubuntu), compiled by
 //! the default-feature CI build but with no local run path.

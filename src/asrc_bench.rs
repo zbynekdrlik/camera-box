@@ -24,7 +24,7 @@
 //! which balloon the shared dev1 `target/` per this project's Local Build Policy). This bench
 //! needs none of that — the drift mechanism is a closed-form relationship between sample counts
 //! and wall-clock time, not a pixel/QR decode — so it lives here as a PURE module, mirroring
-//! `src/reannounce.rs` / `src/av_window.rs`: it unit-tests Tier-0 (default features, no hardware,
+//! `vstack:av/ndi/src/reannounce.rs` / `src/av_window.rs`: it unit-tests Tier-0 (default features, no hardware,
 //! no probe deps), which is exactly the ticket's own requirement ("beh na CI/bench stroji, nie na
 //! produkčnom rigu").
 //!

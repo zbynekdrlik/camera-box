@@ -20,7 +20,7 @@
 //!
 //! Pure Tier-0 (default features, no probe): the geometry + position math live here and unit-test
 //! off-rig; the probe-gated painter (`src/probe/painter.rs` via `src/probe/qr.rs`) only CALLS
-//! [`ball_rect`] / [`sweep_band`] to blit — the `src/reannounce.rs` / `src/colour_scale.rs` pattern.
+//! [`ball_rect`] / [`sweep_band`] to blit — the `vstack:av/ndi/src/reannounce.rs` / `src/colour_scale.rs` pattern.
 
 use crate::colour_scale::Rect;
 

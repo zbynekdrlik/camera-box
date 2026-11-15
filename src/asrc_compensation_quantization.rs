@@ -6,7 +6,7 @@
 //!
 //! ## Why this lives here (not `src/probe/`)
 //!
-//! Same rationale as `src/asrc_bench.rs`/`src/reannounce.rs`: pure closed-form arithmetic, no
+//! Same rationale as `src/asrc_bench.rs`/`vstack:av/ndi/src/reannounce.rs`: pure closed-form arithmetic, no
 //! hardware, no `probe` feature deps -- unit-tests on default features (`cargo test`, Tier-0,
 //! bypass documented in project CLAUDE.md's Local Build Policy).
 //!

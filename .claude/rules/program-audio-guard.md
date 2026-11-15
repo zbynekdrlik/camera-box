@@ -815,7 +815,7 @@ is at a venue. So the mirror is a long-running service holding one
 
 ## Traps
 
-- **The NDI receiver is ctypes over `/usr/lib/ndi/libndi.so.6`.** The in-repo `src/ndi.rs`
+- **The NDI receiver is ctypes over `/usr/lib/ndi/libndi.so.6`.** The in-repo `vstack:av/ndi/src/ndi.rs`
   receiver is video-only (a NULL audio frame). Struct layouts come from the vendored SDK headers,
   pinned by a test.
 - **The receiver is created BY NAME, audio-only.** It runs with a private, empty

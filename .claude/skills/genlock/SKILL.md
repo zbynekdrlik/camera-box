@@ -862,7 +862,7 @@ field → p_metadata dropped at ingest; the output re-creates a fresh NDI frame 
 A per-frame emit-stamp in p_metadata is structurally dropped twice across one OBS hop.
 
 **The fix (B′):** patch DistroAV fork to stamp the real DanteSync wall-clock boundary
-instead of `synthesize` — mirror what camera-box already does in `src/ndi.rs:792-805`.
+instead of `synthesize` — mirror what camera-box already does in `vstack:av/ndi/src/ndi.rs:1025-1032`.
 The genlock wall-clock infra exists in the OBS fork. ~10-line helper + change :372 and :423.
 Tracked: #76.
 

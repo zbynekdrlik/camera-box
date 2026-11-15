@@ -22,6 +22,8 @@ import subprocess
 import sys
 
 import pytest
+
+import vstack_src
 # issue 1474: the stream box is the Linux stream-snv on the real fleet and the Windows planner
 # refuses it by class; the Windows program is pinned on a fleet whose stream box is Windows.
 WIN_STREAM_FLEET = ("strih-snv|10.77.9.202|linux-genlock|always\n"
@@ -255,7 +257,7 @@ def test_the_ndi_portmap_baseline_names_strih_snv():
 
 
 def test_the_preview_source_default_is_strih_snv():
-    src = (REPO / "src" / "preview_source.rs").read_text()
+    src = vstack_src.read("av/ndi/src/preview_source.rs")  # the pinned vstack tag (issue 1487)
     assert 'pub const DEFAULT_PREVIEW_SOURCE: &str = "STRIH-SNV (interkom)";' in src
 
 
