@@ -206,7 +206,7 @@ def test_the_version_gate_still_pins_alex_nb_and_never_the_nodes_dsync_owns(tmp_
     env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=_HOME, DANTESYNC_FLEET_CRED_FILE=str(tmp_path / "none.env"),
                DANTESYNC_VERSION_GATE_SSH_PASS="pw", DANTESYNC_TRAY_EXPECTED_SHA="a" * 64,
                DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FLEET_SCAN_CMD="/bin/true")
-    for n in ("RESOLUME_SNV", "MBC", "FOHABL", "RESOLUME_PP", "ALEX_NB"):
+    for n in ("RESOLUME_SNV", "RESOLUME_PP", "ALEX_NB"):
         env[f"DANTESYNC_TRAY_SHA_{n}"] = "a" * 64
     r = subprocess.run(["bash", str(_GATE), "--pin", _PIN, "--fleet-file", str(fleet), "--fleet"],
                        capture_output=True, text=True, env=env)

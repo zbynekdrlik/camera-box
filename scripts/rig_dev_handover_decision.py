@@ -389,8 +389,6 @@ class Item(object):
         # relay SHADING-DEAD and its old relay RELAY-STALE). `forgot_token_msgs` names the owner's
         # fix per forgot TOKEN seen (joined in first-seen order), falling back to `forgot_msg`.
         self.forgot_token_msgs = dict(forgot_token_msgs or {})
-        # issue 1487: report-only notes read from the captures (text -> [Slovak note]); they ride on
-        # the item's line and the summary, never on its status.
 
     def _status_for_capture(self, text, rc, kind=None):
         """Status contribution of ONE captured (text, rc) pair, per this item's (or the capture's)
@@ -653,9 +651,7 @@ def build_checklist(entries):
     unknown = []
     supervisor = []  # #1319: timer names the supervisor must (re-)enable; owner is not blamed
     supervisor_other = []  # issue 1371: a non-watchdog supervisor problem (the item label)
-    notes = []  # issue 1487: report-only notes, shown on the summary whatever the verdict
     for e in entries:
-        notes.extend(e.get("notes") or [])
         lines.append("%s %s: %s" % (GLYPH[e["status"]], e["label"], e["message"]))
         if e["status"] == FORGOT:
             forgot.append(e["label"])
@@ -691,8 +687,6 @@ def build_checklist(entries):
     else:
         summary = "✅ všetko je v development stave, nič si nezabudol"
         exit_code = 0
-    if notes:
-        summary += " (pozor: " + "; ".join(notes) + ")"
     return lines, summary, exit_code
 
 
