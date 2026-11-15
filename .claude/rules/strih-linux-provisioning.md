@@ -830,7 +830,7 @@ fresh box reaches a green baseline like imag-nb from a single `setup-strih.sh` r
 
 1. **dantesync installed as a SERVICE (step 2).** step 2 used to only VALIDATE the client args, so
    the box had NO timesync. It now writes `/etc/systemd/system/dsync.service` via the pure
-   `strih_dantesync_unit_text` (the EXACT cambox shape: `Type=simple`, `Restart=always`,
+   `strih_dantesync_unit_text` (the cambox shape, but `Type=notify` since issue 1483, `obs-box-baseline.md`; `Restart=always`,
    `RestartSec=5`, `ExecStart=/usr/local/bin/dsync --ntp-server strih.lan`,
    `WantedBy=multi-user.target`), `daemon-reload`, clears a stale `/var/run/dsync.lock`, enables
    and (if the binary is present) restarts it. **Issue 1372 changed this:** the write, the reload, the

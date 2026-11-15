@@ -766,6 +766,7 @@ dm=/usr/lib/systemd/system/lightdm.service
 dm_lightdm=/usr/lib/systemd/system/lightdm.service
 autologin=1
 gpu_wait=1
+dsync_ready=1
 x_core=0
 gdm3=deinstall ok config-files
 gnome_shell=
@@ -999,6 +1000,9 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         // issue 1454: lightdm waits for every display GPU, and a boot whose Xorg dumped core fell
         // back to the login screen.
         ("kiosk", "gpu_wait=1", "gpu_wait=0"),
+        // issue 1483: lightdm is ordered after dsync, so OBS never starts on a wall dsync will step.
+        ("kiosk", "dsync_ready=1", "dsync_ready=0"),
+        ("kiosk", "dsync_ready=1", "dsync_ready="),
         ("kiosk", "x_core=0", "x_core=1"),
         ("kiosk", "x_core=0", "x_core="),
         (

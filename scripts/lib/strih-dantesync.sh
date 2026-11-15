@@ -73,7 +73,7 @@ strih_dantesync_dropins_present() {
 }
 
 # strih_dantesync_exec_start UNIT_TEXT -> the value of the unit's LAST `ExecStart=` line (systemd's
-# own reading for a Type=simple unit; an empty `ExecStart=` resets). Pure, no pipe. The value is taken
+# own reading for a simple/notify service unit; an empty `ExecStart=` resets). Pure, no pipe. The value is taken
 # verbatim: systemd strips quotes before exec, so a quoted argument would never equal the running
 # command line -- strih_dantesync_unit_text never emits one (the upstream host fact is quote-free).
 strih_dantesync_exec_start() {
@@ -160,6 +160,44 @@ strih_dantesync_unit_verdict() {
   printf 'ok'
 }
 
+# --- issue 1483: Type=notify needs a dsync that sends READY ----------------------------------------
+# dsync >= 1.30 sends READY=1 once the boot date is placed (bounded at 30 s). An older dsync sends
+# none: under Type=notify systemd kills it at every TimeoutStartSec (Restart=always = a flapping clock,
+# on the fleet date master) and holds lightdm that long each boot.
+STRIH_DANTESYNC_NOTIFY_FIRST_VERSION="1.30.0"
+
+# strih_dantesync_binary_version BIN -> the X.Y.Z the binary reports for `--version` (bounded 10 s), or
+# nothing and rc 1 when it reports none.
+strih_dantesync_binary_version() {
+  local out v
+  out="$(timeout 10 "${1:?binary required}" --version 2>/dev/null || true)"
+  v="$(printf '%s\n' "$out" | grep -oE '[0123456789]+\.[0123456789]+\.[0123456789]+' | tail -n 1 || true)"
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+
+# strih_dantesync_notify_binary_ok UNIT_TEXT BIN -> rc 0 when the unit is not Type=notify, no binary is
+# installed yet (setup's pinned install comes first), or the binary reports >= 1.30.0; an unreadable
+# version is a named WARN, never guessed (a real dsync always answers --version). rc 1 + one stderr
+# line naming the version and the fix when it is older.
+strih_dantesync_notify_binary_ok() {
+  local text="${1-}" bin="${2-}" v rc=0
+  grep -qx 'Type=notify' <<<"$text" || return 0
+  [ -x "$bin" ] || return 0
+  if ! v="$(strih_dantesync_binary_version "$bin")"; then
+    warn "  could not read the dsync version of ${bin} -- the Type=notify unit needs >= ${STRIH_DANTESYNC_NOTIFY_FIRST_VERSION} (READY after the boot date)"
+    return 0
+  fi
+  declare -F dantesync_install_version_ge >/dev/null || {
+    echo "strih_dantesync_install: dantesync_install_version_ge is not loaded (scripts/lib/dantesync-install.sh) -- nothing touched" >&2
+    return 1
+  }
+  dantesync_install_version_ge "$v" "$STRIH_DANTESYNC_NOTIFY_FIRST_VERSION" || rc=$?
+  [ "$rc" = 0 ] && return 0
+  echo "strih_dantesync_install: ${bin} reports dsync ${v}, below ${STRIH_DANTESYNC_NOTIFY_FIRST_VERSION}: it never sends READY, so the Type=notify unit (issue 1483) would flap it -- roll the box to the pin with scripts/dantesync-fleet-upgrade.sh first; nothing touched" >&2
+  return 1
+}
+
 strih_dantesync_install() {
   local unit_text="${1-}" role="${2-}"
   local unit="${STRIH_DANTESYNC_UNIT:-/etc/systemd/system/dsync.service}"
@@ -179,6 +217,10 @@ strih_dantesync_install() {
     warn "  dsync.service is masked by an operator (${unit} -> /dev/null) -- nothing touched"
     return 0
   fi
+
+  # issue 1483: a Type=notify unit only over a dsync that sends READY (>= 1.30); anything older is
+  # refused here, before anything is read or written (setup keeps an existing binary whatever its version).
+  strih_dantesync_notify_binary_ok "$unit_text" "$bin" || return 1
 
   # --- read everything first ---------------------------------------------------------------------
   need_reload="$(systemctl show -p NeedDaemonReload --value dsync 2>/dev/null || true)"

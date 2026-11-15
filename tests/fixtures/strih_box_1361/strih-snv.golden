@@ -59,7 +59,11 @@ After=network.target
 Wants=network.target
 
 [Service]
-Type=simple
+# issue 1483: dsync >= 1.30 sends READY=1 only once the boot date is placed (bounded at 30 s), so
+# lightdm, ordered After=dsync.service, starts the operator session and OBS on a placed wall.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=120
 ExecStart=/usr/local/bin/dsync --interface enp7s0
 Restart=always
 RestartSec=5
