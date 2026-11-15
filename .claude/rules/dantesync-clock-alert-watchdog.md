@@ -62,16 +62,19 @@ production-critical watchdog class (umbrella **#1308**).
   cameras (strih-snv.env STRIH_CAMERAS) and the Poprad cameras ride the REACH arm (below); before it, every
   camera camera_resolve knows (incl. ones
   retired from `CAMERA_ACTIVE_SET`) + the obs-fleet boxes (a `retired` one drops out) + **dev1**
-  (the `local` node, #1313) + the audio-VLAN PCs **mbc + fohabl** (the `fixed` arm,
-  `DANTE_CLOCK_FIXED_NODES`; box-up = ssh :22, no ssh-banner mgmt axis). resolume is traveling →
+  (the `local` node, #1313) + every always-home non-camera row (the `fixed` arm,
+  `DANTE_CLOCK_FIXED_NODES`; box-up = ssh :22, no ssh-banner mgmt axis; it held the audio-VLAN PCs
+  mbc + fohabl until they went to dsync on 15.11.2026, issue 1487, and is empty by default now). resolume is traveling →
   paged only while `obs_fleet_is_home`. An OFF box → UNREACHABLE → SKIP (defers to #1001), never a
   page. Roster lines are `NAME|IP|HOMEGATE[|ROLE]`; an **audio** node is graded against the audio
   grandmaster (`DANTESYNC_AUDIO_GM_HOST`, 10.77.7.104 since 25.9.2026; earlier 10.77.7.106) with an audio remedy text, every other node
   against video-clock.lan. A 3-field `DANTE_CLOCK_NODES` override still parses (role = video).
   **Issue 1487 (12.11.2026):** every default roster drops the nodes dsync grades itself
-  (`DSYNC_GRADED_NODES` = alex-nb resolume-pp, through `dantesync_fleet_graded_here`; an explicit
-  `DANTE_CLOCK_*_NODES` override is kept as given), and iem-snv + companion-snv are no fleet rows any
-  more (`dantesync-fleet.md`, "The nodes dsync owns"). FIXED is `mbc fohabl`.
+  (`DSYNC_GRADED_NODES` = alex-nb, through `dantesync_fleet_graded_here`; an explicit
+  `DANTE_CLOCK_*_NODES` override is kept as given), and iem-snv + companion-snv (and since 15.11.2026
+  resolume-pp, mbc and fohabl) are no fleet rows any more (`dantesync-fleet.md`, "The nodes dsync
+  owns"). FIXED is empty; the only audio node left is alex-nb, which dsync grades. The audio
+  grandmaster grading stays for it (an explicit `DSYNC_GRADED_NODES=""` or roster override).
   **Issue 1412:** the Poprad boxes (strih-pp, stream-pp; resolume-pp until issue 1487) are the `reach` arm
   (`DANTE_CLOCK_REACH_NODES`): skipped with an `away (unreachable` line while ssh :22 does not
   answer (no fetch, no page), otherwise graded like a fixed node against their VENUE grandmaster
@@ -98,7 +101,7 @@ production-critical watchdog class (umbrella **#1308**).
     uses `dante-clock-nohttp-dev1-<bucket>`); version drift vs `DANTESYNC_VERSION_PIN` is REPORTED in
     the card, never a page. Recovery stays a machine-channel log line.
   - **Every fleet roll AND every config patch (`gm_allowlist` / `phase_slew`) MUST include dev1** —
-    `dantesync-fleet-upgrade.sh --fleet` (issue 1372: the whole declared fleet incl. dev1, mbc, fohabl), "fleet N/N" counts dev1 (the `.claude/skills/ops`
+    `dantesync-fleet-upgrade.sh --fleet` (issue 1372: the whole declared fleet incl. dev1), "fleet N/N" counts dev1 (the `.claude/skills/ops`
     DanteSync rollout checklist). This watchdog is the between-rolls backstop, not a substitute for
     including dev1 in the roll itself.
   - **Cross-consumer coupling — the #1312 "development" handover check reads this watchdog's

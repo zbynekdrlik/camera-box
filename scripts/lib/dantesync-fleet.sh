@@ -14,7 +14,8 @@
 # gm_allowlist; fohabl without phase_slew), and the owner found it by hand again. Owner (verbatim,
 # 25.9.2026): "chcem aby si prevzal ... zodpovednost za vsetky stroje kde bezi dantesync ... teda aj
 # za mbc a ablfoh". This is the camera-set.sh / obs-fleet.sh analogue for the dantesync fleet:
-# adding a node is one row here, and every consumer picks it up.
+# adding a node is one row here, and every consumer picks it up. (Since 15.11.2026, issue 1487, mbc
+# and fohabl are dsync's and no rows here any more.)
 #
 # THE NODE SET (dantesync_fleet_rows):
 #   * the camboxes -- the cameras each VENUE has (issue 1413): every camera camera_resolve
@@ -32,7 +33,7 @@
 #     (dantesync_fleet_spec / _field / _names) read the rows with `2>/dev/null || true`, so there it is
 #     simply absent -- CI pins the committed fact files clean (test_every_camera_row_follows_its_venue).
 #   * the DANTESYNC_FLEET table below: dev1, the OBS boxes (addresses from obs-fleet.sh, never a
-#     second literal), and the audio-VLAN PCs.
+#     second literal), the PP boxes and alex-nb on the audio VLAN.
 #   lv1 (10.77.7.100) is deliberately ABSENT: the owner ruled it an operational PC that is on the
 #   network only temporarily (ROZHODNUTÉ on issue 1372, 25.9.2026: "lv1 je pc ktory je operativne na
 #   nasej sieti. zatial vynechaj").
@@ -55,7 +56,8 @@
 #   * user     -- the ssh login; `-` = the consumer's own default login.
 #   * credvar  -- the NAME of the env var holding this node's ssh password. Empty = the consumer's
 #                 default fleet password. The VALUE is never written in a committed file: it comes
-#                 from the environment or from the dev1-local credential file (below).
+#                 from the environment or from the dev1-local credential file (below). No row names
+#                 one since fohabl left (issue 1487); the field and its readers stay for the next.
 #
 # Python twin: scripts/dantesync_fleet.py reads the SAME table and walks the SAME camera arms;
 # tests/python/test_dantesync_fleet_1372.py pins the two to identical output.
@@ -79,17 +81,17 @@ fi
 #   strih-snv  -- the production strih and the fleet NTP master (ntp_server_mode on, upstream NTP).
 #   stream / resolume / imag -- the other OBS boxes (imag is `retired` in obs-fleet.sh today, so it
 #                drops out automatically and returns with a one-word flip there).
-#   mbc       -- the Master Broadcast Console (Ableton, the measurement-audio chain), audio VLAN.
-#   fohabl    -- the FOH Ableton PC that hosts the AIC128-D card, audio VLAN, ssh user `master` with
-#                its own password (DANTESYNC_FOHABL_SSH_PASS).
+#   mbc / fohabl -- issue 1487: no longer rows here (since 15.11.2026). The audio-VLAN PCs (the
+#                Master Broadcast Console and the FOH Ableton PC) are dsync's: it grades and upgrades
+#                both itself; DSYNC_FLEET_HANDED_OVER below keeps the outside-fleet scan from flagging
+#                them. They were rows from 25.9.2026 (issue 1372) to 15.11.2026.
 #   iem-snv / companion-snv -- issue 1487: no longer rows here. dsync (the dstack project) grades and
 #                upgrades both itself; DSYNC_FLEET_HANDED_OVER below keeps the outside-fleet scan from
 #                flagging them. (Owner 13.10.2026 had found them outside every roll at 1.8.28 / 1.8.20.)
-#   strih-pp / stream-pp / resolume-pp -- issue 1412: the Poprad (PP) venue. strih-pp is the PP NTP
-#                master (scripts/strih-boxes/strih-pp.env: STRIH_DANTESYNC_ROLE=server), stream-pp and
-#                resolume-pp (Windows; its obs-fleet row, issue 1426, is only in the build-parity facet) follow it; all three lock to the PP PTP
-#                grandmaster (role `*-pp`). dev1 reaches the PP LAN as 10.76.8.x through the
-#                companion-pp subnet router, so the rows dial NAMES (strih-pp/stream-pp through their
+#   strih-pp / stream-pp -- issue 1412: the Poprad (PP) venue. strih-pp is the PP NTP
+#                master (scripts/strih-boxes/strih-pp.env: STRIH_DANTESYNC_ROLE=server), stream-pp
+#                follows it; both lock to the PP PTP grandmaster (role `*-pp`). dev1 reaches the PP
+#                LAN as 10.76.8.x through the companion-pp subnet router, so the rows dial NAMES (strih-pp/stream-pp through their
 #                obs-fleet rows), and their homegate is `reach`: an unreachable PP box is skipped,
 #                never a page or a failed gate. Owner (11.10.2026): "a tiez tam nie je dantesync tam
 #                nie je updatnuty cize potrebujes zaradit tento pc do updatovania".
@@ -97,6 +99,9 @@ fi
 #                locked to the audio grandmaster. A notebook comes and goes, so `reach`: read only
 #                while its ssh answers, never a page while it is away. Login alexnb with the fleet
 #                default password. Owner (23.10.2026): "zaradil ho medzi udrziavanu flotilu dantesyncov".
+#   resolume-pp -- issue 1487: no longer a row (since 15.11.2026). dsync grades AND upgrades it
+#                itself (over MCP); DSYNC_FLEET_HANDED_OVER below keeps the outside-fleet scan from
+#                flagging it. Its obs-fleet row (issue 1426, build-parity facet) is unrelated and stays.
 # The /24 nets dev1 scans for a dantesync node OUTSIDE this table (scripts/dantesync_fleet_scan.py,
 # dantesync-version-gate.sh --fleet; owner 13.10.2026: the IEM PC sat outside it unseen). dev1's view:
 # the SNV rig LAN + the audio VLAN, the PP LAN as 10.76.x through companion-pp.
@@ -106,29 +111,24 @@ strih-snv|obs:strih-snv|linux|ntp-master|obsfleet|-|
 stream-snv|obs:stream-snv|linux|video|obsfleet|-|
 resolume-snv|obs:resolume-snv|windows|video|obsfleet|-|
 imag|obs:imag|linux|video|obsfleet|-|
-mbc|10.77.7.232|windows|audio|always|-|
-fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS
 strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|
 stream-pp|obs:stream-pp|linux|video-pp|reach|-|
-resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|
 alex-nb|10.77.7.109|windows|audio|reach|alexnb|}"
-
-# issue 1487: the nodes dsync upgrades itself (its own release flow since the handover to the dsync
-# project). They stay rows of the table, so the clock watchdog and the config drift check keep
-# grading them on :8898, but the fleet upgrader never rolls them and the version gate never pins them.
-# alex-nb left it on 12.11.2026: dsync cannot log in there, so camera-box rolls it again.
-DSYNC_SELF_UPGRADED_NODES="${DSYNC_SELF_UPGRADED_NODES-mbc fohabl}"
 
 # issue 1487: the nodes dsync GRADES itself (dsync#179: a dev1 user timer reads their :8898 every 60 s
 # and pages through airuleset notify). camera-box keeps their UPGRADE path (the fleet upgrader and the
 # version gate still read them) until dsync can log in there (airuleset#1311), but drops them from every
 # GRADING roster here -- the clock watchdog's defaults (and through it the handover clock item) and the
 # config drift check -- so one node never has two graders paging on it.
-DSYNC_GRADED_NODES="${DSYNC_GRADED_NODES-alex-nb resolume-pp}"
+DSYNC_GRADED_NODES="${DSYNC_GRADED_NODES-alex-nb}"
 
 # issue 1487: hosts that run dsync but are dsync's own (graded + upgraded by it, no row here). The
 # version gate's outside-fleet scan names them as handed over, never as an OUTSIDE-FLEET alarm.
-DSYNC_FLEET_HANDED_OVER="${DSYNC_FLEET_HANDED_OVER-iem-snv.lan companion-snv.lan}"
+# resolume-pp joined on 15.11.2026 (dsync upgrades it over MCP; dsync is the only writer there), and
+# mbc (10.77.7.232) + fohabl (10.77.7.30) the same day, by the address their rows dialled.
+# (The former DSYNC_SELF_UPGRADED_NODES middle state -- dsync upgrades, camera-box grades -- is gone:
+# its last nodes, mbc and fohabl, went to dsync completely.)
+DSYNC_FLEET_HANDED_OVER="${DSYNC_FLEET_HANDED_OVER-iem-snv.lan companion-snv.lan resolume-pp.lan 10.77.7.232 10.77.7.30}"
 
 # The audio-VLAN PTP grandmaster: an Audinate device, locked to the same clock as the video
 # grandmaster video-clock.lan (#1367 comment 5832526338). Since 25.9.2026 ~21:07 the leader is
@@ -158,8 +158,8 @@ DANTESYNC_FLEET_CRED_FILE="${DANTESYNC_FLEET_CRED_FILE:-$HOME/.config/camera-box
 DANTESYNC_FLEET_CONFIG_LINUX="/etc/dsync/config.json"
 # shellcheck disable=SC2034  # consumed cross-file by scripts/dantesync-config-drift.sh
 DANTESYNC_FLEET_CONFIG_WINDOWS='C:\ProgramData\dsync\config.json'
-# issue 1487: a node dsync upgrades itself keeps the pre-1.25 state dir IN PLACE until someone renames
-# it, so the drift check falls back to these.
+# issue 1487: a node not yet rolled to dsync 1.25+ keeps the pre-1.25 state dir, so the drift check
+# falls back to these.
 # shellcheck disable=SC2034  # consumed cross-file by scripts/dantesync-config-drift.sh
 DANTESYNC_FLEET_CONFIG_LINUX_LEGACY="/etc/dantesync/config.json"
 # shellcheck disable=SC2034  # consumed cross-file by scripts/dantesync-config-drift.sh
@@ -390,8 +390,8 @@ dantesync_fleet_away_venues() {
   printf '%s' "$out"
 }
 
-# dantesync_fleet_fixed_names -> the always-home NON-camera nodes (the audio-VLAN PCs today): every
-# `homegate=always` row that is not a camera.
+# dantesync_fleet_fixed_names -> the always-home NON-camera nodes: every `homegate=always` row that is
+# not a camera. None today: its nodes, the audio-VLAN PCs mbc + fohabl, went to dsync (issue 1487).
 dantesync_fleet_fixed_names() {
   local out="" name cams
   cams=" $({ _dantesync_fleet_camera_rows 2>/dev/null || true; } | cut -d'|' -f1 | tr '\n' ' ') "
@@ -437,11 +437,6 @@ dantesync_fleet_present() {
       ;;
   esac
   return 0
-}
-
-# dantesync_fleet_self_upgraded NAME -> 0 iff dsync upgrades NAME itself (issue 1487).
-dantesync_fleet_self_upgraded() {
-  case " $DSYNC_SELF_UPGRADED_NODES " in *" ${1:-} "*) [ -n "${1:-}" ] ;; *) return 1 ;; esac
 }
 
 # dantesync_fleet_dsync_graded NAME -> 0 iff dsync grades NAME itself (issue 1487, DSYNC_GRADED_NODES).

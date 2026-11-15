@@ -13,7 +13,7 @@ set -euo pipefail
 # provisions all three.
 #
 # It DERIVES the env value from the box's OWN appliance capture-fps config (the camera-box.service.d
-# drop-ins), mirroring src/capture.rs requested_capture_denominator — ONE source of truth, so the
+# drop-ins), mirroring vstack:av/capture/src/capture.rs requested_capture_denominator — ONE source of truth, so the
 # reported rate matches what the box actually grabs at (no hard-coded 60 duplicate).
 #
 # Idempotent (re-run just re-verifies / re-writes), fail-loud (a gap exits non-zero with the exact

@@ -14,7 +14,7 @@
 # chroma-muted picture. Live evidence (#744, 2026-07-13): both Elgato boxes (CAM1 10.77.9.61, CAM6
 # 10.77.9.66) sitting at contrast=50/saturation=50 on their 0-255 range — resetting to 128/128
 # instantly fixed the dark multiview tiles (mean luma 29/30 -> 101/100). This is EXACTLY the #456
-# lesson already fixed in src/capture.rs (`ControlTarget::RangeScaled`: `reference_pct=50` resolves
+# lesson already fixed in vstack:av/capture/src/capture.rs (`ControlTarget::RangeScaled`: `reference_pct=50` resolves
 # to the device's OWN queried `default_value`, never a literal calibrated for a different card,
 # see `scale_to_range`) — the bash harness never got the same fix.
 #

@@ -255,9 +255,10 @@ CAM_LINUX_SPEC="$(build_cam_linux_spec "$CAMSET_LIB")"
 # --- item 12: dantesync version pin (read-only gate; EVERY dantesync node) -----------------------
 # issue 1372: the node set is the ONE declared dantesync fleet (scripts/lib/dantesync-fleet.sh, via the
 # gate's --fleet): every camera, dev1, the OBS boxes (strih-snv on the --linux arm by its fleet row --
-# the issue 1317 part 4 routing now lives in that row) and the audio-VLAN PCs mbc + fohabl. A retired
-# obs-fleet box (imag) drops out; an away traveling box (resolume) is skipped by the gate. fohabl's own
-# ssh credential is read by NAME from the dev1-local credential file (UNKNOWN when it is missing).
+# the issue 1317 part 4 routing now lives in that row), the PP boxes and alex-nb. A retired obs-fleet box
+# (imag) drops out; an away traveling box (resolume) is skipped by the gate. The audio-VLAN PCs mbc +
+# fohabl are dsync's since 15.11.2026 (issue 1487): no rows, never read here. A row's own ssh credential
+# (credvar) is read by NAME from the dev1-local credential file (UNKNOWN when it is missing).
 run_probe dantesync bash "$DANTESYNC_PROBE" --fleet
 
 # --- item 13: camera-box uniform build (read-only gate; active cam fleet, relative peer parity) --

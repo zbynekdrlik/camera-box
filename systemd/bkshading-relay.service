@@ -46,7 +46,7 @@ TasksMax=512
 
 # issue 809: CAMERA_BOX_CAPTURE_FPS is provisioned into this file by
 # scripts/bkshading-provision-relay.sh, DERIVED from the box's own appliance capture-fps config
-# (the SAME value src/capture.rs requested_capture_denominator uses -- ONE source of truth). The
+# (the SAME value vstack:av/capture/src/capture.rs requested_capture_denominator uses -- ONE source of truth). The
 # leading `-` makes the file OPTIONAL: if it is absent (relay not yet provisioned, or a box with no
 # camera) the relay reads no capture fps -> the aggregation service falls back to the static
 # grab_fps config instead of writing a WRONG rate.

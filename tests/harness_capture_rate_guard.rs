@@ -43,7 +43,7 @@ fn capture_rate_defect_grep_pattern_is_the_exact_656_signal() {
 }
 
 /// The pattern must actually MATCH the real WARN line src/main.rs's capture loop emits
-/// (src/capture_rate_health.rs's message, verbatim shape).
+/// (vstack:av/capture/src/capture_rate_health.rs's message, verbatim shape).
 #[test]
 fn capture_rate_defect_grep_pattern_matches_the_real_warn_line() {
     let pattern = run_sourced("capture_rate_defect_grep_pattern")

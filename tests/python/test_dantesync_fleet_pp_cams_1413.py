@@ -27,12 +27,6 @@ import sys
 
 import pytest
 
-@pytest.fixture(autouse=True)
-def _every_node_rolled(monkeypatch):
-    """issue 1487: these tests use mbc / fohabl as their rolled nodes."""
-    monkeypatch.setenv("DSYNC_SELF_UPGRADED_NODES", "")
-
-
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _LIB = _ROOT / "scripts" / "lib" / "dantesync-fleet.sh"
 _PY = _ROOT / "scripts" / "dantesync_fleet.py"
@@ -132,7 +126,7 @@ def test_the_cam_arm_is_the_home_venue_and_the_pp_cameras_are_reach_nodes(tmp_pa
     out = dict(ln.split("=", 1) for ln in r.stdout.splitlines())
     assert out["C"].split() == SNV_CAMS
     assert out["R"].split()[:4] == PP_CAMS
-    assert out["F"] == "mbc fohabl"  # a camera is never a fixed node, whatever its venue (issue 1487: no iem/companion)
+    assert out["F"] == ""  # a camera is never a fixed node, whatever its venue (issue 1487: no iem/companion/mbc/fohabl)
 
 
 def test_a_pp_camera_locks_to_the_pp_grandmaster(tmp_path, monkeypatch):
@@ -203,7 +197,7 @@ def _stub_bin(tmp_path, versions):
 
 
 _HOSTS = (["10.77.9.6%d" % n for n in (2, 3, 5)] + ["10.76.9.6%d" % n for n in (1, 4, 6, 7)]
-          + ["10.77.9.202", "10.77.9.204", "resolume.lan", "10.77.7.232", "10.77.7.30",
+          + ["10.77.9.202", "10.77.9.204", "resolume.lan",
              "strih-pp.lan", "stream-pp.lan", "resolume-pp.lan"])
 
 
@@ -213,9 +207,8 @@ def _gate(tmp_path, versions, home):
     fleet.write_text("")
     env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=home, DANTESYNC_FLEET_CRED_FILE=str(tmp_path / "none.env"),
                DANTESYNC_VERSION_GATE_SSH_PASS="pw", DANTESYNC_TRAY_EXPECTED_SHA="a" * 64,
-               DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FOHABL_SSH_PASS="foh",
-               DANTESYNC_FLEET_SCAN_CMD="/bin/true")
-    for n in ("STREAM", "RESOLUME", "MBC", "FOHABL", "IEM_SNV", "RESOLUME_PP"):
+               DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FLEET_SCAN_CMD="/bin/true")
+    for n in ("STREAM", "RESOLUME", "IEM_SNV", "RESOLUME_PP"):
         env[f"DANTESYNC_TRAY_SHA_{n}"] = "a" * 64
     return subprocess.run(["bash", str(_GATE), "--pin", _PIN, "--fleet-file", str(fleet), "--fleet"],
                           capture_output=True, text=True, env=env)
@@ -232,7 +225,8 @@ def test_version_gate_reads_a_reachable_pp_camera_at_its_pp_address(tmp_path):
     dials = (tmp_path / "dials.log").read_text().split()
     assert "root@10.76.9.67" in dials
     assert not any(d.endswith(("@10.77.9.61", "@10.77.9.64", "@10.77.9.66", "@10.77.9.67")) for d in dials)
-    assert "GATE PASS — 10 box(es)" in r.stdout  # cam2 cam3 cam5 cam7 + dev1 + 5 SNV boxes (issue 1487: no iem/companion)
+    # cam2 cam3 cam5 cam7 + dev1 + 3 SNV OBS boxes (issue 1487: no iem/companion, no mbc/fohabl)
+    assert "GATE PASS — 8 box(es)" in r.stdout
 
 
 def test_version_gate_drifts_on_a_stale_pp_camera(tmp_path):

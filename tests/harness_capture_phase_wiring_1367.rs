@@ -13,9 +13,12 @@
 //! * every emitted stamp is recorded back to the gate (`note_emitted_stamp_100ns`) after the
 //!   timecode and before the first send;
 //! * the phase tokens ride the 5 s `#707 emit-1s` line;
-//! * `capture.rs` hands the dequeued buffer's sequence number to the callback.
+//! * `vstack:av/capture/src/capture.rs` hands the dequeued buffer's sequence number to the callback.
 
 use std::path::PathBuf;
+
+#[path = "support/vstack.rs"]
+mod vstack;
 
 fn read(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -95,7 +98,8 @@ fn the_phase_tokens_ride_the_707_bucket_line_1367() {
 
 #[test]
 fn capture_hands_the_sequence_number_to_the_callback_1367() {
-    let c = read("src/capture.rs");
+    // Issue 1487: capture.rs lives in the pinned vstack tag (av-capture).
+    let c = vstack::read("av/capture/src/capture.rs");
     let dq = unique(&c, "let seq = metadata.sequence;\n\n        // #696");
     let info = unique(&c, "            sequence: seq,\n");
     let cb = unique(&c, "callback(&buffer, info);");

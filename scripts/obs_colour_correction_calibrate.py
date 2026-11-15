@@ -26,7 +26,7 @@ never as the literal target frame.
 ## Pure functions (unit-tested, tests/python/test_obs_colour_correction_calibrate.py)
 
 - `chroma_cast_bt601`: BT.601 RGB->Cb/Cr chroma-cast metric (the SAME metric family
-  camera-box's own `mean_chroma` uses in the V4L2 YUV domain -- src/capture.rs -- just computed
+  camera-box's own `mean_chroma` uses in the V4L2 YUV domain -- vstack:av/capture/src/capture.rs -- just computed
   here in the RGB domain OBS screenshots are already in).
 - `grey_world_gains`: the damped per-channel correction gain (`damping=1.0` = full grey-world
   correction, `0.0` = no-op) -- damping is conservative BY DEFAULT since a single/few-sample

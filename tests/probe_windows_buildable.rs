@@ -106,7 +106,13 @@ fn lib_gates_the_linux_appliance_modules() {
         "ndi",
         "ndi_display",
     ] {
-        let decl = format!("pub mod {module};");
+        // Issue 1487: `capture` lives in vstack's av-capture, re-exported at its old path, and the
+        // re-export carries the same gate (the v4l crate is Linux only there too).
+        let decl = if module == "capture" {
+            "pub use av_capture::capture;".to_string()
+        } else {
+            format!("pub mod {module};")
+        };
         let pos = s
             .find(&decl)
             .unwrap_or_else(|| panic!("src/lib.rs must declare `{decl}`"));

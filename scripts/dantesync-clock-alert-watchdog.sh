@@ -46,8 +46,9 @@ set -uo pipefail
 # NODE ROSTER (issue 1372: DERIVED from the ONE declared dantesync fleet, scripts/lib/dantesync-fleet.sh):
 # every camera camera_resolve knows (incl. those retired from CAMERA_ACTIVE_SET -- still powered,
 # still running dantesync), dev1 (the local node), the OBS boxes resolved via obs-fleet.sh's
-# obs_fleet_host (issue 1317: strih-snv is the production strih since M4; imag is retired), and the
-# audio-VLAN PCs mbc + fohabl (the `fixed` nodes). resolume is a TRAVELING CG box: paged only while
+# obs_fleet_host (issue 1317: strih-snv is the production strih since M4; imag is retired), and any
+# always-home non-camera node (the `fixed` arm; none since the audio-VLAN PCs mbc + fohabl went to
+# dsync, issue 1487). resolume is a TRAVELING CG box: paged only while
 # obs_fleet_is_home resolume holds (the #1296 condition); away -> skipped (never a false page against
 # a box that is simply not here). An OFF cam reads UNREACHABLE -> SKIP (deferred to the #1001
 # network-reach watchdog), never a page. Each node is graded against ITS role's grandmaster: the
@@ -108,9 +109,9 @@ DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_graded_here "$(
 # drops out there).
 DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-$(dantesync_fleet_graded_here "$(dantesync_fleet_names homegate=obsfleet)")}"
 # issue 1487: every default below drops the nodes dsync grades itself (DSYNC_GRADED_NODES in
-# dantesync-fleet.sh: alex-nb, resolume-pp) -- one grader per node; an explicit override is kept as given.
-# issue 1372: the FIXED non-camera nodes -- the audio-VLAN PCs mbc + fohabl (Windows, always home).
-# Probed like any remote node; box-up = ssh :22; graded against their role's grandmaster.
+# dantesync-fleet.sh: alex-nb) -- one grader per node; an explicit override is kept as given.
+# issue 1372: the FIXED non-camera nodes (always home). Empty by default since 15.11.2026: its nodes,
+# the audio-VLAN PCs mbc + fohabl, went to dsync (issue 1487). Probed like any remote node; box-up = ssh :22; graded against their role's grandmaster.
 DANTE_CLOCK_FIXED_NODES="${DANTE_CLOCK_FIXED_NODES-$(dantesync_fleet_graded_here "$(dantesync_fleet_fixed_names)")}"
 # issue 1412: the `reach` nodes -- the Poprad (PP) boxes, read only while their ssh port answers
 # (dantesync_fleet_present: dev1 reaches them only through the companion-pp subnet route). An
@@ -182,7 +183,7 @@ log() { printf '%s [dantesync-clock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:
 # obsfleet (obs_fleet_is_home decides -- always-true for strih-snv/stream, false for a retired box, the traveling gate for
 # resolume) | local (#1313: dev1 itself -- loopback :8898, NO ssh/TCP reach probe, box up by
 # definition so a dead :8898 is NO_DANTESYNC not SKIP) | fixed (issue 1372: an always-home
-# non-camera node -- mbc/fohabl; box-up = ssh :22, no ssh-banner management axis). ROLE (issue
+# non-camera node; box-up = ssh :22, no ssh-banner management axis). ROLE (issue
 # 1372) picks the grandmaster the node is graded against (video | audio | ntp-master; absent =
 # video). DANTE_CLOCK_NODES (space-separated NAME|IP[|HOMEGATE[|ROLE]]) overrides the whole roster.
 build_roster() {
@@ -214,7 +215,7 @@ build_roster() {
       log "roster: obs_fleet_host failed for '$n' -- skipping (check obs-fleet.sh)"
     fi
   done
-  # issue 1372: the fixed non-camera nodes (mbc, fohabl) -- address + role from the dantesync fleet.
+  # issue 1372: the fixed non-camera nodes -- address + role from the dantesync fleet.
   for n in $DANTE_CLOCK_FIXED_NODES; do
     host="$(dantesync_fleet_field "$n" addr 2>/dev/null || true)"
     if [ -n "$host" ]; then

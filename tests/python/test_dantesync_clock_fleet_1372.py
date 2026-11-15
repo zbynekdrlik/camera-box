@@ -7,10 +7,15 @@ node is graded against ITS role's grandmaster: an audio-VLAN node locks to the a
 (10.77.7.104, the Audinate device -- the same clock as video-clock.lan on the other VLAN), so a
 correctly locked mbc must read OK, never a false `wrong_gm` page against the video grandmaster.
 
+issue 1487 (15.11.2026): mbc + fohabl are dsync's completely and no fleet rows, so the FIXED arm is
+empty by default. The arm and the audio grading stay (alex-nb is an audio row, a future always-home
+PC joins the FIXED arm with one row), so these tests run them on a test-only table.
+
 Drives the REAL watchdog in --dry-run through its seams (fetch stub keyed by IP), no live rig.
 """
 import os
 import pathlib
+import re
 import stat
 import subprocess
 
@@ -19,6 +24,10 @@ _WATCHDOG = _ROOT / "scripts" / "dantesync-clock-alert-watchdog.sh"
 _NOW = 1790349506
 VIDEO_GM = "10.77.9.230"
 AUDIO_GM = "10.77.7.104"
+_LIB = _ROOT / "scripts" / "lib" / "dantesync-fleet.sh"
+_TABLE = re.search(r'DANTESYNC_FLEET="\$\{DANTESYNC_FLEET:-(.*?)\}"', _LIB.read_text(), re.S).group(1)
+# Two test-only always-home audio PCs: the shape mbc + fohabl had until issue 1487.
+_AUDIO_TABLE = _TABLE + "\naudiopc1|10.77.7.31|windows|audio|always|-|\naudiopc2|10.77.7.32|windows|audio|always|-|"
 
 
 def _status(gm, is_locked="true", mode="LOCK"):
@@ -41,7 +50,9 @@ def test_roster_defaults_come_from_the_dantesync_fleet():
     # cameras are `reach` rows, watched once through the REACH arm (test_dantesync_fleet_pp_cams_1413.py).
     assert _source_var("DANTE_CLOCK_CAM_NODES") == "cam2 cam3 cam5"
     assert _source_var("DANTE_CLOCK_OBS_NODES") == "strih-snv stream-snv resolume-snv"
-    assert _source_var("DANTE_CLOCK_FIXED_NODES") == "mbc fohabl"  # issue 1487: iem-snv + companion-snv are dsync's
+    # issue 1487: iem-snv + companion-snv, then mbc + fohabl (15.11.2026) are dsync's -- no fixed node left
+    assert _source_var("DANTE_CLOCK_FIXED_NODES") == ""
+    assert _source_var("DANTE_CLOCK_FIXED_NODES", DANTESYNC_FLEET=_AUDIO_TABLE) == "audiopc1 audiopc2"
     assert _source_var("DANTE_CLOCK_LOCAL_NODES") == "dev1"
 
 
@@ -85,20 +96,30 @@ def _run_dry(tmp_path, by_ip, **env):
     return r.stderr
 
 
+def test_the_nodes_dsync_owns_are_never_watched_here(tmp_path):
+    """issue 1487: mbc + fohabl answer, but no default roster names them -- dsync grades them."""
+    err = _run_dry(tmp_path, {"10.77.7.232": _status(VIDEO_GM), "10.77.7.30": _status(VIDEO_GM)})
+    assert "fixed=''" in err, err
+    assert "10.77.7.232" not in err and "10.77.7.30" not in err
+    assert "WOULD alert" not in err, err
+
+
 def test_audio_vlan_nodes_are_watched_and_graded_against_the_audio_grandmaster(tmp_path):
-    err = _run_dry(tmp_path, {"10.77.7.232": _status(AUDIO_GM), "10.77.7.30": _status(AUDIO_GM)})
-    assert "fixed='mbc fohabl'" in err
-    assert "mbc (10.77.7.232): reachable=1 verdict=OK" in err, err
-    assert "fohabl (10.77.7.30): reachable=1 verdict=OK" in err, err
+    err = _run_dry(tmp_path, {"10.77.7.31": _status(AUDIO_GM), "10.77.7.32": _status(AUDIO_GM)},
+                   DANTESYNC_FLEET=_AUDIO_TABLE)
+    assert "fixed='audiopc1 audiopc2'" in err
+    assert "audiopc1 (10.77.7.31): reachable=1 verdict=OK" in err, err
+    assert "audiopc2 (10.77.7.32): reachable=1 verdict=OK" in err, err
     assert "WOULD alert" not in err, err
 
 
 def test_an_audio_node_on_the_wrong_grandmaster_pages_with_the_audio_remedy(tmp_path):
-    err = _run_dry(tmp_path, {"10.77.7.232": _status(VIDEO_GM), "10.77.7.30": _status(AUDIO_GM)})
-    assert "mbc (10.77.7.232): reachable=1 verdict=NO_CLOCK reason=wrong_gm" in err, err
-    assert "WOULD alert" in err and "dante-clock-mbc-" in err
+    err = _run_dry(tmp_path, {"10.77.7.31": _status(VIDEO_GM), "10.77.7.32": _status(AUDIO_GM)},
+                   DANTESYNC_FLEET=_AUDIO_TABLE)
+    assert "audiopc1 (10.77.7.31): reachable=1 verdict=NO_CLOCK reason=wrong_gm" in err, err
+    assert "WOULD alert" in err and "dante-clock-audiopc1-" in err
     assert "audio grandmaster na audio VLAN (10.77.7.104" in err
-    assert "fohabl (10.77.7.30): reachable=1 verdict=OK" in err
+    assert "audiopc2 (10.77.7.32): reachable=1 verdict=OK" in err
 
 
 def test_a_video_node_keeps_the_video_grandmaster(tmp_path):
@@ -109,8 +130,8 @@ def test_a_video_node_keeps_the_video_grandmaster(tmp_path):
 
 
 def test_a_down_audio_node_is_skip_never_a_page(tmp_path):
-    err = _run_dry(tmp_path, {"10.77.7.30": _status(AUDIO_GM)})
-    assert "mbc (10.77.7.232): reachable=0 verdict=SKIP" in err, err
+    err = _run_dry(tmp_path, {"10.77.7.32": _status(AUDIO_GM)}, DANTESYNC_FLEET=_AUDIO_TABLE)
+    assert "audiopc1 (10.77.7.31): reachable=0 verdict=SKIP" in err, err
     assert "WOULD alert" not in err, err
 
 

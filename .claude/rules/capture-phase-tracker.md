@@ -1,12 +1,9 @@
 ---
 paths:
-  - "src/capture_phase.rs"
-  - "src/capture_phase/**"
   - "src/capture_phase_bench.rs"
   - "src/dupe_decimation/stamp.rs"
   - "src/dupe_decimation/stamp/**"
   - "src/dupe_decimation/gate.rs"
-  - "src/genlock_stamp.rs"
   - "src/main.rs"
 ---
 
@@ -25,7 +22,7 @@ ONE missing frame per crossing.
 
 ## The pieces
 
-- **`CapturePhaseTracker`** (`src/capture_phase.rs`) fits `t = a + P * seq` over the last
+- **`CapturePhaseTracker`** (`vstack:av/capture/src/capture_phase.rs`) fits `t = a + P * seq` over the last
   `FIT_WINDOW_FRAMES` (256) frames by least squares.
   - Exact `i128` running sums, re-anchored on the oldest sample at every pop, so the same
     timestamps always give the same fit (the bench's determinism test). No floats until the result.
@@ -109,7 +106,7 @@ ONE missing frame per crossing.
     while seeding inflates the fit RMS and would widen its own bound. The O(window) check runs only
     while unlocked, every `WHITENESS_CHECK_EVERY` (16) frames after a failure. The prediction
     error at the newest frame is `2 sigma / sqrt(n)`, 1/8 of the raw jitter.
-- **`SourcePhase`** (`src/capture_phase/source_phase.rs`, issue 1482 step 2, design 6449255649):
+- **`SourcePhase`** (`vstack:av/capture/src/capture_phase/source_phase.rs`, issue 1482 step 2, design 6449255649):
   the long-horizon SOURCE phase, so a re-timing card's sawtooth never reaches the stamp.
   - Step 1 kept the lock through every card step, but the short fit (~4 s) follows each TOOTH:
     cam2's card runs +45 ppm between steps and catches up later by +1.0..+2.9 ms, ~2 ms peak to

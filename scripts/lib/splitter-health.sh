@@ -118,7 +118,7 @@ _splitter_rough_exceeds() {
 #   PURPLE_NOISE : reachable + capturing + COLOUR + rough > noise_thr (#1099). The Elgato 4K S
 #                  no-signal mode is COLOURFUL structureless static (frames flow, colour=1), the axis
 #                  the colour/grayscale label alone misses. REPORT-ONLY in the watchdog (never a
-#                  page): the calibrated threshold (mirrored from src/capture.rs NOISE_ROUGHNESS_
+#                  page): the calibrated threshold (mirrored from vstack:av/capture/src/capture.rs NOISE_ROUGHNESS_
 #                  THRESHOLD) clears the measured healthy ceiling, but the positive class is unmeasured
 #                  so the page is deferred. `rough`/`noise_thr` are OPTIONAL trailing args -- absent /
 #                  `-` / empty threshold -> pre-#1099 behaviour (colour -> OK), so a rolling fleet

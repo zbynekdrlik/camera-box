@@ -78,7 +78,7 @@ pub struct DecimationGate {
     /// fade-chaining false-positive class.
     prev_was_noisy_dupe: bool,
     /// (#1167) Pending corrupted-slot make-up deficit: how many GOOD frames a corrupted-buffer drop
-    /// (in `src/capture.rs`, before the emit gate) has removed from the stream that the gate still
+    /// (in `vstack:av/capture/src/capture.rs`, before the emit gate) has removed from the stream that the gate still
     /// owes a slot-fill for. Accrued by [`note_corrupted_frame`](Self::note_corrupted_frame),
     /// reclaimed 1:1 in [`poll`](Self::poll) by converting the next slot-skipping
     /// [`ShedAction::Retire`] / [`ShedAction::Drain`] into a copy emit (the nearest good frame), so
@@ -219,7 +219,7 @@ impl DecimationGate {
     }
 
     /// (#1167) Register that ONE captured buffer was dropped for content corruption
-    /// (`V4L2_BUF_FLAG_ERROR` / a short buffer) in `src/capture.rs::process_frame` BEFORE it could
+    /// (`V4L2_BUF_FLAG_ERROR` / a short buffer) in `vstack:av/capture/src/capture.rs::process_frame` BEFORE it could
     /// reach [`poll`](Self::poll). At an over-rate that removes a would-be-emitted GOOD frame from
     /// the stream, so its 60 fps slot would otherwise be absorbed by the over-rate shed machinery
     /// (a [`ShedAction::Retire`] / [`ShedAction::Drain`] that advances the boundary but emits
@@ -630,7 +630,7 @@ impl DecimationGate {
             queue_depth,
             sustained_over_rate,
         );
-        // (#1167) corrupted-slot make-up: a corrupted buffer dropped in `src/capture.rs` before the
+        // (#1167) corrupted-slot make-up: a corrupted buffer dropped in `vstack:av/capture/src/capture.rs` before the
         // gate removed a would-be-emitted GOOD frame from an over-rate stream, so this otherwise
         // slot-skipping over-rate shed (Retire / Drain — advance the boundary, emit nothing) would
         // leave a hole the strih genlock FIFO holds through (the cam1 align sawtooth). While a

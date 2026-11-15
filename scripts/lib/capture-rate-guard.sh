@@ -5,7 +5,7 @@
 # scripts/lib/capture-rate-guard.sh — shared "capture-delivery-rate defective" journal signal
 # (#656 prevention item 2).
 #
-# The appliance's OWN capture loop (src/capture_rate_health.rs + its src/main.rs call site)
+# The appliance's OWN capture loop (vstack:av/capture/src/capture_rate_health.rs + its src/main.rs call site)
 # already logs a WARN naming #656 once a camera's captured fps has sustained a deviation from
 # its negotiated capture rate (>1% for most grabber models; #685 widens this to >9% for
 # ShadowCast 2 specifically, since that model's own USB output clock free-runs even against its
@@ -22,7 +22,7 @@
 # Source-only: this file defines pure functions and performs no side effects on its own.
 
 # capture_rate_defect_grep_pattern -> the journalctl grep proving the appliance ITSELF already
-# detected a sustained capture-rate defect (see src/capture_rate_health.rs's WARN message,
+# detected a sustained capture-rate defect (see vstack:av/capture/src/capture_rate_health.rs's WARN message,
 # emitted verbatim from src/main.rs's capture-loop report block).
 capture_rate_defect_grep_pattern() { echo '#656 capture-delivery-rate DEFECTIVE'; }
 
@@ -129,7 +129,7 @@ capture_rate_recurrence_message() {
 #
 # capture_rate_defect_grep_pattern_hard -> the alternation for the bands that are genuine defect
 # DECLARATIONS or EVENTS, and must still abort the run (exit 1): #656 (the original jitter WARN,
-# src/capture_rate_health.rs), #971 (the CHRONIC sustained-band escalation -- the appliance's own
+# vstack:av/capture/src/capture_rate_health.rs), #971 (the CHRONIC sustained-band escalation -- the appliance's own
 # escalation policy already decided this is a defect), and #663 (the shared self-heal-RESET event
 # line, src/main.rs's SelfHealDecision::Heal arm, the SAME line self_heal_reset_grep_pattern in
 # scripts/lib/self-heal-attribution.sh keys on -- a reset having fired at all is itself proof a
