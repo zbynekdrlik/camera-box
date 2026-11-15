@@ -16,6 +16,7 @@ cam2-shading shading-release-rest.pin
 # the cam4-shading board, and the strih-pp service (every relay it drives is then on v0.2.x).
 cam6 shading-release-rest.pin
 cam7 shading-release-rest.pin
+cam4 shading-release-rest.pin
 cam4-shading shading-release-rest.pin
 strih-pp shading-release-rest.pin
 # A strih box listed here takes that pin for its bkshading SERVICE (setup-strih step 16c, verify item 31).
