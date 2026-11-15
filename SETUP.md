@@ -220,7 +220,7 @@ does not yet exist):
   **44× tighter than the 16.7 ms (60 fps) frame period** (and the worst single-node offset, cam2's
   382 µs against UTC, is itself ~44× under one frame). The cluster's wall-clock genlock boundary
   divergence is well inside one frame on every camera; the genlock clock assumption stated in
-  `vstack:av/ndi/src/ndi.rs:62-65` holds across cam1-4.
+  `vstack:av/ndi/src/ndi.rs:62-64` holds across cam1-4.
 
 The continuous guard (`scripts/clock-offset-guard.sh`, exit non-zero if any node exceeds ±2 ms)
 keeps this bound — and therefore the boundary agreement — from silently regressing.

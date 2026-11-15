@@ -16,8 +16,8 @@ colour_scale; re-exported at the old paths, the C++ parity tests stay here), and
 the cambox capture side, since v0.1.10 the NDI side. A `vstack:<path>` in this repo's prose is that path inside the pinned tag.
 
 - **v0.1.8/v0.1.9 moved the capture side** (behaviour unchanged from camera-box dev 4ee558aba):
-  - `rig_core::genlock_stamp` (portable now, `floor_boundary_100ns` is `pub` there; `src/ndi.rs`
-    imports it, no copy here) and `rig_core::send_stall`;
+  - `rig_core::genlock_stamp` (portable now, `floor_boundary_100ns` is `pub` there; `src/ndi.rs`, since
+    v0.1.10 `vstack:av/ndi/src/ndi.rs`, imports it, no copy here) and `rig_core::send_stall`;
   - the crate `av-capture` (`vstack:av/capture`): `capture` (Linux only, with the `v4l` crate),
     `capture_phase` (+ `source_phase`), `capture_rate_health`, `capture_stall`, `capture_wedge`. The
     decision modules build for Windows, so the probe build can reach them.

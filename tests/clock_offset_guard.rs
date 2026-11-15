@@ -2,7 +2,7 @@
 //!
 //! The software genlock in `vstack:av/ndi/src/ndi.rs` aligns every camera's NDI send timecode to absolute
 //! wall-clock frame boundaries, which only produces a COMMON boundary across nodes if their
-//! wall clocks are synchronized (`vstack:av/ndi/src/ndi.rs:62-65` states this assumption verbatim). The
+//! wall clocks are synchronized (`vstack:av/ndi/src/ndi.rs:62-64` states this assumption verbatim). The
 //! cluster is disciplined by DanteSync (strih = master; NTP anchor + PTP fine servo). If a
 //! node's clock silently drifts past a fraction of the 16.7 ms (60 fps) frame period, genlock
 //! degrades with NO error — exactly the failure mode #8 exists to guard against.
