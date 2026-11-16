@@ -127,7 +127,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # (the GM rate moved ~4 ppm), a 1.35.1 node on the same leg never did (dsync#182, camera-box issue 1518).
 # 2026-11-13 later: v1.35.2 -- the re-engagement log line, a replay test of the 13.11 outage + double
 # flap, and the offset_ns docs (offset_ns is the raw offset to the PTPv1 GM uptime; lock = ptp_phase_error_us).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.2}"
+# 2026-11-16: v1.35.7 -- READY at most 30 s after start even when the pinned --interface NIC is missing
+# (it keeps waiting and joins it, the missing NIC in /status clock_alarm), for the Type=notify unit of
+# camera-box issue 1483 (lightdm ordered after dsync).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.7}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
