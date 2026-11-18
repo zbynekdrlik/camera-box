@@ -46,6 +46,23 @@ def _fact(box, key):
     raise KeyError(key)
 
 
+JXS_KEYS = ("STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS", "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS")
+
+
+def _ndi_only_pp(tmp_path):
+    """A copy of the real fact files in which the PP pair declares no JPEG XS (every JXS fact `none`): the
+    NDI-only venue PP was until issue 1535 (18.11.2026). Returns the fact dir."""
+    d = tmp_path / "ndi-only-facts"
+    d.mkdir()
+    for f in (FACTS).glob("*.env"):
+        shutil.copy(f, d / f.name)
+    for box in ("strih-pp", "stream-pp"):
+        p = d / f"{box}.env"
+        p.write_text("\n".join(f"{ln.split('=', 1)[0]}=none" if ln.split("=", 1)[0] in JXS_KEYS else ln
+                               for ln in p.read_text().splitlines()) + "\n")
+    return d
+
+
 # --- the target, from the venue fact files ----------------------------------------------------------
 
 def test_every_camera_resolves_its_declared_target_or_none():
@@ -60,11 +77,21 @@ def test_every_camera_resolves_its_declared_target_or_none():
             assert r.stdout == want + "\n", (n, r.stdout)
 
 
-def test_the_live_ports_of_31_10_are_kept_and_pp_is_deferred():
+def test_the_live_snv_ports_of_31_10_are_kept_and_the_pp_cameras_target_strih_pp():
+    # issue 1535 (owner 18.11.2026): the PP cameras on the JPEG XS link, port 7000+N on strih-pp
+    want = {"cam2": "10.77.9.202:7002", "cam3": "10.77.9.202:7003", "cam5": "10.77.9.202:7000",
+            "cam1": "10.77.8.202:7001", "cam4": "10.77.8.202:7004", "cam6": "10.77.8.202:7006",
+            "cam7": "10.77.8.202:7007"}
+    for cam, t in want.items():
+        assert _bash('cambox_jxs_target "$1"', cam).stdout.strip() == t, cam
+
+
+def test_a_camera_its_venue_strih_does_not_declare_targets_none(tmp_path):
+    d = _ndi_only_pp(tmp_path)
     want = {"cam2": "10.77.9.202:7002", "cam3": "10.77.9.202:7003", "cam5": "10.77.9.202:7000",
             "cam1": "none", "cam4": "none", "cam6": "none", "cam7": "none"}
     for cam, t in want.items():
-        assert _bash('cambox_jxs_target "$1"', cam).stdout.strip() == t, cam
+        assert _bash('cambox_jxs_target "$1"', cam, env={"STRIH_BOXES_DIR": str(d)}).stdout.strip() == t, cam
 
 
 def test_a_camera_no_venue_lists_has_no_target():
