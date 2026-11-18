@@ -1629,6 +1629,9 @@ EOF
 # overrides of the default cambox-relay at camN.lan:8771; an sbc-relay override is written as it is. A wrong
 # RELAYS prints nothing and returns 1, never a partial config.
 # Seeded ONLY IF absent (setup-strih step 16c [ ! -f ] guard) so the operator's live edits are kept.
+# strih_bkshading_tally_url -> the strih tally service's /state on this box (issue 1417, port 9240).
+strih_bkshading_tally_url() { printf '%s' "http://127.0.0.1:9240/state"; }
+
 strih_bkshading_config_text() {
   local bind="${1:-0.0.0.0:8770}" relays cams fleet n e transport address
   if [ "$#" -ge 2 ]; then relays="$2"; else relays="$(strih_lx_bkshading_relays)" || return 1; fi
@@ -1663,6 +1666,11 @@ fps = 3.0
 jpeg_quality = 55
 capture_timeout_ms = 1000
 reconnect_backoff_ms = 2000
+
+# The strih tally service on this box (issue 1417): the panel tints the program camera red and the
+# preview green (shading v0.2.11, shading#24). Without the key the tally is off.
+[tally]
+url = "$(strih_bkshading_tally_url)"
 EOF
   for n in $cams; do
     transport="${tr[$n]:-cambox-relay}"
@@ -1684,6 +1692,21 @@ EOF
     printf 'transport = "cambox-relay"\naddress = "register:cam%s"\nvisiting = true\n' "$n"
     printf 'ndi_preview = "CAM%s (usb)"\ngrab_fps = 60\n' "$n"
   done
+}
+
+# strih_bkshading_tally_ensure FILE -> the operator config FILE gets the [tally] block of the seed once when it
+# has none (shading v0.2.11 reads the box's tally service through it; the key is additive in the shading
+# contract). A file that already has a [tally] table is the operator's and is left as it is. Appends only.
+strih_bkshading_tally_ensure() {
+  local f="${1:?strih_bkshading_tally_ensure: FILE}"
+  [ -f "$f" ] || { echo "strih_bkshading_tally_ensure: ${f} does not exist" >&2; return 1; }
+  if grep -qE '^[[:space:]]*\[tally\][[:space:]]*(#.*)?$' "$f"; then
+    echo "  ${f}: [tally] present -- left as it is"
+    return 0
+  fi
+  printf '\n# The strih tally service on this box (issue 1417, shading v0.2.11): PGM red / PVW green.\n[tally]\nurl = "%s"\n' \
+    "$(strih_bkshading_tally_url)" >>"$f" || return 1
+  echo "  ${f}: [tally] url = $(strih_bkshading_tally_url) added (shading v0.2.11 tally tint)"
 }
 
 # strih_bkshading_listener_owner reads `ss -tlnp` output on stdin and prints the process NAME that

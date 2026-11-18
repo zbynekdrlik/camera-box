@@ -911,7 +911,7 @@ if [ ! -f /etc/bkshading/bkshading.toml ]; then
     || fail "could not seed /etc/bkshading/bkshading.toml"
   echo "  seeded /etc/bkshading/bkshading.toml (the box's STRIH_CAMERAS + its STRIH_BKSHADING_RELAYS; edit for the live camera set)"
 else
-  echo "  /etc/bkshading/bkshading.toml already present -- leaving the operator's config"
+  echo "  /etc/bkshading/bkshading.toml already present -- leaving the operator's config"; strih_bkshading_tally_ensure /etc/bkshading/bkshading.toml || fail "bkshading [tally] key (above)"
 fi
 # Install the SYSTEM unit from the printer (source of truth) + ENABLE (NEVER start -- the supervisor
 # deploys the running service).
