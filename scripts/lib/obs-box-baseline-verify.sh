@@ -25,7 +25,8 @@
 # -> openbox, no GNOME), websocket (python3-websocket for the OBS seeders), brightness (the kiosk
 # panel-brightness keys),
 # autostart (the openbox autostart contract), power (thermald purged + PL1 envelope units), touchpad,
-# swap (a RAM-sized swapfile, active + in fstab, issue 1428).
+# swap (a RAM-sized swapfile, active + in fstab, issue 1428), coredump (systemd-coredump capped so a crashing OBS
+# never freezes its box, issue 1441).
 # Fail-closed: a fact the gather could not read grades FAIL ("unreadable"), never a silent pass.
 
 # (the directory is a pure parameter expansion -- no dirname/cd -- like obs-box-baseline.sh's own)
@@ -146,7 +147,8 @@ obs_box_baseline_gather_snippet() {
         obs_box_cpulist_expand obs_box_cpulist_compress obs_box_background_cpus obs_box_background_smt_shared \
         obs_box_background_slice_name obs_box_background_slice_path obs_box_background_dropin_path \
         obs_box_background_run_path obs_box_background_memory_high obs_box_background_slice_text \
-        obs_box_background_dropin_text obs_box_background_run_text
+        obs_box_background_dropin_text obs_box_background_run_text \
+        obs_box_coredump_size_max obs_box_coredump_dropin_path obs_box_coredump_dropin_text obs_box_coredump_effective
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
@@ -325,6 +327,10 @@ echo "touchpad=$(_tp=/etc/X11/xorg.conf.d/30-touchpad-tap.conf; if grep -qF 'Opt
 echo "swap_bytes=$(swapon --show=SIZE --bytes --noheadings 2>/dev/null | awk '{s += $1} END {print s + 0}')"
 echo "mem_bytes=$(awk '/^MemTotal:/{print $2 * 1024; exit}' /proc/meminfo 2>/dev/null)"
 echo "swap_fstab=$(grep -cE '^[^#[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+swap[[:space:]]' /etc/fstab 2>/dev/null)"
+# issue 1441: the coredump bound -- the drop-in byte-identical to its renderer, and what systemd will
+# really use (the cat-config merge; an unreadable merge prints nothing)
+echo "coredump_dropin=$(if cmp -s "$(obs_box_coredump_dropin_path)" <(obs_box_coredump_dropin_text); then echo 1; else echo 0; fi)"
+echo "coredump_effective=$(systemd-analyze cat-config systemd/coredump.conf 2>/dev/null | obs_box_coredump_effective)"
 echo "gather_done=1"
 GATHER_EOF
 }
@@ -358,7 +364,7 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in timezone net perf cstate nosleep boot kernel affinity rtprio background gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap; do
+        for v in timezone net perf cstate nosleep boot kernel affinity rtprio background gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap coredump; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
@@ -518,5 +524,13 @@ obs_box_baseline_verdict() {
     case "$sb$mb" in '' | *[!0-9]*) ;; *) [ "$((sb * 10))" -ge "$((mb * 9))" ] && [ "$sb" -gt 0 ] \
         && case "$(_obs_box_f swap_fstab)" in '' | 0 | *[!0-9]*) false ;; *) true ;; esac && ok=1 ;; esac
     _obs_box_item swap "$ok" "active swap=${sb:-unreadable} B, RAM=${mb:-unreadable} B, fstab swap lines=$(_obs_box_f swap_fstab) -- setup obs_box_swap (issue 1428)"
+    # coredump -- issue 1441: the bound drop-in installed AND the effective config is the bound (Storage
+    # external or none, both sizes = obs_box_coredump_size_max); an unread merge is a FAIL, never a pass
+    local cd_want
+    cd_want="$(obs_box_coredump_size_max)"
+    ok=0
+    case "$(_obs_box_f coredump_effective)" in "external,${cd_want},${cd_want}" | "none,${cd_want},${cd_want}")
+        [ "$(_obs_box_f coredump_dropin)" = 1 ] && ok=1 ;; esac
+    _obs_box_item coredump "$ok" "drop-in=$(_obs_box_f coredump_dropin) effective Storage,ProcessSizeMax,ExternalSizeMax=$(_obs_box_f coredump_effective) (want external,${cd_want},${cd_want}) -- setup obs_box_coredump_bound, or a later drop-in overrides it: systemd-analyze cat-config systemd/coredump.conf (issue 1441)"
     [ "$fails" -eq 0 ]
 }

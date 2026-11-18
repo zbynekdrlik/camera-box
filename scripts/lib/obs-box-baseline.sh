@@ -61,6 +61,8 @@ if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/
 if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-swap.sh"; else . ./obs-box-swap.sh; fi
 # shellcheck source=scripts/lib/obs-box-background.sh
 if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-background.sh"; else . ./obs-box-background.sh; fi
+# shellcheck source=scripts/lib/obs-box-coredump.sh
+if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-coredump.sh"; else . ./obs-box-coredump.sh; fi
 # obs_box_write_if_changed + _rendered (issue 1474) live in their own file (this one is at the line budget).
 # shellcheck source=scripts/lib/obs-box-write.sh
 if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-write.sh"; else . ./obs-box-write.sh; fi

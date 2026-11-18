@@ -570,7 +570,7 @@ IMAG_ISOLATED_CPUS="$OBS_BOX_ISOLATED_CPUS"
 # issue 1357: rtprio stays OFF. The #484 grant served the render-tick SCHED_FIFO pin, which now lands only
 # on isolated nohz_full cores; obs_box_cpu_affinity above keeps kernel isolation off, so the grant served
 # nothing and its FIFO leaked to the NDI threads (issue comment 5793075833). Remove a leftover grant.
-obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice imag "$DESKTOP_USER"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice
+obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice imag "$DESKTOP_USER" ; obs_box_coredump_bound || fail "issue 1441: the coredump bound could not be installed (above)"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice; issue 1441 coredump bound
 
 # =============================================================================
 step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary"

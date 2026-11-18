@@ -787,10 +787,12 @@ touchpad=1
 swap_bytes=17179865088
 mem_bytes=16000000000
 swap_fstab=1
+coredump_dropin=1
+coredump_effective=external,256M,256M
 gather_done=1
 ";
 
-const ITEMS: [&str; 21] = [
+const ITEMS: [&str; 22] = [
     "timezone",
     "net",
     "perf",
@@ -812,6 +814,7 @@ const ITEMS: [&str; 21] = [
     "power",
     "touchpad",
     "swap",
+    "coredump",
 ];
 
 fn verdict(facts: &str) -> (i32, Vec<(String, String)>) {
@@ -1025,6 +1028,25 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ("swap", "swap_bytes=17179865088", "swap_bytes=4294967296"),
         ("swap", "swap_fstab=1", "swap_fstab=0"),
         ("swap", "swap_bytes=17179865088", "swap_bytes="),
+        // issue 1441 (stream-pp 18.11.2026): systemd-coredump wrote a multi-GB OBS core and froze the
+        // box; the bound drop-in must be installed AND be what systemd really reads.
+        ("coredump", "coredump_dropin=1", "coredump_dropin=0"),
+        ("coredump", "coredump_dropin=1", "coredump_dropin="),
+        (
+            "coredump",
+            "coredump_effective=external,256M,256M",
+            "coredump_effective=external,32G,256M",
+        ),
+        (
+            "coredump",
+            "coredump_effective=external,256M,256M",
+            "coredump_effective=journal,256M,256M",
+        ),
+        (
+            "coredump",
+            "coredump_effective=external,256M,256M",
+            "coredump_effective=",
+        ),
         // issue 1387: background work off the OBS cores.
         ("background", "bg_loaded=loaded", "bg_loaded=not-found"),
         ("background", "bg_dropin=1", "bg_dropin=0"),
@@ -1619,6 +1641,10 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/obs-box-background.sh",
         // issue 1474: the compare-then-rewrite install (sourced by the system half)
         "scripts/lib/obs-box-write.sh",
+        // issue 1428: the swapfile item (sourced by the system half)
+        "scripts/lib/obs-box-swap.sh",
+        // issue 1441: the coredump bound (sourced by the system half)
+        "scripts/lib/obs-box-coredump.sh",
         "scripts/lib/strih-provision.sh",
         "scripts/lib/strih-drm-output.sh",
         // issue 1424: the X config of the fixed HDMI outputs (sourced by strih-drm-output.sh)
