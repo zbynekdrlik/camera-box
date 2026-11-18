@@ -116,9 +116,9 @@ fn stagger_sleeps_proportional_to_launch_index() {
         "source '{path}'\n\
          export CAMBOX_PARALLEL_STAGGER_MS=120\n\
          CAMBOX_PARALLEL_PIDS=()\n\
-         t0=$(date +%s%3N); cambox_parallel_stagger; t1=$(date +%s%3N); echo \"IDX0=$((t1-t0))\"\n\
+         t0=$(( ${{EPOCHREALTIME/[.,]/}} / 1000 )); cambox_parallel_stagger; t1=$(( ${{EPOCHREALTIME/[.,]/}} / 1000 )); echo \"IDX0=$((t1-t0))\"\n\
          CAMBOX_PARALLEL_PIDS=(1 2 3)\n\
-         t0=$(date +%s%3N); cambox_parallel_stagger; t1=$(date +%s%3N); echo \"IDX3=$((t1-t0))\"\n"
+         t0=$(( ${{EPOCHREALTIME/[.,]/}} / 1000 )); cambox_parallel_stagger; t1=$(( ${{EPOCHREALTIME/[.,]/}} / 1000 )); echo \"IDX3=$((t1-t0))\"\n"
     );
     let (stdout, stderr, ok) = run(&script);
     assert!(
@@ -147,7 +147,7 @@ fn stagger_disabled_when_ms_zero() {
         "source '{path}'\n\
          export CAMBOX_PARALLEL_STAGGER_MS=0\n\
          CAMBOX_PARALLEL_PIDS=(1 2 3 4 5)\n\
-         t0=$(date +%s%3N); cambox_parallel_stagger; t1=$(date +%s%3N); echo \"OFF=$((t1-t0))\"\n"
+         t0=$(( ${{EPOCHREALTIME/[.,]/}} / 1000 )); cambox_parallel_stagger; t1=$(( ${{EPOCHREALTIME/[.,]/}} / 1000 )); echo \"OFF=$((t1-t0))\"\n"
     );
     let (stdout, stderr, ok) = run(&script);
     assert!(
@@ -325,7 +325,7 @@ fn write_phase_driver(driver_path: &std::path::Path, log_path: &std::path::Path,
          PAINTER_IP=10.9.9.2\nCAMERA_NAME=cam1\n\
          CAM_PW=fake\nRUN_ID=1085001\nCLEANUP_SSH_TIMEOUT=5\nALL_CAMBOX=1\n\
          LOG={log:?}\n\
-         timeout() {{ shift; echo \"TS $(date +%s%3N) $*\" >> \"$LOG\"; sleep 0.4; return 0; }}\n\
+         timeout() {{ shift; echo \"TS $(( ${{EPOCHREALTIME/[.,]/}} / 1000 )) $*\" >> \"$LOG\"; sleep 0.4; return 0; }}\n\
          export -f timeout\n\
          sshpass() {{ :; }}\n\
          export -f sshpass\n\
