@@ -11,6 +11,7 @@ paths:
   - "tests/python/test_stream_snv_dante_1495.py"
   - "scripts/strih-boxes/stream-snv.env"
   - "tests/python/test_strih_dante_terms_1513.py"
+  - "tests/python/test_strih_dante_legless_1536.py"
 ---
 
 # strih-snv's program audio over Dante: the obs release's `dante_input` source (issue 1485)
@@ -48,7 +49,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   no leg VBAN sender (issue 1519: dstack's generic leg filter, `obs-vban-receive.md`).
 - **The file:** `~/.camera-box/dante-input.toml` of the OBS user, read ONCE at OBS start (no file = no
   device and no source kind). setup-strih step 13 writes it after the leg (`strih_dante_input_install`):
-  name `strih-obs`, iface = the leg's (`enp7s0.70`), `network_rate = 96000`, no `sample_rate`,
+  name `strih-obs`, iface = the leg's (`enp7s0.70`), or on a box with no leg (issue 1536, PP's flat network)
+  the rig NIC from `strih_lx_rig_nic` (no leg filter there, `obs-vban-receive.md`), `network_rate = 96000`, no `sample_rate`,
   never `latency_ms` (obs v0.4.27 refuses it), the named latency terms + the program TX from the box facts
   (the bullet below), the fact's arc / cmc / flows ports, never `rx_port_base` or `tx_port_base` (issue 1519,
   obs v0.4.28: unset = the slot's fixed block from the ARC port; a kept base warns), one `[[subscribe]]` per RX

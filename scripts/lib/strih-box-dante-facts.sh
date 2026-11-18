@@ -6,16 +6,15 @@
 # 1000-line budget.
 
 # _strih_box_dante_devices_ok NAME VALUE LEG SENDER -> rc 0 for `none`, or for `name=arc:cmc:flows` devices
-# (space-joined) on a box with a leg and no leg VBAN sender, every port 1024..65535, the ARC port in dstack's
-# slot range 4440-4471 and no two devices sharing one. Issue 1519 (dstack #264): a device's flow ports are the
-# fixed block of its slot (29800-31847, from the ARC port), so no RX range is declared; VBAN on a Dante leg is
-# retired (dstack's generic filter admits no VBAN). rc 1 + a named line otherwise.
+# (space-joined) with no leg VBAN sender, every port 1024..65535, the ARC port in dstack's slot range 4440-4471
+# and no two devices sharing one. Issue 1519 (dstack #264): a device's flow ports are the fixed block of its slot
+# (29800-31847, from the ARC port), so no RX range is declared; VBAN on a Dante leg is retired (dstack's generic
+# filter admits no VBAN). Issue 1536 (dstack 18.11.2026, PP's flat network): LEG may be none -- the devices then
+# run on the rig NIC and no leg filter is loaded (it would cut the LAN); LEG is not graded here (the leg's own
+# rules below the call). rc 1 + a named line otherwise.
 _strih_box_dante_devices_ok() {
-  local name="$1" v="$2" leg="$3" sender="${4:-none}" d dev ports arc cmc flows p seen=" " rc=0 dg='[0123456789]'
+  local name="$1" v="$2" sender="${4:-none}" d dev ports arc cmc flows p seen=" " rc=0 dg='[0123456789]'
   [ "$v" != none ] || return 0
-  if [ "$leg" = none ]; then
-    echo "strih-box ${name}: STRIH_DANTE_DEVICES needs a leg on the audio VLAN (STRIH_PROGRAM_VBAN_LEG is none)" >&2; return 1
-  fi
   if [ "$sender" != none ]; then
     echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER must be none on a Dante leg: dstack's generic filter admits no VBAN (issue 1519)" >&2; rc=1
   fi

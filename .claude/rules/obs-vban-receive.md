@@ -741,8 +741,17 @@ USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `
 Owner 2.11.2026: each application is its own Dante device; PP gets no Dante. Fact
 `STRIH_DANTE_DEVICES` = `none` everywhere but strih-snv + stream-snv (`name=arc:cmc:flows`, space-joined; issue
 1519 dropped the `rxfirst-rxlast` part). The loader refuses malformed ports, a port used twice, an ARC port
-outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender on a Dante box. A box with
+outside dstack's slots 4440-4471, and a leg VBAN sender on a Dante box. A box with
 `none` renders byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`.
+
+- **A Dante box WITHOUT a leg (issue 1536, dstack 18.11.2026: PP's flat 10.77.8.0/23 until its new switch
+  + Dante VLAN):** `STRIH_DANTE_DEVICES` with `STRIH_PROGRAM_VBAN_LEG=none` loads. The devices run on the rig
+  NIC (`_strih_dante_input_iface` -> `strih_lx_rig_nic`), and NOTHING of this section applies there: dstack's
+  dante-leg.nft must never load on the shared LAN NIC (it would cut the box's LAN), so
+  `strih_dante_leg_declared` is false without a leg, `strih_vban_leg_install` SKIPs and verify item 9's leg
+  grade is one NOTE. A leg filter left from an earlier leg keeps today's behaviour (not removed by the SKIP).
+  Moving to the VLAN later = only the leg facts (`vlan:<id>` + the /24 address). Tests:
+  `tests/python/test_strih_dante_legless_1536.py`.
 
 - **The address:** a real `/24` with `ipv4.route-table=70`: NetworkManager puts the connected route in table
   70, so only sockets bound to the leg's address reach it (`from <addr> lookup 70`), and main stays free of
