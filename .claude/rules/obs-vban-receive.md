@@ -757,8 +757,9 @@ outside dstack's slots 4440-4471, and a leg VBAN sender on a Dante box. A box wi
 - **PP on its new switch (issue 1536, 18.11.2026): VLAN 70 legs, SNV's shape.** strih-pp `vlan:70`
   10.77.7.202 (`enp5s0f1.70`), stream-pp 10.77.7.204 (`rig0.70`: its USB RTL8156 `enx6c1ff7618e74` is renamed
   rig0 by the issue-1502 fact `STRIH_NIC_RENAME`, a 15-character name has no room for `.70`), one `<role>-obs`
-  device each (the program from dsg, the SoundGrid<->Dante bridge), the terms 1 / 12.041666, no TX; PP's
-  intercom stays VBAN. `STRIH_DANTE_GM=10.77.7.200` ("dante-ptp" on VLAN 70); the PP switch also copies its
+  device each (the program from dsg, the SoundGrid<->Dante bridge), the terms 1 / 12.041666, no TX; strih-pp's
+  hub also carries its own device `strih-pp-intercom=4442:8802:4457` (dstack slot 2, never SNV's slot 1;
+  intercom#32, its TOML is the intercom project's), so item 16's `(intercom-dante)` rows run there. `STRIH_DANTE_GM=10.77.7.200` ("dante-ptp" on VLAN 70); the PP switch also copies its
   PTP onto the LAN untagged, so dsync stays on the rig NIC exactly like SNV. Tests:
   `tests/python/test_pp_dante_leg_1536.py`; the VBAN-shape tests run the PP boxes in their pre-1536 rollback
   shape (`vban_leg_fakes_1439.PP_PRE_1536`, `pp_pre_1536_boxes_dir`).
