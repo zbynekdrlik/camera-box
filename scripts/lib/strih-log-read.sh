@@ -60,6 +60,48 @@ strih_log_os() {
   esac
 }
 
+# strih_log_session_filter_text -> the remote text (after the newest-log selection, `$F` set) of the
+# issue-1534 whole-session genlock read: a `#newest<TAB>name<TAB>bytes` header, then the
+# `genlock-fifo audit '<input>':` and `jxs-source '<input>': fps=` lines of the WHOLE log with their
+# byte offsets (`grep -a -b`, nice 19 + ionice idle: 9-15 ms on the live 11-17 MB logs), reduced on
+# the box by awk so a multi-day session never ships its lines: per input and kind the first
+# K = 40 lines (the 60 s settle at the 5 s cadence; a JPEG XS input also its first 40 from its first
+# window with frames, a camera that connects late), every audit line whose
+# underruns/relocks changed or whose received went backwards (200 each), every lossy JPEG XS window
+# (2000), the last line, and a `#count` line (audit: total lines; jxs: total lines + lossy windows).
+# The lossy set = scripts/genlock_session_continuity.py JXS_GATED. mawk-safe (`\047` = a quote).
+strih_log_session_filter_text() {
+  local prog
+  prog="$(cat <<'AWK'
+function nm(m,   p, r) { p = index($0, m); if (!p) return ""; r = substr($0, p + length(m)); p = index(r, "\047"); return p ? substr(r, 1, p - 1) : "" }
+function fv(k,   i, s) { s = k "="; for (i = 1; i <= NF; i++) if (index($i, s) == 1) return substr($i, length(s) + 1); return "" }
+{
+  if (index($0, "genlock-fifo audit \047")) {
+    n = nm("genlock-fifo audit \047"); if (n == "") next
+    ac[n]++; key = fv("underruns") ":" fv("relocks"); r = fv("received") + 0; p = (ac[n] <= K)
+    if (!p && key != ak[n] && achg[n] < CAP) { achg[n]++; p = 1 }
+    if (!p && r < ar[n] && arst[n] < CAP) { arst[n]++; p = 1 }
+    if (p) print; ak[n] = key; ar[n] = r; al[n] = $0
+  } else if (index($0, "] jxs-source \047") && index($0, " fps=")) {
+    n = nm("] jxs-source \047"); if (n == "") next
+    jc[n]++; if (jf[n] || fv("frames") + 0 > 0) jf[n]++; p = (jc[n] <= K || (jf[n] > 0 && jf[n] <= K))
+    bad = fv("lost_slices") + fv("concealed") + fv("undecodable") + fv("dropped_unread") + fv("foreign") + fv("reopens")
+    if (bad > 0) { jb[n]++; if (!p && jbp[n] < JCAP) { jbp[n]++; p = 1 } }
+    if (p) print; jl[n] = $0
+  }
+}
+END {
+  for (n in al) { print al[n]; printf "#count\taudit\t%d\t0\t%s\n", ac[n], n }
+  for (n in jl) { print jl[n]; printf "#count\tjxs\t%d\t%d\t%s\n", jc[n], jb[n] + 0, n }
+}
+AWK
+)"
+  # shellcheck disable=SC2016  # expands on the box
+  printf '%s' '{ printf "#newest\t%s\t%s\n" "${F##*/}" "$(stat -c %s -- "$F")"; nice -n 19 ionice -c 3 grep -a -b -E "genlock-fifo audit '"'"'|\] jxs-source '"'"'[^'"'"']*'"'"': fps=" -- "$F" | nice -n 19 awk -v K=40 -v CAP=200 -v JCAP=2000 '"'"
+  printf '%s' "$prog" | sed "s/'/'\"'\"'/g"
+  printf '%s' "'"'; }'
+}
+
 # strih_log_remote_cmd <platform> <op> [arg] -> stdout: the REMOTE command string for one read, or
 # nothing (return 0) for an unknown platform/op or a non-numeric `since` mark. `tail` clamps a
 # non-numeric count to 400, `headtail` to 500 (the audit's default) -- never spliced into a remote
@@ -74,11 +116,18 @@ strih_log_remote_cmd() {
       n="$arg"
       ;;
     count) n="" ;;
+    ident | session) n="" ;;
     *) return 0 ;;
   esac
   case "$platform" in
     linux)
       local newest='F=$(ls -t ~/.config/obs-studio/logs/*.txt 2>/dev/null | head -1); [ -n "$F" ] && '
+      case "$op" in
+        # issue 1534: the newest log's name + byte size (a `stat`, never a read) and the whole-session
+        # genlock filter (strih_log_session_filter_text). Linux only: a Windows box gets no command.
+        ident) printf '%s' "${newest}"'printf "%s\t%s\n" "${F##*/}" "$(stat -c %s -- "$F")"'; return 0 ;;
+        session) printf '%s' "${newest}$(strih_log_session_filter_text)"; return 0 ;;
+      esac
       case "$op" in
         tail) printf '%s' "${newest}nice -n 19 tail -n ${n} \"\$F\"" ;;
         headtail) printf '%s' "${newest}{ nice -n 19 head -n 600 \"\$F\"; nice -n 19 tail -n ${n} \"\$F\"; }" ;;
@@ -87,6 +136,7 @@ strih_log_remote_cmd() {
       esac
       ;;
     windows)
+      case "$op" in ident | session) return 0 ;; esac
       # Verbatim from the consumers that owned them: count/since = qr-align.sh's Get-ChildItem form;
       # tail = the gc/gci form mv-reverify-escalate.sh + ndi-cadence-heal.sh used; headtail =
       # rig-health-audit.py's _windows_obs_log_tail_cmd PowerShell.
@@ -131,6 +181,15 @@ strih_log_line_count() {
 
 strih_log_since_line() {
   _strih_log_read "${1:-}" "${2:-}" "${3:-}" since "${4:-}" "${5:-${STRIH_LOG_READ_TIMEOUT:-20}}"
+}
+
+# issue 1534: the newest log's `name<TAB>bytes` (ident) and the whole-session genlock filter (session).
+strih_log_ident() {
+  _strih_log_read "${1:-}" "${2:-}" "${3:-}" ident "" "${4:-${STRIH_LOG_READ_TIMEOUT:-20}}"
+}
+
+strih_log_session() {
+  _strih_log_read "${1:-}" "${2:-}" "${3:-}" session "" "${4:-${STRIH_LOG_READ_TIMEOUT:-20}}"
 }
 
 strih_log_tail() {
