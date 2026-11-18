@@ -316,7 +316,10 @@ class Rig:
             exe = tmp_path / "bin" / "obs64"
             exe.parent.mkdir()
             shutil.copy(shutil.which("sleep"), exe)
-            self.obs = subprocess.Popen([str(exe), "600"])
+            # argv[0] stays "sleep": a multicall coreutils (uutils, the CI runner since 11.2026)
+            # picks its program by argv[0] and refuses "obs64"; the process NAME (comm) comes
+            # from the executable's file name, so Get-Process still sees obs64.
+            self.obs = subprocess.Popen(["sleep", "600"], executable=str(exe))
             # reap it the moment it dies, so a closed fake leaves no zombie behind
             self.reaper = threading.Thread(target=self.obs.wait, daemon=True)
             self.reaper.start()
