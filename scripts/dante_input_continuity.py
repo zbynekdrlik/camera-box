@@ -20,7 +20,9 @@ reported, never graded: a late packet that cost samples shows in rx_written_late
 from a release before v0.3.0 has no rx_holes and reads UNKNOWN. A status line FAILs too, and so does a status line in the window that reads clock=free or holdover=1 (the
 device left the media clock), and a `dante-input error:` line in the window. UNKNOWN fails too: no
 opening line, a counter that went backwards or a `dante-input start:` inside the window (the device
-restarted), delivered_frames that did not move (no audio reached OBS). Pure; the CLI reads a log slice.
+restarted), delivered_frames that did not move (no audio reached OBS). Owner 18.11.2026: a gated counter
+already above 0 on the opening line = a loss EARLIER in this OBS session, FAIL too (`session`). Pure; the
+CLI reads a log slice.
 
 The verdict folds into the E2E's `program_audio_continuity` block (scripts/lib/program-audio-continuity.sh),
 so the report and the gate need no second key: `--fold-into BLOCK` writes the Dante result under
@@ -123,6 +125,15 @@ def decide(lines, start_idx, end_idx, device="strih-obs"):
         res["counters"][k] = {"before": b, "after": a, "delta": a - b}
         if k in GATED and a > b:
             res["failures"].append(f"{k} +{a - b}")
+    # owner 18.11.2026: the counters are totals since the device started (0 at an OBS start), so a loss
+    # EARLIER in this OBS session shows on the opening line -- a rig that lost audio between two E2E
+    # windows is not a green rig. Counted once: a window delta is graded above, the session part here.
+    res["session"] = {}
+    for k in GATED:
+        b = _int(before.get(k))
+        if b:
+            res["session"][k] = b
+            res["failures"].append(f"{k}={b} earlier in this OBS session (the device's total since it started)")
     for k in OPTIONAL:
         ob, oa = _int(before.get(k)), _int(closing.get(k))
         if ob is not None and oa is not None and oa >= ob:
@@ -165,6 +176,8 @@ def summary_lines(res, box="strih"):
     c = res.get("counters") or {}
     if c:
         out.append("  deltas: " + " ".join(f"{k}={v['delta']}" for k, v in c.items()))
+    if res.get("session"):
+        out.append("  earlier in this OBS session: " + " ".join(f"{k}={v}" for k, v in res["session"].items()))
     ro = res.get("report_only")
     if ro:
         out.append(f"  timing (report-only): {ro.get('timing_lines', 0)} `dante-input timing:` line(s), "
