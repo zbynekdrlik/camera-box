@@ -68,15 +68,15 @@ def _expected(cams, addresses):
 
 SNV_LIVE = _expected((2, 3, 5), {n: ("cambox-relay", "cam%d.lan:8771" % n) for n in range(1, 8)}
                      | {2: ("sbc-relay", "register:cam2-shading")})
-PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)}
-                    | {1: ("sbc-relay", "register:cam1-shading")})
+# issue 1537 (18.11.2026): the Orange SBCs are not in PP (owner 15.11.2026), so cam1 is the cambox relay too.
+PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)})
 
 
 # --- the fact ---------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("box,want", [
     ("strih-snv", "2=sbc-relay@register:cam2-shading"),
-    ("strih-pp", "1=sbc-relay@register:cam1-shading 4=cambox-relay@10.77.9.64:8771 6=cambox-relay@10.77.9.66:8771 "
+    ("strih-pp", "1=cambox-relay@10.77.9.61:8771 4=cambox-relay@10.77.9.64:8771 6=cambox-relay@10.77.9.66:8771 "
                  "7=cambox-relay@10.77.9.67:8771"),
     ("stream-snv", "none"),
     ("stream-pp", "none"),
@@ -204,3 +204,14 @@ def test_the_visiting_blocks_follow_the_fact_files_not_a_literal_range_1431(boxe
     assert r.returncode == 0 and r.stdout.strip() == "1 2 3 4 5 6", r.stdout + r.stderr
     _t, cfg = _seed(boxes, "strih-snv")
     assert sorted(c["id"] for c in cfg["camera"]) == ["cam%d" % n for n in (1, 2, 3, 4, 5, 6)], cfg["camera"]
+
+
+def test_every_pp_cambox_relay_is_on_the_rest_pin_1537():
+    """issue 1537: each PP camera's box relay is listed on the REST pin (cam1 joined cam4/6/7)."""
+    rows = {}
+    for line in (REPO / "scripts" / "shading-release-boxes.txt").read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            box, pin = line.split()
+            rows[box] = pin
+    for n in (1, 4, 6, 7):
+        assert rows.get("cam%d" % n) == "shading-release-rest.pin", ("cam%d" % n, rows)
