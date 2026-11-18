@@ -271,6 +271,53 @@ def test_lossy_windows_past_the_awk_cap_still_fail(tmp_path):
     assert j["lossy_windows"] == 2100 and j["unlisted_lossy_windows"] == 100
 
 
+# review round 1: the reduced read is SPARSE (first lines, changes, the last line), so two printed
+# lines can be hours or days apart and a 12 h midnight heuristic on them mis-dates a later line
+# before the settle point -- a real loss then read PASS. The box's awk counts the days.
+OVERNIGHT = 8 * 3600.0  # an OBS started at 08:00
+
+
+@pytest.mark.parametrize("minutes,loss_s", [(1830, 13 * 3600), (1830, 22 * 3600), (1600, 25 * 3600)])
+def test_an_overnight_session_read_sparse_still_fails_a_loss(tmp_path, minutes, loss_s):
+    text = session(minutes=minutes, start=OVERNIGHT, noise=False,
+                   edits={("audit", "JXS cam3 src", loss_s): {"u": 6},
+                          ("jxs", "JXS cam3 src", loss_s): {"lost": 3, "conc": 1}})
+    res = decide(box_read(tmp_path, text))
+    assert res["verdict"] == "FAIL", res
+    i = _inp(res, "JXS cam3 src")
+    assert i["counters"]["underruns"]["delta"] == 6 and i["counters"]["underruns"]["settle"] == 0
+    assert i["jxs"]["lossy_windows"] == 1
+
+
+def test_a_healthy_overnight_session_read_sparse_passes_on_its_real_settle(tmp_path):
+    text = session(minutes=1830, start=OVERNIGHT, noise=False, edits={("audit", "JXS cam3 src", 20): {"u": 2}})
+    res = decide(box_read(tmp_path, text))
+    assert res["verdict"] == "PASS", res
+    assert _inp(res, "JXS cam3 src")["settle"].startswith(ts(OVERNIGHT + 60))
+
+
+def test_the_box_stamps_every_line_with_its_day(tmp_path):
+    out = box_read(tmp_path, session(minutes=1830, start=OVERNIGHT, noise=False))
+    rows = [l.split(":", 2)[1] for l in out.split("\n") if l and not l.startswith("#")]
+    assert set(rows) == {"D0", "D1"}, set(rows)
+
+
+def test_an_input_of_a_camera_acked_offline_is_report_only():
+    text = session(names=("JXS cam3 src", "JXS cam1 src"), edits={("audit", "JXS cam1 src", 300): {"u": 9}})
+    read = raw_read(text)
+    size = int(read.split("\n", 1)[0].split("\t")[2])
+    res = gsc.decide_box("strih", read, ["JXS cam3 src", "JXS cam1 src"], log_name=LOG, start_byte=0,
+                         stop_byte=size - 1, excluded=["JXS cam1 src"])
+    assert res["verdict"] == "PASS", res
+    cam1 = _inp(res, "JXS cam1 src")
+    assert cam1["verdict"] == "FAIL" and cam1["excluded"] is True and "report-only" in cam1["note"]
+
+
+def test_both_parsers_read_the_first_of_a_repeated_key():
+    line = audit(T0, "JXS cam3 src", 150, u=2) + " underruns=9"
+    assert gsc._fields(line)["underruns"] == 2
+
+
 # --- the real reductions of 18.11.2026 ----------------------------------------------------------
 
 def _fixture(name):

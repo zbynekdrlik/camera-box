@@ -159,6 +159,19 @@ def test_an_unreachable_box_is_unknown_and_red(tmp_path):
     assert _block(tmp_path)["boxes"]["strih"]["verdict"] == "UNKNOWN"
 
 
+def test_a_camera_acked_offline_is_graded_report_only(tmp_path):
+    r = _gate(tmp_path, strih_edits={("audit", "JXS cam3 src", 300): {"u": 2}}, PREFLIGHT_EXCLUDED_CAMS="cam3",
+              CAMERA_ACTIVE_SET="cam2 cam3 cam5")
+    assert "GATE=0" in r.stdout, r.stdout + r.stderr
+    cam3 = next(i for i in _block(tmp_path)["boxes"]["strih"]["inputs"] if i["input"] == "JXS cam3 src")
+    assert cam3["excluded"] is True and cam3["verdict"] == "FAIL"
+
+
+def test_a_bad_wait_knob_never_aborts_the_run(tmp_path):
+    r = _gate(tmp_path, GENLOCK_SESSION_CONTINUITY_WAIT_S="abc", GENLOCK_SESSION_CONTINUITY_STEP_S="x")
+    assert "GATE=0" in r.stdout, r.stdout + r.stderr
+
+
 def test_a_windows_class_box_is_unknown_before_any_contact(tmp_path):
     r = _gate(tmp_path, STREAM="10.77.9.205")
     assert "GATE=1" in r.stdout
@@ -229,7 +242,8 @@ def _with(blk):
 def test_a_fail_block_turns_a_passing_merge_red_and_names_the_input():
     text = edr.compose_summary(_with(_blk({("audit", "JXS cam3 src", 300): {"u": 3}})), META)
     assert text.startswith("❌"), text
-    assert "Strata obrazu od štartu OBS" in text and "'JXS cam3 src' underruns +3" in text
+    assert "Strata obrazu od štartu OBS" in text and "strih 'JXS cam3 src': underruns +3 po ustálení" in text
+    assert "after its start settle" not in text  # the Slovak report never carries the English lines
 
 
 def test_a_lossy_window_is_called_lost():
