@@ -82,10 +82,11 @@ def _sysfs(tmp_path, nics):
 
 def test_the_loader_takes_a_dante_device_without_a_leg(tmp_path):
     d = _legless(tmp_path)
-    r = _bash('strih_box_load strih-pp >/dev/null\nstrih_lx_dante_devices\nstrih_lx_program_vban_leg',
+    # the accessors print no trailing newline: join them explicitly
+    r = _bash('strih_box_load strih-pp >/dev/null\nprintf "%s|%s\\n" "$(strih_lx_dante_devices)" "$(strih_lx_program_vban_leg)"',
               env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split("\n")[:2] == [DEVICES, "none"]
+    assert r.stdout.strip() == DEVICES + "|none"
 
 
 def test_a_legless_dante_program_box_with_a_vban_program_is_still_refused(tmp_path):
