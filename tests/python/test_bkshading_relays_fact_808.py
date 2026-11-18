@@ -68,16 +68,18 @@ def _expected(cams, addresses):
 
 SNV_LIVE = _expected((2, 3, 5), {n: ("cambox-relay", "cam%d.lan:8771" % n) for n in range(1, 8)}
                      | {2: ("sbc-relay", "register:cam2-shading")})
-# issue 1537 (18.11.2026): the Orange SBCs are not in PP (owner 15.11.2026), so cam1 is the cambox relay too.
-PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)})
+# issue 1537 (18.11.2026 evening, the owner reversed 15.11): the Orange handhelds DO run in PP, cam1 and cam4 on
+# their boards (cam1-shading, handheld-1 = cam4-shading), cam6/cam7 on their camboxes' relays.
+PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)}
+                    | {1: ("sbc-relay", "register:cam1-shading"), 4: ("sbc-relay", "register:cam4-shading")})
 
 
 # --- the fact ---------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("box,want", [
     ("strih-snv", "2=sbc-relay@register:cam2-shading"),
-    ("strih-pp", "1=cambox-relay@10.77.9.61:8771 4=cambox-relay@10.77.9.64:8771 6=cambox-relay@10.77.9.66:8771 "
-                 "7=cambox-relay@10.77.9.67:8771"),
+    ("strih-pp", "1=sbc-relay@register:cam1-shading 4=sbc-relay@register:cam4-shading "
+                 "6=cambox-relay@10.77.9.66:8771 7=cambox-relay@10.77.9.67:8771"),
     ("stream-snv", "none"),
     ("stream-pp", "none"),
 ])

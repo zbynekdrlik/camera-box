@@ -88,10 +88,8 @@ def test_every_live_board_resolves_to_the_strih_boxes_that_name_it():
         for e in _facts(f.name).get("STRIH_BKSHADING_RELAYS", "none").split():
             if "@register:" in e:
                 boards.add(e.split("@register:", 1)[1])
-    # issue 1529: strih-pp's cam4 block moved to the cambox relay (its Orange is gone), so cam4-shading
-    # is listed by no venue any more; the two boards still in use must stay.
-    # issue 1537: strih-pp's cam1 block moved to the cambox relay too (no Orange in PP); cam2-shading stays.
-    assert {"cam2-shading"} <= boards and "cam1-shading" not in boards
+    # issue 1537 (18.11.2026 evening, the owner reversed 15.11): PP's cam1 and cam4 run on their Oranges again.
+    assert {"cam1-shading", "cam2-shading", "cam4-shading"} <= boards
     for board in sorted(boards):
         r = _bash('remote_log_board_sink_ips "$1"', board)
         assert r.returncode == 0, r.stderr
@@ -102,13 +100,9 @@ def test_each_board_gets_the_venue_that_lists_it():
     snv = _facts("strih-snv.env")["STRIH_IP"]
     pp = _facts("strih-pp.env")["STRIH_IP"]
     assert _bash('remote_log_board_sink_ips cam2-shading').stdout.split() == [snv]
-    assert pp  # issue 1537: no venue lists cam1-shading any more, refused by name like cam4-shading
-    r1 = _bash('remote_log_board_sink_ips cam1-shading')
-    assert r1.returncode == 1 and r1.stdout.split() == []
-    # issue 1529: no venue lists cam4-shading since strih-pp's cam4 block went to the cambox relay, so the
-    # resolver refuses it by name like any unlisted board (it comes back if `4=sbc-relay@register:cam4-shading` does).
-    r = _bash('remote_log_board_sink_ips cam4-shading')
-    assert r.returncode == 1 and r.stdout.split() == []
+    # issue 1537 (18.11.2026 evening): strih-pp lists cam1-shading and cam4-shading again (the PP Oranges)
+    assert _bash('remote_log_board_sink_ips cam1-shading').stdout.split() == [pp]
+    assert _bash('remote_log_board_sink_ips cam4-shading').stdout.split() == [pp]
 
 
 def test_an_unlisted_or_bad_board_name_is_refused_by_name_never_guessed():
