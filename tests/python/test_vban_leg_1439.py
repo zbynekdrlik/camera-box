@@ -555,7 +555,7 @@ def test_only_the_snv_boxes_declare_dante_devices():
     """Owner 2.11.2026: PP got no Dante then. issue 1495: stream-snv's own device stream-obs. issue 1536
     (18.11.2026, PP's new switch + dsg): the PP boxes take their program over Dante too (no intercom device)."""
     want = {"strih-snv": STRIH_DEVICES, "stream-snv": "stream-obs=4440:8800:4455",
-            "strih-pp": "strih-obs=4440:8800:4455", "stream-pp": "stream-obs=4440:8800:4455"}
+            "strih-pp": "strih-pp-intercom=4442:8802:4457 strih-obs=4440:8800:4455", "stream-pp": "stream-obs=4440:8800:4455"}   # intercom#32
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
         r = _bash('strih_box_load "$1" || exit 9\nstrih_lx_dante_devices', box, env={"STRIH_BOXES_DIR": str(BOXES)})
         assert r.returncode == 0, (box, r.stderr)

@@ -287,7 +287,7 @@ def test_the_markers_follow_the_strih_snv_fact_file():
                sources=(F.SCRIPTS / "lib" / "strih-box-facts.sh", DTRAY_LIB))
     assert r.returncode == 0 and r.stdout.split() == ["stream-obs"], r.stderr   # issue 1495
     # issue 1536: the PP boxes carry their program devices too (no PP intercom device)
-    for box, want in (("strih-pp", ["strih-obs"]), ("stream-pp", ["stream-obs"])):
+    for box, want in (("strih-pp", ["strih-pp-intercom", "strih-obs"]), ("stream-pp", ["stream-obs"])):   # + intercom#32
         r = F.bash('unset DTRAY_DANTE_DEVICES; strih_box_load %s >/dev/null || exit 9; dtray_expected_devices' % box,
                    sources=(F.SCRIPTS / "lib" / "strih-box-facts.sh", DTRAY_LIB))
         assert r.returncode == 0 and r.stdout.split() == want, (box, r.stderr)

@@ -90,7 +90,9 @@ STRIH_PP_ADDRS = ("1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft for
 
 # --- the PP facts --------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("box,addr,device", [("strih-pp", "10.77.7.202", "strih-obs=4440:8800:4455"),
+# intercom#32 (owner: PP at SNV's level): the strih-pp hub carries its own Dante device in dstack slot 2 (never
+# SNV's slot 1), strih-obs keeps slot 0; the hub's TOML / subscriptions are the intercom project's
+@pytest.mark.parametrize("box,addr,device", [("strih-pp", "10.77.7.202", "strih-pp-intercom=4442:8802:4457 strih-obs=4440:8800:4455"),
                                              ("stream-pp", "10.77.7.204", "stream-obs=4440:8800:4455")])
 def test_the_pp_fact_files_are_the_snv_shape(box, addr, device):
     f = _facts(box)
@@ -201,3 +203,18 @@ def test_the_pp_seed_manifest_takes_the_program_from_the_dante_device(box, fn, d
     m = json.loads(r.stdout)
     assert m["program_audio_dante"] == {"device": device}
     assert m["program_audio_input"] == name and "program_audio_vban" not in m
+
+
+def test_the_strih_pp_hub_device_is_graded_like_strih_snvs():
+    """The `*-intercom=` device turns on item 16's `(intercom-dante)` rows (strih-intercom-hub-unit.sh) and the
+    loader keeps every port distinct and the ARC ports in dstack's slots, exactly as on strih-snv."""
+    r = _bash('strih_box_load strih-pp >/dev/null\nstrih_lx_dante_devices\nprintf "\\n%s\\n" "$(strih_dante_input_device)"\n'
+              'strih_dante_input_ports "$(strih_lx_dante_devices)"', env={"STRIH_BOXES_DIR": str(BOXES)})
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.strip().splitlines()
+    assert lines[0] == "strih-pp-intercom=4442:8802:4457 strih-obs=4440:8800:4455" and lines[1] == "strih-obs", lines
+    snv = _facts("strih-snv")["STRIH_DANTE_DEVICES"].split()
+    pp = _facts("strih-pp")["STRIH_DANTE_DEVICES"].split()
+    # the hub's slot on PP differs from SNV's, the OBS device keeps slot 0 on both
+    assert [d for d in pp if d.startswith("strih-obs=")] == [d for d in snv if d.startswith("strih-obs=")]
+    assert {d.split("=")[1] for d in pp if "-intercom=" in d}.isdisjoint({d.split("=")[1] for d in snv if "-intercom=" in d})
