@@ -217,3 +217,36 @@ def test_every_pp_cambox_relay_is_on_the_rest_pin_1537():
             rows[box] = pin
     for n in (1, 4, 6, 7):
         assert rows.get("cam%d" % n) == "shading-release-rest.pin", ("cam%d" % n, rows)
+
+
+# shading v0.2.11 (shading#24, the PP operators): the panel tints the program camera red / the preview green
+# from the strih tally service on the same box. The key is additive in the shading CONTRACT; without it the
+# tally is OFF. Every strih box runs strih-tally.service, so every seed carries it.
+TALLY_URL = "http://127.0.0.1:9240/state"
+
+
+@pytest.mark.parametrize("box", ["strih-snv", "strih-pp"])
+def test_the_seed_points_the_panel_at_the_box_tally_service(boxes, box):
+    _text, cfg = _seed(boxes, box)
+    assert cfg["tally"] == {"url": TALLY_URL}
+
+
+def test_an_existing_config_without_the_tally_key_gets_it_once_and_keeps_the_rest(boxes, tmp_path):
+    f = tmp_path / "bkshading.toml"
+    f.write_text('bind = "0.0.0.0:8770"\n\n[[camera]]\nid = "cam4"\naddress = "register:cam4-shading"\n')
+    for _ in range(2):
+        r = _bash('strih_bkshading_tally_ensure "$1"', boxes, str(f))
+        assert r.returncode == 0, r.stderr
+    cfg = tomllib.loads(f.read_text())
+    assert cfg["tally"] == {"url": TALLY_URL}
+    assert cfg["camera"] == [{"id": "cam4", "address": "register:cam4-shading"}]
+    assert f.read_text().count("[tally]") == 1
+
+
+def test_an_operator_tally_block_is_left_as_it_is(boxes, tmp_path):
+    f = tmp_path / "bkshading.toml"
+    f.write_text('bind = "0.0.0.0:8770"\n\n[tally]\nurl = "http://10.0.0.9:9240/state"\n')
+    before = f.read_text()
+    r = _bash('strih_bkshading_tally_ensure "$1"', boxes, str(f))
+    assert r.returncode == 0, r.stderr
+    assert f.read_text() == before
