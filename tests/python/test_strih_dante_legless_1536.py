@@ -116,16 +116,16 @@ def test_the_real_fact_files_all_still_load():
 
 def test_the_dante_input_iface_of_a_legless_box_is_the_rig_nic(tmp_path):
     d = _legless(tmp_path)
-    sysfs = _sysfs(tmp_path, {"enp5s0": "r8169", "wlp3s0": "iwlwifi"})
+    sysfs = _sysfs(tmp_path, {"enp5s0f1": "ixgbe", "wlp3s0": "iwlwifi"})  # issue 1535: strih-pp is ixgbe
     r = _bash('strih_box_load strih-pp >/dev/null\n_strih_dante_input_iface',
               env={"STRIH_BOXES_DIR": str(d), "STRIH_VBAN_LEG_SYSFS": str(sysfs)})
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "enp5s0"
+    assert r.stdout.strip() == "enp5s0f1"
 
 
 def test_an_unresolvable_rig_nic_fails_by_name_never_a_guess(tmp_path):
     d = _legless(tmp_path)
-    sysfs = _sysfs(tmp_path, {"enp5s0": "r8169", "enp6s0": "r8169"})   # two r8169: MULTI
+    sysfs = _sysfs(tmp_path, {"enp5s0f0": "ixgbe", "enp5s0f1": "ixgbe"})   # the X520-2 two ports: MULTI
     r = _bash('strih_box_load strih-pp >/dev/null\n_strih_dante_input_iface',
               env={"STRIH_BOXES_DIR": str(d), "STRIH_VBAN_LEG_SYSFS": str(sysfs)})
     assert r.returncode != 0 and r.stdout.strip() == "", r.stdout
@@ -142,7 +142,7 @@ def test_a_leg_box_keeps_the_legs_interface(tmp_path):
 
 def test_install_writes_the_toml_on_the_rig_nic(tmp_path):
     d = _legless(tmp_path)
-    sysfs = _sysfs(tmp_path, {"enp5s0": "r8169"})
+    sysfs = _sysfs(tmp_path, {"enp5s0f1": "ixgbe"})
     dest = tmp_path / "home" / ".camera-box" / "dante-input.toml"
     site = tmp_path / "site.conf"
     site.write_text(SITE)
@@ -165,8 +165,8 @@ def test_install_writes_the_toml_on_the_rig_nic(tmp_path):
               user, tmp_path / "home", env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     t = tomllib.loads(dest.read_text())
-    assert t["iface"] == "enp5s0" and t["name"] == "strih-obs", t
-    assert "strih-obs on enp5s0" in r.stdout
+    assert t["iface"] == "enp5s0f1" and t["name"] == "strih-obs", t
+    assert "strih-obs on enp5s0f1" in r.stdout
 
 
 # --- no leg filter on the shared NIC ------------------------------------------------------------------
