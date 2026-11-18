@@ -172,11 +172,12 @@ def test_the_journal_reader_is_gone():
 # --- the wiring --------------------------------------------------------------------------------
 
 def test_setup_and_verify_render_the_unit_with_the_rig_nic():
+    # issue 1536: through strih_dantesync_ptp_nic (the rig NIC, or the leg when dsync follows the GM there)
     for path in (SETUP, VERIFY):
         calls = [l for l in path.read_text().splitlines() if 'strih_dantesync_unit_text "$' in l]
         assert calls, path
         for line in calls:
-            assert "strih_dantesync_rig_nic" in line, (path, line)
+            assert "strih_dantesync_ptp_nic" in line, (path, line)
             assert "strih_lx_ip" not in line, (path, line)
 
 
@@ -185,7 +186,7 @@ def test_verify_item_6d_grades_the_status_before_item_6c():
     d6 = v.index("# 6d) dsync PTP NIC")
     assert v.index("# 6b) dantesync ROLE") < d6 < v.index("# 6c) dantesync UNIT content")
     block = v[d6:v.index("# 6c) dantesync UNIT content")]
-    assert "strih_dantesync_iface_grade" in block and "strih_dantesync_rig_nic" in block
+    assert "strih_dantesync_iface_grade" in block and "strih_dantesync_ptp_nic" in block
     assert "(dantesync-nic)" in block and 'bad "' in block
 
 
@@ -195,7 +196,7 @@ def _item6d(tmp_path, body, nic="enp7s0"):
     block = v[v.index("# 6d) dsync PTP NIC"):v.index("# 6c) dantesync UNIT content")]
     env = _fake_curl(tmp_path, body)
     harness = ('. "$1"\nok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\n'
-               'strih_dantesync_rig_nic() { [ -n "$NIC" ] && echo "$NIC"; }\n' + block + '\necho END\n')
+               'strih_dantesync_ptp_nic() { [ -n "$NIC" ] && echo "$NIC"; }\n' + block + '\necho END\n')
     r = _bash(harness, str(DS_LIB), env=dict(env, NIC=nic))
     assert r.returncode == 0 and r.stdout.strip().endswith("END"), r.stdout + r.stderr
     return r.stdout.strip().splitlines()[0]
