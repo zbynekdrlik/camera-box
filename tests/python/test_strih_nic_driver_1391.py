@@ -1259,3 +1259,94 @@ def test_apply_never_touches_a_non_r8152_rig_nic_1534(tmp_path):
 def test_setup_step1c_applies_the_ring_1534():
     text = SETUP.read_text()
     assert 'strih_nic_ring_apply /sys "$(ip -o -4 addr show 2>/dev/null || true)"' in text
+
+
+# --- issue 1534: USB3 hardware LPM off on the r8152 rig NIC ------------------------------------------------
+# Live 18.11.2026: stream-snv's RTL8156B on the Intel xhci had USB3 hardware LPM U1+U2 enabled and lost
+# packets device-side (rx_missed) even at an even 900 Mb/s; stream-pp (AMD xhci, no hardware LPM) lost none.
+# usbcore.quirks=<vid>:<pid>:k (USB_QUIRK_NO_LPM) on the kernel command line keeps it off from boot.
+
+def _lpm_box(tmp_path, u1, u2, product="8156"):
+    box = Sysfs(tmp_path)
+    usbdev = box.sys / "devices/pci0000:00/0000:00:14.0/usb2/2-3"
+    (usbdev / "idProduct").write_text(product + "\n")
+    power = usbdev / "power"
+    power.mkdir(exist_ok=True)
+    if u1 is not None:
+        (power / "usb3_hardware_lpm_u1").write_text(u1 + "\n")
+    if u2 is not None:
+        (power / "usb3_hardware_lpm_u2").write_text(u2 + "\n")
+    return box
+
+
+@pytest.mark.parametrize("u1,u2,state", [
+    ("disabled", "disabled", "OK"), (None, None, None),  # no hardware LPM on the host: nothing to grade ("enabled", "disabled", "FAIL"),
+    ("disabled", "enabled", "FAIL"), ("enabled", "enabled", "FAIL")])
+def test_grade_fails_an_r8152_rig_nic_with_usb3_lpm_on_1534(tmp_path, u1, u2, state):
+    rows = _lpm_box(tmp_path, u1, u2).grade()
+    assert _states(rows).get("(nic-lpm)") == state, rows
+    if state == "FAIL":
+        text = [d for s, d in rows if d.startswith("(nic-lpm)")][0]
+        assert "usbcore.quirks=0bda:8156:k" in text and "setup-strih" in text, text
+
+
+def test_lpm_dropin_text_names_the_quirk_on_the_default_cmdline_1534():
+    r = _bash('strih_nic_lpm_grub_dropin_text 0bda:8156')
+    assert r.returncode == 0, r.stderr
+    lines = [l for l in r.stdout.splitlines() if not l.startswith("#")]
+    assert lines == ['GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT usbcore.quirks=0bda:8156:k"'], r.stdout
+
+
+@pytest.mark.parametrize("bad", ["", "0bda", "0BDA:8156", "0bda:8156:k", "0bda:81x6", "0bda:8156 x"])
+def test_lpm_dropin_text_refuses_a_malformed_usb_id_1534(bad):
+    r = _bash('strih_nic_lpm_grub_dropin_text "$ID"', env={"ID": bad})
+    assert r.returncode != 0 and r.stdout == "", (bad, r.stdout)
+
+
+def _lpm_apply(tmp_path, u1="enabled", quirks=""):
+    box = _lpm_box(tmp_path, u1, u1)
+    grubd = tmp_path / "grub.d"
+    grubd.mkdir()
+    param = tmp_path / "quirks"
+    param.write_text(quirks + "\n")
+    regen = tmp_path / "regen.log"
+    boxes = tmp_path / "usb-box"
+    boxes.mkdir(exist_ok=True)
+    env = {"PATH": "%s:%s" % (box.bin, os.environ["PATH"]), "SYSROOT": str(box.sys),
+           "STRIH_NIC_LPM_GRUB_DIR": str(grubd), "STRIH_NIC_LPM_QUIRKS_PARAM": str(param),
+           "REGEN": str(regen)}
+    env.update(_fixture(boxes, []))
+    r = _bash('safe_grub_regen() { echo regen >> "$REGEN"; }; strih_nic_lpm_apply "$SYSROOT" ""',
+              env=env, sources=(PROVISION, LIB))
+    return r, grubd, param, regen
+
+
+def test_apply_writes_the_dropin_regenerates_grub_and_sets_the_runtime_quirk_1534(tmp_path):
+    r, grubd, param, regen = _lpm_apply(tmp_path, quirks="")
+    assert r.returncode == 0, r.stdout + r.stderr
+    f = grubd / "60-camera-box-rig-nic-no-lpm.cfg"
+    assert "usbcore.quirks=0bda:8156:k" in f.read_text()
+    assert regen.read_text().count("regen") == 1
+    assert param.read_text().strip() == "0bda:8156:k"
+    assert "next boot" in r.stdout and "authorized" in r.stdout, r.stdout  # never bounces the NIC itself
+
+
+def test_apply_keeps_other_runtime_quirks_and_is_quiet_on_a_rerun_1534(tmp_path):
+    r, grubd, param, regen = _lpm_apply(tmp_path, quirks="1234:5678:g")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert param.read_text().strip() == "1234:5678:g,0bda:8156:k"
+    r2 = _bash('safe_grub_regen() { echo regen >> "$REGEN"; }; strih_nic_lpm_apply "$SYSROOT" ""',
+               env={"PATH": os.environ["PATH"], "SYSROOT": "/nonexistent"}, sources=(PROVISION, LIB))
+    assert r2.returncode == 0  # a box that is not r8152 (the default strih-snv facts) is untouched
+
+
+def test_apply_on_a_box_with_lpm_already_off_writes_the_dropin_only_1534(tmp_path):
+    r, grubd, param, regen = _lpm_apply(tmp_path, u1="disabled", quirks="0bda:8156:k")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (grubd / "60-camera-box-rig-nic-no-lpm.cfg").exists()
+    assert "authorized" not in r.stdout, r.stdout
+
+
+def test_setup_step1c_applies_the_lpm_quirk_1534():
+    text = SETUP.read_text()
+    assert 'strih_nic_lpm_apply /sys "$(ip -o -4 addr show 2>/dev/null || true)"' in text
