@@ -177,11 +177,11 @@ def test_a_usb_box_with_the_vendored_driver_still_loads(tmp_path):
 
 
 def test_strih_pp_declares_its_pcie_nic_facts():
-    # issue 1412: strih-pp's rig NIC is the RTL8125 on PCIe (in-tree r8169, no USB device, 2.5 GbE);
-    # the facts are decided now (read off the box in the 11.10.2026 recon), never TODO_OWNER.
+    # issue 1412: strih-pp's rig NIC was the RTL8125 on PCIe (r8169, 2.5 GbE). Issue 1535 (18.11.2026): the
+    # Intel X520-2 (82599ES, in-tree ixgbe) SFP+ port at 10 GbE is the rig NIC now; never TODO_OWNER.
     lines = (BOXES / "strih-pp.env").read_text().splitlines()
-    for want in ("STRIH_NIC_DRIVER=r8169", "STRIH_NIC_OOT_DRIVER=none", "STRIH_NIC_MIN_USB_MBPS=none",
-                 "STRIH_NIC_MIN_LINK_MBPS=2500"):
+    for want in ("STRIH_NIC_DRIVER=ixgbe", "STRIH_NIC_OOT_DRIVER=none", "STRIH_NIC_MIN_USB_MBPS=none",
+                 "STRIH_NIC_MIN_LINK_MBPS=10000"):
         assert want in lines, want
     r = _bash("strih_box_load strih-pp", sources=(FACTS,))
     for k in NEW_KEYS:

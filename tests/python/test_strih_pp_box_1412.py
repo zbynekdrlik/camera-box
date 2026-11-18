@@ -99,8 +99,8 @@ def test_strih_pp_loads_with_every_fact_answered():
 EXPECTED_PP = {
     "STRIH_HOSTNAME": "strih-pp", "STRIH_IP": "10.77.8.202", "STRIH_NDI_PREFIX": "STRIH-PP",
     "STRIH_DANTESYNC_ROLE": "server", "STRIH_DANTESYNC_UPSTREAM": "",
-    "STRIH_INTERCOM_CONFIG": "intercom.strih-pp.toml", "STRIH_NIC_DRIVER": "r8169",
-    "STRIH_NIC_OOT_DRIVER": "none", "STRIH_NIC_MIN_USB_MBPS": "none", "STRIH_NIC_MIN_LINK_MBPS": "2500",
+    "STRIH_INTERCOM_CONFIG": "intercom.strih-pp.toml", "STRIH_NIC_DRIVER": "ixgbe",  # issue 1535
+    "STRIH_NIC_OOT_DRIVER": "none", "STRIH_NIC_MIN_USB_MBPS": "none", "STRIH_NIC_MIN_LINK_MBPS": "10000",
     "STRIH_OBS_PROFILE": "strih-pp", "STRIH_OBS_COLLECTION": "strih-pp", "STRIH_NDI_RUNTIME_PEER": PEER,
     "STRIH_COMPANION_HOST": "10.77.8.205", "STRIH_CG_SENDER": "RESOLUME-PP (SP-program)",
     "STRIH_CAMERAS": "1 4 6 7", "STRIH_HDMI_OUTPUT_BACKEND": "vk-direct", "STRIH_ROLE": "strih",
