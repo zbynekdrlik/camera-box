@@ -4,6 +4,7 @@ paths:
   - "scripts/lib/obs-box-kiosk.sh"
   - "scripts/lib/obs-box-baseline-verify.sh"
   - "scripts/lib/obs-box-background.sh"
+  - "scripts/lib/obs-box-coredump.sh"
   - "scripts/background-load-bench.sh"
   - "scripts/background_load_decision.py"
   - "scripts/lib/rig-timezone.sh"
@@ -324,6 +325,35 @@ OBS browser source and the restreamer (14.10.2026 09:37).
   disk writes) from setup-device / create-usb, graded by verify-device.
 - Tests: `tests/python/test_obs_box_swap_1428.py` (stubbed tools, path seams `OBS_BOX_SWAPFILE` /
   `OBS_BOX_FSTAB` / `OBS_BOX_MEMINFO`), the `swap` rows in `tests/obs_box_baseline_1357.rs`.
+
+## A crashing OBS never freezes its box (item `obs_box_coredump_bound`, grader row `coredump`, issue 1441)
+
+stream-pp, 18.11.2026 17:16: OBS aborted (SIGABRT after `amdgpu: Not enough memory for command
+submission`), then systemd-coredump (installed by the crash-popup item) read, wrote and compressed the
+multi-GB core under its compiled 32G defaults. The notebook froze for minutes until a power cycle.
+
+- **The bound:** `/etc/systemd/coredump.conf.d/90-obs-box-coredump.conf` = `ProcessSizeMax` +
+  `ExternalSizeMax` = `obs_box_coredump_size_max` (256M, the ONE value). Storage stays `external`.
+- **Why it works (systemd v255/v258 `coredump.c`, `save_external_coredump`):** at most
+  `MIN(RLIMIT_CORE, MAX(ProcessSizeMax, <Storage>SizeMax))` bytes are streamed to disk; past it the core
+  is `truncated` (`COREDUMP_TRUNCATED=1`), systemd-coredump exits, the kernel's pipe closes and the dump
+  ends. Both sizes must be capped, and `Storage=journal` would lift it to `JournalSizeMax` (767M).
+- **What is lost:** the stack trace of a core bigger than the cap (the trace needs the core on disk,
+  coredump.conf(5)). The journal still records `Process N (obs) ... dumped core.` with signal, exe and
+  cmdline. Small cores (Xorg, dsync, the hub, the session apps) keep a full core + stack in coredumpctl;
+  that is why a cap, not `Storage=none` + `ProcessSizeMax=0` (which drops every core) and not a per-unit
+  `LimitCORE=` (misses a hand-started OBS, imag's launcher, CEF helpers).
+- **No restart:** systemd-coredump runs `parse_config()` (coredump.conf + coredump.conf.d) at every
+  invocation, one per crash. The item never calls systemctl.
+- **Install:** `scripts/lib/obs-box-coredump.sh` (sourced by the system half, its line budget), through
+  `obs_box_write_if_changed_rendered`, on the `obs_box_rtprio_off ; obs_box_swap ...` line of BOTH setups
+  (`obs_box_coredump_bound || fail`).
+- **Grader row `coredump`** (last): the drop-in byte-identical to its renderer (`coredump_dropin`) AND the
+  EFFECTIVE values (`coredump_effective` = `Storage,ProcessSizeMax,ExternalSizeMax`, the last assignment
+  in the `[Coredump]` section of `systemd-analyze cat-config systemd/coredump.conf`, pure filter
+  `obs_box_coredump_effective`) are `external|none` + the bound. A later drop-in that lifts it FAILs; an
+  unreadable merge prints nothing and FAILs.
+- Tests: `tests/python/test_obs_box_coredump_1441.py`, the `coredump` rows in `tests/obs_box_baseline_1357.rs`.
 
 ## Background work off the OBS cores (item `obs_box_background_slice`, grader row `background`, issue 1387)
 
