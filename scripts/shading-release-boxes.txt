@@ -17,6 +17,7 @@ cam2-shading shading-release-rest.pin
 cam6 shading-release-rest.pin
 cam7 shading-release-rest.pin
 cam4 shading-release-rest.pin
+cam1 shading-release-rest.pin
 cam4-shading shading-release-rest.pin
 strih-pp shading-release-rest.pin
 # A strih box listed here takes that pin for its bkshading SERVICE (setup-strih step 16c, verify item 31).
