@@ -181,7 +181,8 @@ def test_both_setups_provision_it_on_the_existing_line():
 
 def test_the_lib_is_sourced_by_the_baseline_and_needs_no_restart():
     base = BASE.read_text()
-    assert base.count("/obs-box-coredump.sh") == 1
+    # the source statement itself (the shellcheck directive and the ./ fallback name the file too)
+    assert base.count('. "${BASH_SOURCE[0]%/*}/obs-box-coredump.sh"') == 1
     lib = LIB.read_text()
     # systemd-coredump reads coredump.conf.d per crash: the item never restarts or reloads anything.
     assert "systemctl" not in lib.split("obs_box_coredump_bound()", 1)[1]
