@@ -447,21 +447,37 @@ STREAM_SNV_PRE_1502_NIC = {
     "STRIH_NIC_MIN_LINK_MBPS": "1000", "STRIH_NIC_RENAME": "none",
 }
 STREAM_SNV_PRE_1495.update(STREAM_SNV_PRE_1502_NIC)
+# issue 1536 (18.11.2026): the PP boxes moved to VLAN 70 legs + Dante (dsg) + the Dante GM; before that they
+# were the obs-vban boxes on the flat LAN (lv1's VBAN straight to the rig NIC, no leg). The tests that pin the
+# VBAN program / leg-less shape on a PP box run on these lines (the rollback shape the fact files name).
+PP_PRE_1536_COMMON = {
+    "STRIH_PROGRAM_VBAN_LEG": "none", "STRIH_PROGRAM_VBAN_LEG_ADDR": "none", "STRIH_PROGRAM_VBAN_SENDER": "none",
+    "STRIH_DANTE_DEVICES": "none", "STRIH_DANTE_GM": "10.77.8.110",
+    "STRIH_DANTE_NETWORK_LATENCY_MS": "none", "STRIH_DANTE_RECEIVE_BUFFER_MS": "none",
+}
+PP_PRE_1536 = {
+    "strih-pp": dict(PP_PRE_1536_COMMON, STRIH_PROGRAM_VBAN_STREAMS="strih-obs", STRIH_PROGRAM_VBAN_PORT="6981",
+                     STRIH_PROGRAM_VBAN_RESERVE_MS="40"),
+    "stream-pp": dict(PP_PRE_1536_COMMON, STRIH_PROGRAM_VBAN_STREAMS="stream", STRIH_PROGRAM_VBAN_PORT="6980",
+                      STRIH_PROGRAM_VBAN_RESERVE_MS="40", STRIH_NIC_RENAME="none"),
+}
 BOXES = Path(__file__).resolve().parent.parent.parent / "scripts" / "strih-boxes"
 
 
 def pre_1495_boxes(dest):
-    """Copy the box facts to DEST (a new dir) with stream-snv in its pre-issue-1495 shape; return DEST."""
+    """Copy the box facts to DEST (a new dir) with stream-snv in its pre-issue-1495 shape and the PP boxes in
+    their pre-issue-1536 shape (every box's program on obs-vban); return DEST."""
     import re
     import shutil
     dest = Path(dest)
     shutil.copytree(BOXES, dest)
-    f = dest / "stream-snv.env"
-    t = f.read_text()
-    for k, v in STREAM_SNV_PRE_1495.items():
-        t, n = re.subn(r"(?m)^%s=.*$" % k, "%s=%s" % (k, v), t)
-        assert n == 1, k
-    f.write_text(t)
+    for box, pairs in (("stream-snv", STREAM_SNV_PRE_1495),) + tuple(PP_PRE_1536.items()):
+        f = dest / ("%s.env" % box)
+        t = f.read_text()
+        for k, v in pairs.items():
+            t, n = re.subn(r"(?m)^%s=.*$" % k, "%s=%s" % (k, v), t)
+            assert n == 1, (box, k)
+        f.write_text(t)
     return dest
 
 
@@ -476,6 +492,36 @@ def pre_1495_boxes_dir():
         _PRE_1495_DIR = tempfile.TemporaryDirectory(prefix="boxes-pre-1495-")
         pre_1495_boxes(Path(_PRE_1495_DIR.name) / "boxes")
     return str(Path(_PRE_1495_DIR.name) / "boxes")
+
+
+def pp_pre_1536_boxes(dest):
+    """Copy the box facts to DEST (a new dir) with ONLY the PP boxes in their pre-issue-1536 VBAN shape (the
+    SNV boxes stay as they are); return DEST."""
+    import re
+    import shutil
+    dest = Path(dest)
+    shutil.copytree(BOXES, dest)
+    for box, pairs in PP_PRE_1536.items():
+        f = dest / ("%s.env" % box)
+        t = f.read_text()
+        for k, v in pairs.items():
+            t, n = re.subn(r"(?m)^%s=.*$" % k, "%s=%s" % (k, v), t)
+            assert n == 1, (box, k)
+        f.write_text(t)
+    return dest
+
+
+_PP_PRE_1536_DIR = None
+
+
+def pp_pre_1536_boxes_dir():
+    """One shared pre-issue-1536 PP copy per test process (removed at exit)."""
+    global _PP_PRE_1536_DIR
+    if _PP_PRE_1536_DIR is None:
+        import tempfile
+        _PP_PRE_1536_DIR = tempfile.TemporaryDirectory(prefix="boxes-pp-pre-1536-")
+        pp_pre_1536_boxes(Path(_PP_PRE_1536_DIR.name) / "boxes")
+    return str(Path(_PP_PRE_1536_DIR.name) / "boxes")
 
 
 def install(bin_dir, state_path, proc_sys):

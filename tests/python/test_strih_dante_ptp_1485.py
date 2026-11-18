@@ -473,7 +473,8 @@ def test_the_journal_is_read_for_the_current_invocation_only(tmp_path):
 
 
 def test_a_box_without_the_hub_device_prints_nothing(tmp_path):
-    r = _hub_clock(tmp_path, "strih-pp", [])
+    # stream-pp: no hub device (strih-pp declares strih-pp-intercom since intercom#32)
+    r = _hub_clock(tmp_path, "stream-pp", [])
     assert r.returncode == 0 and r.stdout == "END\n", r.stdout + r.stderr
 
 

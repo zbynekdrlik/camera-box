@@ -52,9 +52,12 @@ def _boxes(tmp_path, box, pairs):
     return d
 
 
+# issue 1536 (the PP switch, 18.11.2026): the real strih-pp.env carries the VLAN 70 leg now, so the
+# leg-less shape sets the leg facts back to none explicitly.
 LEGLESS_PP = {"STRIH_DANTE_DEVICES": DEVICES, "STRIH_PROGRAM_VBAN_STREAMS": "none",
               "STRIH_PROGRAM_VBAN_PORT": "none", "STRIH_PROGRAM_VBAN_RESERVE_MS": "none",
-              "STRIH_DANTE_NETWORK_LATENCY_MS": "1", "STRIH_DANTE_RECEIVE_BUFFER_MS": "12.041666"}
+              "STRIH_DANTE_NETWORK_LATENCY_MS": "1", "STRIH_DANTE_RECEIVE_BUFFER_MS": "12.041666",
+              "STRIH_PROGRAM_VBAN_LEG": "none", "STRIH_PROGRAM_VBAN_LEG_ADDR": "none"}
 
 
 def _legless(tmp_path, **extra):

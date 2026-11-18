@@ -74,7 +74,8 @@ def test_an_unreadable_or_garbage_state_fails(tmp_path):
 
 
 def test_a_box_without_a_hub_dante_device_prints_nothing(tmp_path):
-    assert _grade(tmp_path, "", "", box="strih-pp") == []
+    # stream-pp: no hub device (strih-pp declares strih-pp-intercom since intercom#32)
+    assert _grade(tmp_path, "", "", box="stream-pp") == []
 
 
 def test_verify_item_16_calls_the_grade_on_the_hub_line():

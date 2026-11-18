@@ -87,6 +87,11 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
     fixture that shrinks `STRIH_CAMERAS` (the 1361 `strih-zz` box and `seed_manifest_follows_the_camera_and_cg_facts`)
     must shrink the dependent fact too, or the load refuses before the assertion. Grep the test tree for
     the other fact's literal (`STRIH_CAMERAS=2 3 5`) and read each replacement.
+- **Never write a literal `KEY=value` of a fact into a fact-file COMMENT** (issue 1536): many fixtures
+  replace `KEY=value` in a copied fact file with `assert t.count(old) == 1`, so a rollback note such as
+  "+ STRIH_DANTE_DEVICES=none" in a comment makes them count 2. Write "STRIH_DANTE_DEVICES none". A box
+  that stops being a test's example shape (PP left VBAN for Dante) keeps its old shape as a fixture
+  (`vban_leg_fakes_1439.PP_PRE_1536` / `pp_pre_1536_boxes_dir`), never an edited real fact file.
 - **`STRIH_DESKTOP` (issue 1466)** = `openbox` | `xfce`, the last key: the operator session
   (`.claude/rules/obs-box-xfce.md`). stream-snv is the first `xfce` box. It is not in the 1361 golden
   (the openbox autostart is `strih_session_start_text openbox`, unchanged), so moving a box is the fact
@@ -191,7 +196,7 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
 - **strih-pp.env is decided** from the read-only recon (issue 1412 comment 6106146258) + the owner
   rulings: 10.77.8.202, NTP master, RTL8125 PCIe (`r8169`, `none`, `none`, 2500), vk-direct (RTX 3060
   only), cameras `1 4 6 7`, companion-pp 10.77.8.205, `RESOLUME-PP (SP-program)`, grandmaster
-  10.77.8.110, sampler `off`, the program-only `intercom.strih-pp.toml`. Only
+  10.77.8.110 (10.77.7.200 on VLAN 70 since issue 1536), sampler `off`, the program-only `intercom.strih-pp.toml`. Only
   `STRIH_NDI_RUNTIME_PEER` stays TODO_OWNER (the PP camboxes have no PP address yet); on site set it,
   or run with `STRIH_NDI_PEER=<ip>` after filling the fact. Disable the onboard RTL8168 in the BIOS
   (both NICs bind `r8169`), or pass `STRIH_NIC_IFACE`.
@@ -240,7 +245,8 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   the operator's stream A/V knob), `program_audio_input` = the box fact STRIH_PROGRAM_AUDIO_INPUT
   (stream-pp `Zvuk z mixu`, stream-snv `mbc`, issue 1462), since issue 1439 the obs-vban receive
   source on the console's VBAN (`program_audio_vban` from the facts STRIH_PROGRAM_VBAN_*: lv1 at PP,
-  mbc.lan at SNV; `.claude/rules/obs-vban-receive.md`). A wrong-kind audio input is replaced in every scene it was in,
+  mbc.lan at SNV; `.claude/rules/obs-vban-receive.md`); since issues 1495 / 1536 every stream box takes the
+  `program_audio_dante` device instead (`.claude/rules/strih-dante-input.md`). A wrong-kind audio input is replaced in every scene it was in,
   keeping its sync offset and (issue 1439) its whole mixer state and filters.
 - **No intercom hub on the stream role (issue 1439, owner 22.10.2026):** `obs_box_step_applies 13`
   skips step 13 and moves a present hub aside (`strih_intercom_hub_remove`); steps 4b / 12 write no hub
