@@ -581,3 +581,23 @@ def test_every_dante_device_takes_its_flow_ports_from_its_arc_slot():
                 continue
             arc, cmc, flows = (int(p) for p in ports.split(":"))
             assert 4440 <= arc <= 4471, f"{env.name}: {name} ARC port {arc} outside dstack's slots"
+
+
+# owner 18.11.2026 ("preco e2e dovoli aby bol v produkcii rig co takto straca obsah"): the green runs of 14.11
+# and 15.11 read 0 in their 4-5 min windows while stream-snv lost 85632 / 59808 packets between them. The
+# counters are totals since the device started (0 at an OBS start), so a loss EARLIER in the session FAILs.
+@pytest.mark.parametrize("key", ["rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps",
+                                 "rx_written_late", "re_anchors", "obs_dropped"])
+def test_a_loss_earlier_in_the_obs_session_fails_even_with_a_clean_window(key):
+    w = [_status("12:00:00.000", 100, **{key: "64"}), "mark", _status("12:00:10.000", 200, **{key: "64"}), "stop",
+         _status("12:00:20.000", 300, **{key: "64"}), _status("12:00:30.000", 400, **{key: "64"})]
+    r = CONT.decide(w, 1, 3)
+    assert r["verdict"] == "FAIL", r
+    assert r["failures"] == ["%s=64 earlier in this OBS session (the device's total since it started)" % key], r
+    assert r["session"] == {key: 64}, r
+
+
+def test_a_loss_inside_the_window_is_not_counted_twice_as_session():
+    w = _window(rx_loss="2")
+    r = CONT.decide(w, 1, 3)
+    assert r["failures"] == ["rx_loss +2"] and r["session"] == {}, r
