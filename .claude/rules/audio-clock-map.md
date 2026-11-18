@@ -138,7 +138,7 @@ job (`OBS_GENLOCK_LATENCY_MS`, the av-sync dock), never a hub setting.
 ## Dante on strih-snv (issue 1485, VLAN 70, `STRIH_DANTE_DEVICES`)
 
 Owner 2.11.2026: each application carries its own Dante device, no shared memory and no forwarding;
-strih-snv only, VBAN stays on every box and PP gets no Dante. Not deployed yet: the OBS row goes live with
+strih-snv only, VBAN stays on every box and PP gets no Dante (superseded: stream-snv since issue 1495, the PP boxes since issue 1536). Not deployed yet: the OBS row goes live with
 the obs release v0.2.0 deploy + the site file on strih-snv (issue 1487); live on strih-snv since 3.11.2026, v0.3.0 the first release whose counters can prove zero loss.
 
 | Path | Source clock -> crossings -> listener | Fixed latency (computed) |

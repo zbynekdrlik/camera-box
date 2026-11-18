@@ -90,7 +90,7 @@ def _bash(body, *args, env=None, path_prefix=None):
 def _boxes_with(tmp_path, box, old, new):
     # issue 1536: the loader's VBAN rules run on the VBAN shape (the PP boxes take Dante since 18.11.2026)
     d = tmp_path / "boxes"
-    shutil.copytree(fk.pre_1495_boxes_dir(), d)
+    shutil.copytree(fk.pp_pre_1536_boxes_dir(), d)
     f = d / ("%s.env" % box)
     t = f.read_text()
     assert t.count(old) == 1, (box, old)
@@ -236,7 +236,7 @@ def _manifest(box, boxes=None):
 
 def test_the_stream_manifest_carries_the_vban_source_settings():
     # stream-pp's VBAN rollback shape (issue 1536 moved its program to Dante)
-    text = _manifest("stream-pp", fk.pre_1495_boxes_dir())
+    text = _manifest("stream-pp", fk.pp_pre_1536_boxes_dir())
     d = json.loads(text)
     assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 40}
     assert d["program_audio_input"] == "Zvuk z mixu"
@@ -543,7 +543,7 @@ def test_each_pp_preset_is_its_box_facts(box):
     # obs-vban source; the port converts the program input exactly as the launch seed does
     # issue 1536: the PP boxes take Dante now; the preset (a one-time collection import, its collections
     # exist) keeps the VBAN rollback shape, and the launch seed switches the input to dante_input
-    pre = {"STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()}
+    pre = {"STRIH_BOXES_DIR": fk.pp_pre_1536_boxes_dir()}
     r = _bash('strih_box_load "$1"\nprintf "%s %s %s" "$(strih_lx_program_vban_port)" '
               '"$(strih_lx_program_vban_streams)" "$(strih_lx_program_vban_reserve_ms)"', box, env=pre)
     port, stream, ms = r.stdout.split()

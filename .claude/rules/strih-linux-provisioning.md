@@ -240,7 +240,8 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   the operator's stream A/V knob), `program_audio_input` = the box fact STRIH_PROGRAM_AUDIO_INPUT
   (stream-pp `Zvuk z mixu`, stream-snv `mbc`, issue 1462), since issue 1439 the obs-vban receive
   source on the console's VBAN (`program_audio_vban` from the facts STRIH_PROGRAM_VBAN_*: lv1 at PP,
-  mbc.lan at SNV; `.claude/rules/obs-vban-receive.md`). A wrong-kind audio input is replaced in every scene it was in,
+  mbc.lan at SNV; `.claude/rules/obs-vban-receive.md`); since issues 1495 / 1536 every stream box takes the
+  `program_audio_dante` device instead (`.claude/rules/strih-dante-input.md`). A wrong-kind audio input is replaced in every scene it was in,
   keeping its sync offset and (issue 1439) its whole mixer state and filters.
 - **No intercom hub on the stream role (issue 1439, owner 22.10.2026):** `obs_box_step_applies 13`
   skips step 13 and moves a present hub aside (`strih_intercom_hub_remove`); steps 4b / 12 write no hub

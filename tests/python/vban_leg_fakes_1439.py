@@ -459,7 +459,7 @@ PP_PRE_1536 = {
     "strih-pp": dict(PP_PRE_1536_COMMON, STRIH_PROGRAM_VBAN_STREAMS="strih-obs", STRIH_PROGRAM_VBAN_PORT="6981",
                      STRIH_PROGRAM_VBAN_RESERVE_MS="40"),
     "stream-pp": dict(PP_PRE_1536_COMMON, STRIH_PROGRAM_VBAN_STREAMS="stream", STRIH_PROGRAM_VBAN_PORT="6980",
-                      STRIH_PROGRAM_VBAN_RESERVE_MS="40"),
+                      STRIH_PROGRAM_VBAN_RESERVE_MS="40", STRIH_NIC_RENAME="none"),
 }
 BOXES = Path(__file__).resolve().parent.parent.parent / "scripts" / "strih-boxes"
 

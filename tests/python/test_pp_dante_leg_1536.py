@@ -68,8 +68,24 @@ def _sysfs(tmp_path, nics):
     return root
 
 
-def _env(sysfs):
-    return {"STRIH_BOXES_DIR": str(BOXES), "STRIH_VBAN_LEG_SYSFS": str(sysfs), "STRIH_DANTESYNC_SYSFS": str(sysfs)}
+def _env(sysfs, addrs=""):
+    """ADDRS = the `ip -o -4 addr show` text a stub `ip` prints (the live box's rig address, for the
+    STRIH_IP fallback when two NICs share the driver)."""
+    b = sysfs.parent / "bin"
+    b.mkdir(exist_ok=True)
+    (b / "ip.out").write_text(addrs)
+    ip = b / "ip"
+    ip.write_text('#!/bin/bash\ncat "%s"\n' % (b / "ip.out"))
+    ip.chmod(0o755)
+    return {"STRIH_BOXES_DIR": str(BOXES), "STRIH_VBAN_LEG_SYSFS": str(sysfs), "STRIH_DANTESYNC_SYSFS": str(sysfs),
+            "PATH": "%s:%s" % (b, os.environ["PATH"])}
+
+
+# strih-pp's X520-2 has two ixgbe ports, so the driver match reads MULTI and the rig NIC resolves by STRIH_IP
+STRIH_PP_NICS = {"enp5s0f0": "ixgbe", "enp5s0f1": "ixgbe"}
+STRIH_PP_ADDRS = ("1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever\n"
+                  "4: enp5s0f1    inet 10.77.8.202/23 brd 10.77.9.255 scope global noprefixroute enp5s0f1\\"
+                  "       valid_lft forever preferred_lft forever\n")
 
 
 # --- the PP facts --------------------------------------------------------------------------------
@@ -125,13 +141,14 @@ def test_the_pp_legs_are_dante_legs():
         assert r.stdout.split() == ["YES", "24"], box
 
 
-@pytest.mark.parametrize("box,nics,want", [
-    ("strih-pp", {"enp5s0f1": "ixgbe"}, "enp5s0f1.70"),
-    ("stream-pp", {"rig0": "r8152"}, "rig0.70"),
+@pytest.mark.parametrize("box,nics,addrs,want", [
+    ("strih-pp", STRIH_PP_NICS, STRIH_PP_ADDRS, "enp5s0f1.70"),
+    ("stream-pp", {"rig0": "r8152"}, "", "rig0.70"),
 ])
-def test_the_leg_and_the_dante_input_bind_the_vlan_on_the_rig_nic(tmp_path, box, nics, want):
+def test_the_leg_and_the_dante_input_bind_the_vlan_on_the_rig_nic(tmp_path, box, nics, addrs, want):
     sysfs = _sysfs(tmp_path, nics)
-    r = _bash('strih_box_load "$1" >/dev/null\nstrih_vban_leg_resolve\n_strih_dante_input_iface', box, env=_env(sysfs))
+    r = _bash('strih_box_load "$1" >/dev/null\nstrih_vban_leg_resolve\n_strih_dante_input_iface', box,
+              env=_env(sysfs, addrs))
     assert r.returncode == 0, r.stderr
     leg, iface = r.stdout.strip().splitlines()
     assert leg.split()[0] == want and iface == want
@@ -147,18 +164,18 @@ def test_stream_pp_before_the_rename_resolves_no_leg(tmp_path):
 
 # --- dsync stays on the rig NIC (the switch copies dante-ptp's PTP onto the LAN) -------------------------
 
-def _unit(tmp_path, box, nics):
+def _unit(tmp_path, box, nics, addrs=""):
     sysfs = _sysfs(tmp_path, nics)
     return _bash('strih_box_load "$1" >/dev/null\n'
                  't="$(strih_dantesync_unit_text "$(strih_lx_dantesync_role)" "$(strih_lx_dantesync_args)" '
-                 '"$(strih_dantesync_rig_nic)")"\nstrih_dantesync_exec_start "$t"', box, env=_env(sysfs))
+                 '"$(strih_dantesync_rig_nic)")"\nstrih_dantesync_exec_start "$t"', box, env=_env(sysfs, addrs))
 
 
 def test_the_strih_pp_unit_is_byte_for_byte_the_hand_set_live_one(tmp_path):
     """Supervisor 18.11.2026: strih-pp runs `/usr/local/bin/dsync --interface enp5s0f1` (role server), LOCKED
     to 10.77.7.200; setup-strih's next run must render exactly that ExecStart, so strih_dantesync_install
     keeps the running date master (no restart)."""
-    r = _unit(tmp_path, "strih-pp", {"enp5s0f1": "ixgbe", "enp5s0f1.70": None})
+    r = _unit(tmp_path, "strih-pp", dict(STRIH_PP_NICS, **{"enp5s0f1.70": None}), STRIH_PP_ADDRS)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "/usr/local/bin/dsync --interface enp5s0f1\n"
 
@@ -167,3 +184,20 @@ def test_the_stream_pp_unit_is_the_strih_pp_client_on_rig0(tmp_path):
     r = _unit(tmp_path, "stream-pp", {"rig0": "r8152", "rig0.70": None})
     assert r.returncode == 0, r.stderr
     assert r.stdout == "/usr/local/bin/dsync --ntp-server strih-pp.lan --interface rig0\n"
+
+
+# --- the launch seed switches the PP program inputs to the Dante source -----------------------------------
+
+@pytest.mark.parametrize("box,fn,device,name", [
+    ("strih-pp", "strih_lx_seed_manifest_json", "strih-obs", "ASIO zvuk"),
+    ("stream-pp", "obs_box_seed_manifest_json", "stream-obs", "Zvuk z mixu"),
+])
+def test_the_pp_seed_manifest_takes_the_program_from_the_dante_device(box, fn, device, name):
+    """The ported PP collections keep their obs-vban input (the collection-port presets are the VBAN
+    rollback shape); the launch seed switches it to dante_input from this manifest, keeping its name."""
+    import json
+    r = _bash('strih_box_load "$1" >/dev/null\n"$2"', box, fn, env={"STRIH_BOXES_DIR": str(BOXES)})
+    assert r.returncode == 0, r.stderr
+    m = json.loads(r.stdout)
+    assert m["program_audio_dante"] == {"device": device}
+    assert m["program_audio_input"] == name and "program_audio_vban" not in m
