@@ -89,7 +89,7 @@ fn a_frame_crosses_loopback_and_decodes_back_within_the_psnr_bound() {
 
     let mut assembler = FrameAssembler::new();
     let got: RefCell<Option<(FrameReport, YuvPlanes)>> = RefCell::new(None);
-    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
+    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>, _opened: bool| {
         *got.borrow_mut() = Some((*r, p.expect("decoded").clone()));
     });
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -141,7 +141,7 @@ fn a_stream_of_frames_keeps_two_in_flight_and_every_frame_decodes_in_order() {
     let base: i64 = 17_618_456_000_000_000;
     let got: RefCell<Vec<(u64, YuvPlanes)>> = RefCell::new(Vec::new());
     let mut assembler = FrameAssembler::new();
-    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
+    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>, _opened: bool| {
         if let Some(p) = p {
             got.borrow_mut().push((r.timecode, p.clone()));
         }
@@ -266,7 +266,7 @@ fn a_lost_slice_is_concealed_from_the_previous_frame_and_counted() {
     let mut out: Vec<(FrameReport, YuvPlanes)> = Vec::new();
     {
         let mut a = FrameAssembler::new();
-        let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
+        let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>, _opened: bool| {
             out.push((*r, p.expect("decoded").clone()));
         });
         push_frame(&mut a, &mut sink, 1000, &ka, None);
@@ -334,7 +334,7 @@ fn a_garbled_slice_costs_that_frame_and_the_next_one_decodes() {
         }
         let mut seen = Vec::new();
         let mut a = FrameAssembler::new();
-        let mut sink = DecodeSink::new(|_: &FrameReport, p: Option<&YuvPlanes>| {
+        let mut sink = DecodeSink::new(|_: &FrameReport, p: Option<&YuvPlanes>, _opened: bool| {
             seen.push(p.is_some());
         });
         push_frame(&mut a, &mut sink, 1000, &fa, None);
@@ -359,7 +359,7 @@ fn a_clock_step_back_mid_frame_ends_that_frame_and_the_stream_goes_on() {
         let fb = encode(&mut enc, &planar(50));
         let mut out = Vec::new();
         let mut a = FrameAssembler::new();
-        let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
+        let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>, _opened: bool| {
             out.push((r.timecode, r.lost_slices, p.is_some()));
         });
         let t0 = 100_000_000u64;
@@ -401,9 +401,10 @@ fn a_bpp_change_mid_stream_decodes_every_frame_with_no_loss() {
         let mut seen: Vec<(u64, u32, bool)> = Vec::new();
         let (errors, last_error) = {
             let mut a = FrameAssembler::new();
-            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
-                seen.push((r.timecode, r.lost_slices, p.is_some()));
-            });
+            let mut sink =
+                DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>, _opened: bool| {
+                    seen.push((r.timecode, r.lost_slices, p.is_some()));
+                });
             let t0 = 100_000_000u64;
             for (k, f) in frames.iter().enumerate() {
                 push_frame(&mut a, &mut sink, t0 + k as u64 * 333_333, f, None);
@@ -448,9 +449,10 @@ fn after_a_bpp_change_every_picture_is_its_own_and_a_loss_is_concealed_from_the_
         let mut out: Vec<(u32, Option<YuvPlanes>)> = Vec::new();
         let (header_changes, errors) = {
             let mut a = FrameAssembler::new();
-            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
-                out.push((r.lost_slices, p.cloned()));
-            });
+            let mut sink =
+                DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>, _opened: bool| {
+                    out.push((r.lost_slices, p.cloned()));
+                });
             let t0 = 100_000_000u64;
             for (k, (_, f)) in frames.iter().enumerate() {
                 // the second frame at 8 bpp loses packet 5
@@ -527,9 +529,10 @@ fn receive(
         let mut out: Vec<(u32, Option<YuvPlanes>)> = Vec::new();
         let (errors, changes) = {
             let mut a = FrameAssembler::new();
-            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
-                out.push((r.lost_slices, p.cloned()));
-            });
+            let mut sink =
+                DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>, _opened: bool| {
+                    out.push((r.lost_slices, p.cloned()));
+                });
             let t0 = 100_000_000u64;
             for (k, (f, drop)) in frames.iter().enumerate() {
                 push_frame(&mut a, &mut sink, t0 + k as u64 * 333_333, f, *drop);

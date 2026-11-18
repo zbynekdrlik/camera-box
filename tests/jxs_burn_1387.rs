@@ -71,7 +71,7 @@ fn info() -> FrameInfo {
 fn receive_one(rx: &mut JxsRecvSocket) -> (FrameReport, YuvPlanes) {
     let mut assembler = FrameAssembler::new();
     let got: RefCell<Option<(FrameReport, YuvPlanes)>> = RefCell::new(None);
-    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
+    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>, _opened: bool| {
         *got.borrow_mut() = Some((*r, p.expect("decoded").clone()));
     });
     let deadline = Instant::now() + Duration::from_secs(10);
