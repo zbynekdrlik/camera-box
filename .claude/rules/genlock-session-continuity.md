@@ -40,20 +40,36 @@ Input = one box's whole-session read (below). Per input:
   counters with it), a settle point the read does not reach past, another newest log than the window's
   (OBS restarted after the window), a log that has not reached the stop mark (`retryable`), an empty
   read, a Windows-class box.
-- Midnight: the times unwrap in file order, a line > 12 h behind the previous starts the next day; a
-  line a moment before midnight written right after one past it stays on its own day.
+- **Midnight is counted ON THE BOX** (review round 1, a 🔴): the reduced read is SPARSE (the first lines,
+  the changes, the last line), so two printed lines can be hours or days apart and a 12 h heuristic on
+  them put a later line before the settle point: a real loss in an overnight session read PASS. The awk
+  sees every filtered line in file order and prefixes each printed one with its day
+  (`<offset>:D<day>:<line>`; a line > 12 h behind the previous one starts the next day, one > 12 h ahead
+  is the day before). The decision uses `day x 86400 + time`; the heuristic is kept only for a dense read
+  without stamps (the tests' raw grep). The settle base is the last line before the FIRST line past the
+  settle, in file order, never "any line at or before it".
+- **A camera the run acked offline** (`PREFLIGHT_EXCLUDED_CAMS` -> `camera_strih_input`, `--exclude`) is
+  graded and shown, never gating (`excluded`, the report says `kamera kvitovaná offline`).
+- Both parsers read the FIRST `key=` of a repeated name (the awk `fv`, the python `_fields`).
 
 ## The box read (`strih_log_remote_cmd linux session`, the ONE strih log reader)
 
 A `#newest<TAB>name<TAB>bytes` header, then `nice -n 19 ionice -c 3 grep -a -b` of the two line kinds over
-the WHOLE newest log (9-15 ms on the live 11-17 MB logs), reduced ON THE BOX by awk (mawk-safe, `\047`
+the WHOLE newest log, reduced ON THE BOX by awk (also nice 19 + ionice idle; mawk-safe, `\047`
 for the quote): per input and kind the first 40 lines (a JPEG XS input also its first 40 from its first
 window with frames), every audit line whose underruns/relocks changed or whose received went backwards
 (200 each), every lossy JPEG XS window (2000), the last line, and `#count<TAB>kind<TAB>lines<TAB>lossy
 windows<TAB>input`. A multi-day session therefore never ships its lines (owner 1.11.2026: never ship the
 whole log). Lossy windows past the awk cap are later than every listed one, so they are counted
 (`unlisted_lossy_windows`) and FAIL. `ident` = the newest log's `name<TAB>bytes` (a `stat`, never a read).
-Linux only: a Windows platform gets no command (empty read = UNKNOWN). The strih goes through the reader's
+Linux only: a Windows platform gets no command (empty read = UNKNOWN).
+
+Cost (a whole-file scan, the owner's 1.11.2026 concern is CPU on a broadcast box, not only the bytes):
+measured 9-15 ms on the live 11-17 MB logs (18.11.2026); on dev1 a 210 MB synthetic two-day log with four
+inputs took 1.6 s of one core at nice 19 and shipped 90 KB. Not yet measured: a 100 MB+ read ON a live
+broadcast box while reading `jxs-output ... dropped_busy` / `program-render-audit lagged` across it
+(supervisor step). If it ever costs a frame, cache a per-log `(offset, awk state)` checkpoint so a run
+scans only the new bytes. The strih goes through the reader's
 own transport (`strih_log_session` / `strih_log_ident`), the stream through `stream_box_exec` with the same
 text.
 

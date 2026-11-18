@@ -54,15 +54,15 @@ _gsc_read() {
   fi
   if [ "$role" = strih ]; then
     if [ "$op" = ident ]; then
-      strih_log_ident "$host" "${STRIH_USER:-newlevel}" "${STRIH_PW:-newlevel}" "$t"
+      strih_log_ident "$host" "${STRIH_USER:-newlevel}" "${STRIH_PW:-}" "$t"
     else
-      strih_log_session "$host" "${STRIH_USER:-newlevel}" "${STRIH_PW:-newlevel}" "$t"
+      strih_log_session "$host" "${STRIH_USER:-newlevel}" "${STRIH_PW:-}" "$t"
     fi
     return 0
   fi
   # shellcheck disable=SC2016  # the sourced lib's path and the text are positional arguments
   timeout "$t" bash -c '. "$1"; shift; stream_box_exec "$@"' _ \
-    "$_GENLOCK_SESSION_CONTINUITY_LIB/stream-box.sh" "${STREAM_USER:-newlevel}" "${STREAM_PW:-newlevel}" \
+    "$_GENLOCK_SESSION_CONTINUITY_LIB/stream-box.sh" "${STREAM_USER:-newlevel}" "${STREAM_PW:-}" \
     "$host" "" "$text" 2>/dev/null || true
   return 0
 }
@@ -111,12 +111,19 @@ _gsc_inputs() {
 # _gsc_box ROLE HOST DIR PY OUT -> one box's result JSON at OUT (always written).
 _gsc_box() {
   local role="$1" host="$2" dir="$3" py="$4" out="$5" sname="" ssize="" ename="" esize="" reason=""
-  local read="$dir/genlock-session-continuity-${role}.read" line step tries i
+  local read="$dir/genlock-session-continuity-${role}.read" line step wmax tries i cam
   local -a args=(--box "$role")
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     args+=(--input "$line")
   done < <(_gsc_inputs "$role")
+  # the cameras the preflight acked offline are graded report-only (their inputs still write audit lines)
+  if [ "$role" = strih ] && declare -F camera_strih_input >/dev/null; then
+    for cam in ${PREFLIGHT_EXCLUDED_CAMS:-}; do
+      line="$(camera_strih_input "$cam" 2>/dev/null)" || continue
+      [ -z "$line" ] || args+=(--exclude "$line")
+    done
+  fi
   IFS=$'\t' read -r sname ssize 2>/dev/null <"$dir/genlock-session-continuity-${role}-start.mark" || true
   IFS=$'\t' read -r ename esize 2>/dev/null <"$dir/genlock-session-continuity-${role}-stop.mark" || true
   if [ -z "$host" ] || [ "$(stream_box_platform "$host")" != linux ]; then
@@ -133,8 +140,10 @@ _gsc_box() {
     return 0
   fi
   step="${GENLOCK_SESSION_CONTINUITY_STEP_S:-10}"
+  wmax="${GENLOCK_SESSION_CONTINUITY_WAIT_S:-30}"
   _gsc_count_ok "$step" || step=10
-  tries=$(( ${GENLOCK_SESSION_CONTINUITY_WAIT_S:-30} / (step > 0 ? step : 1) + 1 ))
+  _gsc_count_ok "$wmax" || wmax=30
+  tries=$((wmax / (step > 0 ? step : 1) + 1))
   for ((i = 1; i <= tries; i++)); do
     _gsc_read "$role" "$host" session 2>/dev/null | tr -d '\r' >"$read" || true
     python3 "$py" "${args[@]}" --read "$read" --log-name "$ename" --start-byte "$ssize" --stop-byte "$esize" \

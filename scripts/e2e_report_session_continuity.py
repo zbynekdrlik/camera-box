@@ -24,8 +24,21 @@ def blocks(verdict):
     return bool(b) and b.get("gates_overall_pass") is True and b.get("pass") is not True
 
 
-def _sk(text):
-    return text.replace("(a concealed slice is a LOST slice)", "(zamaskované = STRATENÉ)")
+def _sk_failures(b):
+    """The failing inputs in Slovak, from the block's structured fields (never its English lines)."""
+    out = []
+    for box, bx in (b.get("boxes") or {}).items():
+        for i in bx.get("inputs") or []:
+            if i.get("verdict") != "FAIL" or i.get("excluded"):
+                continue
+            parts = [f"{k} +{v['delta']}" for k, v in (i.get("counters") or {}).items() if v.get("delta")]
+            j = i.get("jxs") or {}
+            if j.get("lossy_windows"):
+                sums = ", ".join(f"{k} +{v}" for k, v in (j.get("sums") or {}).items() if v)
+                parts.append(f"{j['lossy_windows']} stratových JPEG XS okien ({sums or 'súčty neuvedené'}; "
+                             f"zamaskované = STRATENÉ)")
+            out.append(f"{box} '{i.get('input')}': {', '.join(parts)} po ustálení")
+    return out
 
 
 def summary_label(verdict):
@@ -33,11 +46,12 @@ def summary_label(verdict):
         return None
     b = _block(verdict)
     if b.get("verdict") == "FAIL":
-        fails = [_sk(f) for f in b.get("failures") or []]
+        fails = _sk_failures(b) or list(b.get("failures") or [])
         more = f" (+{len(fails) - _SHOWN} ďalších)" if len(fails) > _SHOWN else ""
         return f"Strata obrazu od štartu OBS (celá session, nie len okno): ZLYHALA — {'; '.join(fails[:_SHOWN])}{more}"
     reasons = b.get("unknown_reasons") or ["dôvod neuvedený"]
-    return f"Obraz od štartu OBS (celá session): NEOVERENÉ = ZLYHANIE — {reasons[0]}"
+    more = f" (+{len(reasons) - 3} ďalších)" if len(reasons) > 3 else ""
+    return f"Obraz od štartu OBS (celá session): NEOVERENÉ = ZLYHANIE — {'; '.join(reasons[:3])}{more}"
 
 
 def _glyph(v):
@@ -54,6 +68,8 @@ def _input_line(box, i):
         parts.append(f"informatívne: dropped_due +{d}")
     if i.get("first_growth"):
         parts.append(f"prvý nárast {i['first_growth']}")
+    if i.get("excluded"):
+        parts.append("kamera kvitovaná offline: len informatívne")
     return f"  • {box} '{i.get('input')}': {', '.join(parts) or 'bez počítadiel'} — {_glyph(i.get('verdict'))}"
 
 
@@ -67,8 +83,9 @@ def section(verdict):
     for box, bx in (b.get("boxes") or {}).items():
         lines.append(f"{box} ({bx.get('log', '?')}): {_glyph(bx.get('verdict'))}")
         lines.extend(_input_line(box, i) for i in bx.get("inputs") or [])
-    if b.get("failures"):
-        lines.append("Zlyhalo: " + "; ".join(_sk(f) for f in b["failures"]))
+    fails = _sk_failures(b)
+    if fails:
+        lines.append("Zlyhalo: " + "; ".join(fails))
     for u in b.get("unknown_reasons") or []:
         lines.append(f"Neoverené: {u}")
     return "\n".join(lines)

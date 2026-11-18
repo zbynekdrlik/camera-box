@@ -63,7 +63,8 @@ strih_log_os() {
 # strih_log_session_filter_text -> the remote text (after the newest-log selection, `$F` set) of the
 # issue-1534 whole-session genlock read: a `#newest<TAB>name<TAB>bytes` header, then the
 # `genlock-fifo audit '<input>':` and `jxs-source '<input>': fps=` lines of the WHOLE log with their
-# byte offsets (`grep -a -b`, nice 19 + ionice idle: 9-15 ms on the live 11-17 MB logs), reduced on
+# byte offsets (`grep -a -b`, nice 19 + ionice idle: 9-15 ms on the live 11-17 MB logs), each line
+# carrying its day (`<offset>:D<day>:<line>`, the awk counts midnights), reduced on
 # the box by awk so a multi-day session never ships its lines: per input and kind the first
 # K = 40 lines (the 60 s settle at the 5 s cadence; a JPEG XS input also its first 40 from its first
 # window with frames, a camera that connects late), every audit line whose
@@ -75,19 +76,35 @@ strih_log_session_filter_text() {
   prog="$(cat <<'AWK'
 function nm(m,   p, r) { p = index($0, m); if (!p) return ""; r = substr($0, p + length(m)); p = index(r, "\047"); return p ? substr(r, 1, p - 1) : "" }
 function fv(k,   i, s) { s = k "="; for (i = 1; i <= NF; i++) if (index($i, s) == 1) return substr($i, length(s) + 1); return "" }
+# the day of each line, counted here where EVERY filtered line passes in file order (the printed set is
+# sparse, so the decision cannot unwrap midnight from it): a line > 12 h behind the previous one starts
+# the next day; one > 12 h ahead (written just before midnight right after one past it) is the day before
+function stamp(   c, rest, sod, t, d) {
+  c = index($0, ":"); rest = substr($0, c + 1); d = day + 0
+  if (rest ~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) {
+    sod = substr(rest, 1, 2) * 3600 + substr(rest, 4, 2) * 60 + substr(rest, 7, 2)
+    t = sod + day * 86400
+    if (seen && t < last - 43200) { day++; d = day; t += 86400 }
+    else if (seen && t > last + 43200) { d = day - 1; t -= 86400 }
+    last = t; seen = 1
+  }
+  return substr($0, 1, c) "D" d ":" rest
+}
 {
   if (index($0, "genlock-fifo audit \047")) {
     n = nm("genlock-fifo audit \047"); if (n == "") next
+    o = stamp()
     ac[n]++; key = fv("underruns") ":" fv("relocks"); r = fv("received") + 0; p = (ac[n] <= K)
     if (!p && key != ak[n] && achg[n] < CAP) { achg[n]++; p = 1 }
     if (!p && r < ar[n] && arst[n] < CAP) { arst[n]++; p = 1 }
-    if (p) print; ak[n] = key; ar[n] = r; al[n] = $0
+    if (p) print o; ak[n] = key; ar[n] = r; al[n] = o
   } else if (index($0, "] jxs-source \047") && index($0, " fps=")) {
     n = nm("] jxs-source \047"); if (n == "") next
+    o = stamp()
     jc[n]++; if (jf[n] || fv("frames") + 0 > 0) jf[n]++; p = (jc[n] <= K || (jf[n] > 0 && jf[n] <= K))
     bad = fv("lost_slices") + fv("concealed") + fv("undecodable") + fv("dropped_unread") + fv("foreign") + fv("reopens")
     if (bad > 0) { jb[n]++; if (!p && jbp[n] < JCAP) { jbp[n]++; p = 1 } }
-    if (p) print; jl[n] = $0
+    if (p) print o; jl[n] = o
   }
 }
 END {
@@ -97,7 +114,7 @@ END {
 AWK
 )"
   # shellcheck disable=SC2016  # expands on the box
-  printf '%s' '{ printf "#newest\t%s\t%s\n" "${F##*/}" "$(stat -c %s -- "$F")"; nice -n 19 ionice -c 3 grep -a -b -E "genlock-fifo audit '"'"'|\] jxs-source '"'"'[^'"'"']*'"'"': fps=" -- "$F" | nice -n 19 awk -v K=40 -v CAP=200 -v JCAP=2000 '"'"
+  printf '%s' '{ printf "#newest\t%s\t%s\n" "${F##*/}" "$(stat -c %s -- "$F")"; nice -n 19 ionice -c 3 grep -a -b -E "genlock-fifo audit '"'"'|\] jxs-source '"'"'[^'"'"']*'"'"': fps=" -- "$F" | nice -n 19 ionice -c 3 awk -v K=40 -v CAP=200 -v JCAP=2000 '"'"
   printf '%s' "$prog" | sed "s/'/'\"'\"'/g"
   printf '%s' "'"'; }'
 }

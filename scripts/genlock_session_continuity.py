@@ -44,6 +44,7 @@ CONTEXT_AUDIT = ("dropped_due", "holds", "late_holds", "n2_early", "stamp_gap")
 JXS_GATED = ("lost_slices", "concealed", "undecodable", "dropped_unread", "foreign", "reopens")
 AUDIT_MARK = "genlock-fifo audit '"
 JXS_MARK = "] jxs-source '"
+_DAY = re.compile(r"^D(-?\d+):")
 _TS = re.compile(r"^(\d\d):(\d\d):(\d\d(?:\.\d+)?): ")
 _FIELD = re.compile(r"(?:^|\s)([a-z_0-9]+)=(-?\d+)(?=\s|$)")
 _RANK = {"PASS": 0, "UNKNOWN": 1, "FAIL": 2}
@@ -59,7 +60,11 @@ def _name(text, mark):
 
 
 def _fields(text):
-    return {k: int(v) for k, v in _FIELD.findall(text)}
+    """The FIRST `key=` of each name, like the box's awk `fv` (both sides read the same field)."""
+    out = {}
+    for k, v in _FIELD.findall(text):
+        out.setdefault(k, int(v))
+    return out
 
 
 def _sod(text):
@@ -89,6 +94,10 @@ def parse_read(text):
         off, sep, line = raw.partition(":")
         if not sep or not off.isdigit():
             continue
+        day = None
+        m = _DAY.match(line)
+        if m:  # the box's awk counted midnights over EVERY line (the read itself is sparse)
+            day, line = int(m.group(1)), line[m.end():]
         if AUDIT_MARK in line:
             kind, inp = "audit", _name(line, AUDIT_MARK)
         elif JXS_MARK in line and " fps=" in line:
@@ -99,10 +108,14 @@ def parse_read(text):
         if inp is None or sod is None:
             continue
         rows[int(off)] = {"off": int(off), "text": line, "sod": sod, "kind": kind, "input": inp,
-                          "f": _fields(line)}
+                          "f": _fields(line), "day": day}
     entries = [rows[k] for k in sorted(rows)]
-    # midnight: a line more than 12 h behind the previous one starts the next day; a line a moment
-    # before midnight written right after one past it (two threads' clocks) stays on its own day
+    if entries and all(e["day"] is not None for e in entries):
+        for e in entries:
+            e["t"] = e["sod"] + 86400.0 * e["day"]
+        return name, size, entries, counts
+    # a dense read without day stamps: a line more than 12 h behind the previous one starts the next
+    # day; a line a moment before midnight written right after one past it stays on its own day
     day, prev = 0.0, None
     for e in entries:
         t = e["sod"] + day
@@ -123,10 +136,11 @@ def _grade_audit(inp, rows, total, res):
     """`rows`: the input's audit entries in file order."""
     t0 = rows[0]["t"]
     settle = t0 + SETTLE_S
-    base = None
-    for e in rows:
-        if e["t"] <= settle:
-            base = e
+    base = rows[0]
+    for e in rows[1:]:  # file order: the last line before the first one past the settle
+        if e["t"] > settle:
+            break
+        base = e
     if total > len(rows) and all(e["t"] <= settle for e in rows):
         res["unknown_reasons"].append(f"'{inp}': the read does not reach past its settle point")
         return
@@ -210,9 +224,10 @@ def unknown_box(box, reason, declared=(), retryable=False):
             "failures": [], "unknown_reasons": [reason], "retryable": retryable}
 
 
-def decide_box(box, text, declared, *, log_name, start_byte, stop_byte):
+def decide_box(box, text, declared, *, log_name, start_byte, stop_byte, excluded=()):
     """One box: `text` = the box's read, `declared` = the inputs the run measures (each must be there),
-    `log_name` / `start_byte` / `stop_byte` = the window marks of this box."""
+    `log_name` / `start_byte` / `stop_byte` = the window marks of this box, `excluded` = the inputs of
+    cameras the run acked offline (graded and reported, never gating)."""
     name, size, entries, counts = parse_read(text)
     if name is None:
         return unknown_box(box, f"the {box} OBS log could not be read", declared)
@@ -224,12 +239,13 @@ def decide_box(box, text, declared, *, log_name, start_byte, stop_byte):
                                 f"({stop_byte}) yet", declared, retryable=True)
     res = {"box": box, "log": name, "verdict": "PASS", "pass": True, "declared": list(declared),
            "inputs": [], "failures": [], "unknown_reasons": [], "retryable": False}
+    declared = [d for d in declared if d not in excluded]
     names = sorted({e["input"] for e in entries} | set(declared))
     if not names:
         res["unknown_reasons"].append(f"no genlock input on the {box} OBS log")
     for inp in names:
         r = {"input": inp, "declared": inp in declared, "counters": {}, "context": {}, "failures": [],
-             "unknown_reasons": []}
+             "unknown_reasons": [], "excluded": inp in excluded}
         audit = [e for e in entries if e["input"] == inp and e["kind"] == "audit"]
         jxs = [e for e in entries if e["input"] == inp and e["kind"] == "jxs"]
         if audit:
@@ -248,6 +264,9 @@ def decide_box(box, text, declared, *, log_name, start_byte, stop_byte):
         r.pop("_jxs_total", None)
         _finish(r)
         res["inputs"].append(r)
+        if r["excluded"]:
+            r["note"] = "the run acked this camera offline: report-only"
+            continue
         res["failures"].extend(r["failures"])
         res["unknown_reasons"].extend(r["unknown_reasons"])
     return _finish(res)
@@ -315,6 +334,8 @@ def main(argv=None):
     ap.add_argument("--box", choices=("strih", "stream"))
     ap.add_argument("--read", help="the box's whole-session read (a file)")
     ap.add_argument("--input", action="append", default=[], help="a declared input (repeat)")
+    ap.add_argument("--exclude", action="append", default=[],
+                    help="an input of a camera the run acked offline: report-only (repeat)")
     ap.add_argument("--log-name", default="")
     ap.add_argument("--start-byte", type=int, default=0)
     ap.add_argument("--stop-byte", type=int, default=0)
@@ -355,7 +376,7 @@ def main(argv=None):
             res = unknown_box(a.box, f"the {a.box} read is not readable: {e}", a.input)
         else:
             res = decide_box(a.box, text, a.input, log_name=a.log_name, start_byte=a.start_byte,
-                             stop_byte=a.stop_byte)
+                             stop_byte=a.stop_byte, excluded=a.exclude)
     if a.box_out:
         _write(a.box_out, res)
     print(f"{a.box}: {res['verdict']}")
