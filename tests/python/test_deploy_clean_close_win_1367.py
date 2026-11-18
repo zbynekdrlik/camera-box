@@ -315,11 +315,13 @@ class Rig:
         if obs_running:
             exe = tmp_path / "bin" / "obs64"
             exe.parent.mkdir()
-            shutil.copy(shutil.which("sleep"), exe)
-            # argv[0] stays "sleep": a multicall coreutils (uutils, the CI runner since 11.2026)
-            # picks its program by argv[0] and refuses "obs64"; the process NAME (comm) comes
-            # from the executable's file name, so Get-Process still sees obs64.
-            self.obs = subprocess.Popen(["sleep", "600"], executable=str(exe))
+            # A symlink named obs64 to the python interpreter: the kernel names the process (comm)
+            # after the path it executed, and python ignores its own name. A copy of `sleep` broke
+            # on the CI runner's multicall coreutils (uutils, 11.2026), which picks its program by
+            # argv[0] and refuses "obs64", and keeping argv[0] "sleep" made .NET's ProcessName read
+            # "sleep" (issue 1534).
+            os.symlink(sys.executable, exe)
+            self.obs = subprocess.Popen([str(exe), "-c", "import time; time.sleep(600)"])
             # reap it the moment it dies, so a closed fake leaves no zombie behind
             self.reaper = threading.Thread(target=self.obs.wait, daemon=True)
             self.reaper.start()
