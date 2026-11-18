@@ -815,13 +815,26 @@ case "$args" in
 esac
 '''
 
-GOOD_NM = "u-1|strih-lan|%s|10.77.9.202/23\n" % NIC
+# issue 1534 (18.11.2026): the r8152 rig NIC's profile carries ethtool.ring-rx 4096 (5th field)
+GOOD_NM = "u-1|strih-lan|%s|10.77.9.202/23|4096\n" % NIC
+
+# fake ethtool: `-g IF` prints the ring with the current RX from $FAKE_RING (empty file = unreadable),
+# `-G IF rx N` records N there and logs the call to $FAKE_RING.log
+FAKE_ETHTOOL = r'''#!/bin/bash
+case "$1" in
+  -g) r="$(cat "$FAKE_RING" 2>/dev/null)"; [ -n "$r" ] || exit 1
+      printf 'Ring parameters for %s:\nPre-set maximums:\nRX:\t\t\t4096\nCurrent hardware settings:\nRX:\t\t\t%s\n' "$2" "$r" ;;
+  -G) echo "ethtool $*" >> "$FAKE_RING.log"; printf '%s\n' "$4" > "$FAKE_RING" ;;
+  *) echo "fake ethtool: $*" >&2; exit 2 ;;
+esac
+'''
 
 
 class Sysfs:
     """A fake /sys with the RTL8157 on usb2/2-3 (r8152), an onboard r8169 NIC and lo."""
 
-    def __init__(self, tmp_path, usb="10000", link="5000", loaded=LOADED, nm=GOOD_NM, dkms_db=None):
+    def __init__(self, tmp_path, usb="10000", link="5000", loaded=LOADED, nm=GOOD_NM, dkms_db=None,
+                 ring="4096"):
         self.tmp = tmp_path
         s = tmp_path / "sys"
         self.sys = s
@@ -859,6 +872,8 @@ class Sysfs:
         self.fake.mkdir()
         _exe(self.bin / "dkms", FAKE_DKMS)
         _exe(self.bin / "nmcli", FAKE_NMCLI)
+        _exe(self.bin / "ethtool", FAKE_ETHTOOL)
+        (tmp_path / "ring").write_text(ring + "\n" if ring else "")
         (self.fake / "dkms.db").write_text(dkms_db if dkms_db is not None else
                                             "realtek-r8152|2.21.4|%s|installed\n" % KERNEL)
         (tmp_path / "nm.tsv").write_text(nm)
@@ -869,7 +884,8 @@ class Sysfs:
             boxes.mkdir(exist_ok=True)
             facts_env = _fixture(boxes, [])
         env = {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "FAKE": str(self.fake),
-               "FAKE_NM": str(self.tmp / "nm.tsv"), "STRIH_NIC_DRV_KERNEL": KERNEL,
+               "FAKE_NM": str(self.tmp / "nm.tsv"), "FAKE_RING": str(self.tmp / "ring"),
+               "STRIH_NIC_DRV_KERNEL": KERNEL,
                "STRIH_NIC_DRV_MODULES_ROOT": str(self.tmp / "no-modules")}
         for name in drop:
             (self.bin / name).unlink()
@@ -888,7 +904,7 @@ def _states(rows):
 def test_grade_passes_the_live_target_state(tmp_path):
     rows = Sysfs(tmp_path).grade()
     assert _states(rows) == {"(nic-driver)": "OK", "(nic-dkms)": "OK", "(nic-usb)": "OK", "(nic-link)": "OK",
-                             "(nic-nm)": "OK", "(nic-rename)": "NOTE"}, rows  # issue 1502: no rename declared
+                             "(nic-nm)": "OK", "(nic-rename)": "NOTE", "(nic-ring)": "OK"}, rows  # issue 1502: no rename declared
     text = "\n".join(d for _, d in rows)
     assert "USB link 10000 Mb/s >= 10000" in text
     assert "Ethernet link 5000 Mb/s >= 5000" in text
@@ -1168,3 +1184,78 @@ def test_setup_step1_prints_the_driver_ring_note_1411():
     assert 'strih_nic_ring_note "$(strih_lx_nic_driver)"' in text
     assert "set ethtool.ring-rx 4096 --" not in text
 
+
+
+# --- issue 1534: the r8152 USB rig NIC needs its RX ring at 4096, kept by setup and graded by verify -----------
+# Live 18.11.2026 on stream-snv (RTL8156B, r8152): the ring sat at the driver's 100 of a possible 4096 and the
+# NIC dropped bursts before the kernel saw them (rx_missed 20978, the Dante program audio holes from 11:29).
+# The step-1 note had asked for 4096 since issue 1391, but nothing set or graded it after the issue-1502 swap.
+# r8152 changes the ring without a link reset (live: carrier_changes unchanged); atlantic never gets one.
+
+@pytest.mark.parametrize("profile,live,state", [
+    ("4096", "4096", "OK"), ("", "4096", "FAIL"), ("4096", "100", "FAIL"), ("4096", "", "FAIL"),
+    ("2048", "4096", "FAIL")])
+def test_r8152_ring_verdict_wants_4096_in_the_profile_and_on_the_nic_1534(profile, live, state):
+    r = _bash('strih_nic_r8152_ring_verdict strih-lan "$P" "$L" rig0', env={"P": profile, "L": live})
+    assert r.stdout.startswith(state + "|(nic-ring)"), r.stdout
+    assert (r.returncode == 0) == (state == "OK"), r
+    if state == "FAIL":
+        assert "4096" in r.stdout and "setup-strih" in r.stdout, r.stdout
+
+
+def test_grade_fails_an_r8152_nic_whose_ring_is_the_driver_default_1534(tmp_path):
+    rows = Sysfs(tmp_path, ring="100").grade()
+    assert _states(rows)["(nic-ring)"] == "FAIL", rows
+    assert any("100" in d for s, d in rows if d.startswith("(nic-ring)")), rows
+
+
+def test_grade_fails_an_r8152_profile_without_the_ring_1534(tmp_path):
+    rows = Sysfs(tmp_path, nm="u-1|strih-lan|%s|10.77.9.202/23\n" % NIC).grade()
+    assert _states(rows)["(nic-ring)"] == "FAIL", rows
+
+
+def _apply(tmp_path, nm, ring, facts=None):
+    box = Sysfs(tmp_path, nm=nm, ring=ring)
+    log = tmp_path / "nmcli.log"
+    nmcli = box.bin / "nmcli"
+    nmcli.write_text(FAKE_NMCLI.replace('args="$*"', 'args="$*"\necho "nmcli $args" >> "$NM_LOG"\n'
+                                        'case "$args" in "connection modify "*) exit 0 ;; esac', 1))
+    boxes = tmp_path / "usb-box"
+    boxes.mkdir(exist_ok=True)
+    env = {"PATH": "%s:%s" % (box.bin, os.environ["PATH"]), "FAKE_NM": str(tmp_path / "nm.tsv"),
+           "FAKE_RING": str(tmp_path / "ring"), "NM_LOG": str(log), "SYSROOT": str(box.sys)}
+    env.update(facts if facts is not None else _fixture(boxes, []))
+    r = _bash('strih_nic_ring_apply "$SYSROOT" ""', env=env, sources=(PROVISION, LIB))
+    calls = log.read_text() if log.exists() else ""
+    eth = (tmp_path / "ring.log").read_text() if (tmp_path / "ring.log").exists() else ""
+    return r, calls, eth, (tmp_path / "ring").read_text().strip()
+
+
+def test_apply_sets_the_ring_in_the_profile_and_on_the_nic_1534(tmp_path):
+    r, calls, eth, live = _apply(tmp_path, "u-1|strih-lan|%s|10.77.9.202/23\n" % NIC, "100")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "nmcli connection modify u-1 ethtool.ring-rx 4096" in calls, calls
+    assert "ethtool -G %s rx 4096" % NIC in eth, eth
+    assert live == "4096"
+    for banned in ("device reapply", "connection up", "connection down"):
+        assert banned not in calls, calls
+
+
+def test_apply_changes_nothing_on_a_box_already_at_4096_1534(tmp_path):
+    r, calls, eth, live = _apply(tmp_path, GOOD_NM, "4096")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "connection modify" not in calls and eth == "", (calls, eth)
+    assert "unchanged" in r.stdout, r.stdout
+
+
+def test_apply_never_touches_a_non_r8152_rig_nic_1534(tmp_path):
+    r = _bash('strih_nic_ring_apply /nonexistent ""', env={"STRIH_BOXES_DIR": str(SCRIPTS / "strih-boxes"),
+                                                        "STRIH_FACT_BOX": "strih-snv"},
+              sources=(PROVISION, LIB))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ethtool -G" not in r.stdout and "modify" not in r.stdout, r.stdout
+
+
+def test_setup_step1c_applies_the_ring_1534():
+    text = SETUP.read_text()
+    assert 'strih_nic_ring_apply /sys "$(ip -o -4 addr show 2>/dev/null || true)"' in text
