@@ -70,6 +70,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   5/6, owner yes on issue 1513). A change of (a) or (b) is an owner decision. Clocks + latencies:
   `.claude/rules/audio-clock-map.md` ("The named Dante latency terms"). Tests:
   `tests/python/test_strih_dante_terms_1513.py`.
+- **PP (issue 1536, 18.11.2026):** strih-pp `strih-obs` + stream-pp `stream-obs` on their VLAN 70 legs (the
+  transmitter is dsg, the SoundGrid<->Dante bridge); each box's site file is placed by the supervisor like SNV's.
 - **Site data is never in git (the repo is public):** the per-box untracked
   `/etc/camera-box/dante-input.site.conf` (`STRIH_DANTE_INPUT_SITE_FILE`), placed by the supervisor:
   `RX<n>=<rx label>|<tx device>|<tx channel>`, 1-6 or 8 channels, contiguous. Missing or malformed on a

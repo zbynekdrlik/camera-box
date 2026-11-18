@@ -23,7 +23,7 @@ never counts). No new fact, no box name.
 | Box | Verdict | Why |
 |---|---|---|
 | strih-snv | purge | program = obs-vban `strih-obs` (issue 1439 phase 2), cutters = the hub's `alsa` leg (issue 1438), no pipewire participant |
-| strih-pp | purge (since 24.10.2026) | program = obs-vban `strih-obs` from lv1 on UDP 6981 (issue 1439), cutters = the hub's `alsa` leg on the MG-XU, the vestibule = `alsa_hdmi`, no pipewire participant |
+| strih-pp | purge (since 24.10.2026) | program = the Dante device `strih-obs` from dsg (issue 1536; before: obs-vban `strih-obs` from lv1 on UDP 6981, issue 1439), cutters = the hub's `alsa` leg on the MG-XU, the vestibule = `alsa_hdmi`, no pipewire participant |
 | a hub-fed strih (all four program facts `none`; none deployed) | keep | its program goes hub `program_out` (adapter pipewire) -> pw-cat -> PipeWire -> OBS |
 | stream-pp / stream-snv | keep | the stream role's locked operator PipeWire |
 

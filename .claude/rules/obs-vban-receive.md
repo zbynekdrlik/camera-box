@@ -752,6 +752,14 @@ outside dstack's slots 4440-4471, and a leg VBAN sender on a Dante box. A box wi
   grade is one NOTE. A leg filter left from an earlier leg keeps today's behaviour (not removed by the SKIP).
   Moving to the VLAN later = only the leg facts (`vlan:<id>` + the /24 address). Tests:
   `tests/python/test_strih_dante_legless_1536.py`.
+- **PP on its new switch (issue 1536, 18.11.2026): VLAN 70 legs, SNV's shape.** strih-pp `vlan:70`
+  10.77.7.202 (`enp5s0f1.70`), stream-pp 10.77.7.204 (`rig0.70`: its USB RTL8156 `enx6c1ff7618e74` is renamed
+  rig0 by the issue-1502 fact `STRIH_NIC_RENAME`, a 15-character name has no room for `.70`), one `<role>-obs`
+  device each (the program from dsg, the SoundGrid<->Dante bridge), the terms 1 / 12.041666, no TX; PP's
+  intercom stays VBAN. `STRIH_DANTE_GM=10.77.7.200` ("dante-ptp" on VLAN 70); the PP switch also copies its
+  PTP onto the LAN untagged, so dsync stays on the rig NIC exactly like SNV. Tests:
+  `tests/python/test_pp_dante_leg_1536.py`; the VBAN-shape tests run the PP boxes in their pre-1536 rollback
+  shape (`vban_leg_fakes_1439.PP_PRE_1536`, `pp_pre_1536_boxes_dir`).
 
 - **The address:** a real `/24` with `ipv4.route-table=70`: NetworkManager puts the connected route in table
   70, so only sockets bound to the leg's address reach it (`from <addr> lookup 70`), and main stays free of

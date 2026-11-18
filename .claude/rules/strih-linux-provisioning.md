@@ -191,7 +191,7 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
 - **strih-pp.env is decided** from the read-only recon (issue 1412 comment 6106146258) + the owner
   rulings: 10.77.8.202, NTP master, RTL8125 PCIe (`r8169`, `none`, `none`, 2500), vk-direct (RTX 3060
   only), cameras `1 4 6 7`, companion-pp 10.77.8.205, `RESOLUME-PP (SP-program)`, grandmaster
-  10.77.8.110, sampler `off`, the program-only `intercom.strih-pp.toml`. Only
+  10.77.8.110 (10.77.7.200 on VLAN 70 since issue 1536), sampler `off`, the program-only `intercom.strih-pp.toml`. Only
   `STRIH_NDI_RUNTIME_PEER` stays TODO_OWNER (the PP camboxes have no PP address yet); on site set it,
   or run with `STRIH_NDI_PEER=<ip>` after filling the fact. Disable the onboard RTL8168 in the BIOS
   (both NICs bind `r8169`), or pass `STRIH_NIC_IFACE`.
