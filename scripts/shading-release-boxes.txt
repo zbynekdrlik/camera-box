@@ -24,3 +24,4 @@ strih-pp shading-release-rest.pin
 # A v0.2.x panel sends apertureStep, which a v0.1.x relay ignores, so a venue moves once its cameras are on
 # the REST relay. strih-snv: owner 10.11.2026 (cam3 + cam5 on v0.2.2; cam2's gphoto2 relay keeps the gap).
 strih-snv shading-release-rest.pin
+handheld-1 shading-release-rest.pin
