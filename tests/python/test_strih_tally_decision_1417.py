@@ -107,3 +107,19 @@ def test_every_pvw_and_pgm_frame_also_goes_out_in_the_2me_form():
     assert d.with_me2_aliases(d.full_messages((7, 0))) == [
         "TALLY-PVW 0", "TALLY-PVW2 0", "TALLY-PGM 7", "TALLY-PGM2 7"]
     assert d.with_me2_aliases([]) == []
+
+
+def test_a_jpeg_xs_input_is_a_camera_by_its_jxs_camera_setting_1536():
+    """PP 18.11.2026: the strih cameras are JPEG XS inputs (camera_box_jxs_source, `jxs_camera` = N),
+    so a scene holding only `JXS camN src` lit nothing and the lights never changed."""
+    assert d.camera_of_input("camera_box_jxs_source", {"jxs_camera": 7}) == 7
+    assert d.camera_of_input("camera_box_jxs_source", {"jxs_camera": 0}) == 0
+    assert d.camera_of_input("camera_box_jxs_source", {}) == 0
+    assert d.camera_of_input("camera_box_jxs_source", {"jxs_camera": "7"}) == 0
+    assert d.camera_of_input("camera_box_jxs_source", {"jxs_camera": True}) == 0
+    assert d.camera_of_input("ndi_source", {"ndi_source_name": "CAM4 (usb)"}) == 4
+    assert d.camera_of_input("ndi_source", {"ndi_source_name": "STRIH-PP (2ME PGM)"}) == 0
+    assert d.camera_of_input("ffmpeg_source", {"jxs_camera": 3}) == 0
+    tree = {"Cam 7": [{"name": "JXS cam7 src", "kind": "input", "enabled": True},
+                      {"name": "NDI cam7", "kind": "input", "enabled": False}]}
+    assert d.camera_of_scene("Cam 7", tree, {"JXS cam7 src": 7, "NDI cam7": 7}) == 7
