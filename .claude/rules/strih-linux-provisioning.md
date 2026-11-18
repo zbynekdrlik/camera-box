@@ -87,6 +87,11 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
     fixture that shrinks `STRIH_CAMERAS` (the 1361 `strih-zz` box and `seed_manifest_follows_the_camera_and_cg_facts`)
     must shrink the dependent fact too, or the load refuses before the assertion. Grep the test tree for
     the other fact's literal (`STRIH_CAMERAS=2 3 5`) and read each replacement.
+- **Never write a literal `KEY=value` of a fact into a fact-file COMMENT** (issue 1536): many fixtures
+  replace `KEY=value` in a copied fact file with `assert t.count(old) == 1`, so a rollback note such as
+  "+ STRIH_DANTE_DEVICES=none" in a comment makes them count 2. Write "STRIH_DANTE_DEVICES none". A box
+  that stops being a test's example shape (PP left VBAN for Dante) keeps its old shape as a fixture
+  (`vban_leg_fakes_1439.PP_PRE_1536` / `pp_pre_1536_boxes_dir`), never an edited real fact file.
 - **`STRIH_DESKTOP` (issue 1466)** = `openbox` | `xfce`, the last key: the operator session
   (`.claude/rules/obs-box-xfce.md`). stream-snv is the first `xfce` box. It is not in the 1361 golden
   (the openbox autostart is `strih_session_start_text openbox`, unchanged), so moving a box is the fact
