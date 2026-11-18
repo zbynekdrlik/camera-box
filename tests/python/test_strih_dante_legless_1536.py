@@ -97,9 +97,13 @@ def test_a_legless_dante_program_box_with_a_vban_program_is_still_refused(tmp_pa
 
 
 def test_a_legless_dante_box_still_refuses_a_leg_vban_sender(tmp_path):
+    """Both refusals name it: the leg rule (a sender without a leg) and the Dante rule (no VBAN sender on a
+    Dante box), so dropping either check is caught."""
     d = _legless(tmp_path, STRIH_PROGRAM_VBAN_SENDER="10.77.8.230")
     r = _bash('strih_box_load strih-pp', env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode != 0, r.stderr
+    assert "must be none while STRIH_PROGRAM_VBAN_LEG is none" in r.stderr, r.stderr
+    assert "STRIH_PROGRAM_VBAN_SENDER must be none on a Dante box" in r.stderr, r.stderr
 
 
 def test_the_real_fact_files_all_still_load():

@@ -16,7 +16,7 @@ _strih_box_dante_devices_ok() {
   local name="$1" v="$2" sender="${4:-none}" d dev ports arc cmc flows p seen=" " rc=0 dg='[0123456789]'
   [ "$v" != none ] || return 0
   if [ "$sender" != none ]; then
-    echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER must be none on a Dante leg: dstack's generic filter admits no VBAN (issue 1519)" >&2; rc=1
+    echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER must be none on a Dante box: dstack's generic leg filter admits no VBAN (issue 1519)" >&2; rc=1
   fi
   for d in $v; do
     dev="${d%%=*}"; ports="${d#*=}"
