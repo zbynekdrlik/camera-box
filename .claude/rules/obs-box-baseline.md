@@ -343,6 +343,13 @@ multi-GB core under its compiled 32G defaults. The notebook froze for minutes un
   cmdline. Small cores (Xorg, dsync, the hub, the session apps) keep a full core + stack in coredumpctl;
   that is why a cap, not `Storage=none` + `ProcessSizeMax=0` (which drops every core) and not a per-unit
   `LimitCORE=` (misses a hand-started OBS, imag's launcher, CEF helpers).
+- **imag's issue-882 core capture still holds under the cap.** imag's OBS unit sets
+  `LimitCORE=infinity` so a segfault leaves an inspectable core; the 30.7.2026 live proof was an 88 MB
+  OBS core, which fits 256M whole (with its stack). Only a multi-GB core (stream-pp's amdgpu OBS) is
+  truncated. If a debuggable OBS core over the cap is ever needed, raise the ONE value
+  (`obs_box_coredump_size_max`) on purpose, never per box.
+- **A FAILing row can be a foreign drop-in**, not a missing setup: a file sorted after `90-` that lifts a
+  size wins in systemd too. The row's detail names `systemd-analyze cat-config systemd/coredump.conf`.
 - **No restart:** systemd-coredump runs `parse_config()` (coredump.conf + coredump.conf.d) at every
   invocation, one per crash. The item never calls systemctl.
 - **Install:** `scripts/lib/obs-box-coredump.sh` (sourced by the system half, its line budget), through

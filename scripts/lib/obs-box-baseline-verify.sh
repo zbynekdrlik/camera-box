@@ -531,6 +531,6 @@ obs_box_baseline_verdict() {
     ok=0
     case "$(_obs_box_f coredump_effective)" in "external,${cd_want},${cd_want}" | "none,${cd_want},${cd_want}")
         [ "$(_obs_box_f coredump_dropin)" = 1 ] && ok=1 ;; esac
-    _obs_box_item coredump "$ok" "drop-in=$(_obs_box_f coredump_dropin) effective Storage,ProcessSizeMax,ExternalSizeMax=$(_obs_box_f coredump_effective) (want external,${cd_want},${cd_want}) -- setup obs_box_coredump_bound (issue 1441)"
+    _obs_box_item coredump "$ok" "drop-in=$(_obs_box_f coredump_dropin) effective Storage,ProcessSizeMax,ExternalSizeMax=$(_obs_box_f coredump_effective) (want external,${cd_want},${cd_want}) -- setup obs_box_coredump_bound, or a later drop-in overrides it: systemd-analyze cat-config systemd/coredump.conf (issue 1441)"
     [ "$fails" -eq 0 ]
 }

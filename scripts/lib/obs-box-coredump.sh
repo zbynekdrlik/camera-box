@@ -17,7 +17,8 @@
 # (`Process N (obs) ... dumped core.`, signal, exe, cmdline); the stack trace needs the core on disk, so
 # an OBS core bigger than the cap gets no full stack (coredump.conf(5)). Storage stays the default
 # `external`: every small process (Xorg, dsync, the hub, the session apps) keeps a full core + stack in
-# coredumpctl. systemd-coredump parses coredump.conf.d at every invocation (one per crash), so the
+# coredumpctl, and so does an imag OBS core of the issue-882 size (88 MB live, 30.7.2026: imag's unit sets
+# LimitCORE=infinity on purpose). systemd-coredump parses coredump.conf.d at every invocation (one per crash), so the
 # drop-in needs no reload and no restart.
 
 # obs_box_coredump_size_max -> the ONE bound for ProcessSizeMax and ExternalSizeMax: above a helper
