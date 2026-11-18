@@ -574,10 +574,14 @@ def test_the_loader_refuses_malformed_or_overlapping_devices(tmp_path, value, wo
     assert r.returncode != 0 and word in r.stderr, r.stderr
 
 
-def test_the_loader_refuses_devices_without_a_leg(tmp_path):
+def test_the_loader_takes_devices_without_a_leg_but_never_beside_a_vban_program(tmp_path):
+    """issue 1536 (dstack 18.11.2026, PP's flat network): a Dante box may run on its rig NIC with no leg
+    (tests/python/test_strih_dante_legless_1536.py); strih-pp still declares its VBAN program, so the one
+    program source rule refuses it -- never a "needs a leg" refusal any more."""
     d = _boxes_with(tmp_path, "strih-pp", [("STRIH_DANTE_DEVICES=none", "STRIH_DANTE_DEVICES=" + STRIH_DEVICES)])
     r = _bash('strih_box_load strih-pp', env={"STRIH_BOXES_DIR": str(d)})
-    assert r.returncode != 0 and "needs a leg" in r.stderr, r.stderr
+    assert r.returncode != 0 and "needs a leg" not in r.stderr, r.stderr
+    assert "is the program source" in r.stderr, r.stderr
 
 
 def test_the_live_32_moves_to_the_24_by_reapply_never_a_link_change(tmp_path):
