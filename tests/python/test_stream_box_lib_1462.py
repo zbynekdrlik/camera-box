@@ -93,7 +93,8 @@ def test_the_expectation_follows_the_fact_file(tmp_path):
 
 def test_the_input_name_comes_last_whole_with_its_spaces(tmp_path):
     p, _ = _run(tmp_path, 'read -r s port i <<<"$(stream_mbc_vban_expect 10.77.8.204)"; printf "[%s][%s][%s]\\n" "$s" "$port" "$i"',
-                env={"OBS_FLEET": "stream-pp|10.77.8.204|linux-genlock|always"})
+                env={"OBS_FLEET": "stream-pp|10.77.8.204|linux-genlock|always",
+                     "STRIH_BOXES_DIR": fk.pp_pre_1536_boxes_dir()})   # issue 1536: its VBAN rollback shape
     assert p.returncode == 0, p.stderr
     assert p.stdout.strip() == "[stream][6980][Zvuk z mixu]"
 
@@ -147,10 +148,18 @@ def test_the_real_stream_snv_takes_its_program_from_the_dante_device_stream_obs(
     ("192.0.2.10", "stream-zz|192.0.2.10|linux-genlock|always"),     # no fact file
 ])
 def test_any_other_box_is_no_dante_stream_box(tmp_path, host, fleet):
+    # issue 1536: stream-pp is a Dante box now; its VBAN rollback shape is the VBAN-fed case here
     p, _ = _run(tmp_path, 'if out="$(stream_program_dante_input "$1")"; then echo "OK[$out]"; else echo "RC=$?"; fi',
-                host, env={"OBS_FLEET": fleet})
+                host, env={"OBS_FLEET": fleet, "STRIH_BOXES_DIR": fk.pp_pre_1536_boxes_dir()})
     assert p.returncode == 0, p.stderr
     assert p.stdout.strip() == "RC=1"
+
+
+def test_stream_pp_is_a_dante_stream_box_since_1536(tmp_path):
+    p, _ = _run(tmp_path, 'if out="$(stream_program_dante_input 10.77.8.204)"; then echo "OK[$out]"; else echo "RC=$?"; fi',
+                env={"OBS_FLEET": "stream-pp|10.77.8.204|linux-genlock|always"})
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == "OK[stream-obs Zvuk z mixu]"
 
 
 def test_the_pre_1495_stream_snv_is_no_dante_stream_box(tmp_path):

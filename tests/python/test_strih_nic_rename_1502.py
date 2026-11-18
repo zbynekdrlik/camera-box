@@ -92,7 +92,7 @@ def test_stream_snv_declares_the_usb_25g_adapter_renamed_rig0():
     assert len("rig0." + f["STRIH_PROGRAM_VBAN_LEG"].split(":")[1]) <= 15
 
 
-@pytest.mark.parametrize("box", ["strih-snv", "strih-pp", "stream-pp"])
+@pytest.mark.parametrize("box", ["strih-snv", "strih-pp"])   # stream-pp: rig0 since issue 1536
 def test_every_other_box_declares_no_rename(box):
     assert _facts(box)["STRIH_NIC_RENAME"] == "none"
 

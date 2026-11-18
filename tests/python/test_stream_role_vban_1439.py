@@ -88,8 +88,9 @@ def _bash(body, *args, env=None, path_prefix=None):
 
 
 def _boxes_with(tmp_path, box, old, new):
+    # issue 1536: the loader's VBAN rules run on the VBAN shape (the PP boxes take Dante since 18.11.2026)
     d = tmp_path / "boxes"
-    shutil.copytree(BOXES, d)
+    shutil.copytree(fk.pre_1495_boxes_dir(), d)
     f = d / ("%s.env" % box)
     t = f.read_text()
     assert t.count(old) == 1, (box, old)
@@ -123,8 +124,8 @@ def test_every_box_fact_file_loads(box):
     assert r.returncode == 0, r.stderr
 
 
-@pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "none|none|none"),   # stream-snv: Dante, issue 1495
-                                      ("strih-snv", "none|none|none"), ("strih-pp", "strih-obs|6981|40")])   # strih-snv: Dante, issue 1485
+@pytest.mark.parametrize("box,want", [("stream-pp", "none|none|none"), ("stream-snv", "none|none|none"),   # stream-snv: Dante, issue 1495
+                                      ("strih-snv", "none|none|none"), ("strih-pp", "none|none|none")])   # strih-snv: Dante, issue 1485; PP: issue 1536
 def test_each_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s" "$(strih_lx_program_vban_streams)" '
               '"$(strih_lx_program_vban_port)" "$(strih_lx_program_vban_reserve_ms)"', box)
@@ -226,14 +227,16 @@ def test_vban_source_settings_accepts_the_facts_and_refuses_the_rest():
             PAV.vban_source_settings(*bad)
 
 
-def _manifest(box):
-    r = _bash('strih_box_load "$1"\nobs_box_seed_manifest_json', box)
+def _manifest(box, boxes=None):
+    r = _bash('strih_box_load "$1"\nobs_box_seed_manifest_json', box,
+              env={"STRIH_BOXES_DIR": boxes} if boxes else None)
     assert r.returncode == 0, r.stderr
     return r.stdout
 
 
 def test_the_stream_manifest_carries_the_vban_source_settings():
-    text = _manifest("stream-pp")
+    # stream-pp's VBAN rollback shape (issue 1536 moved its program to Dante)
+    text = _manifest("stream-pp", fk.pre_1495_boxes_dir())
     d = json.loads(text)
     assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 40}
     assert d["program_audio_input"] == "Zvuk z mixu"
@@ -538,10 +541,13 @@ def test_main_hands_the_manifest_vban_to_the_bootstrap():
 def test_each_pp_preset_is_its_box_facts(box):
     # issue 1439: stream-pp takes lv1's `stream`, strih-pp (24.10.2026) lv1's `strih-obs`, both into the
     # obs-vban source; the port converts the program input exactly as the launch seed does
+    # issue 1536: the PP boxes take Dante now; the preset (a one-time collection import, its collections
+    # exist) keeps the VBAN rollback shape, and the launch seed switches the input to dante_input
+    pre = {"STRIH_BOXES_DIR": fk.pre_1495_boxes_dir()}
     r = _bash('strih_box_load "$1"\nprintf "%s %s %s" "$(strih_lx_program_vban_port)" '
-              '"$(strih_lx_program_vban_streams)" "$(strih_lx_program_vban_reserve_ms)"', box)
+              '"$(strih_lx_program_vban_streams)" "$(strih_lx_program_vban_reserve_ms)"', box, env=pre)
     port, stream, ms = r.stdout.split()
-    n = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_audio_input)"', box)
+    n = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_audio_input)"', box, env=pre)
     assert n.returncode == 0 and _port().PRESETS[box]["program_audio_input"] == n.stdout
     assert _port().PRESETS[box]["program_audio_vban"] == {
         "port": int(port), "stream_name": stream, "receive_buffer_ms": int(ms)}

@@ -15,9 +15,13 @@ import json
 import os
 import subprocess
 import tomllib
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import vban_leg_fakes_1439 as fk  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
@@ -47,10 +51,10 @@ def _facts(box):
     return out
 
 
-def _boxes_with(tmp_path, box, pairs):
+def _boxes_with(tmp_path, box, pairs, base=None):
     d = tmp_path / "boxes"
     d.mkdir(exist_ok=True)
-    for f in BOXES.glob("*.env"):
+    for f in Path(base or BOXES).glob("*.env"):
         (d / f.name).write_text(f.read_text())
     f = d / ("%s.env" % box)
     lines = f.read_text().splitlines()
@@ -61,8 +65,8 @@ def _boxes_with(tmp_path, box, pairs):
     return d
 
 
-def _load(tmp_path, box, pairs):
-    d = _boxes_with(tmp_path, box, pairs)
+def _load(tmp_path, box, pairs, base=None):
+    d = _boxes_with(tmp_path, box, pairs, base)
     return _bash('strih_box_load "$1"', box, env={"STRIH_BOXES_DIR": str(d)})
 
 
@@ -77,7 +81,7 @@ def test_the_four_terms_are_required_facts_at_the_end_of_the_key_list():
 
 def test_every_dante_program_box_keeps_todays_latency_explicitly():
     # P = (a) + (b) = 1 + 12.041666 = 13.041666 ms, today's P on strih-obs and stream-obs (no latency change)
-    for box in ("strih-snv", "stream-snv"):
+    for box in ("strih-snv", "stream-snv", "strih-pp", "stream-pp"):   # PP: issue 1536
         f = _facts(box)
         assert f["STRIH_DANTE_NETWORK_LATENCY_MS"] == "1", box
         assert f["STRIH_DANTE_RECEIVE_BUFFER_MS"] == "12.041666", box
@@ -89,9 +93,6 @@ def test_only_stream_snv_sends_the_program_to_dante():
     for box in ("strih-snv", "strih-pp", "stream-pp"):
         f = _facts(box)
         assert (f["STRIH_DANTE_TX"], f["STRIH_DANTE_TX_TRACK"]) == ("none", "none"), box
-    for box in ("strih-pp", "stream-pp"):
-        f = _facts(box)
-        assert (f["STRIH_DANTE_NETWORK_LATENCY_MS"], f["STRIH_DANTE_RECEIVE_BUFFER_MS"]) == ("none", "none"), box
 
 
 def test_every_box_loads():
@@ -115,7 +116,8 @@ def test_a_program_device_needs_both_terms_explicit(tmp_path, key):
                                        ("STRIH_DANTE_TX", "OBS program L,OBS program R"),
                                        ("STRIH_DANTE_TX_TRACK", "1")])
 def test_a_box_without_a_program_device_sets_every_term_none(tmp_path, key, value):
-    r = _load(tmp_path, "strih-pp", {key: value})
+    # issue 1536: strih-pp's VBAN rollback shape is the box without a program device
+    r = _load(tmp_path, "strih-pp", {key: value}, fk.pp_pre_1536_boxes_dir())
     assert r.returncode != 0 and key in r.stderr and "no " in r.stderr, r.stderr
 
 

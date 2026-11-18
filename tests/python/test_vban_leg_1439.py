@@ -124,12 +124,14 @@ def test_stream_snv_and_strih_snv_have_the_vlan_leg_every_other_box_none():
     assert _bash(LEG_BODY, "strih-snv", env=real).stdout.strip() == "vlan:70|%s|%s" % (STRIH_LEG_ADDR, STRIH_SENDER)
     # the pre-1495 shape the `mac:` tests below run on
     assert _bash(LEG_BODY, "stream-snv").stdout.strip() == "mac:%s|%s|%s" % (LEG_MAC, LEG_ADDR, SENDER)
+    # issue 1536 (18.11.2026): the PP boxes on VLAN 70 of their rig NIC too, no VBAN sender (a Dante leg)
+    pp = {"strih-pp": "vlan:70|10.77.7.202|none", "stream-pp": "vlan:70|10.77.7.204|none"}
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
         if box in ("stream-snv", "strih-snv"):
             continue
         r = _bash(LEG_BODY, box, env=real)
         assert r.returncode == 0, (box, r.stderr)
-        assert r.stdout.strip() == "none|none|none", box
+        assert r.stdout.strip() == pp.get(box, "none|none|none"), box
 
 
 @pytest.mark.parametrize("box,edits,word", [
@@ -550,8 +552,10 @@ def _mutations(s):
 
 
 def test_only_the_snv_boxes_declare_dante_devices():
-    """Owner 2.11.2026: PP gets no Dante, and VBAN stays. issue 1495: stream-snv's own device stream-obs."""
-    want = {"strih-snv": STRIH_DEVICES, "stream-snv": "stream-obs=4440:8800:4455"}
+    """Owner 2.11.2026: PP got no Dante then. issue 1495: stream-snv's own device stream-obs. issue 1536
+    (18.11.2026, PP's new switch + dsg): the PP boxes take their program over Dante too (no intercom device)."""
+    want = {"strih-snv": STRIH_DEVICES, "stream-snv": "stream-obs=4440:8800:4455",
+            "strih-pp": "strih-obs=4440:8800:4455", "stream-pp": "stream-obs=4440:8800:4455"}
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
         r = _bash('strih_box_load "$1" || exit 9\nstrih_lx_dante_devices', box, env={"STRIH_BOXES_DIR": str(BOXES)})
         assert r.returncode == 0, (box, r.stderr)

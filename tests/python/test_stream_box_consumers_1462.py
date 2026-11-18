@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stream_box_fakes_1462 import calls, ffmpeg_calls, make_rig  # noqa: E402
+import vban_leg_fakes_1439 as fk  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
@@ -141,8 +142,9 @@ def test_rig_mode_takes_an_input_name_with_spaces_from_the_facts(tmp_path):
     # stream-pp's program-audio input is `Zvuk z mixu`: the name comes last in the expectation and
     # reaches the check whole
     rig = _rig(tmp_path)
+    # issue 1536: stream-pp takes Dante now; its VBAN rollback shape keeps the spaced-name case
     env = {"OBS_FLEET": "stream-pp|10.77.8.204|linux-genlock|always", "STREAM_IP": "10.77.8.204",
-           "MBC_INPUT_NAME": "Zvuk z mixu"}
+           "MBC_INPUT_NAME": "Zvuk z mixu", "STRIH_BOXES_DIR": fk.pp_pre_1536_boxes_dir()}
     p = _rig_mode(tmp_path, rig, "verify_mbc_dante_transport; echo AFTER", env=env)
     assert p.returncode == 0, p.stderr
     (argv,) = [c for c in _py_calls(rig) if c[:1] == ["mbc-input-check"]]

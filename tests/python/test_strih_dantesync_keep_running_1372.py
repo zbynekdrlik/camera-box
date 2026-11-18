@@ -555,7 +555,7 @@ def test_setup_strih_step2_goes_through_the_caller():
     lib = DS_LIB.read_text()
     src = s.index('. "${HERE}/lib/strih-dantesync.sh"')
     guard = s.index('if [ "${BASH_SOURCE[0]}" != "${0}" ]; then')
-    emit = s.index('DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_dantesync_ptp_nic)")"')
+    emit = s.index('DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" "$(strih_dantesync_rig_nic)")"')
     call = s.index('strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE"')
     assert src < guard, "the lib is sourced before the source-guard, so a sourced setup (the tests) has it"
     assert guard < emit < call, "step 2 emits the unit text, then hands it to the caller"
@@ -613,7 +613,7 @@ def _verify_item(tmp_path, unit, argv):
     sc.chmod(0o755)
     harness = ('set -euo pipefail\n. "$LIBP"\n. "$DSLIB"\n'
                'ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nDS_ROLE_V=server\n'
-               'strih_dantesync_ptp_nic() { echo enp7s0; }\n'  # issues 1439 + 1536: the PTP NIC, no box here
+               'strih_dantesync_rig_nic() { echo enp7s0; }\n'  # issue 1439: the rig NIC, no box here
                + block + '\necho END\n')
     r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, cwd=str(REPO), timeout=60,
                        env=dict(os.environ, LIBP=str(LIB), DSLIB=str(DS_LIB), STRIH_DANTESYNC_PROC=str(proc),
