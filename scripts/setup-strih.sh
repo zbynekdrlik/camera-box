@@ -126,6 +126,7 @@ else
 fi
 step "1c" "Rig NIC stable name (issue 1502: a systemd .link from STRIH_NIC_RENAME, never a live rename)"
 strih_nic_rename_apply "$(strih_lx_nic_rename)" "$(strih_lx_nic_driver)" || fail "rig NIC rename: the .link file could not be written (above)"
+strih_nic_ring_apply /sys "$(ip -o -4 addr show 2>/dev/null || true)" || fail "rig NIC RX ring (issue 1534): not set (above)"
 
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->
