@@ -1641,6 +1641,10 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/obs-box-background.sh",
         // issue 1474: the compare-then-rewrite install (sourced by the system half)
         "scripts/lib/obs-box-write.sh",
+        // issue 1428: the swapfile item (sourced by the system half)
+        "scripts/lib/obs-box-swap.sh",
+        // issue 1441: the coredump bound (sourced by the system half)
+        "scripts/lib/obs-box-coredump.sh",
         "scripts/lib/strih-provision.sh",
         "scripts/lib/strih-drm-output.sh",
         // issue 1424: the X config of the fixed HDMI outputs (sourced by strih-drm-output.sh)
