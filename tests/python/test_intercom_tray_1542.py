@@ -98,10 +98,27 @@ def test_the_shipped_pin_names_intercom_v1_9_26():
         assert hashlib.sha256((PINNED / name).read_bytes()).hexdigest() == sha, name
 
 
-def test_the_bundle_member_list_carries_the_tray():
-    r = F.bash('printf "%s\\n" "${STRIH_INTERCOM_FILES[@]}"', sources=(RELEASE_LIB,))
+def test_the_tray_is_an_optional_bundle_member():
+    r = F.bash('printf "%s\\n" "${STRIH_INTERCOM_FILES[@]}"; echo --; printf "%s\\n" "${STRIH_INTERCOM_OPTIONAL_FILES[@]}"',
+               sources=(RELEASE_LIB,))
     assert r.returncode == 0, r.stderr
-    assert r.stdout.splitlines()[-1] == "intercom-tray" and len(r.stdout.splitlines()) == 7
+    req, opt = r.stdout.split("--\n")
+    assert "intercom-tray" not in req.split() and len(req.split()) == 6
+    assert opt.split() == ["intercom-tray"]
+
+
+def test_a_bundle_without_the_tray_still_installs_the_hub(tmp_path):
+    """A hub pin rolled back below v1.9.26 (no tray member) must still give step 13 its bundle."""
+    env = _bundle(tmp_path, with_tray=False)
+    root = _tree(tmp_path)
+    stale = root / "intercom-release" / "v9.9.42" / "intercom-tray"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"left by another extraction")
+    r = F.bash('strih_intercom_release_ensure "%s"' % root, env=env, sources=(RELEASE_LIB,))
+    assert r.returncode == 0, r.stderr
+    d = Path(r.stdout.strip())
+    assert (d / "intercom-hub").is_file() and (d / "intercom.strih-snv.toml").is_file()
+    assert not stale.exists(), "a member this release does not carry stays from nothing"
 
 
 # --- intercom_tray_install -----------------------------------------------------------------------------

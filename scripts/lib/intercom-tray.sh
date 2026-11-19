@@ -28,14 +28,11 @@ fi
 
 INTERCOM_TRAY_DEFAULT_BIN=/usr/local/bin/intercom-tray
 INTERCOM_TRAY_DEFAULT_RELEASE_FILE=/usr/local/share/intercom-tray/release
-# the bundle member's name (STRIH_INTERCOM_FILES lists it, so the bundle refuses a release without it)
+# the bundle member's name (STRIH_INTERCOM_OPTIONAL_FILES: the hub install never requires it, this lib does)
 INTERCOM_TRAY_MEMBER=intercom-tray
 
 intercom_tray_bin() { printf '%s' "${INTERCOM_TRAY_BIN:-$INTERCOM_TRAY_DEFAULT_BIN}"; }
 intercom_tray_release_file() { printf '%s' "${INTERCOM_TRAY_RELEASE_FILE:-$INTERCOM_TRAY_DEFAULT_RELEASE_FILE}"; }
-
-# _intercom_tray_sha FILE -> its sha256 (empty when unreadable). Always rc 0.
-_intercom_tray_sha() { sha256sum "$1" 2>/dev/null | awk '{print $1}' || true; }
 
 # _intercom_tray_record TAG SHA -> the release record `<tag> <sha>` (0644, temp + rename) unless it already
 # holds it. rc 1 + a stderr line.
@@ -67,10 +64,10 @@ intercom_tray_install() {
   tag="$(strih_intercom_pin_tag "$root")" || return 1
   src="${dir}/${INTERCOM_TRAY_MEMBER}"
   [ -f "$src" ] || { echo "intercom-tray: the ${tag} bundle in ${dir} has no ${INTERCOM_TRAY_MEMBER}" >&2; return 1; }
-  want="$(_intercom_tray_sha "$src")"
+  want="$(_strih_intercom_sha "$src")"
   [ -n "$want" ] || { echo "intercom-tray: cannot read ${src}" >&2; return 1; }
   bin="$(intercom_tray_bin)"
-  cur="$(_intercom_tray_sha "$bin")"
+  cur="$(_strih_intercom_sha "$bin" || true)"
   if [ -x "$bin" ] && [ "$cur" = "$want" ]; then
     echo "  intercom-tray ${tag} present (${bin}, the bundle's member) -- kept"
     _intercom_tray_record "$tag" "$want"
@@ -102,11 +99,11 @@ intercom_tray_state() {
   [ -n "$rec" ] || { printf 'stale:no-release-record'; return 1; }
   read -r rt rs _ <<<"$rec"
   [ "$rt" = "$tag" ] || { printf 'stale:installed-%s-pin-%s' "$rt" "$tag"; return 1; }
-  have="$(_intercom_tray_sha "$bin")"
+  have="$(_strih_intercom_sha "$bin" || true)"
   [ -n "$have" ] && [ "$have" = "$rs" ] || { printf 'stale:sha256-is-not-the-recorded-%s' "$tag"; return 1; }
   dir="$(strih_intercom_release_dir "$root" 2>/dev/null || true)"
   if [ -n "$dir" ] && [ -f "${dir}/${INTERCOM_TRAY_MEMBER}" ]; then
-    member="$(_intercom_tray_sha "${dir}/${INTERCOM_TRAY_MEMBER}")"
+    member="$(_strih_intercom_sha "${dir}/${INTERCOM_TRAY_MEMBER}" || true)"
     [ "$member" = "$rs" ] || { printf 'stale:not-the-%s-bundle-member' "$tag"; return 1; }
   fi
   printf 'ok'

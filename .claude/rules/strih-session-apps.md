@@ -396,14 +396,16 @@ installs and supervises it. The eighth entry, LAST, on the STRIH role only (`STR
 page). No line in setup-strih.sh / verify-strih.sh: it rides step 16d's loop and the grader.
 
 - **The program** is the 7th member `intercom-tray` of the PINNED hub bundle (`scripts/intercom-release.pin`,
-  v1.9.26 is the first with it). `STRIH_INTERCOM_FILES` lists it, so `strih_intercom_release_ensure` refuses a
-  bundle without it. Its menu opens `/snap/bin/firefox --new-window http://127.0.0.1:8791/` (the hub's
+  v1.9.26 is the first with it). It is an OPTIONAL member (`STRIH_INTERCOM_OPTIONAL_FILES`): the hub install
+  (step 13) never depends on a menu icon, so a hub pin rolled back below v1.9.26 still installs; the tray's own
+  install then refuses (`has no intercom-tray`) and verify FAILs its row. Its menu opens `/snap/bin/firefox --new-window http://127.0.0.1:8791/` (the hub's
   loopback-only level page); one tray per session (its lock in `XDG_RUNTIME_DIR`, a second one exits 0); logs
   on stderr; runtime libgtk-3 + libayatana-appindicator3 (already in `STRIH_SESSION_APP_PACKAGES`).
 - **The install** (`intercom_tray_install ROOT`, `scripts/lib/intercom-tray.sh`, step 16d inside the
   per-entry loop): the bundle through `strih_intercom_release_ensure` on the same tree step 13 used (a
   tarball already there on the pin = no network), the member copied 0755 as a `<bin>.new.<pid>` sibling and
-  renamed over `/usr/local/bin/intercom-tray` (a running tray keeps its inode), kept with its mtime when
+  renamed over `/usr/local/bin/intercom-tray` (a running tray keeps its inode; the second ensure after
+  step 13 is deliberate: it re-proves the extracted member against the tarball and the pin), kept with its mtime when
   already that member, the record `<tag> <sha256>` in `/usr/local/share/intercom-tray/release`. No
   fallback: a failure is rc 1 + stderr, step 16d WARNs once and provisions the rest, verify FAILs the row.
 - **The unit** is the dtray shape: foreground, no args, `DISPLAY=:0`, `PartOf=` + `After=graphical-session.target`,
