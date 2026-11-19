@@ -90,6 +90,79 @@ genlock_session_continuity_mark() {
   return 0
 }
 
+# The run's own camera handling (E2E 44502999091, 19.11.2026): the E2E restarts the camboxes into burn
+# units and back, and the strih camera inputs repeat frames meanwhile. That is the RUN's doing, never a
+# loss of the production session (the recording window is graded by the window gates), so each run
+# records the byte range of the strih OBS log it handled the cameras in, durably on dev1 (a later run
+# reads every earlier range of the same OBS session):
+#   genlock_session_touch begin|end RUN_ID STRIH
+#       `begin` right before the first camera mutation, `end` as the last step of cleanup(). Lines of
+#       GENLOCK_SESSION_TOUCH_FILE (~/.camera-box/genlock-session-touch.tsv):
+#       <log name><TAB><start byte><TAB><end byte | -><TAB><run id>; the last 500 kept. Fail-open.
+#   The gate passes each range of the window's log as `--touch START-END` (camera inputs only, + the
+#   60 s settle after the end); this run's still open range as `START-`, another run's open one (it
+#   died before its cleanup) as `START-~` = one hour from its start, never more.
+_gsc_touch_file() {
+  printf '%s\n' "${GENLOCK_SESSION_TOUCH_FILE:-${HOME:-/tmp}/.camera-box/genlock-session-touch.tsv}"
+}
+
+genlock_session_touch() {
+  local op="${1-}" run="${2-}" host="${3-}" file out name="" size=""
+  file="$(_gsc_touch_file)"
+  [ -n "$op" ] && [ -n "$run" ] && [ -n "$host" ] || return 0
+  [ "$(stream_box_platform "$host")" = linux ] || return 0
+  out="$(_gsc_read strih "$host" ident 2>/dev/null | tr -d '\r' | head -n 1)" || out=""
+  IFS=$'\t' read -r name size <<<"$out" || true
+  if ! _gsc_name_ok "$name" || ! _gsc_count_ok "$size"; then
+    echo "    WARNING: [session-video] issue 1534: no strih OBS log mark for the run's camera handling (${op}, read: '${out}')" >&2
+    return 0
+  fi
+  mkdir -p "${file%/*}" 2>/dev/null || true
+  if [ "$op" = begin ]; then
+    printf '%s\t%s\t-\t%s\n' "$name" "$size" "$run" >>"$file" 2>/dev/null || true
+    echo "    [session-video] issue 1534: the run's camera handling starts at byte ${size} of the strih OBS log '${name}'"
+  else
+    python3 - "$file" "$name" "$size" "$run" <<'PY_TOUCH' 2>/dev/null || true
+import os, sys
+path, name, size, run = sys.argv[1:5]
+try:
+    lines = open(path, encoding="utf-8").read().split("\n")
+except OSError:
+    sys.exit(0)
+out = []
+for line in lines:
+    f = line.split("\t")
+    if len(f) == 4 and f[0] == name and f[2] == "-" and f[3] == run:
+        f[2] = size
+        line = "\t".join(f)
+    if line:
+        out.append(line)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(out[-500:]) + "\n")
+os.replace(tmp, path)
+PY_TOUCH
+    echo "    [session-video] issue 1534: the run's camera handling ends at byte ${size} of the strih OBS log '${name}'"
+  fi
+  return 0
+}
+
+# _gsc_touch_args LOG_NAME RUN_ID -> one `--touch RANGE` pair per line pair (strih only).
+_gsc_touch_args() {
+  local name="${1-}" run="${2-}" file lname s e r
+  file="$(_gsc_touch_file)"
+  [ -f "$file" ] || return 0
+  while IFS=$'\t' read -r lname s e r; do
+    [ "$lname" = "$name" ] && _gsc_count_ok "$s" || continue
+    if [ "$e" = - ]; then
+      if [ -n "$run" ] && [ "$r" = "$run" ]; then printf -- '--touch\n%s-\n' "$s"; else printf -- '--touch\n%s-~\n' "$s"; fi
+    elif _gsc_count_ok "$e"; then
+      printf -- '--touch\n%s-%s\n' "$s" "$e"
+    fi
+  done <"$file"
+  return 0
+}
+
 # _gsc_inputs ROLE -> the declared inputs of the box, one per line.
 _gsc_inputs() {
   local cam
@@ -138,6 +211,11 @@ _gsc_box() {
   if [ -n "$reason" ]; then
     python3 "$py" "${args[@]}" --unknown "$reason" --box-out "$out" >/dev/null 2>&1 || true
     return 0
+  fi
+  if [ "$role" = strih ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] && args+=("$line")
+    done < <(_gsc_touch_args "$ename" "${RUN_ID:-}")
   fi
   step="${GENLOCK_SESSION_CONTINUITY_STEP_S:-10}"
   wmax="${GENLOCK_SESSION_CONTINUITY_WAIT_S:-30}"

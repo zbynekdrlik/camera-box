@@ -48,6 +48,10 @@ _DAY = re.compile(r"^D(-?\d+):")
 _TS = re.compile(r"^(\d\d):(\d\d):(\d\d(?:\.\d+)?): ")
 _FIELD = re.compile(r"(?:^|\s)([a-z_0-9]+)=(-?\d+)(?=\s|$)")
 _RANK = {"PASS": 0, "UNKNOWN": 1, "FAIL": 2}
+# the strih camera inputs the E2E itself restarts (burn units and back): a growth inside the run's
+# recorded camera-handling range of the strih log (`touch`) + SETTLE_S is the run's own, never a loss
+STALE_TOUCH_S = 3600.0  # an open touch of ANOTHER run (it died before its cleanup) covers one hour, never more
+_CAMERA_INPUT = re.compile(r"^(?:JXS cam[0-9]+ src|NDI cam[0-9]+)$")
 
 
 def _name(text, mark):
@@ -132,8 +136,32 @@ def _short(text):
     return text[:12]
 
 
-def _grade_audit(inp, rows, total, res):
-    """`rows`: the input's audit entries in file order."""
+def _in_zone(t, zones):
+    return any(a <= t <= b for a, b in zones)
+
+
+def touch_zones(entries, touches):
+    """`touches` = [(start byte, end byte | None | "stale")] -> [(t from, t to)]: from the first line at
+    or after the start to the first line at or after the end + SETTLE_S; None = this run's own, still
+    open (to the end of the read); "stale" = another run's open touch, STALE_TOUCH_S from its start."""
+    zones = []
+    for start, end in touches or ():
+        first = next((e["t"] for e in entries if e["off"] >= start), None)
+        if first is None:
+            continue
+        if end is None:
+            zones.append((first, float("inf")))
+            continue
+        if end == "stale":
+            zones.append((first, first + STALE_TOUCH_S))
+            continue
+        last = next((e["t"] for e in entries if e["off"] >= end), float("inf"))
+        zones.append((first, last + SETTLE_S))
+    return zones
+
+
+def _grade_audit(inp, rows, total, res, zones=()):
+    """`rows`: the input's audit entries in file order; `zones` = the run's own camera handling."""
     t0 = rows[0]["t"]
     settle = t0 + SETTLE_S
     base = rows[0]
@@ -148,30 +176,44 @@ def _grade_audit(inp, rows, total, res):
     last = rows[-1]
     res["closing"] = _short(last["text"])
     for prev, e in zip(rows, rows[1:]):
+        if _in_zone(e["t"], zones):
+            continue
         if e["t"] > settle and e["f"].get("received", 0) < prev["f"].get("received", 0):
             res["unknown_reasons"].append(
                 f"'{inp}': the source restarted at {_short(e['text'])} (received "
                 f"{prev['f'].get('received')} -> {e['f'].get('received')}): its counters restarted")
             return
+    after = rows[rows.index(base):]
     for k in GATED_AUDIT:
         b, a = base["f"].get(k), last["f"].get(k)
         if b is None or a is None:
             res["unknown_reasons"].append(f"'{inp}': `{k}=` is not on its audit lines")
             continue
-        res["counters"][k] = {"settle": b, "closing": a, "delta": a - b}
-        if a > b:
-            res["failures"].append(f"'{inp}' {k} +{a - b} after its start settle")
+        counted = excluded = 0
+        for prev, e in zip(after, after[1:]):
+            inc = e["f"].get(k, 0) - prev["f"].get(k, 0)
+            if inc <= 0:
+                continue
+            if _in_zone(e["t"], zones):
+                excluded += inc
+            else:
+                counted += inc
+        res["counters"][k] = {"settle": b, "closing": a, "delta": counted}
+        if excluded:
+            res["context"][f"run_touch_excluded_{k}"] = excluded
+        if counted > 0:
+            res["failures"].append(f"'{inp}' {k} +{counted} after its start settle")
     for k in CONTEXT_AUDIT:
         b, a = base["f"].get(k), last["f"].get(k)
         if b is not None and a is not None:
             res["context"][k] = a - b
-    for e in rows:
-        if e["t"] > settle and any(e["f"].get(k, 0) > base["f"].get(k, 0) for k in GATED_AUDIT):
+    for prev, e in zip(after, after[1:]):
+        if not _in_zone(e["t"], zones) and any(e["f"].get(k, 0) > prev["f"].get(k, 0) for k in GATED_AUDIT):
             res["first_growth"] = _short(e["text"])
             break
 
 
-def _grade_jxs(inp, rows, total_lossy, res):
+def _grade_jxs(inp, rows, total_lossy, res, zones=()):
     with_frames = [e for e in rows if e["f"].get("frames", 0) > 0]
     j = {"windows": len(rows), "lossy_windows": 0, "unlisted_lossy_windows": 0,
          "sums": {k: 0 for k in JXS_GATED}, "lossy": []}
@@ -186,6 +228,9 @@ def _grade_jxs(inp, rows, total_lossy, res):
         bad = {k: e["f"].get(k, 0) for k in JXS_GATED if e["f"].get(k, 0)}
         if bad:
             listed_lossy += 1
+        if bad and e["t"] > settle and _in_zone(e["t"], zones):
+            j["run_touch_excluded_windows"] = j.get("run_touch_excluded_windows", 0) + 1
+            continue
         if bad and e["t"] > settle:
             j["lossy_windows"] += 1
             for k, v in bad.items():
@@ -224,10 +269,11 @@ def unknown_box(box, reason, declared=(), retryable=False):
             "failures": [], "unknown_reasons": [reason], "retryable": retryable}
 
 
-def decide_box(box, text, declared, *, log_name, start_byte, stop_byte, excluded=()):
+def decide_box(box, text, declared, *, log_name, start_byte, stop_byte, excluded=(), touches=()):
     """One box: `text` = the box's read, `declared` = the inputs the run measures (each must be there),
     `log_name` / `start_byte` / `stop_byte` = the window marks of this box, `excluded` = the inputs of
-    cameras the run acked offline (graded and reported, never gating)."""
+    cameras the run acked offline (graded and reported, never gating), `touches` = the byte ranges of
+    this log in which an E2E run handled the camboxes (camera inputs only)."""
     name, size, entries, counts = parse_read(text)
     if name is None:
         return unknown_box(box, f"the {box} OBS log could not be read", declared)
@@ -240,6 +286,9 @@ def decide_box(box, text, declared, *, log_name, start_byte, stop_byte, excluded
     res = {"box": box, "log": name, "verdict": "PASS", "pass": True, "declared": list(declared),
            "inputs": [], "failures": [], "unknown_reasons": [], "retryable": False}
     declared = [d for d in declared if d not in excluded]
+    zones = touch_zones(entries, touches)
+    if touches:
+        res["run_touch"] = [[a, b] for a, b in touches]
     names = sorted({e["input"] for e in entries} | set(declared))
     if not names:
         res["unknown_reasons"].append(f"no genlock input on the {box} OBS log")
@@ -249,7 +298,8 @@ def decide_box(box, text, declared, *, log_name, start_byte, stop_byte, excluded
         audit = [e for e in entries if e["input"] == inp and e["kind"] == "audit"]
         jxs = [e for e in entries if e["input"] == inp and e["kind"] == "jxs"]
         if audit:
-            _grade_audit(inp, audit, counts.get(("audit", inp), (len(audit), 0))[0], r)
+            z = zones if _CAMERA_INPUT.match(inp) else ()
+            _grade_audit(inp, audit, counts.get(("audit", inp), (len(audit), 0))[0], r, z)
             if audit[0]["off"] >= start_byte:
                 r["note"] = "the input's first audit line is inside the recording window"
         elif inp in declared:
@@ -258,7 +308,7 @@ def decide_box(box, text, declared, *, log_name, start_byte, stop_byte, excluded
             if jxs:
                 total, lossy = counts.get(("jxs", inp), (len(jxs), 0))
                 r["_jxs_total"] = total
-                _grade_jxs(inp, jxs, lossy, r)
+                _grade_jxs(inp, jxs, lossy, r, zones if _CAMERA_INPUT.match(inp) else ())
             else:
                 r["unknown_reasons"].append(f"'{inp}': no `jxs-source` window line in this OBS session")
         r.pop("_jxs_total", None)
@@ -339,6 +389,9 @@ def main(argv=None):
     ap.add_argument("--log-name", default="")
     ap.add_argument("--start-byte", type=int, default=0)
     ap.add_argument("--stop-byte", type=int, default=0)
+    ap.add_argument("--touch", action="append", default=[],
+                    help="START-END (END empty = this run's, still open; ~ = another run's, left open): a byte range of this log in which an E2E run "
+                         "handled the camboxes; growth there on a camera input is the run's own (repeat)")
     ap.add_argument("--unknown", help="an UNKNOWN box result with this reason (no read)")
     ap.add_argument("--box-out", help="write the box result here")
     ap.add_argument("--combine", nargs="+", help="box result files -> the block")
@@ -375,8 +428,13 @@ def main(argv=None):
         except OSError as e:
             res = unknown_box(a.box, f"the {a.box} read is not readable: {e}", a.input)
         else:
+            touches = []
+            for t in a.touch:
+                lo, _, hi = t.partition("-")
+                if lo.isdigit() and (hi in ("", "~") or hi.isdigit()):
+                    touches.append((int(lo), "stale" if hi == "~" else (int(hi) if hi else None)))
             res = decide_box(a.box, text, a.input, log_name=a.log_name, start_byte=a.start_byte,
-                             stop_byte=a.stop_byte, excluded=a.exclude)
+                             stop_byte=a.stop_byte, excluded=a.exclude, touches=touches)
     if a.box_out:
         _write(a.box_out, res)
     print(f"{a.box}: {res['verdict']}")

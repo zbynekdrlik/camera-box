@@ -51,6 +51,19 @@ Input = one box's whole-session read (below). Per input:
 - **A camera the run acked offline** (`PREFLIGHT_EXCLUDED_CAMS` -> `camera_strih_input`, `--exclude`) is
   graded and shown, never gating (`excluded`, the report says `kamera kvitovaná offline`).
 - Both parsers read the FIRST `key=` of a repeated name (the awk `fv`, the python `_fields`).
+- **The run's own camera handling is excluded (E2E 44502999091, 19.11.2026):** the E2E restarts the
+  camboxes into burn units and back, and the strih camera inputs repeat frames meanwhile (cam5 +52786
+  underruns while its burn unit was idle after the recording). Each run records the byte range of the
+  strih OBS log it handled the cameras in, durably on dev1 (`genlock_session_touch begin` right before
+  the [0/8] parity align, `end` as the LAST line of cleanup(); `~/.camera-box/genlock-session-touch.tsv`
+  `<log><TAB><start><TAB><end|-><TAB><run id>`, the last 500 kept). The gate passes every range of the
+  window's log as `--touch START-END`; growth there + the 60 s settle after it is excluded on CAMERA
+  inputs only (`JXS camN src`, `NDI camN`; `CG-obs` and the stream inputs never), reported as
+  `context.run_touch_excluded_<counter>` / `jxs.run_touch_excluded_windows`. Gating sums the increments
+  OUTSIDE the zones (the sparse read keeps every changed line). This run's still open range = `START-`
+  (to the end of the read: its recording window is graded by the window gates), ANOTHER run's open
+  range (it died before its cleanup) = `START-~` = one hour from its start, never more, so a run that
+  never closed its range cannot hide a later production loss.
 
 ## The box read (`strih_log_remote_cmd linux session`, the ONE strih log reader)
 

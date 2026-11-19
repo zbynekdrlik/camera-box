@@ -1295,6 +1295,7 @@ done
 # issue 1271: guard immediately BEFORE this fleet MUTATION (it deploys + restarts camera-box.service
 # on the whole active fleet, and the painter align below redeploys cam2). A broadcast that started
 # during the read-only [0/8] gates above must be caught here, before the fleet's binary is touched.
+genlock_session_touch begin "$RUN_ID" "$STRIH" || true   # issue 1534: the run's own camera handling starts
 stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the camera-box + painter parity auto-align"
 cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 "$HERE/camera-box-version-gate.sh" \
@@ -2395,6 +2396,7 @@ fi"
   echo "[cleanup] #808 bkshading-relay restore (was-active: $CAMERA_NAME=$BKSH_PAUSE_CAM1_WAS_ACTIVE, cam2=$BKSH_PAUSE_PAINTER_WAS_ACTIVE)"
   bkshading_e2e_pause_restore "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW" "${BKSH_PAUSE_CAM1_WAS_ACTIVE:-0}"
   bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"
+  genlock_session_touch end "$RUN_ID" "$STRIH" || true   # issue 1534: the run's own camera handling ends
 }
 # #657: a plain foreground `sleep N` defers ALL signal handling — trapped OR default — until
 # that `wait4()` syscall returns on its own, i.e. until the sleep completes naturally. This is

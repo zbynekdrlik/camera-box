@@ -270,3 +270,53 @@ def test_the_full_report_has_a_section_with_one_line_per_input():
     for cam in CAMS:
         assert f"strih '{cam}'" in rep
     assert "❌ FAIL" in rep
+
+
+# --- the run's own camera handling, recorded durably on dev1 (E2E 44502999091, 19.11.2026) ------
+
+TOUCH_BODY = BODY.replace('add 0\n', 'add 0\ngenlock_session_touch begin "$RUN_ID" "$STRIH"\n', 1)
+
+
+def test_the_runs_own_camera_restart_inside_its_touch_passes(tmp_path):
+    # second 800 lies in the recording part, after the run's touch begin
+    r = _gate(tmp_path, strih_edits={("audit", "JXS cam5 src", 800): {"u": 52786}}, body=TOUCH_BODY,
+              RUN_ID="42", GENLOCK_SESSION_TOUCH_FILE=str(tmp_path / "touch.tsv"))
+    assert "GATE=0" in r.stdout, r.stdout + r.stderr
+    line = (tmp_path / "touch.tsv").read_text().strip().split("\t")
+    assert line[0] == LOG and line[2] == "-" and line[3] == "42", line
+    assert _block(tmp_path)["boxes"]["strih"]["run_touch"][0][1] is None
+
+
+def test_a_loss_before_the_runs_touch_still_fails(tmp_path):
+    r = _gate(tmp_path, strih_edits={("audit", "JXS cam3 src", 300): {"u": 2}}, body=TOUCH_BODY,
+              RUN_ID="42", GENLOCK_SESSION_TOUCH_FILE=str(tmp_path / "touch.tsv"))
+    assert "GATE=1" in r.stdout, r.stdout + r.stderr
+
+
+def test_end_closes_only_this_runs_open_touch(tmp_path):
+    homes, cmd = _boxes(tmp_path)
+    (homes["strih"] / ".config/obs-studio/logs" / LOG).write_text("x" * 100)
+    touch = tmp_path / "touch.tsv"
+    touch.write_text(f"{LOG}\t10\t-\t41\n")
+    body = ('genlock_session_touch begin 42 "$STRIH"\n'
+            f'printf "%0200d" 0 >> "$DIR/home-strih/.config/obs-studio/logs/{LOG}"\n'
+            'genlock_session_touch end 42 "$STRIH"\n_gsc_touch_args "' + LOG + '" 43\n')
+    r = _run(tmp_path, cmd, body, GENLOCK_SESSION_TOUCH_FILE=str(touch))
+    assert "HARNESS-END" in r.stdout, r.stdout + r.stderr
+    assert touch.read_text() == f"{LOG}\t10\t-\t41\n{LOG}\t100\t300\t42\n"
+    assert "--touch\n10-~\n--touch\n100-300\n" in r.stdout, r.stdout
+
+
+def test_the_touch_calls_sit_before_the_first_camera_mutation_and_end_cleanup():
+    s = _e2e()
+    begin = s.find('genlock_session_touch begin "$RUN_ID" "$STRIH"')
+    assert begin > 0 and s.count('genlock_session_touch begin "$RUN_ID" "$STRIH"') == 1
+    assert begin < s.find('stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the camera-box + painter parity auto-align"')
+    end = s.find('genlock_session_touch end "$RUN_ID" "$STRIH"')
+    assert s.count('genlock_session_touch end "$RUN_ID" "$STRIH"') == 1
+    tail = ('  bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"\n'
+            '  genlock_session_touch end "$RUN_ID" "$STRIH" || true')
+    assert s.count(tail) == 1, "the end call must be the last line of cleanup()"
+    at = s.find(tail)
+    assert at < end < s.find("\n}\n", at) < s.find("trap cleanup EXIT HUP INT TERM")
+    assert s.find("\n}\n", at) == s.find("\n", end)  # nothing between the end call and cleanup's brace
