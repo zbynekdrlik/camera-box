@@ -120,6 +120,7 @@ def test_script_mapping_and_items():
         "dsync-tray.service [] dsync-tray",
         "strih-display-watch.service [strih_display_watch.py] display-watch",
         "dtray.service [] dtray",
+        "intercom-tray.service [] intercom-tray",
         "REFUSED",
     ]
 

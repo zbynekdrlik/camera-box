@@ -431,13 +431,14 @@ def test_the_unit_text():
     assert r.stdout == u["ExecStart"]
 
 
-def test_dtray_is_the_last_session_app_on_both_roles():
+def test_dtray_follows_every_other_app_on_both_roles():
+    # issue 1542: on the strih role only the intercom tray comes after it
     r = F.bash('printf "%s\\n" "${STRIH_SESSION_APP_UNITS[@]}"; strih_session_app_item dtray.service; echo;'
                'printf "[%s]" "$(strih_session_app_script dtray.service)"; echo; strih_session_app_program dtray.service',
                env={"DTRAY_BIN": ""})
     lines = r.stdout.splitlines()
-    assert lines[:7] == list(F.UNITS) and lines[6] == UNIT
-    assert lines[7:] == ["dtray", "[]", "/usr/local/bin/dtray"]
+    assert lines[:8] == list(F.UNITS) and lines[6] == UNIT and lines[7] == "intercom-tray.service"
+    assert lines[8:] == ["dtray", "[]", "/usr/local/bin/dtray"]
     role = (F.SCRIPTS / "lib" / "obs-box-role.sh").read_text()
     line = [ln for ln in role.splitlines() if ln.startswith("OBS_BOX_STREAM_SESSION_APP_UNITS=(")][0]
     assert line.endswith(" dtray.service)"), line

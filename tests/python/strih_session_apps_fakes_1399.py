@@ -14,6 +14,11 @@ DANTESYNC_INSTALL_TRAY_BIN a path nobody can write, so no test ever reaches GitH
 Issue 1485: dstack's tray dtray rides the same loop. `HERMETIC` points its release, binary, record and
 device-marker paths at nonexistent places and declares no Dante device (DTRAY_DANTE_DEVICES=none);
 `fake_dtray` installs a fake binary + record, `dtray_pin` writes a fixture pin for it.
+
+Issue 1542: the intercom tray (strih role only) rides the same loop. `HERMETIC` points its binary and record
+at nonexistent places and its bundle at a missing file:// release, so no test reaches GitHub or /usr/local;
+`fake_intercom_tray` installs a fake binary + record (graded by the record: the checkout has no extracted
+bundle at the fixture tag), `intercom_tray_env` names those seams.
 """
 import hashlib
 import json
@@ -27,11 +32,12 @@ REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "strih-session-apps.sh"
 UNITS = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-         "strih-satellite-watch.timer", "dsync-tray.service", "strih-display-watch.service", "dtray.service")
+         "strih-satellite-watch.timer", "dsync-tray.service", "strih-display-watch.service", "dtray.service",
+         "intercom-tray.service")
 # every unit FILE the install writes (the watch timer's oneshot service rides with the timer)
 UNIT_FILES = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
               "strih-satellite-watch.timer", "strih-satellite-watch.service", "dsync-tray.service",
-              "strih-display-watch.service", "dtray.service")
+              "strih-display-watch.service", "dtray.service", "intercom-tray.service")
 PROGRAMS = ("strih_browser_keeper.py", "bkshading_panel_app.py", "strih_satellite_watch.py",
             "strih_display_watch.py")
 LEAKY = ("STRIH_SESSION_APPS_BIN_DIR", "STRIH_SESSION_APPS_RUNTIME_DIR", "STRIH_SESSION_APPS_EUID",
@@ -39,7 +45,9 @@ LEAKY = ("STRIH_SESSION_APPS_BIN_DIR", "STRIH_SESSION_APPS_RUNTIME_DIR", "STRIH_
          "DANTESYNC_VERSION_PIN", "DANTESYNC_RELEASE_BASE", "DANTESYNC_INSTALL_TRAY_BIN",
          "DANTESYNC_INSTALL_TRAY_RELEASE_FILE", "DTRAY_PIN_FILE", "DTRAY_RELEASE_BASE", "DTRAY_BIN",
          "DTRAY_RELEASE_FILE", "DTRAY_DEVICES_DIR", "DTRAY_DEVICES_RECORD", "DTRAY_DANTE_DEVICES",
-         "DTRAY_INTERCOM_PIN_FILE", "DTRAY_OBS_PIN_FILE", "DTRAY_PRINT_TIMEOUT")
+         "DTRAY_INTERCOM_PIN_FILE", "DTRAY_OBS_PIN_FILE", "DTRAY_PRINT_TIMEOUT", "INTERCOM_TRAY_BIN",
+         "INTERCOM_TRAY_RELEASE_FILE", "STRIH_INTERCOM_PIN_FILE", "STRIH_INTERCOM_RELEASE_URL",
+         "STRIH_INTERCOM_TARBALL_SRC")
 # issue 1429: the hermetic defaults (see the module doc); a test's own env wins
 HERMETIC = {"DANTESYNC_RELEASE_BASE": "file:///nonexistent-1429/release",
             "DANTESYNC_INSTALL_TRAY_BIN": "/nonexistent-1429/bin/dsync-tray",
@@ -48,13 +56,19 @@ HERMETIC = {"DANTESYNC_RELEASE_BASE": "file:///nonexistent-1429/release",
             "DTRAY_RELEASE_BASE": "file:///nonexistent-1485/release", "DTRAY_BIN": "/nonexistent-1485/bin/dtray",
             "DTRAY_RELEASE_FILE": "/nonexistent-1485/share/release",
             "DTRAY_DEVICES_DIR": "/nonexistent-1485/etc/dstack/devices",
-            "DTRAY_DEVICES_RECORD": "/nonexistent-1485/share/devices", "DTRAY_DANTE_DEVICES": "none"}
+            "DTRAY_DEVICES_RECORD": "/nonexistent-1485/share/devices", "DTRAY_DANTE_DEVICES": "none",
+            # issue 1542: the intercom tray never reaches GitHub or /usr/local in a test
+            "INTERCOM_TRAY_BIN": "/nonexistent-1542/bin/intercom-tray",
+            "INTERCOM_TRAY_RELEASE_FILE": "/nonexistent-1542/share/release",
+            "STRIH_INTERCOM_RELEASE_URL": "file:///nonexistent-1542/release",
+            "STRIH_INTERCOM_PIN_FILE": "/nonexistent-1542/intercom-release.pin"}
 TRAY_PIN = "1.18.0"
 TRAY_ASSET = "dsync-tray-linux-amd64"
 # the main processes /proc shows (the watch's oneshot service has none between its runs)
 PIDS = {"strih-browser-keeper.service": 4242, "bkshading-panel-app.service": 4343,
         "companion-satellite.service": 4444, "strih-satellite-watch.service": 0, "dsync-tray.service": 4545,
-        "strih-display-watch.service": 4646, "dtray.service": 4747}
+        "strih-display-watch.service": 4646, "dtray.service": 4747,
+        "intercom-tray.service": 4848}
 PANEL_CLASS = "bkshading-panel-app.Bkshading-panel-app"
 WIN = "0x01  0 %s  strih-snv Shading\n" % PANEL_CLASS
 
@@ -223,6 +237,48 @@ def dtray_env(tmp_path):
             "DTRAY_DEVICES_RECORD": str(tmp_path / "dtray-share" / "devices")}
 
 
+# issue 1542: the intercom tray. The fixture pin names a tag with no extracted bundle in the checkout, so
+# the grader reads the record alone (the bundle-member check has its own test).
+ITRAY_TAG = "v9.9.1542"
+ITRAY_GOOD = b"#!/bin/sh\n# intercom-tray (fake)\n"
+
+
+def itray_bin(tmp_path):
+    return tmp_path / "itray" / "intercom-tray"
+
+
+def itray_record(tmp_path):
+    return tmp_path / "itray-share" / "release"
+
+
+def itray_pin(tmp_path, tag=ITRAY_TAG, sha="0" * 64):
+    """A fixture intercom pin (STRIH_INTERCOM_PIN_FILE); `sha` is the tarball's (a bundle test sets it)."""
+    p = tmp_path / "intercom-release.pin"
+    p.write_text("INTERCOM_RELEASE_TAG=%s\nINTERCOM_RELEASE_SHA256=%s\nINTERCOM_RELEASE_DSTACK_VERSION=v0.6.178\n"
+                 % (tag, sha))
+    return p
+
+
+def fake_intercom_tray(tmp_path, content=ITRAY_GOOD, tag=ITRAY_TAG):
+    """intercom-tray as step 16d installs it (INTERCOM_TRAY_BIN) + its release record."""
+    p = itray_bin(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(content)
+    p.chmod(0o755)
+    past = time.time() - 86400
+    os.utime(p, (past, past))
+    rec = itray_record(tmp_path)
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    rec.write_text("%s %s\n" % (tag, hashlib.sha256(content).hexdigest()))
+    return p
+
+
+def intercom_tray_env(tmp_path):
+    """The intercom tray seams of a test (the fixture pin, the binary, its record)."""
+    return {"STRIH_INTERCOM_PIN_FILE": str(itray_pin(tmp_path)), "INTERCOM_TRAY_BIN": str(itray_bin(tmp_path)),
+            "INTERCOM_TRAY_RELEASE_FILE": str(itray_record(tmp_path))}
+
+
 def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, panel_cmd=None, satellite_exe=None,
                    tray=True, tray_exe=None):
     """A home + bin dir as step 16d leaves them (every unit + program from the checkout, enabled, started by
@@ -245,6 +301,7 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
     sat = fake_satellite(tmp_path)
     tray_path = fake_tray(tmp_path) if tray else tray_bin(tmp_path)
     dtray_path = fake_dtray(tmp_path)  # issue 1485
+    itray_path = fake_intercom_tray(tmp_path)  # issue 1542
     (home / ".config/openbox").mkdir(parents=True)
     lines = ["systemctl --user start strih-obs.service || true"]
     if autostart:
@@ -262,6 +319,7 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
         "companion-satellite.service": ["companion-satellite", "--rewritten-title"],
         "dsync-tray.service": [str(tray_path)],
         "dtray.service": [str(dtray_path)],  # issue 1485
+        "intercom-tray.service": [str(itray_path)],  # issue 1542
         # issue 1424: the display watch
         "strih-display-watch.service": ["/usr/bin/python3", str(bindir / "strih_display_watch.py"),
                                         "--state-file", "/run/user/1000/strih-display-watch.json"],
@@ -272,6 +330,7 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
     os.symlink(satellite_exe or str(sat), proc / str(PIDS["companion-satellite.service"]) / "exe")
     os.symlink(tray_exe or str(tray_path), proc / str(PIDS["dsync-tray.service"]) / "exe")
     os.symlink(str(dtray_path), proc / str(PIDS["dtray.service"]) / "exe")
+    os.symlink(str(itray_path), proc / str(PIDS["intercom-tray.service"]) / "exe")
     return home, bindir
 
 
@@ -315,6 +374,7 @@ def grade_env(tmp_path, bindir, rundir, euid="1000"):
             "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path)), "DANTESYNC_VERSION_PIN": TRAY_PIN,
             "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(tray_record(tmp_path)),
             **dtray_env(tmp_path),  # issue 1485
+            **intercom_tray_env(tmp_path),  # issue 1542
             # issue 1424: the display watch's X config row never reads the real /etc/X11 or Xorg log
             "STRIH_X_CONF_DIR": str(tmp_path / "xorg.conf.d"), "STRIH_X_XORG_LOG": str(tmp_path / "Xorg.0.log")}
 
