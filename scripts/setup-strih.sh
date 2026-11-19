@@ -879,6 +879,9 @@ step "16b" "RustDesk remote desktop (owner request 22.9.2026) -- pinned .deb, th
 RD_VER="$(strih_rustdesk_version)"; RD_URL="$(strih_rustdesk_deb_url)"; RD_SHA="$(strih_rustdesk_deb_sha256)"
 RD_PW_FILE="${STRIH_LX_RUSTDESK_PW_FILE:-/etc/rustdesk/permanent-password.secret}"
 RD_STATE="$(strih_rustdesk_state)"
+if [ "$RD_STATE" = stopped ]; then  # issue 1544: "Stop service" in the RustDesk window
+  ( eval "$(strih_rustdesk_clear_stop_cmds /root/.config/rustdesk/RustDesk2.toml "${USER_HOME}/.config/rustdesk/RustDesk2.toml")" ) \
+    || fail "RustDesk: clearing stop-service = 'Y' failed"; RD_STATE="$(strih_rustdesk_state)"; fi
 if [ "$RD_STATE" = ready ]; then
   echo "  RustDesk active with its permanent password set; connect ID: $(timeout 10 rustdesk --get-id 2>/dev/null | head -1 || true)"
 elif [ -s "$RD_PW_FILE" ]; then

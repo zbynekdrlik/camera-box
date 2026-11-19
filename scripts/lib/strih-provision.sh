@@ -1271,11 +1271,27 @@ EOF
 # sudo; an unreadable config reads as `nopw` (never a false ready). Only the key's PRESENCE is read, the
 # (encrypted) value is never printed. Always rc 0.
 strih_rustdesk_state() {
-  local conf="${STRIH_RUSTDESK_CONF:-/root/.config/rustdesk/RustDesk.toml}" text
+  local conf="${STRIH_RUSTDESK_CONF:-/root/.config/rustdesk/RustDesk.toml}" text opts
+  local conf2="${STRIH_RUSTDESK_CONF2:-/root/.config/rustdesk/RustDesk2.toml}"
   command -v rustdesk >/dev/null 2>&1 || { printf absent; return 0; }
+  # issue 1544: RustDesk's own "Stop service" writes stop-service = 'Y'; the service then stops itself
+  opts="$({ cat "$conf2" 2>/dev/null || sudo -n cat "$conf2" 2>/dev/null; } || true)"
+  if grep -qE "^stop-service[[:space:]]*=[[:space:]]*'Y'" <<<"$opts"; then printf stopped; return 0; fi
   [ "$(systemctl is-active rustdesk 2>/dev/null || true)" = active ] || { printf down; return 0; }
   text="$({ cat "$conf" 2>/dev/null || sudo -n cat "$conf" 2>/dev/null; } || true)"
   if grep -qE "^password[[:space:]]*=[[:space:]]*'[^']+'" <<<"$text"; then printf ready; else printf nopw; fi
+}
+
+# strih_rustdesk_clear_stop_cmds ROOT_CONF2 USER_CONF2 -> issue 1544: the on-box statements that remove the
+# one `stop-service = 'Y'` line RustDesk's "Stop service" wrote into root's and the operator's RustDesk2.toml
+# (a missing file is skipped, nothing else is touched), then enable --now the unit. An emitter: run it as
+# `( eval "$(...)" ) || fail`.
+strih_rustdesk_clear_stop_cmds() {
+  local f
+  for f in "${1:?root RustDesk2.toml required}" "${2:?operator RustDesk2.toml required}"; do
+    printf "if [ -f %q ]; then sed -i \"/^stop-service[[:space:]]*=[[:space:]]*'Y'\$/d\" %q || { echo 'rustdesk: cannot edit %s' >&2; exit 1; }; fi;\n" "$f" "$f" "$f"
+  done
+  printf 'systemctl enable --now rustdesk || { echo "rustdesk: enable --now failed" >&2; exit 1; };\n'
 }
 
 # strih_rustdesk_apply_hint BOX -> the dev1 command that applies the permanent password to BOX from the
@@ -1296,6 +1312,7 @@ strih_rustdesk_grade_row() {
     down) printf 'FAIL|(rustdesk) installed but the service is %s -- systemctl enable --now rustdesk; re-run setup-strih.sh step 16b\n' \
       "$(systemctl is-active rustdesk 2>/dev/null || echo unknown)" ;;
     nopw) printf 'FAIL|(rustdesk) active but no permanent password is set -- %s\n' "$(strih_rustdesk_apply_hint "$box")" ;;
+    stopped) printf "FAIL|(rustdesk) stop-service = 'Y' in RustDesk2.toml (\"Stop service\" was pressed in its window): the service stops itself -- re-run setup-strih.sh step 16b, which clears it (issue 1544)\n" ;;
     *)
       id="$(timeout 10 rustdesk --get-id 2>/dev/null | head -1 || true)"
       if [ -n "$id" ]; then
