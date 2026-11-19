@@ -461,3 +461,12 @@ def test_the_cli_takes_touch_ranges(tmp_path):
                          "--box-out", str(out)], capture_output=True, text=True)
     assert rc.returncode == 0, rc.stderr
     assert json.loads(out.read_text())["verdict"] == "PASS"
+
+
+def test_a_stale_open_touch_of_another_run_excludes_one_hour_only():
+    """A run that died before its cleanup leaves its touch open; it must never hide a later loss."""
+    text = session(minutes=90, edits={("audit", "JXS cam3 src", 400): {"u": 10},
+                                       ("audit", "JXS cam3 src", 4800): {"u": 12}})
+    res = _decide_touch(text, [(_byte_at(text, 390), "stale")])
+    assert res["verdict"] == "FAIL"
+    assert any("underruns +2" in f for f in res["failures"]), res["failures"]
