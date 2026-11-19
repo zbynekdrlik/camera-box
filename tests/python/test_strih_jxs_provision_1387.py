@@ -81,7 +81,7 @@ def _ndi_only_pp(tmp_path):
 def test_the_four_fact_files_declare_the_live_snv_path_and_the_pp_path_of_issue_1535():
     assert _fact("strih-snv", "STRIH_JXS_CAMERAS") == "2:7002 3:7003 5:7000"
     assert _fact("strih-snv", "STRIH_JXS_CAMERA_PIN_MS") == "36"
-    assert (_fact("stream-snv", "STRIH_JXS_PROGRAM_PORT"), _fact("stream-snv", "STRIH_JXS_PROGRAM_PIN_MS")) == ("7100", "1064")
+    assert (_fact("stream-snv", "STRIH_JXS_PROGRAM_PORT"), _fact("stream-snv", "STRIH_JXS_PROGRAM_PIN_MS")) == ("7100", "1019")
     # issue 1535 (owner 18.11.2026): PP moves to the JPEG XS link like SNV
     assert _fact("strih-pp", "STRIH_JXS_CAMERAS") == "1:7001 4:7004 6:7006 7:7007"
     assert _fact("strih-pp", "STRIH_JXS_CAMERA_PIN_MS") == "36"
@@ -187,7 +187,7 @@ def test_stream_snv_declares_its_program_input_on_the_programs_stream_id():
     assert _bash('printf "%s\\n" "$STRIH_JXS_PROGRAM_STREAM_ID"').stdout.strip() == str(sid)
     (s,) = oji.parse_manifest(_manifest("stream-snv"))
     assert s.name == "JXS PGM src" and s.scene == "JXS PGM"
-    assert s.settings == {"jxs_port": 7100, "jxs_camera": sid, "jxs_max_bpp": 0, "genlock_latency_ms_src": 1064,
+    assert s.settings == {"jxs_port": 7100, "jxs_camera": sid, "jxs_max_bpp": 0, "genlock_latency_ms_src": 1019,
                           "genlock_fifo": True, "genlock_grid": False}
 
 
