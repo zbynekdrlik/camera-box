@@ -36,19 +36,19 @@ intercom-vban = { git = "https://github.com/zbynekdrlik/intercom", tag = "v1.9.2
 # tag names one version of all of them. src/lib.rs re-exports them at their old paths. The tag must
 # equal scripts/vstack-release.pin (tests/vstack_pin_1487.rs). jxs-recv-ffi and jxs-send-ffi are not
 # dependencies here: they pull the codec in unconditionally, and a default build needs no cmake.
-camera-box-jxs = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.14" }
-rig-core = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.14" }
-qpsk-marker = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.14" }
+camera-box-jxs = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.15" }
+rig-core = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.15" }
+qpsk-marker = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.15" }
 # vstack#8 (v0.1.7): the test-burn geometry (burn_regions, burn_quiet_zone, burn_tick_cache,
 # colour_scale), re-exported at the old paths in src/lib.rs.
-burn-geom = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.14" }
+burn-geom = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.15" }
 # vstack v0.1.8/v0.1.9: the V4L2 capture side (capture, capture_phase, capture_rate_health,
 # capture_stall, capture_wedge), re-exported at the old paths in src/lib.rs. `capture` and its v4l
 # dependency are Linux only there; the decision modules build for Windows too.
-av-capture = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.14" }
+av-capture = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.15" }
 # vstack v0.1.10: the NDI side (ndi, send_stagger, reannounce, preview_source), re-exported at the
 # old paths in src/lib.rs. `ndi` is Linux only there; the three decision modules build for Windows.
-av-ndi = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.14" }
+av-ndi = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.15" }
 
 # Dynamic library loading (for NDI SDK at runtime)
 libloading = "0.8"
@@ -106,7 +106,7 @@ drm = { version = "0.15", optional = true }
 # Issue 1387: the JPEG XS link's codec (SVT-JPEG-XS, vendored in vstack and built statically by its
 # jxs/sys/build.rs: cmake + nasm). Behind the `jxs` feature so a default build needs neither; CI's
 # deployed camera-box-linux-amd64 is built WITH it (ci.yml `build`).
-svt-jpegxs-sys = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.14", optional = true }
+svt-jpegxs-sys = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.15", optional = true }
 
 [dev-dependencies]
 # Property-based testing for format conversions
