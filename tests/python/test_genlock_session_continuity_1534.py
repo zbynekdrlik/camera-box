@@ -382,3 +382,82 @@ def test_the_cli_round_trip(tmp_path):
     assert r.returncode == 1
     r = subprocess.run([sys.executable, py, "--from-block", str(blk)], capture_output=True, text=True)
     assert r.returncode == 1 and "underruns +2" in r.stdout
+
+
+# --- the run's own camera handling (E2E 44502999091, 19.11.2026) ---------------------------------
+# The E2E restarts the camboxes into burn units and back. The strih camera inputs then repeat frames
+# for a moment: the RUN's own doing, recorded as byte ranges of the strih log (`touch`), never a loss
+# of the production session. The recording window itself is graded by the window gates.
+
+def _byte_at(text, second):
+    """The byte offset of the first line written at T0 + second."""
+    off = 0
+    for line in text.split("\n"):
+        if line.startswith(ts(T0 + second)) or line.startswith(ts(T0 + second - 0.05)):
+            return off
+        off += len(line.encode()) + 1
+    raise AssertionError(second)
+
+
+def _decide_touch(text, touches, declared=("JXS cam3 src",), inputs=None):
+    read = raw_read(text)
+    stop = int(read.split("\n", 1)[0].split("\t")[2]) - 1
+    return gsc.decide_box("strih", read, list(declared), log_name=LOG, start_byte=0, stop_byte=stop,
+                          touches=touches)
+
+
+def test_underruns_inside_the_runs_own_camera_handling_are_excluded():
+    text = session(minutes=20, edits={("audit", "JXS cam3 src", 400): {"u": 15},
+                                       ("audit", "JXS cam3 src", 405): {"u": 52786}})
+    res = _decide_touch(text, [(_byte_at(text, 390), _byte_at(text, 600))])
+    assert res["verdict"] == "PASS", res["failures"]
+    assert _inp(res, "JXS cam3 src")["context"]["run_touch_excluded_underruns"] == 52786
+
+
+def test_a_loss_before_the_runs_camera_handling_still_fails():
+    text = session(minutes=20, edits={("audit", "JXS cam3 src", 200): {"u": 2},
+                                       ("audit", "JXS cam3 src", 400): {"u": 900}})
+    res = _decide_touch(text, [(_byte_at(text, 390), _byte_at(text, 600))])
+    assert res["verdict"] == "FAIL"
+    assert any("underruns +2" in f for f in res["failures"]), res["failures"]
+
+
+def test_a_loss_past_the_touch_settle_still_fails():
+    text = session(minutes=20, edits={("audit", "JXS cam3 src", 400): {"u": 10},
+                                       ("audit", "JXS cam3 src", 900): {"u": 13}})
+    res = _decide_touch(text, [(_byte_at(text, 390), _byte_at(text, 600))])
+    assert res["verdict"] == "FAIL"
+    assert any("underruns +3" in f for f in res["failures"]), res["failures"]
+
+
+def test_an_open_touch_excludes_everything_after_it():
+    text = session(minutes=20, edits={("audit", "JXS cam3 src", 400): {"u": 10},
+                                       ("audit", "JXS cam3 src", 900): {"u": 13}})
+    res = _decide_touch(text, [(_byte_at(text, 390), None)])
+    assert res["verdict"] == "PASS", res["failures"]
+
+
+def test_lossy_jpeg_xs_windows_inside_the_touch_are_excluded():
+    text = session(minutes=20, edits={("jxs", "JXS cam3 src", 400): {"lost": 21, "conc": 1}})
+    res = _decide_touch(text, [(_byte_at(text, 390), _byte_at(text, 600))])
+    assert res["verdict"] == "PASS", res["failures"]
+
+
+def test_a_touch_never_excludes_a_non_camera_input():
+    text = session(minutes=20, names=("CG-obs",), edits={("audit", "CG-obs", 400): {"u": 5}})
+    res = _decide_touch(text, [(_byte_at(text, 390), _byte_at(text, 600))], declared=())
+    assert res["verdict"] == "FAIL"
+    assert any("'CG-obs' underruns +5" in f for f in res["failures"]), res["failures"]
+
+
+def test_the_cli_takes_touch_ranges(tmp_path):
+    text = session(minutes=20, edits={("audit", "JXS cam3 src", 400): {"u": 15}})
+    read = tmp_path / "r.txt"
+    read.write_text(raw_read(text))
+    out = tmp_path / "o.json"
+    rc = subprocess.run([sys.executable, str(REPO / "scripts/genlock_session_continuity.py"), "--box", "strih",
+                         "--read", str(read), "--input", "JXS cam3 src", "--log-name", LOG,
+                         "--stop-byte", "10", "--touch", f"{_byte_at(text, 390)}-{_byte_at(text, 600)}",
+                         "--box-out", str(out)], capture_output=True, text=True)
+    assert rc.returncode == 0, rc.stderr
+    assert json.loads(out.read_text())["verdict"] == "PASS"
