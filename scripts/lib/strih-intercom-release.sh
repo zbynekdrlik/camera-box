@@ -7,7 +7,8 @@
 # routing files. ONE pin, scripts/intercom-release.pin: the tag + the sha256 of the release tarball.
 # Root Cargo.toml's `intercom-vban` git tag must equal it (tests/intercom_pin_1487.rs).
 #
-# The bundle `intercom-hub-linux-amd64.tar.gz` carries the binary, the unit and the four routing TOMLs.
+# The bundle `intercom-hub-linux-amd64.tar.gz` carries the binary, the unit, the four routing TOMLs and
+# (since v1.9.26, issue 1542) the strih role's tray `intercom-tray`.
 # `--check-config` makes TOML and binary a pair, so everything step 13 installs comes from one verified
 # directory: <tree>/intercom-release/<tag>/. The strih deploy fills it in its staged tree on dev1 (the box
 # then needs no network for it); a setup-strih run from a checkout fills it there (git-ignored).
@@ -19,8 +20,9 @@
 
 STRIH_INTERCOM_REPO_URL="https://github.com/zbynekdrlik/intercom/releases/download"
 STRIH_INTERCOM_TARBALL="intercom-hub-linux-amd64.tar.gz"
+# issue 1542: v1.9.26 added intercom-tray (the strih role's tray, scripts/lib/intercom-tray.sh).
 STRIH_INTERCOM_FILES=(intercom-hub intercom-hub.service intercom.strih-snv.toml intercom.strih-pp.toml
-  intercom.stream-snv.toml intercom.stream-pp.toml)
+  intercom.stream-snv.toml intercom.stream-pp.toml intercom-tray)
 
 # _strih_intercom_pin_field ROOT KEY -> the value of KEY in ROOT's scripts/intercom-release.pin.
 _strih_intercom_pin_field() {

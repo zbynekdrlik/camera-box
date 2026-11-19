@@ -41,11 +41,14 @@ def _release(tmp_path, tag=TAG, version=None, drop=(), said=None):
     (build / "intercom-hub").chmod(0o755)
     for f in FILES:
         (build / f).write_text((PINNED / f).read_text())
+    # issue 1542: the 7th member, the strih role's tray (no pinned copy: a stand-in binary)
+    (build / "intercom-tray").write_text("#!/bin/sh\necho 'intercom-tray %s'\n" % (version or tag[1:]))
+    (build / "intercom-tray").chmod(0o755)
     rel = tmp_path / "rel" / tag
     rel.mkdir(parents=True, exist_ok=True)
     tb = rel / "intercom-hub-linux-amd64.tar.gz"
     with tarfile.open(tb, "w:gz") as t:
-        for n in ("intercom-hub",) + FILES:
+        for n in ("intercom-hub", "intercom-tray") + FILES:
             if n not in drop:
                 t.add(build / n, arcname=n)
     sha = hashlib.sha256(tb.read_bytes()).hexdigest()
