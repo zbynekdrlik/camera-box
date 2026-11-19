@@ -141,6 +141,11 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
   FINISHED of a load that did not fail; a FINISHED follows a failed load too). A service down all
   day would otherwise write ~29 000 journal lines.
 - **Closing the window exits the app**; the unit's `Restart=always` (3 s) brings it back.
+- **A fully covered window hides its WebView** (issue 1541, shading v0.2.14 / shading#19). The
+  service connects the NDI preview receivers only while a visible panel calls it. WebKitGTK reports a
+  window under OBS as visible, so `PanelWindow` (given `Gdk`) handles X `visibility-notify-event`:
+  `FULLY_OBSCURED` hides the view (the page turns `hidden`), `UNOBSCURED` / `PARTIAL` shows it, one
+  log line per change. It needs real X visibility events, which plain Xorg with no compositor sends.
 - **It is a NORMAL window.** Never keep-above / keep-below and no special type hint: the live
   4.10.2026 trial first put it `below` the multiview and openbox Alt+Tab could not reach it.
 - **WM_CLASS** comes from `GLib.set_prgname("bkshading-panel-app")`, called BEFORE `from

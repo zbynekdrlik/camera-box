@@ -254,7 +254,7 @@ strih_session_apps_missing_packages() {
 # strih_session_apps_import_check -> the python the import preflight runs: everything the two programs
 # import at runtime (the keeper: websocket; the panel: Gtk 3 + WebKit2 4.1 through gi).
 strih_session_apps_import_check() {
-  printf '%s' 'import websocket, gi; gi.require_version("Gtk", "3.0"); gi.require_version("WebKit2", "4.1"); from gi.repository import GLib, Gtk, WebKit2'
+  printf '%s' 'import websocket, gi; gi.require_version("Gtk", "3.0"); gi.require_version("Gdk", "3.0"); gi.require_version("WebKit2", "4.1"); from gi.repository import Gdk, GLib, Gtk, WebKit2'
 }
 
 # strih_session_apps_user_run USER CMD... -> CMD as USER with USER's runtime dir: as root through
