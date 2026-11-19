@@ -104,7 +104,8 @@ strih_intercom_release_ensure() {
   chmod 0755 "${x}/intercom-hub"
   # an optional member this release does not carry: none of it stays from another extraction
   for f in "${STRIH_INTERCOM_OPTIONAL_FILES[@]}"; do
-    [ -f "${x}/${f}" ] || rm -f "${dir}/${f}"
+    [ -f "${x}/${f}" ] || rm -f "${dir}/${f}" \
+      || { rm -rf "$x"; echo "strih-intercom-release: cannot remove the stale ${dir}/${f}" >&2; return 1; }
   done
   name="intercom-hub ${tag#v}"
   have="$(timeout 10 "${x}/intercom-hub" --version 2>/dev/null | head -n 1 || true)"
