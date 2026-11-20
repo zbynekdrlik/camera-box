@@ -85,12 +85,14 @@ def _state(tmp_path, env):
 
 # --- the pin + the bundle -------------------------------------------------------------------------------
 
-def test_the_shipped_pin_names_intercom_v1_9_26():
+def test_the_shipped_pin_carries_the_tray_release_or_later():
+    # issue 1542: the tray is in the hub bundle from intercom v1.9.26 on; a later pin keeps it
     pin = dict(ln.split("=", 1) for ln in (REPO / "scripts/intercom-release.pin").read_text().splitlines() if ln)
-    assert pin == {"INTERCOM_RELEASE_TAG": "v1.9.26",
-                   "INTERCOM_RELEASE_SHA256": "4fe9fce72ca2b86838a851b33cf9a4799c6e77801e35256347775f86e456e2cc",
-                   "INTERCOM_RELEASE_DSTACK_VERSION": "v0.6.178"}
-    assert 'intercom-vban = { git = "https://github.com/zbynekdrlik/intercom", tag = "v1.9.26" }' in \
+    assert set(pin) == {"INTERCOM_RELEASE_TAG", "INTERCOM_RELEASE_SHA256", "INTERCOM_RELEASE_DSTACK_VERSION"}
+    tag = pin["INTERCOM_RELEASE_TAG"]
+    assert tuple(int(x) for x in tag.lstrip("v").split(".")) >= (1, 9, 26), tag
+    assert len(pin["INTERCOM_RELEASE_SHA256"]) == 64
+    assert ('intercom-vban = { git = "https://github.com/zbynekdrlik/intercom", tag = "%s" }' % tag) in \
         (REPO / "Cargo.toml").read_text()
     # the routing files of that release (the sha256 the release ships, the ticket's)
     for name, sha in (("intercom.strih-snv.toml", "35d1730e75990acb340145703246f4672287061802cdf83bfb5b6345979a0670"),
