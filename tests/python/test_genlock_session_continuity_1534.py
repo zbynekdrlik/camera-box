@@ -178,11 +178,12 @@ def test_dropped_due_is_context_never_a_failure():
 
 
 def test_an_undeclared_input_is_graded_too():
-    text = session(names=("JXS cam3 src", "CG-obs"), edits={("audit", "CG-obs", 300): {"u": 9}})
+    # CG-obs is report-only since the owner's 20.11.2026 ruling; any other non-camera input gates.
+    text = session(names=("JXS cam3 src", "Zaloha kamera"), edits={("audit", "Zaloha kamera", 300): {"u": 9}})
     res = decide(raw_read(text))
     assert res["verdict"] == "FAIL"
-    assert any("'CG-obs'" in f and "underruns +9" in f for f in res["failures"])
-    assert _inp(res, "CG-obs")["declared"] is False
+    assert any("'Zaloha kamera'" in f and "underruns +9" in f for f in res["failures"])
+    assert _inp(res, "Zaloha kamera")["declared"] is False
 
 
 def test_a_declared_input_without_an_audit_line_is_unknown():
@@ -329,7 +330,9 @@ def test_real_strih_snv_names_cam3s_late_underrun_and_cg_obs():
     res = decide(read, declared=("JXS cam2 src", "JXS cam3 src", "JXS cam5 src"))
     assert res["verdict"] == "FAIL"
     assert any("'JXS cam3 src'" in f and "underruns +1" in f for f in res["failures"]), res["failures"]
-    assert any("'CG-obs'" in f and "underruns +499" in f for f in res["failures"]), res["failures"]
+    cg = _inp(res, "CG-obs")  # report-only since the owner's 20.11.2026 ruling
+    assert cg["verdict"] == "FAIL" and cg["report_only"] is True, cg
+    assert not any("'CG-obs'" in f for f in res["failures"]), res["failures"]
     for cam in ("JXS cam2 src", "JXS cam5 src"):
         assert _inp(res, cam)["verdict"] == "PASS", _inp(res, cam)
     assert _inp(res, "JXS cam3 src")["first_growth"].startswith("20:05:23.067")
@@ -444,10 +447,10 @@ def test_lossy_jpeg_xs_windows_inside_the_touch_are_excluded():
 
 
 def test_a_touch_never_excludes_a_non_camera_input():
-    text = session(minutes=20, names=("CG-obs",), edits={("audit", "CG-obs", 400): {"u": 5}})
+    text = session(minutes=20, names=("Zaloha kamera",), edits={("audit", "Zaloha kamera", 400): {"u": 5}})
     res = _decide_touch(text, [(_byte_at(text, 390), _byte_at(text, 600))], declared=())
     assert res["verdict"] == "FAIL"
-    assert any("'CG-obs' underruns +5" in f for f in res["failures"]), res["failures"]
+    assert any("'Zaloha kamera' underruns +5" in f for f in res["failures"]), res["failures"]
 
 
 def test_the_cli_takes_touch_ranges(tmp_path):
