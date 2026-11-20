@@ -245,7 +245,8 @@ PROG
   printf '%s\n' "$(declare -f ro_root_mount_mode)"
   # issue 1439: the dsync unit bound to the LAN NIC (scripts/lib/cambox-dsync-unit.sh emits its parts)
   cambox_dsync_apply_prelude "$CAMBOX_RO_UNITS_UNIT_DIR/dsync.service" "${CAMBOX_RO_UNITS_FS_ROOT}/sys" \
-    "${CAMBOX_RO_UNITS_DSYNC_WAIT_S:-150}" "${CAMBOX_RO_UNITS_DSYNC_POLL_S:-5}"
+    "${CAMBOX_RO_UNITS_DSYNC_WAIT_S:-150}" "${CAMBOX_RO_UNITS_DSYNC_POLL_S:-5}" \
+    "${CAMBOX_RO_UNITS_FS_ROOT}/usr/local/bin/dsync"
   cat <<'PROG'
 _rou_box="$(hostname 2>/dev/null || echo this cambox)"
 _rou_sha() { if [ -e "$1" ]; then _rou_s="$(sha256sum <"$1")"; echo "${_rou_s%% *}"; else echo __ABSENT__; fi; }

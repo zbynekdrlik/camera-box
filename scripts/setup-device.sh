@@ -1666,8 +1666,10 @@ echo "  #1307/#1066: /etc/dsync/config.json installed (gm_allowlist=[\"${_RG_GM_
 # issue 1439 (ROZHODNUTE 1.11.2026): dsync binds PTP to this box's LAN NIC, never to the first IPv4
 # interface it lists (the bkshading USB camera link, enx*, took the join on cam1 on 20.8.2026). The unit
 # text and the NIC rule (the ONE cabled enp* with a device link) live in scripts/lib/cambox-dsync-unit.sh, which
-# verify-device (ba) and the live apply (scripts/cambox-ro-units-apply.sh) read too.
-_DSYNC_NIC="$(cambox_lan_nic /sys)" || fail "cannot resolve this cambox's LAN NIC (the line above) -- dsync is never bound to a guessed NIC (issue 1439)"
+# verify-device (ba) and the live apply (scripts/cambox-ro-units-apply.sh) read too. Issue 1545: a dsync
+# >= 1.35.16 gets BOTH onboard ports (the crew plugs the cable into either), an older one the cabled port.
+_DSYNC_VER="$(/usr/local/bin/dsync --version 2>/dev/null | sed -n '1s/^[^ ]* //p')" || _DSYNC_VER=""
+_DSYNC_NIC="$(cambox_dsync_iface_arg /sys "$_DSYNC_VER")" || fail "cannot resolve this cambox's LAN NIC (the line above) -- dsync is never bound to a guessed NIC (issue 1439)"
 _DSYNC_UNIT="$(cambox_dsync_unit_text "$_DSYNC_NIC")" || fail "LAN NIC name '${_DSYNC_NIC}' is not a usable interface name (issue 1439)"
 printf '%s\n' "$_DSYNC_UNIT" > /etc/systemd/system/dsync.service
 echo "  dsync.service: PTP bound to the LAN NIC ${_DSYNC_NIC} (--interface, issue 1439)"

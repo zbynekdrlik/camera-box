@@ -130,7 +130,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # 2026-11-16: v1.35.7 -- READY at most 30 s after start even when the pinned --interface NIC is missing
 # (it keeps waiting and joins it, the missing NIC in /status clock_alarm), for the Type=notify unit of
 # camera-box issue 1483 (lightdm ordered after dsync).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.7}"
+# 2026-11-20: v1.35.16 -- `--interface` takes a list (dsync#212): it joins the listed NIC that has an
+# IPv4 and re-joins on another listed one when PTP goes silent; the camboxes list both onboard ports
+# (camera-box issue 1545: cam3 ran the 19.11 SNV service on NTP with its cable in the other port).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.16}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

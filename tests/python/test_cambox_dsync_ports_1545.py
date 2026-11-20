@@ -180,3 +180,13 @@ def test_apply_keeps_the_single_cabled_port_on_an_older_dsync(tmp_path):
     assert "--interface enp1s0\n" in unit_dir.joinpath("dsync.service").read_text()
     assert "--interface enp1s0,enp3s0" not in unit_dir.joinpath("dsync.service").read_text()
     assert "dsync PTP NIC enp1s0;" in proc.stdout or "dsync PTP NIC enp1s0 " in proc.stdout, proc.stdout
+
+
+def test_step17_writes_both_ports_for_the_pinned_dsync(tmp_path):
+    from test_cambox_dsync_interface_1439 import _step17
+    dsync = tmp_path / "dsync-bin"
+    dsync.write_text('#!/bin/sh\necho "dsync 1.35.16"\n')
+    dsync.chmod(0o755)
+    r, out = _step17(tmp_path, {"enp1s0": "nocarrier", "enp3s0": True, "enx00e04c680185": True}, dsync_bin=dsync)
+    assert r.returncode == 0 and r.stdout.strip().endswith("END"), r.stdout + r.stderr
+    assert "--ntp-server strih.lan --interface enp1s0,enp3s0\n" in out.read_text()
