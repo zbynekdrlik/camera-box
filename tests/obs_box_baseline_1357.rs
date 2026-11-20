@@ -706,6 +706,8 @@ nic_hook=1
 cpu_perf_unit=enabled
 rc_local_eee=1
 rc_local_active=active
+eee_on=
+eee_unread=
 cpufreq_policies=16
 governors=performance
 maxperf_active=active
@@ -792,7 +794,7 @@ coredump_effective=external,256M,256M
 gather_done=1
 ";
 
-const ITEMS: [&str; 22] = [
+const ITEMS: [&str; 23] = [
     "timezone",
     "net",
     "perf",
@@ -815,6 +817,7 @@ const ITEMS: [&str; 22] = [
     "touchpad",
     "swap",
     "coredump",
+    "eee",
 ];
 
 fn verdict(facts: &str) -> (i32, Vec<(String, String)>) {
@@ -944,6 +947,9 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ),
         ("perf", "maxperf_active=active", "maxperf_active=inactive"),
         ("perf", "rc_local_eee=1", "rc_local_eee=0"),
+        // owner 20.11.2026: EEE enabled on ANY wired NIC of a rig box is a serious failure
+        ("eee", "eee_on=\n", "eee_on=enp56s0\n"),
+        ("eee", "eee_unread=\n", "eee_unread=enp2s0\n"),
         ("perf", "ppd=masked", "ppd=enabled"),
         ("cstate", "cstate_active=active", "cstate_active=inactive"),
         ("cstate", "cstate_deep_delta=0", "cstate_deep_delta=5"),
