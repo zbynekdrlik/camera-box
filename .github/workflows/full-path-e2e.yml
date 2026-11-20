@@ -282,7 +282,9 @@ jobs:
           # touched. A red ci.yml still blocks the merge by itself; this step needs only the exe.
           FOUND_RUN_ID=""
           for i in $(seq 1 60); do
-            RUN_ID_CAND="$(gh run list --workflow ci.yml --json databaseId,headSha \
+            # --commit: a measure=true dispatch on main runs on a commit whose ci.yml run can be
+            # days old, far past gh run list's newest-20 page (restreamer's gate, 20.11.2026).
+            RUN_ID_CAND="$(gh run list --workflow ci.yml --commit "$SHA" --json databaseId,headSha \
               --jq ".[] | select(.headSha==\"$SHA\") | .databaseId" | head -1)"
             JOB_STATE=""
             if [ -n "$RUN_ID_CAND" ]; then
