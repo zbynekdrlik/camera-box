@@ -708,6 +708,7 @@ rc_local_eee=1
 rc_local_active=active
 eee_on=
 eee_unread=
+eee_udev=1
 cpufreq_policies=16
 governors=performance
 maxperf_active=active
@@ -950,6 +951,8 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         // owner 20.11.2026: EEE enabled on ANY wired NIC of a rig box is a serious failure
         ("eee", "eee_on=\n", "eee_on=enp56s0\n"),
         ("eee", "eee_unread=\n", "eee_unread=enp2s0\n"),
+        // dstack#465 follow-up: r8152 forgets EEE on every USB re-attach; the udev add rule follows the device
+        ("eee", "eee_udev=1\n", "eee_udev=0\n"),
         ("perf", "ppd=masked", "ppd=enabled"),
         ("cstate", "cstate_active=active", "cstate_active=inactive"),
         ("cstate", "cstate_deep_delta=0", "cstate_deep_delta=5"),

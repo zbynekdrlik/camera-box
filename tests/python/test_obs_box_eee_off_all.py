@@ -108,3 +108,55 @@ def test_a_nic_without_eee_support_is_fine_and_an_unreadable_one_is_named(tmp_pa
     f = _gather_eee(tmp_path, {"enx1": "wired", "enp2s0": "wired"},
                     {"enx1": "not supported"})
     assert f == {"eee_on": "", "eee_unread": "enp2s0"}
+
+
+# --- dstack#465 follow-up (20.11.2026): r8152 forgets `--set-eee` on every USB re-attach, and the
+# networkd-dispatcher hook never fires for a NetworkManager-managed NIC (stream-snv rig0 read
+# "enabled - inactive" again after an unbind/bind). A udev `add` rule turns EEE off on every wired NIC
+# the moment the device appears, before its link comes up (a set on an up link renegotiates it).
+UDEV = "/etc/udev/rules.d/70-obs-box-eee-off.rules"
+
+
+def test_the_udev_rule_turns_eee_off_on_every_wired_nic_at_add():
+    r = _bash('. "$1"; obs_box_eee_udev_rule', str(BASELINE))
+    assert r.returncode == 0, r.stderr
+    rule = [ln for ln in r.stdout.splitlines() if ln and not ln.startswith("#")]
+    assert len(rule) == 1, r.stdout
+    for part in ('ACTION=="add"', 'SUBSYSTEM=="net"', 'TEST=="device"', 'TEST!="wireless"', 'TEST!="phy80211"',
+                 'RUN+="/usr/sbin/ethtool --set-eee $name eee off"'):
+        assert part in rule[0], (part, rule[0])
+
+
+def test_the_udev_install_writes_the_rule_and_reloads_only_on_a_change(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "udevadm.log"
+    (bindir / "udevadm").write_text('#!/bin/bash\necho "$*" >> "%s"\n' % log)
+    (bindir / "udevadm").chmod(0o755)
+    import pwd
+    import grp
+    owner = "%s:%s" % (pwd.getpwuid(os.getuid()).pw_name, grp.getgrgid(os.getgid()).gr_name)
+    dest = tmp_path / "70-obs-box-eee-off.rules"
+    env = {"PATH": "%s:%s" % (bindir, os.environ["PATH"]), "OBS_BOX_EEE_UDEV_RULE": str(dest),
+           "OBS_BOX_EEE_UDEV_OWNER": owner}
+    script = 'set -euo pipefail; fail() { echo "FAIL $*" >&2; return 1; }; . "$1"; obs_box_eee_udev_install'
+    r = _bash(script, str(BASELINE), env=env)
+    assert r.returncode == 0, r.stderr
+    want = _bash('. "$1"; obs_box_eee_udev_rule', str(BASELINE)).stdout
+    assert dest.read_text() == want
+    assert "control --reload-rules" in log.read_text()
+    log.unlink()
+    r = _bash(script, str(BASELINE), env=env)
+    assert r.returncode == 0, r.stderr
+    assert not log.exists(), "an unchanged rule never reloads udev"
+
+
+def test_the_network_tuning_installs_the_udev_rule():
+    s = BASELINE.read_text()
+    body = s[s.index("obs_box_network_tuning() {"):s.index("obs_box_eee_off_cmds() {")]
+    assert "obs_box_eee_udev_install" in body
+
+
+def test_the_gather_grades_the_udev_rule_against_its_renderer():
+    s = VERIFY.read_text()
+    assert "obs_box_eee_udev_rule" in s and "eee_udev=" in s
