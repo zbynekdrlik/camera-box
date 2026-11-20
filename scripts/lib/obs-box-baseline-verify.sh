@@ -166,7 +166,7 @@ obs_box_baseline_gather_snippet() {
         obs_box_cpulist_expand obs_box_cpulist_compress obs_box_background_cpus obs_box_background_smt_shared \
         obs_box_background_slice_name obs_box_background_slice_path obs_box_background_dropin_path \
         obs_box_background_run_path obs_box_background_memory_high obs_box_background_slice_text \
-        obs_box_background_dropin_text obs_box_background_run_text obs_box_eee_state \
+        obs_box_background_dropin_text obs_box_background_run_text obs_box_eee_state obs_box_eee_udev_rule \
         obs_box_coredump_size_max obs_box_coredump_dropin_path obs_box_coredump_dropin_text obs_box_coredump_effective
     cat <<'GATHER_EOF'
 set +e
@@ -184,6 +184,7 @@ echo "rc_local_active=$(systemctl is-active rc-local.service 2>/dev/null | first
 _eee_facts="$(obs_box_eee_state)"
 echo "eee_on=$(printf '%s\n' "$_eee_facts" | sed -n 's/^eee_on=//p')"
 echo "eee_unread=$(printf '%s\n' "$_eee_facts" | sed -n 's/^eee_unread=//p')"
+echo "eee_udev=$(if cmp -s /etc/udev/rules.d/70-obs-box-eee-off.rules <(obs_box_eee_udev_rule); then echo 1; else echo 0; fi)"
 echo "cpufreq_policies=$(ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | wc -l)"
 echo "governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')"
 echo "maxperf_active=$(systemctl is-active "${BOX}-maxperf.service" 2>/dev/null | first)"
@@ -556,7 +557,7 @@ obs_box_baseline_verdict() {
     _obs_box_item coredump "$ok" "drop-in=$(_obs_box_f coredump_dropin) effective Storage,ProcessSizeMax,ExternalSizeMax=$(_obs_box_f coredump_effective) (want external,${cd_want},${cd_want}) -- setup obs_box_coredump_bound, or a later drop-in overrides it: systemd-analyze cat-config systemd/coredump.conf (issue 1441)"
     # eee -- owner 20.11.2026 (dstack#465): EEE enabled on ANY wired NIC, up or down, is a serious failure;
     # an unreadable NIC FAILs too. Setup turns it off on every wired NIC (obs_box_eee_off_cmds).
-    ok=0; [ -z "$(_obs_box_f eee_on)" ] && [ -z "$(_obs_box_f eee_unread)" ] && ok=1
-    _obs_box_item eee "$ok" "EEE enabled on=[$(_obs_box_f eee_on)] unreadable=[$(_obs_box_f eee_unread)] -- setup obs_box_net_tuning turns it off on every wired NIC"
+    ok=0; [ -z "$(_obs_box_f eee_on)" ] && [ -z "$(_obs_box_f eee_unread)" ] && [ "$(_obs_box_f eee_udev)" = 1 ] && ok=1
+    _obs_box_item eee "$ok" "EEE enabled on=[$(_obs_box_f eee_on)] unreadable=[$(_obs_box_f eee_unread)] udev-add-rule=$(_obs_box_f eee_udev) -- setup obs_box_network_tuning turns it off on every wired NIC and installs the udev add rule"
     [ "$fails" -eq 0 ]
 }

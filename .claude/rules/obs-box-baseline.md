@@ -428,6 +428,19 @@ sibling. The E-core pin of the decode is empty on AMD (no `cpu_atom`).
 - **Tests:** `tests/python/test_obs_box_background_1387.py` (stubs + moved paths, the real installer, runner
   and gather), the `background` row in `tests/obs_box_baseline_1357.rs`.
 
+## EEE off on every wired NIC (row `eee`, owner 20.11.2026 via dstack#465)
+
+EEE enabled on ANY wired NIC of a rig box is a serious failure (owner). `obs_box_eee_off_cmds` turns it off on
+every `/sys/class/net` entry with a `device` link that is not wireless, up or down, from three places: the
+immediate apply, rc.local (boot) and the networkd-dispatcher hook. Flow control stays scoped to the rig NIC.
+**The follow-the-device half:** r8152 forgets `--set-eee` on every USB re-attach, and the networkd-dispatcher
+hook never fires for a NetworkManager NIC (stream-snv rig0 read `enabled - inactive` again after dstack's
+unbind/bind, 20.11.2026). `obs_box_eee_udev_install` writes `/etc/udev/rules.d/70-obs-box-eee-off.rules`
+(`ACTION=="add", SUBSYSTEM=="net"`, wired only, `RUN+=` ethtool), applied at add before the link comes up:
+a set on an UP link renegotiates it (a ~4 s outage). Row `eee` FAILs on any wired NIC reading enabled
+(also `enabled - inactive`) or unreadable, or a rule that is not byte-identical to `obs_box_eee_udev_rule`.
+dstack's `tools/linux/nic-standard-check.py` grades the same rule independently.
+
 ## The rig time zone (item `obs_box_timezone`, grader row `timezone`, issue 1415)
 
 Every fresh box used to run the image default `Etc/UTC`, so the browser-source clocks (Camera info,
