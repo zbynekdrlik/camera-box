@@ -63,7 +63,7 @@ refuses a PP relay; an SNV one does not), and `BKSHADING_DEPLOY_LEASE_RESOURCE=<
 holder whose declared issue-1450 `resources` do not name it (restreamer on `snv-cams`) does not
 block, one that names it or declares none (the whole rig) still refuses (`rig_lease_holder_covers`,
 unreadable holder.json = covered, fail-closed). The post-merge job releases the SNV lease before the
-venue step, so without this an SNV holder taking the lease in that gap turned the job red.
+venue step, so without this an SNV holder taking the lease in that gap turned the job red. Issue 1538: a standalone `bkshading-deploy-relay.sh --box <cam>` with no explicit resource derives the same `<venue>-cams` from the camera's venue (`remote_log_camera_venue`), so songplayer's `resolume-snv` lease no longer blocks a PP relay; a camera with no venue keeps the whole-rig refusal.
 
 ## Scope: camboxes only
 
