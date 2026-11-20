@@ -358,7 +358,10 @@ fn windows_probe_lookup_filters_ci_runs_by_the_commit_not_the_newest_page() {
     let at = s
         .find("Fetch the matching Windows recording-verdict.exe for THIS commit (#703)")
         .expect("the #703 fetch step");
-    let end = s[at..].find("\n      - name:").map(|e| at + e).unwrap_or(s.len());
+    let end = s[at..]
+        .find("\n      - name:")
+        .map(|e| at + e)
+        .unwrap_or(s.len());
     let step = &s[at..end];
     let list = step
         .find("gh run list --workflow ci.yml")
