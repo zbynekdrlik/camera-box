@@ -45,7 +45,7 @@ def _ethtool(tmp_path, states):
         f'echo "$*" >> "{log}"\n'
         'if [ "$1" = --show-eee ]; then case "$2" in\n'
         f"{lines}\n"
-        '  *) echo "Cannot get EEE settings: Operation not supported" >&2; exit 75;;\n'
+        '  *) echo "Cannot get EEE settings: No such device" >&2; exit 75;;\n'
         "esac; fi\n"
         "exit 0\n")
     (bindir / "ethtool").chmod(0o755)
@@ -81,7 +81,7 @@ def test_a_nic_whose_eee_cannot_be_set_never_stops_the_others(tmp_path):
 
 def test_every_eee_writer_runs_the_all_nics_command():
     s = BASELINE.read_text()
-    body = s[s.index("obs_box_net_tuning() {"):s.index("obs_box_max_performance() {")]
+    body = s[s.index("obs_box_network_tuning() {"):s.index("obs_box_eee_off_cmds() {")]
     assert "obs_box_eee_off_cmds" in body, "the dispatcher hook + the immediate apply cover every wired NIC"
     perf = s[s.index("obs_box_max_performance() {"):]
     perf = perf[:perf.index("\n}\n")]

@@ -312,7 +312,8 @@ net.ipv6.conf.default.disable_ipv6 = 1
 EOF
 sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
 
-# EEE (Green Ethernet) off + flow-control ADVERTISED (issue 1234), scoped to $NIC only. Two
+# EEE (Green Ethernet) off on EVERY wired NIC, up or down (owner 20.11.2026 via dstack#465: EEE enabled
+# on any rig device is a serious failure), flow-control ADVERTISED on $NIC only (issue 1234). Two
 # mechanisms, belt-and-suspenders (some USB-ethernet chipsets don't implement these ioctls at
 # all — `|| true` throughout): (1) a networkd-dispatcher hook for interface-routable/hotplug
 # events, and (2) an immediate one-time apply now (re-applied at every boot via the governor
@@ -320,16 +321,25 @@ sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
 mkdir -p /etc/networkd-dispatcher/routable.d
 cat > /etc/networkd-dispatcher/routable.d/optimize-nic <<NICEOF
 #!/bin/bash
-# Disable EEE (Green Ethernet); advertise flow control for low latency (issue 1234) — scoped to ${BOX}'s NDI NIC only.
+# EEE (Green Ethernet) off on every wired NIC (owner 20.11.2026); flow control advertised on ${BOX}'s NDI NIC (issue 1234).
+$(obs_box_eee_off_cmds)
 if [ "\$IFACE" = "${NIC}" ]; then
-    ethtool --set-eee "${NIC}" eee off 2>/dev/null || true
     ethtool -A "${NIC}" rx on tx on 2>/dev/null || true
 fi
 NICEOF
 chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
-ethtool --set-eee "$NIC" eee off 2>/dev/null || true
+bash -c "$(obs_box_eee_off_cmds)"
 ethtool -A "$NIC" rx on tx on 2>/dev/null || true
 echo "  sysctl: buffers+BBR+nodelay+IPv6-off applied; EEE off, flow-control advertised on $NIC"
+}
+
+# obs_box_eee_off_cmds [SYSROOT] -- bash that turns EEE off on every wired NIC (a net entry with a device
+# link that is not wireless), up or down; a NIC without EEE support is skipped quietly (owner 20.11.2026).
+obs_box_eee_off_cmds() {
+    local sys="${1:-/sys}"
+    printf 'for _eee_d in %q/class/net/*; do _eee_n="${_eee_d##*/}"; ' "$sys"
+    printf '[ -e "$_eee_d/device" ] || continue; [ -e "$_eee_d/wireless" ] && continue; [ -e "$_eee_d/phy80211" ] && continue; '
+    printf 'ethtool --set-eee "$_eee_n" eee off 2>/dev/null || true; done\n'
 }
 
 # obs_box_max_performance NIC BOX -- the imag step 4 governor (cpu-performance.service) + rc.local boot
@@ -355,7 +365,7 @@ for n in /sys/class/net/*/device/power/control; do echo on > "\$n" 2>/dev/null; 
 # #486/#1234: EEE off, flow-control advertised on the rig NDI NIC — reapplied every boot
 # (belt-and-suspenders alongside step 2's networkd-dispatcher hook; some USB-ethernet
 # chipsets reset EEE/pause state on power cycle).
-ethtool --set-eee ${NIC} eee off 2>/dev/null || true
+$(obs_box_eee_off_cmds)
 ethtool -A ${NIC} rx on tx on 2>/dev/null || true
 exit 0
 EOF

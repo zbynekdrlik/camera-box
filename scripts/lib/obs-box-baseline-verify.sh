@@ -129,6 +129,25 @@ obs_box_holds_generic_kernel() {
 # detectors it needs (obs_box_has_discrete_nvidia, obs_box_crash_popup_units) are embedded from THIS lib
 # via `declare -f` -- one source of truth on the provisioning AND the grading side. Every read is `|| true`
 # guarded: a missing tool/file yields an empty value, which the verdict grades FAIL (unreadable).
+# obs_box_eee_state [SYSROOT] -- owner 20.11.2026: `eee_on=` the wired NICs (up or down) whose
+# `ethtool --show-eee` reads enabled (also "enabled - inactive"), `eee_unread=` the ones whose state could
+# not be read; a NIC with no EEE support ("not supported") is fine. Wireless and virtual entries are skipped.
+obs_box_eee_state() {
+    local sys="${1:-/sys}" d n out on="" unread=""
+    for d in "$sys"/class/net/*; do
+        n="${d##*/}"
+        [ -e "$d/device" ] || continue
+        if [ -e "$d/wireless" ] || [ -e "$d/phy80211" ]; then continue; fi
+        out="$(ethtool --show-eee "$n" 2>&1)" || true
+        case "$out" in
+            *"EEE status: enabled"*) on="${on:+$on }$n" ;;
+            *"EEE status: disabled"* | *"EEE status: not supported"* | *"Operation not supported"*) ;;
+            *) unread="${unread:+$unread }$n" ;;
+        esac
+    done
+    printf 'eee_on=%s\neee_unread=%s\n' "$on" "$unread"
+}
+
 obs_box_baseline_gather_snippet() {
     # issue 1466: SESSION = the lightdm autologin session the kiosk wrote (openbox, imag's only value; a strih
     # box passes its STRIH_DESKTOP, openbox | xfce).
@@ -147,7 +166,7 @@ obs_box_baseline_gather_snippet() {
         obs_box_cpulist_expand obs_box_cpulist_compress obs_box_background_cpus obs_box_background_smt_shared \
         obs_box_background_slice_name obs_box_background_slice_path obs_box_background_dropin_path \
         obs_box_background_run_path obs_box_background_memory_high obs_box_background_slice_text \
-        obs_box_background_dropin_text obs_box_background_run_text \
+        obs_box_background_dropin_text obs_box_background_run_text obs_box_eee_state \
         obs_box_coredump_size_max obs_box_coredump_dropin_path obs_box_coredump_dropin_text obs_box_coredump_effective
     cat <<'GATHER_EOF'
 set +e
@@ -162,6 +181,9 @@ echo "nic_hook=$(if [ -x /etc/networkd-dispatcher/routable.d/optimize-nic ]; the
 echo "cpu_perf_unit=$(systemctl is-enabled cpu-performance.service 2>/dev/null | first)"
 echo "rc_local_eee=$(if [ -x /etc/rc.local ] && grep -qF 'ethtool --set-eee' /etc/rc.local 2>/dev/null; then echo 1; else echo 0; fi)"
 echo "rc_local_active=$(systemctl is-active rc-local.service 2>/dev/null | first)"
+_eee_facts="$(obs_box_eee_state)"
+echo "eee_on=$(printf '%s\n' "$_eee_facts" | sed -n 's/^eee_on=//p')"
+echo "eee_unread=$(printf '%s\n' "$_eee_facts" | sed -n 's/^eee_unread=//p')"
 echo "cpufreq_policies=$(ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | wc -l)"
 echo "governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')"
 echo "maxperf_active=$(systemctl is-active "${BOX}-maxperf.service" 2>/dev/null | first)"
@@ -364,7 +386,7 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in timezone net perf cstate nosleep boot kernel affinity rtprio background gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap coredump; do
+        for v in timezone net perf cstate nosleep boot kernel affinity rtprio background gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap coredump eee; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
@@ -532,5 +554,9 @@ obs_box_baseline_verdict() {
     case "$(_obs_box_f coredump_effective)" in "external,${cd_want},${cd_want}" | "none,${cd_want},${cd_want}")
         [ "$(_obs_box_f coredump_dropin)" = 1 ] && ok=1 ;; esac
     _obs_box_item coredump "$ok" "drop-in=$(_obs_box_f coredump_dropin) effective Storage,ProcessSizeMax,ExternalSizeMax=$(_obs_box_f coredump_effective) (want external,${cd_want},${cd_want}) -- setup obs_box_coredump_bound, or a later drop-in overrides it: systemd-analyze cat-config systemd/coredump.conf (issue 1441)"
+    # eee -- owner 20.11.2026 (dstack#465): EEE enabled on ANY wired NIC, up or down, is a serious failure;
+    # an unreadable NIC FAILs too. Setup turns it off on every wired NIC (obs_box_eee_off_cmds).
+    ok=0; [ -z "$(_obs_box_f eee_on)" ] && [ -z "$(_obs_box_f eee_unread)" ] && ok=1
+    _obs_box_item eee "$ok" "EEE enabled on=[$(_obs_box_f eee_on)] unreadable=[$(_obs_box_f eee_unread)] -- setup obs_box_net_tuning turns it off on every wired NIC"
     [ "$fails" -eq 0 ]
 }
