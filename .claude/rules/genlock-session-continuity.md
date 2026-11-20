@@ -50,6 +50,10 @@ Input = one box's whole-session read (below). Per input:
   settle, in file order, never "any line at or before it".
 - **A camera the run acked offline** (`PREFLIGHT_EXCLUDED_CAMS` -> `camera_strih_input`, `--exclude`) is
   graded and shown, never gating (`excluded`, the report says `kamera kvitovaná offline`).
+- **The strih `CG-obs` input is report-only** (owner ROZHODNUTÉ 20.11.2026: the cg feed from the
+  resolume cg OBS has minimal priority): `REPORT_ONLY_INPUTS` in the decision, graded and shown
+  (`report_only`, the report says `CG z resolume ... len informatívne`), never gating; exact name only.
+  Live cause of its underruns: the resolume sender delivers fewer frames while SongPlayer plays on it.
 - Both parsers read the FIRST `key=` of a repeated name (the awk `fv`, the python `_fields`).
 - **The run's own camera handling is excluded (E2E 44502999091, 19.11.2026):** the E2E restarts the
   camboxes into burn units and back, and the strih camera inputs repeat frames meanwhile (cam5 +52786
