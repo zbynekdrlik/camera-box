@@ -42,6 +42,9 @@ DEFAULT_HOST = "newlevel@dev2"
 DEFAULT_WORKERS = 4
 NICE = 10
 BASE = "youtube-leg-1404"
+EVIDENCE_BASE = "youtube-leg-evidence"  # issue 1534: a red run's VOD + capture, outside the stage sweep
+EVIDENCE_KEEP = 3
+CAPTURE_FILE = "inpoint-capture.mkv"  # = youtube_leg_points.CAPTURE_NAME (the host has no import of it)
 TOOL_FILES = ("youtube_leg_verdict.py", "youtube_leg_ticks.py", "youtube_leg_timeline.py", "youtube_leg_audio.py",
               "youtube_leg_proc.py")
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
@@ -220,6 +223,22 @@ class Host:
                         os.replace(tmp, os.path.join(local_dir, m.name))
                         got.append(m.name)
         return sorted(got)
+
+    def keep_evidence(self):
+        """Issue 1534: move a red run's restreamer-input capture and the VOD out of the stage dir to
+        ~/EVIDENCE_BASE/<key>/ (outside the day-old stage sweep), then keep the newest EVIDENCE_KEEP
+        run dirs there. Returns the names it kept; HostError on a failed ssh."""
+        if self.root is None:
+            self.check()
+        key = shlex.quote(self.key)
+        r = self.run(f'E="$HOME/{EVIDENCE_BASE}"; D="$E/"{key}; mkdir -p "$D"; '
+                     f'for f in "$R/{CAPTURE_FILE}" "$R"/verdict/vod-*; do '
+                     '[ -f "$f" ] || continue; mv -f -- "$f" "$D/" && printf "%s\\n" "${f##*/}"; done; '
+                     f'ls -1dt -- "$E"/*/ 2>/dev/null | tail -n +{EVIDENCE_KEEP + 1} | while IFS= read -r x; do '
+                     'rm -rf -- "$x"; done', CLEAN_TIMEOUT_S, "keeping the evidence")
+        if r.returncode != 0:
+            raise HostError(f"keeping the evidence on {self.describe()} failed: {_tail(r.stderr)}")
+        return [ln for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln]
 
     def cleanup(self):
         """Stop every recorded remote step and delete the stage dir (the videos with it). TERM first:

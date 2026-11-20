@@ -372,3 +372,8 @@ def test_the_host_keeps_only_the_newest_evidence_runs(fk, tmp_path, monkeypatch)
     kept = h.keep_evidence()
     assert sorted(kept) == ["inpoint-capture.mkv", "vod-y.mp4"]
     assert sorted(p.name for p in base.iterdir()) == ["new-run", "old-c", "old-d"]
+
+
+def test_the_kept_capture_name_is_the_one_the_point_pulls():
+    import youtube_leg_points as ylp
+    assert ylh.CAPTURE_FILE == ylp.CAPTURE_NAME
