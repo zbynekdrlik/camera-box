@@ -346,3 +346,26 @@ fn full_path_e2e_yml_wires_cambox_align_candidate_sha_to_pr_head_sha_1244() {
          already uses -- never the pull_request event's synthetic merge sha. step_block:\n{step_block}"
     );
 }
+
+/// The #703 windows-probe lookup must find the ci.yml run of an OLD commit too. A `measure=true`
+/// dispatch on main (restreamer's release gate, 20.11.2026, run 44704341627) runs on a main commit
+/// whose ci.yml run is days old; `gh run list` without a commit filter returns only the newest 20
+/// runs, so the lookup read "none" for 20 min although run 43732575764's windows-probe job had
+/// succeeded and its artifact was still valid.
+#[test]
+fn windows_probe_lookup_filters_ci_runs_by_the_commit_not_the_newest_page() {
+    let s = read_workflow();
+    let at = s
+        .find("Fetch the matching Windows recording-verdict.exe for THIS commit (#703)")
+        .expect("the #703 fetch step");
+    let end = s[at..].find("\n      - name:").map(|e| at + e).unwrap_or(s.len());
+    let step = &s[at..end];
+    let list = step
+        .find("gh run list --workflow ci.yml")
+        .expect("the ci.yml run lookup");
+    let call = &step[list..list + step[list..].find("--jq").expect("its --jq")];
+    assert!(
+        call.contains("--commit \"$SHA\""),
+        "the ci.yml lookup must filter by the commit (`--commit \"$SHA\"`), not scan the newest page: {call}"
+    );
+}
