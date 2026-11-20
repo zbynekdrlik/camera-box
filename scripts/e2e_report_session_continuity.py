@@ -29,7 +29,7 @@ def _sk_failures(b):
     out = []
     for box, bx in (b.get("boxes") or {}).items():
         for i in bx.get("inputs") or []:
-            if i.get("verdict") != "FAIL" or i.get("excluded"):
+            if i.get("verdict") != "FAIL" or i.get("excluded") or i.get("report_only"):
                 continue
             parts = [f"{k} +{v['delta']}" for k, v in (i.get("counters") or {}).items() if v.get("delta")]
             j = i.get("jxs") or {}
@@ -70,6 +70,8 @@ def _input_line(box, i):
         parts.append(f"prvý nárast {i['first_growth']}")
     if i.get("excluded"):
         parts.append("kamera kvitovaná offline: len informatívne")
+    elif i.get("report_only"):
+        parts.append("CG z resolume (minimálna priorita, rozhodnutie 20.11.2026): len informatívne")
     return f"  • {box} '{i.get('input')}': {', '.join(parts) or 'bez počítadiel'} — {_glyph(i.get('verdict'))}"
 
 

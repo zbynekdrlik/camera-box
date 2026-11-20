@@ -269,6 +269,13 @@ def unknown_box(box, reason, declared=(), retryable=False):
             "failures": [], "unknown_reasons": [reason], "retryable": retryable}
 
 
+# Owner ROZHODNUTE 20.11.2026 (issue 1534): the cg feed from the resolume cg OBS (minimal priority) is
+# graded and reported, never gating. Exact input names only; every camera and stream input gates.
+REPORT_ONLY_INPUTS = {
+    "CG-obs": "the cg feed from the resolume cg OBS (minimal priority, owner 20.11.2026): report-only",
+}
+
+
 def decide_box(box, text, declared, *, log_name, start_byte, stop_byte, excluded=(), touches=()):
     """One box: `text` = the box's read, `declared` = the inputs the run measures (each must be there),
     `log_name` / `start_byte` / `stop_byte` = the window marks of this box, `excluded` = the inputs of
@@ -294,7 +301,8 @@ def decide_box(box, text, declared, *, log_name, start_byte, stop_byte, excluded
         res["unknown_reasons"].append(f"no genlock input on the {box} OBS log")
     for inp in names:
         r = {"input": inp, "declared": inp in declared, "counters": {}, "context": {}, "failures": [],
-             "unknown_reasons": [], "excluded": inp in excluded}
+             "unknown_reasons": [], "excluded": inp in excluded,
+             "report_only": inp in REPORT_ONLY_INPUTS}
         audit = [e for e in entries if e["input"] == inp and e["kind"] == "audit"]
         jxs = [e for e in entries if e["input"] == inp and e["kind"] == "jxs"]
         if audit:
@@ -316,6 +324,9 @@ def decide_box(box, text, declared, *, log_name, start_byte, stop_byte, excluded
         res["inputs"].append(r)
         if r["excluded"]:
             r["note"] = "the run acked this camera offline: report-only"
+            continue
+        if r["report_only"]:
+            r["note"] = REPORT_ONLY_INPUTS[inp]
             continue
         res["failures"].extend(r["failures"])
         res["unknown_reasons"].extend(r["unknown_reasons"])
@@ -352,6 +363,8 @@ def summary_lines(blk):
                 parts.append(f"dropped_due +{ctx['dropped_due']} (context)")
             if i.get("first_growth"):
                 parts.append(f"first growth {i['first_growth']}")
+            if i.get("report_only") or i.get("excluded"):
+                parts.append(i.get("note") or "report-only")
             out.append(f"    '{i['input']}': {i.get('verdict')} -- {', '.join(parts) or 'no counters'}")
     out += [f"  FAIL: {f}" for f in blk.get("failures") or []]
     out += [f"  UNKNOWN: {u}" for u in blk.get("unknown_reasons") or []]
