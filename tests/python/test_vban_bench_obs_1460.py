@@ -250,7 +250,9 @@ def test_setup_creates_routes_and_activates_the_input(tmp_path):
     assert NAME in obs.active
     assert obs.preview == "Cam 3"                       # the swap's preview change put back
     assert st["audio_stream_index"] == 1 and st["rectracks_orig"] == 1 and st["rectracks_set"] == 33
-    assert json.loads((tmp_path / "state.json").read_text())["steps"] == ["create", "rectracks", "reprogram", "active"]
+    # issue 1460 (21.11.2026): NDI cam1 feeds track 6 too, so the test track is taken from it first
+    assert json.loads((tmp_path / "state.json").read_text())["steps"] == [
+        "create", "exclusive:NDI cam1", "rectracks", "reprogram", "active"]
     # the tracks are set BEFORE anything else can make the input audible
     names = [c[0] for c in obs.calls]
     assert names.index("SetInputAudioTracks") < names.index("SetProfileParameter") < names.index("SetCurrentProgramScene")
