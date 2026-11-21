@@ -1416,7 +1416,7 @@ apt-get update -qq
 # silently no-op'ing recording-e2e.sh's capture-release busy-wait.
 # dantesync issue 52: nftables provides `nft`, needed by STEP 17c to install the NTP-client
 # DSCP OUTPUT-mangle rule (rsntp cannot setsockopt(IP_TOS) -- see scripts/lib/dscp-nft.sh).
-apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables systemd-journal-remote efibootmgr 2>/dev/null || true
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables systemd-journal-remote efibootmgr --no-upgrade 2>/dev/null || true
 systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc, nftables"
 
@@ -1455,7 +1455,7 @@ fi
 # packages (it Depends on the ffmpeg libav* codecs already present, so --no-install-recommends still
 # decodes the H.264 test asset). ffmpeg/EGL stay installed -- harmless, and ffmpeg's libav* are
 # mpv's own decode dependency anyway.
-apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri mpv
+apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri mpv --no-upgrade
 echo "  Installed: ffmpeg, libsdl2-2.0-0, libegl1, libegl-mesa0, libgl1-mesa-dri, mpv (#930/#1187 lipsync-test-mode runtime)"
 
 # Create rc.local for power management settings (USB autosuspend, etc.)
