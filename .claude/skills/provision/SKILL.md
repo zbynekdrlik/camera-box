@@ -259,6 +259,9 @@ something `verify-device.sh` should be loosened to tolerate.
   non-zero and `mount -o remount,ro /` returns `mount point is busy` with NO open-for-write fd or
   swap to blame. Restarting dbus & co. is worse than the reboot — plan the reboot, and until then
   expect verify-device `(j)` to fail on that box alone.
+  **Since 21.11.2026 STEP 16's package installs carry `--no-upgrade`** (PP cam6: the re-run upgraded
+  systemd via systemd-journal-remote and mesa via the mpv set, and the box stayed rw): a re-run installs
+  what is missing and leaves installed packages as they are, so it no longer causes this by itself.
   Re-run recipe from dev1: `git archive HEAD scripts systemd` → scp to `/tmp` → `systemd-run
   --unit=cam2-setupN --collect --working-directory=/tmp/<stage>/scripts --setenv=FRAME_PROBE_BINARY_URL=
   /tmp/frame-probe --setenv=TMPDIR=/root/.itmp --property=StandardInput=file:/tmp/yes.txt
