@@ -16,7 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
-import bundle_state_video as bsv  # noqa: E402
+import bundle_state_video as bsv
 
 AUD = ("{t}: genlock-fifo audit 'JXS cam3 src': received={r} consumed=10 underruns={u} holds=0 relocks=0 "
        "dropped_due=2 late_holds=0 locked=1 depth=2 latency_ms=41 (x)\n")
@@ -143,7 +143,7 @@ def test_the_server_serves_the_route(tmp_path):
         body = None
         for _ in range(50):
             try:
-                with urllib.request.urlopen("http://127.0.0.1:%d/video-connections.json" % port, timeout=2) as r:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/video-connections.json", timeout=2) as r:
                     body = json.loads(r.read())
                 break
             except OSError:
