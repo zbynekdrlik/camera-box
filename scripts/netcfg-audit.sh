@@ -27,9 +27,10 @@
 #   scripts/netcfg-audit.sh --json       # gather live -> print the raw snapshot JSON (no baseline)
 #   scripts/netcfg-audit.sh --help
 #
-# Credential: the MikroTik `admin` password is read from $NETCFG_SWITCH_PW -- NEVER hardcoded here
-# (the fleet pw is not committed). The systemd service loads it from an operator-owned EnvironmentFile
-# on dev1; see .claude/rules/netcfg-audit.md.
+# Credential (issue 1543): the key-only read-only MikroTik user `camerabox` (group camerabox-ro, from
+# dev1 only, set up by the mikrotik project, network#15) with the dev1 key
+# ~/.ssh/camerabox_netcfg_ed25519 (NETCFG_SSH_USER / NETCFG_SSH_KEY override). `admin` is disabled
+# on every device by design; the sshpass path runs only when NETCFG_SWITCH_PW is set (the tests).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +42,7 @@ case "${1:-}" in
   --check | "") MODE="check" ;;
   --capture) MODE="capture" ;;
   --json) MODE="json" ;;
-  --help | -h) sed -n '4,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --help | -h) sed -n '4,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "netcfg-audit: unknown arg '$1' (try --help)" >&2; exit 2 ;;
 esac
 
@@ -52,6 +53,8 @@ NETCFG_ROUTER="${NETCFG_ROUTER:-router_snv|10.77.8.1}"
 NETCFG_SWITCHES="${NETCFG_SWITCHES:-foh1_audio|10.77.9.2 stage_av|10.77.9.3 foh1_video|10.77.9.4 foh2_video|10.77.9.5}"
 NETCFG_BASELINE="${NETCFG_BASELINE:-$HERE/netcfg-baseline.json}"
 NETCFG_SWITCH_PW="${NETCFG_SWITCH_PW:-}"
+NETCFG_SSH_USER="${NETCFG_SSH_USER:-camerabox}"
+NETCFG_SSH_KEY="${NETCFG_SSH_KEY:-$HOME/.ssh/camerabox_netcfg_ed25519}"
 NETCFG_SSH_TIMEOUT="${NETCFG_SSH_TIMEOUT:-8}"
 # Drop-RATE probe (--check): a port whose cumulative tx-drop-queue1 is nonzero is re-probed with two
 # reads WINDOW seconds apart; a rate above THRESHOLD drops/s pages (the microburst-tail-drop signature).
@@ -76,8 +79,8 @@ NC_BQ="$HERE/netcfg_bridge_qos.py"
 NC_RAW_DIR=""
 _NC_BRIDGE_QOS_CMD="$(python3 "$NC_BQ" gather-cmd)" || { log "cannot read the bridge/QoS gather command"; exit 2; }
 
-if [ -z "$NETCFG_SWITCH_PW" ]; then
-  log "NETCFG_SWITCH_PW is empty -- set it to the MikroTik admin password (never committed). Aborting."
+if [ -z "$NETCFG_SWITCH_PW" ] && [ ! -r "$NETCFG_SSH_KEY" ]; then
+  log "no credential: the read-only key $NETCFG_SSH_KEY is not readable (user $NETCFG_SSH_USER, issue 1543). Aborting."
   exit 2
 fi
 
@@ -87,10 +90,17 @@ fi
 # post-auth hang) -- same wrap as asio-starve/bundle-state/optical-chain-alert-watchdog.sh.
 _nc_ssh() {
   local ip="$1" cmd="$2"
-  timeout "$NETCFG_SSH_TIMEOUT" sshpass -p "$NETCFG_SWITCH_PW" ssh -n \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ConnectTimeout="$NETCFG_SSH_TIMEOUT" -o PreferredAuthentications=password \
-    "admin@$ip" "$cmd" 2>/dev/null
+  if [ -n "$NETCFG_SWITCH_PW" ]; then
+    timeout "$NETCFG_SSH_TIMEOUT" sshpass -p "$NETCFG_SWITCH_PW" ssh -n \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout="$NETCFG_SSH_TIMEOUT" -o PreferredAuthentications=password \
+      "admin@$ip" "$cmd" 2>/dev/null
+    return
+  fi
+  timeout "$NETCFG_SSH_TIMEOUT" ssh -n -i "$NETCFG_SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    -o ConnectTimeout="$NETCFG_SSH_TIMEOUT" \
+    "$NETCFG_SSH_USER@$ip" "$cmd" 2>/dev/null
 }
 
 # The clean per-port gather: RouterOS `:foreach` emits ONE pipe-delimited line per ethernet port.

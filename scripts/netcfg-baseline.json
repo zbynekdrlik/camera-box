@@ -1,5 +1,5 @@
 {
-  "_captured": "2026-08-17",
+  "_captured": "2026-11-21",
   "_comment": "#797 venue MikroTik switch-chain config baseline. REPORT-ONLY source of truth: scripts/netcfg-audit.sh --check diffs the live chain vs this and reports drift LOUD; it NEVER overwrites (a legitimate re-config is recorded by updating this file in a PR, exactly like scripts/latency-pins-baseline.json). Seeded from a live read-only snapshot. See .claude/rules/netcfg-audit.md.",
   "nodes": {
     "foh1_audio": {
@@ -21,15 +21,15 @@
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
-          "pvid": "89"
+          "pvid": "70"
         },
         "ether2": {
           "disabled": "no",
-          "frame-types": "admit-only-vlan-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
-          "mvrp-applicant-state": "normal-participant",
+          "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
-          "pvid": "1"
+          "pvid": "70"
         },
         "ether3": {
           "disabled": "no",
@@ -45,7 +45,7 @@
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
-          "pvid": "89"
+          "pvid": "70"
         },
         "ether5": {
           "disabled": "no",
@@ -53,7 +53,7 @@
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
-          "pvid": "89"
+          "pvid": "70"
         },
         "ether6": {
           "disabled": "no",
@@ -61,7 +61,7 @@
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
-          "pvid": "89"
+          "pvid": "70"
         },
         "ether7": {
           "disabled": "no",
@@ -107,7 +107,8 @@
         "89": {
           "disabled": "no",
           "tagged": [
-            "bridge"
+            "bridge",
+            "ether2"
           ],
           "untagged": []
         }
@@ -116,40 +117,40 @@
       "ip": "10.77.9.2",
       "port": {
         "ether1": {
-          "comment": "basic",
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "2",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether2": {
+          "comment": "dante+lan-tag dsg",
           "dq1": "0",
           "fcs": "0",
           "fullduplex": "",
           "rate": "",
           "running": "false"
-        },
-        "ether2": {
-          "comment": "trunk",
-          "dq1": "21113",
-          "fcs": "0",
-          "fullduplex": "true",
-          "rate": "1Gbps",
-          "running": "true"
         },
         "ether3": {
           "comment": "dante",
           "dq1": "0",
           "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether4": {
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "0",
           "fullduplex": "",
           "rate": "",
           "running": "false"
         },
-        "ether4": {
-          "comment": "dante",
-          "dq1": "287",
-          "fcs": "0",
-          "fullduplex": "false",
-          "rate": "100Mbps",
-          "running": "true"
-        },
         "ether5": {
           "comment": "dante",
-          "dq1": "157",
+          "dq1": "0",
           "fcs": "0",
           "fullduplex": "",
           "rate": "",
@@ -157,7 +158,7 @@
         },
         "ether6": {
           "comment": "dante",
-          "dq1": "48",
+          "dq1": "0",
           "fcs": "0",
           "fullduplex": "",
           "rate": "",
@@ -175,9 +176,9 @@
           "comment": "basic",
           "dq1": "0",
           "fcs": "0",
-          "fullduplex": "true",
-          "rate": "1Gbps",
-          "running": "true"
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
         },
         "sfp-sfpplus1": {
           "comment": "stage",
@@ -191,9 +192,9 @@
           "comment": "trunk::video",
           "dq1": "0",
           "fcs": "0",
-          "fullduplex": "true",
-          "rate": "10Gbps",
-          "running": "true"
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
         }
       },
       "qos_profile": {
@@ -247,7 +248,7 @@
       "bridge_port": {
         "ether1": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -255,7 +256,7 @@
         },
         "ether2": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -263,7 +264,7 @@
         },
         "ether3": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -271,7 +272,7 @@
         },
         "ether4": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -279,7 +280,7 @@
         },
         "ether5": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -287,7 +288,7 @@
         },
         "ether6": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -295,7 +296,7 @@
         },
         "ether7": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -303,7 +304,7 @@
         },
         "ether8": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -319,18 +320,26 @@
         },
         "sfp-sfpplus2": {
           "disabled": "no",
-          "frame-types": "admit-only-vlan-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
-          "mvrp-applicant-state": "normal-participant",
+          "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
-          "pvid": "1"
+          "pvid": "89"
         }
       },
       "bridge_vlan": {
         "70": {
           "disabled": "no",
           "tagged": [
-            "bridge"
+            "bridge",
+            "ether1",
+            "ether2",
+            "ether3",
+            "ether4",
+            "ether5",
+            "ether6",
+            "ether7",
+            "ether8"
           ],
           "untagged": []
         },
@@ -347,7 +356,7 @@
       "port": {
         "ether1": {
           "comment": "basic",
-          "dq1": "4104191",
+          "dq1": "0",
           "fcs": "0",
           "fullduplex": "true",
           "rate": "1Gbps",
@@ -355,47 +364,47 @@
         },
         "ether2": {
           "comment": "dante",
-          "dq1": "79268",
+          "dq1": "0",
           "fcs": "0",
-          "fullduplex": "true",
-          "rate": "2.5Gbps",
-          "running": "true"
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
         },
         "ether3": {
           "comment": "basic",
-          "dq1": "24",
-          "fcs": "0",
+          "dq1": "48934",
+          "fcs": "34",
           "fullduplex": "true",
           "rate": "1Gbps",
           "running": "true"
         },
         "ether4": {
           "comment": "basic",
-          "dq1": "21",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether5": {
+          "comment": "basic",
+          "dq1": "5768",
           "fcs": "0",
           "fullduplex": "true",
           "rate": "1Gbps",
           "running": "true"
         },
-        "ether5": {
-          "comment": "basic",
+        "ether6": {
+          "comment": "dante",
           "dq1": "0",
           "fcs": "0",
-          "fullduplex": "true",
-          "rate": "2.5Gbps",
-          "running": "true"
-        },
-        "ether6": {
-          "comment": "basic",
-          "dq1": "21497",
-          "fcs": "0",
-          "fullduplex": "true",
-          "rate": "2.5Gbps",
-          "running": "true"
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
         },
         "ether7": {
           "comment": "basic",
-          "dq1": "11059",
+          "dq1": "61",
           "fcs": "0",
           "fullduplex": "",
           "rate": "",
@@ -421,9 +430,9 @@
           "comment": "trunk",
           "dq1": "0",
           "fcs": "0",
-          "fullduplex": "true",
-          "rate": "10Gbps",
-          "running": "true"
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
         }
       },
       "qos_profile": {
@@ -460,7 +469,35 @@
       "role": "switch",
       "ros": "7.23.3",
       "shared_buffers": "80%",
-      "switch_rule": {}
+      "switch_rule": {
+        "net7b dante bcast cap ether1 v70": {
+          "copy-to-cpu": "no",
+          "disabled": "no",
+          "dst-mac-address": "FF:FF:FF:FF:FF:FF/FF:FF:FF:FF:FF:FF",
+          "invalid": "no",
+          "mirror": "no",
+          "ports": "ether1",
+          "rate": "2.0Mbps",
+          "redirect-to-cpu": "no",
+          "switch": "switch1",
+          "vlan-id": "70"
+        },
+        "net7b dante mdns cap ether1 v70": {
+          "copy-to-cpu": "no",
+          "disabled": "no",
+          "dst-address": "224.0.0.251/255.255.255.255",
+          "dst-port": "5353",
+          "invalid": "no",
+          "mac-protocol": "ip",
+          "mirror": "no",
+          "ports": "ether1",
+          "protocol": "udp",
+          "rate": "2.0Mbps",
+          "redirect-to-cpu": "no",
+          "switch": "switch1",
+          "vlan-id": "70"
+        }
+      }
     },
     "foh2_video": {
       "board": "CRS310-8G+2S+",
@@ -477,7 +514,7 @@
       "bridge_port": {
         "ether1": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -485,7 +522,7 @@
         },
         "ether2": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -493,7 +530,7 @@
         },
         "ether3": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -501,7 +538,7 @@
         },
         "ether4": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -509,7 +546,7 @@
         },
         "ether5": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -517,7 +554,7 @@
         },
         "ether6": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -561,6 +598,12 @@
           "disabled": "no",
           "tagged": [
             "bridge",
+            "ether1",
+            "ether2",
+            "ether3",
+            "ether4",
+            "ether5",
+            "ether6",
             "sfp-sfpplus2"
           ],
           "untagged": []
@@ -577,60 +620,60 @@
       "ip": "10.77.9.5",
       "port": {
         "ether1": {
-          "comment": "basic",
+          "comment": "lan+dante-tag",
           "dq1": "0",
           "fcs": "0",
           "fullduplex": "true",
-          "rate": "100Mbps",
+          "rate": "2.5Gbps",
           "running": "true"
         },
         "ether2": {
-          "comment": "dante",
-          "dq1": "100054",
-          "fcs": "1",
+          "comment": "lan+dante-tag",
+          "dq1": "0",
+          "fcs": "31",
           "fullduplex": "true",
           "rate": "1Gbps",
           "running": "true"
         },
         "ether3": {
-          "comment": "dante",
+          "comment": "lan+dante-tag",
+          "dq1": "2842",
+          "fcs": "17",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether4": {
+          "comment": "lan+dante-tag",
+          "dq1": "52142",
+          "fcs": "12",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether5": {
+          "comment": "lan+dante-tag",
           "dq1": "0",
           "fcs": "0",
           "fullduplex": "",
           "rate": "",
           "running": "false"
         },
-        "ether4": {
-          "comment": "basic",
-          "dq1": "0",
-          "fcs": "22",
-          "fullduplex": "true",
-          "rate": "1Gbps",
-          "running": "true"
-        },
-        "ether5": {
-          "comment": "basic",
-          "dq1": "125638",
-          "fcs": "0",
-          "fullduplex": "true",
-          "rate": "1Gbps",
-          "running": "true"
-        },
         "ether6": {
-          "comment": "basic",
+          "comment": "lan+dante-tag",
           "dq1": "0",
-          "fcs": "5",
-          "fullduplex": "true",
-          "rate": "1Gbps",
-          "running": "true"
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
         },
         "ether7": {
           "comment": "basic",
-          "dq1": "0",
+          "dq1": "161",
           "fcs": "0",
-          "fullduplex": "true",
-          "rate": "1Gbps",
-          "running": "true"
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
         },
         "ether8": {
           "comment": "basic",
@@ -643,7 +686,7 @@
         "sfp-sfpplus1": {
           "comment": "trunk::foh1",
           "dq1": "0",
-          "fcs": "0",
+          "fcs": "1781",
           "fullduplex": "true",
           "rate": "10Gbps",
           "running": "true"
@@ -651,7 +694,7 @@
         "sfp-sfpplus2": {
           "comment": "basic",
           "dq1": "0",
-          "fcs": "17",
+          "fcs": "0",
           "fullduplex": "true",
           "rate": "10Gbps",
           "running": "true"
@@ -709,12 +752,12 @@
       }
     },
     "router_snv": {
-      "board": "RB4011iGS+",
+      "board": "CRS320-8P-8B-4S+",
       "identity": "router_snv",
       "ip": "10.77.8.1",
       "reachable": "true",
       "role": "router",
-      "ros": "7.22"
+      "ros": "7.25.1"
     },
     "stage_av": {
       "board": "CRS310-8G+2S+",
@@ -779,7 +822,7 @@
         },
         "ether7": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -803,7 +846,7 @@
         },
         "sfp-sfpplus2": {
           "disabled": "no",
-          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "frame-types": "admit-all",
           "ingress-filtering": "yes",
           "mvrp-applicant-state": "non-participant",
           "mvrp-registrar-state": "normal",
@@ -814,7 +857,9 @@
         "70": {
           "disabled": "no",
           "tagged": [
-            "bridge"
+            "bridge",
+            "ether7",
+            "sfp-sfpplus2"
           ],
           "untagged": []
         },
@@ -830,7 +875,7 @@
       "ip": "10.77.9.3",
       "port": {
         "ether1": {
-          "comment": "basic",
+          "comment": "",
           "dq1": "0",
           "fcs": "0",
           "fullduplex": "",
@@ -838,7 +883,7 @@
           "running": "false"
         },
         "ether2": {
-          "comment": "dante",
+          "comment": "",
           "dq1": "0",
           "fcs": "0",
           "fullduplex": "",
@@ -846,7 +891,7 @@
           "running": "false"
         },
         "ether3": {
-          "comment": "dante",
+          "comment": "",
           "dq1": "0",
           "fcs": "0",
           "fullduplex": "",
@@ -854,7 +899,7 @@
           "running": "false"
         },
         "ether4": {
-          "comment": "basic",
+          "comment": "",
           "dq1": "0",
           "fcs": "0",
           "fullduplex": "",
@@ -862,15 +907,15 @@
           "running": "false"
         },
         "ether5": {
-          "comment": "basic",
+          "comment": "",
           "dq1": "0",
-          "fcs": "0",
+          "fcs": "1",
           "fullduplex": "true",
           "rate": "1Gbps",
           "running": "true"
         },
         "ether6": {
-          "comment": "basic",
+          "comment": "",
           "dq1": "0",
           "fcs": "0",
           "fullduplex": "",
@@ -878,7 +923,7 @@
           "running": "false"
         },
         "ether7": {
-          "comment": "basic",
+          "comment": "",
           "dq1": "0",
           "fcs": "0",
           "fullduplex": "true",
@@ -886,9 +931,9 @@
           "running": "true"
         },
         "ether8": {
-          "comment": "basic",
-          "dq1": "0",
-          "fcs": "0",
+          "comment": "",
+          "dq1": "42",
+          "fcs": "5",
           "fullduplex": "true",
           "rate": "1Gbps",
           "running": "true"
@@ -896,7 +941,7 @@
         "sfp-sfpplus1": {
           "comment": "trunk::foh1",
           "dq1": "0",
-          "fcs": "0",
+          "fcs": "14",
           "fullduplex": "true",
           "rate": "10Gbps",
           "running": "true"

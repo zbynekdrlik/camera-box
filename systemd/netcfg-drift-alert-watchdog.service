@@ -8,10 +8,9 @@ Documentation=https://github.com/zbynekdrlik/camera-box
 
 [Service]
 Type=oneshot
-# The MikroTik `admin` password is NOT committed. Put `NETCFG_SWITCH_PW=<pw>` (and any NETCFG_* env
-# overrides) in this operator-owned file on dev1; the leading `-` makes the unit start even if it is
-# absent (it then logs "NETCFG_SWITCH_PW is empty" and exits without paging). See
-# .claude/rules/netcfg-audit.md for the one-time setup.
+# The switches are read as the key-only read-only user `camerabox` with dev1's
+# ~/.ssh/camerabox_netcfg_ed25519 (issue 1543). Optional NETCFG_* overrides live in this file; never
+# put NETCFG_SWITCH_PW here (admin is disabled). See .claude/rules/netcfg-audit.md.
 EnvironmentFile=-%h/.config/camera-box/netcfg-drift.env
 # %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
 ExecStart=%h/devel/camera-box/scripts/netcfg-drift-alert-watchdog.sh

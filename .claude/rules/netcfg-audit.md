@@ -107,8 +107,8 @@ switches foh1_audio `10.77.9.2`, stage_av `10.77.9.3`, foh1_video `10.77.9.4`, f
 ## Running it
 
 ```bash
-NETCFG_SWITCH_PW=<mikrotik-admin-pw> scripts/netcfg-audit.sh --check     # exit 3 on drift
-NETCFG_SWITCH_PW=<pw> scripts/netcfg-audit.sh --capture                  # re-seed the baseline (PR the diff)
+scripts/netcfg-audit.sh --check     # exit 3 on drift
+scripts/netcfg-audit.sh --capture   # re-seed the baseline (PR the diff)
 ```
 
 When the switch config LEGITIMATELY changes (a planned ROS upgrade, a re-tuned buffer, a relocated
@@ -117,18 +117,24 @@ as `scripts/latency-pins-baseline.json`. The check then goes CLEAN again.
 
 ## Enabling the dev1 timer (one-time, ships DISABLED)
 
-The `admin` password is NOT committed. On dev1:
+**Credential (issue 1543, 21.11.2026):** `admin` is disabled on every SNV device by design
+(mikrotik's network#3). The mikrotik project set up the key-only read-only user `camerabox` (group
+camerabox-ro, policy ssh+read, login only from dev1 10.77.9.195/32, network#15) on 10.77.8.1 (the
+CRS320 core since 16.11, no longer the RB4011) and 10.77.9.2-.5. Its key is dev1's
+`~/.ssh/camerabox_netcfg_ed25519` (never committed); `_nc_ssh` uses it by default
+(`NETCFG_SSH_USER` / `NETCFG_SSH_KEY` override). The old sshpass/admin path runs only when
+`NETCFG_SWITCH_PW` is set, which only the fake-sshpass tests do; never put it in the env file. With
+neither a password nor a readable key the script exits 2 ("no credential") without paging. Device
+access, users and keys belong to the mikrotik project: ask it over peer, never change them yourself.
+On dev1:
 
 ```bash
-mkdir -p ~/.config/camera-box && printf 'NETCFG_SWITCH_PW=%s\n' '<mikrotik-admin-pw>' > ~/.config/camera-box/netcfg-drift.env
-chmod 600 ~/.config/camera-box/netcfg-drift.env
 cp systemd/netcfg-drift-alert-watchdog.{timer,service} ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now netcfg-drift-alert-watchdog.timer
 ```
 
-The `.service` loads the password via `EnvironmentFile=-%h/.config/camera-box/netcfg-drift.env` (the
-leading `-` makes it optional — with no file the pass runs, logs "NETCFG_SWITCH_PW is empty", and exits
-WITHOUT paging, so a mis-provisioned dev1 never spams).
+The `.service` loads optional `NETCFG_*` overrides via `EnvironmentFile=-%h/.config/camera-box/netcfg-drift.env`
+(the leading `-` makes it optional).
 
 ## Gotchas
 
