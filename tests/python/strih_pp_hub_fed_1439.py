@@ -18,11 +18,20 @@ HUB_FED_PAIRS = [("STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_
 def hub_fed_boxes(dest):
     """Copy every box fact file into the new directory DEST, strih-pp.env made hub-fed; returns DEST (for
     STRIH_BOXES_DIR). Each edit must match exactly once, so a fact change fails here by name."""
+    import re
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import vban_leg_fakes_1439 as fk
     dest = Path(dest)
     dest.mkdir()
     for f in BOXES.glob("*.env"):
         t = f.read_text()
         if f.stem == "strih-pp":
+            # issue 1536: strih-pp takes its program over Dante now; the hub-fed shape starts from its
+            # pre-1536 VBAN shape (the rollback the fact file names)
+            for k, v in fk.PP_PRE_1536["strih-pp"].items():
+                t, n = re.subn(r"(?m)^%s=.*$" % k, "%s=%s" % (k, v), t)
+                assert n == 1, k
             for old, new in HUB_FED_PAIRS:
                 assert t.count(old) == 1, old
                 t = t.replace(old, new)

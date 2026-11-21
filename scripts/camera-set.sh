@@ -199,10 +199,28 @@
 # the E2E source, the relay pause and the issue-1371 shutter/ISO step all land on the box that holds
 # the camera. It belongs to the SNV DEFAULT set only: an explicit CAMERA_ACTIVE_SET (a legacy or test
 # set) keeps the first-strih-routable derivation. Moving the camera's USB-C = this one word.
+_camera_set_default=0
 if [ -z "${CAMERA_ACTIVE_SET:-}" ]; then
+  _camera_set_default=1
   CAMERA_TEST_CAMERA_BOX="${CAMERA_TEST_CAMERA_BOX:-cam5}"
 fi
 CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3 cam5}"
+# issue 1547 (owner 21.11.2026): CAMERA_MEASURE_EXCLUDE (space-separated camera names) takes cameras
+# with no picture out of the DEFAULT measured set for now, never out of an explicit CAMERA_ACTIVE_SET.
+# It is set in ONE place, the Full-path E2E workflow, next to its open ticket, and every source prints
+# a NOTE naming the excluded cameras, so an exclusion can never go quiet.
+if [ "$_camera_set_default" = 1 ] && [ -n "${CAMERA_MEASURE_EXCLUDE:-}" ]; then
+  _camera_set_keep=""
+  for _camera_set_c in $CAMERA_ACTIVE_SET; do
+    case " $CAMERA_MEASURE_EXCLUDE " in
+      *" $_camera_set_c "*) ;;
+      *) _camera_set_keep="${_camera_set_keep:+$_camera_set_keep }$_camera_set_c" ;;
+    esac
+  done
+  case " $CAMERA_MEASURE_EXCLUDE " in *" ${CAMERA_TEST_CAMERA_BOX:-} "*) unset CAMERA_TEST_CAMERA_BOX ;; esac
+  echo "NOTE: issue 1547: ${CAMERA_MEASURE_EXCLUDE} OUT of the measured set (CAMERA_MEASURE_EXCLUDE, no picture) -- measured: ${_camera_set_keep:-none}; it stays open until measured again" >&2
+  CAMERA_ACTIVE_SET="$_camera_set_keep"
+fi
 
 # CAMERA_ALIGN_SET (the on-air strih cameras the #1003 floor-3 per-run aligner keeps phase-aligned)
 # is resolved further down, right after camera_strih_route: since issue 1413 it is DERIVED from

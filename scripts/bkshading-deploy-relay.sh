@@ -330,6 +330,13 @@ fi
 # GITHUB_REPOSITORY/GITHUB_RUN_ID); an operator shell has neither and is refused as before.
 OWN_LEASE_REPO="${RIG_LEASE_REPO:-${GITHUB_REPOSITORY:-}}"
 OWN_LEASE_RUN="${RIG_LEASE_RUN_ID:-${GITHUB_RUN_ID:-}}"
+# issue 1538: a --box camera without an explicit resource declares its own venue's cameras
+# (`<venue>-cams`, the issue-1450 atom), so a lease held only for another box never blocks it. A camera
+# with no venue keeps the whole-rig refusal; a holder without `resources` still holds every box.
+if [ -z "${BKSHADING_DEPLOY_LEASE_RESOURCE:-}" ] && [ -n "$BOX" ]; then
+  _lease_venue="$(remote_log_camera_venue "$BOX" 2>/dev/null)" && [ -n "$_lease_venue" ] \
+    && BKSHADING_DEPLOY_LEASE_RESOURCE="${_lease_venue}-cams"
+fi
 if ! rig_lease_is_stale "${RIG_LEASE_STALE_SECS:-5400}"; then
   if rig_lease_held_by "$OWN_LEASE_REPO" "$OWN_LEASE_RUN"; then
     echo "the rig lease is held by this run itself ($OWN_LEASE_REPO#$OWN_LEASE_RUN) -- proceeding with the relay deploy to $HOST"

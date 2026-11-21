@@ -486,7 +486,7 @@ _prc=$?
 set -e
 [ "$_prc" -eq 0 ] || refuse "the OBS preflight refused (rc $_prc): $(cat "$RUN_DIR/preflight.json" 2>/dev/null)"
 _feeders="$(python3 -c 'import json,sys; print(", ".join(json.load(open(sys.argv[1])).get("track_feeders") or []))' "$RUN_DIR/preflight.json" 2>/dev/null || true)"
-[ -z "$_feeders" ] || log "NOTE: inputs that also feed track $TRACK: $_feeders (the analysis FAILs a track that is not clean)"
+[ -z "$_feeders" ] || log "NOTE: inputs that also feed track $TRACK: $_feeders -- setup takes the track out of them for the run, teardown puts it back (issue 1460)"
 _ports="$(remote "$STRIH_USER" "$STRIH_PW" "$STRIH_HOST" "ss -Hlun 'sport = :${PORT}'; echo SS_RC=\$?" 2>/dev/null || true)"
 case "$_ports" in
   SS_RC=0) ;;

@@ -65,7 +65,7 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
   dep → clean ARM cross-build for the zero-class arm64 SBC handheld relay.
 
   constant was renamed `COLOR_FORMAT_UYVY_BGRA` → `COLOR_FORMAT_BGRX_BGRA` (behaviour unchanged; the
-  same harmless mislabel still stands in the main display path `src/ndi.rs`, a separate subsystem).
+  same harmless mislabel still stands in the main display path `vstack:av/ndi/src/ndi.rs`, a separate subsystem).
   `ndi` is the DEFAULT service build (owner decision 2026-08-24). **Graceful degrade on a libndi-less host:** with ndi default,
   `source::build_default_source` always builds the real `NdiPreviewSource` (never a stub fallback);
   a missing runtime bails from `ndi_source::load_uncached()` with a platform-neutral message

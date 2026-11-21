@@ -150,6 +150,10 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   `.reads.json` (also after the tool ran over its bound), then deletes the stage dir (videos included,
   `measure_host` in the block). An unreachable dev2 (ssh exit 255) = UNKNOWN `the measurement host
   newlevel@dev2 is unreachable (...)`, never a measurement on dev1.
+- **A red verdict keeps its evidence (issue 1534):** before the stage cleanup, a non-PASS verdict moves the
+  restreamer-input capture and the VOD to `~/youtube-leg-evidence/<run dir name>/` on dev2 (outside the
+  day-old stage sweep, `Host.keep_evidence`), the newest 3 runs kept; the block's events name what was kept.
+  For restreamer's AAC pts check: `ffprobe -v error -select_streams a:0 -show_entries packet=pts_time -of csv=p=0`.
 - **Bounds:** every long remote step runs as `timeout -k 30 <bound> nice -n 10 <cmd> &` with its pid
   in `<step>.pid` (timeout leads its own process group: the decode pool, yt-dlp's ffmpeg, the probe);
   the local ssh is `run_bounded` at the bound + 60 s, its stdin a closed pipe. A step's OWN exit 255

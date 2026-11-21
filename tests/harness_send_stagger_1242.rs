@@ -15,9 +15,12 @@
 //!   (a corrupted buffer never reaches the callback), and the #1131 buffered-queue signal adds it
 //!   back (`idle_wait_ms`);
 //! * the window accounting is reported on the routine 5 s cadence (`window_summary`);
-//! * `src/ndi.rs` (the timecode stamp + the SDK call) is untouched by the stagger.
+//! * `vstack:av/ndi/src/ndi.rs` (the timecode stamp + the SDK call) is untouched by the stagger.
 
 use std::path::PathBuf;
+
+#[path = "support/vstack.rs"]
+mod vstack;
 
 fn read(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -164,7 +167,8 @@ fn the_window_accounting_is_reported_every_5s_1242() {
 
 #[test]
 fn ndi_send_path_and_timecode_are_untouched_1242() {
-    let ndi = read("src/ndi.rs");
+    // Issue 1487: ndi.rs lives in vstack's av-ndi; read it from the pinned tag.
+    let ndi = vstack::read("av/ndi/src/ndi.rs");
     assert!(
         !ndi.contains("send_stagger"),
         "the stagger lives in the capture loop, never in the NDI timecode/send path"

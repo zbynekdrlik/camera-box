@@ -6,6 +6,7 @@ paths:
   - "tests/python/test_e2e_discord_report*.py"
   - "scripts/e2e_report_program_audio.py"
   - "scripts/e2e_report_youtube.py"
+  - "scripts/e2e_report_session_continuity.py"
 ---
 
 # E2E Discord report — two renderings + derived blocking-vs-report-only (#711, #1127)
@@ -108,6 +109,8 @@ slots with the concealed ones called `zamaskované = STRATENÉ`, or `NEOVERENÁ 
 the full report a `🔊 Kontinuita zvuku programu` section and a `_section_overall` blocker. A PASS block
 renders byte-identical to no block. The rendering lives in `scripts/e2e_report_program_audio.py`
 (this file is past its size budget); a future post-merge gate follows the same shape.
+
+**The whole-session video gate (issue 1534) follows it too:** the `genlock_session_continuity` block (`scripts/e2e_report_session_continuity.py`) joins `_run_passed`, the FAIL summary, `_section_overall` and the full report (`🎞 Obraz od štartu OBS`); see `.claude/rules/genlock-session-continuity.md`.
 
 **The YouTube end point (issue 1404) follows that shape:** the `youtube_leg` block (`scripts/e2e_report_youtube.py`:
 `blocks` / `summary_label` / `section` / `endpoint_text` / `points_markdown`) joins `_run_passed`, the

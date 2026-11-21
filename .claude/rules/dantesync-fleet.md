@@ -104,7 +104,7 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up. Sinc
   - **GM per venue.** A venue role `video-<venue>` / `ntp-master-<venue>` (venue = lower-case ASCII
     letters + digits) locks to its venue's PTP grandmaster: `STRIH_DANTE_GM` of the ONE
     `scripts/strih-boxes/*.env` with `STRIH_VENUE=<venue>` + `STRIH_DANTESYNC_ROLE=server` (PP:
-    strih-pp.env, 10.77.8.110), PARSED never sourced (`dantesync_fleet_venue_gm_host` /
+    strih-pp.env, 10.77.7.200 since issue 1536: the Dante GM on VLAN 70, 10.77.8.110 before), PARSED never sourced (`dantesync_fleet_venue_gm_host` /
     `dantesync_fleet.venue_gm_host`). None, two, or one without the GM fails LOUD naming the venue.
     Never a second literal, never moved by `RIG_GRANDMASTER_IP` (the home rig's override). The plain
     roles stay the home venue (SNV, video-clock.lan). The canonical config has `video-pp` /

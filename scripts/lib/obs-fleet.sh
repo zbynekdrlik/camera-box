@@ -152,13 +152,19 @@
 # issue 1441 (owner 15.10.2026, one solution for PP and SNV): strih-pp + stream-pp also join the four
 # content watchdogs whose :8899 facets they serve -- genlock-lock, render-freeze, audio-mixer,
 # obs-handles -- each polled/paged only while home (obs_fleet_is_home / obs_fleet_poll_now).
+# issue 1505: grading-pp (the PP grading notebook, Windows, computer name NOTEBOOKASUS) joins as a
+# traveling windows-genlock row so the genlock deploy + launch planners can name it. No DNS name
+# resolves from dev1 (read 15.11.2026), so it dials 10.76.8.62 -- its DHCP 10.77.8.62 through the
+# companion-pp route, the address its win-grading-pp MCP answers on -- and OBS_FLEET_IDENTITY below
+# declares NOTEBOOKASUS. It is in NO facet: no watchdog polls it.
 OBS_FLEET="${OBS_FLEET:-strih-snv|10.77.9.202|linux-genlock|always
 stream-snv|10.77.9.204|linux-genlock|always
 imag|10.77.9.182|linux-genlock|retired
 resolume-snv|resolume.lan|windows-genlock|traveling
 strih-pp|strih-pp.lan|linux-genlock|traveling
 stream-pp|stream-pp.lan|linux-genlock|traveling
-resolume-pp|resolume-pp.lan|windows-genlock|traveling}"
+resolume-pp|resolume-pp.lan|windows-genlock|traveling
+grading-pp|10.76.8.62|windows-genlock|traveling}"
 
 # OBS_FLEET_ALIASES -- issue 1414 (box names carry the venue): the names the SNV rows had before the
 # rename, as space-separated OLD=NEW pairs. The ONE alias table of the repo (the python twin
@@ -473,8 +479,9 @@ obs_fleet_poll_now() {
 # checks against (never hand-typed per script). Compared case-insensitively (Windows `hostname`
 # prints RESOLUME-SNV, a Linux box its lower-case name). The fixed-IP `always` rows carry none: their
 # address is pinned, and obs_fleet_poll_now does no live I/O for them. resolume-pp is not declared
-# until its computer name is read live (an undeclared row is polled as before).
-OBS_FLEET_IDENTITY="${OBS_FLEET_IDENTITY-resolume-snv=RESOLUME-SNV strih-pp=strih-pp stream-pp=stream-pp resolume-pp=resolume-pp}"
+# until its computer name is read live (an undeclared row is polled as before). issue 1505: grading-pp
+# dials a DHCP address, so it declares the computer name read live on 15.11.2026 (NOTEBOOKASUS).
+OBS_FLEET_IDENTITY="${OBS_FLEET_IDENTITY-resolume-snv=RESOLUME-SNV strih-pp=strih-pp stream-pp=stream-pp resolume-pp=resolume-pp grading-pp=NOTEBOOKASUS}"
 
 # obs_fleet_expected_identity <name> -> the declared expected computer name of NAME (stdout, rc 0),
 # or rc 1 when none is declared. A transition alias (issue 1414) finds its renamed row's name. Pure.

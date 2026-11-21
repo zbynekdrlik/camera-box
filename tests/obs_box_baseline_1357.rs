@@ -706,6 +706,9 @@ nic_hook=1
 cpu_perf_unit=enabled
 rc_local_eee=1
 rc_local_active=active
+eee_on=
+eee_unread=
+eee_udev=1
 cpufreq_policies=16
 governors=performance
 maxperf_active=active
@@ -766,6 +769,7 @@ dm=/usr/lib/systemd/system/lightdm.service
 dm_lightdm=/usr/lib/systemd/system/lightdm.service
 autologin=1
 gpu_wait=1
+dsync_ready=1
 x_core=0
 gdm3=deinstall ok config-files
 gnome_shell=
@@ -786,10 +790,12 @@ touchpad=1
 swap_bytes=17179865088
 mem_bytes=16000000000
 swap_fstab=1
+coredump_dropin=1
+coredump_effective=external,256M,256M
 gather_done=1
 ";
 
-const ITEMS: [&str; 21] = [
+const ITEMS: [&str; 23] = [
     "timezone",
     "net",
     "perf",
@@ -811,6 +817,8 @@ const ITEMS: [&str; 21] = [
     "power",
     "touchpad",
     "swap",
+    "coredump",
+    "eee",
 ];
 
 fn verdict(facts: &str) -> (i32, Vec<(String, String)>) {
@@ -940,6 +948,11 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ),
         ("perf", "maxperf_active=active", "maxperf_active=inactive"),
         ("perf", "rc_local_eee=1", "rc_local_eee=0"),
+        // owner 20.11.2026: EEE enabled on ANY wired NIC of a rig box is a serious failure
+        ("eee", "eee_on=\n", "eee_on=enp56s0\n"),
+        ("eee", "eee_unread=\n", "eee_unread=enp2s0\n"),
+        // dstack#465 follow-up: r8152 forgets EEE on every USB re-attach; the udev add rule follows the device
+        ("eee", "eee_udev=1\n", "eee_udev=0\n"),
         ("perf", "ppd=masked", "ppd=enabled"),
         ("cstate", "cstate_active=active", "cstate_active=inactive"),
         ("cstate", "cstate_deep_delta=0", "cstate_deep_delta=5"),
@@ -999,6 +1012,9 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         // issue 1454: lightdm waits for every display GPU, and a boot whose Xorg dumped core fell
         // back to the login screen.
         ("kiosk", "gpu_wait=1", "gpu_wait=0"),
+        // issue 1483: lightdm is ordered after dsync, so OBS never starts on a wall dsync will step.
+        ("kiosk", "dsync_ready=1", "dsync_ready=0"),
+        ("kiosk", "dsync_ready=1", "dsync_ready="),
         ("kiosk", "x_core=0", "x_core=1"),
         ("kiosk", "x_core=0", "x_core="),
         (
@@ -1021,6 +1037,25 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ("swap", "swap_bytes=17179865088", "swap_bytes=4294967296"),
         ("swap", "swap_fstab=1", "swap_fstab=0"),
         ("swap", "swap_bytes=17179865088", "swap_bytes="),
+        // issue 1441 (stream-pp 18.11.2026): systemd-coredump wrote a multi-GB OBS core and froze the
+        // box; the bound drop-in must be installed AND be what systemd really reads.
+        ("coredump", "coredump_dropin=1", "coredump_dropin=0"),
+        ("coredump", "coredump_dropin=1", "coredump_dropin="),
+        (
+            "coredump",
+            "coredump_effective=external,256M,256M",
+            "coredump_effective=external,32G,256M",
+        ),
+        (
+            "coredump",
+            "coredump_effective=external,256M,256M",
+            "coredump_effective=journal,256M,256M",
+        ),
+        (
+            "coredump",
+            "coredump_effective=external,256M,256M",
+            "coredump_effective=",
+        ),
         // issue 1387: background work off the OBS cores.
         ("background", "bg_loaded=loaded", "bg_loaded=not-found"),
         ("background", "bg_dropin=1", "bg_dropin=0"),
@@ -1615,6 +1650,10 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/obs-box-background.sh",
         // issue 1474: the compare-then-rewrite install (sourced by the system half)
         "scripts/lib/obs-box-write.sh",
+        // issue 1428: the swapfile item (sourced by the system half)
+        "scripts/lib/obs-box-swap.sh",
+        // issue 1441: the coredump bound (sourced by the system half)
+        "scripts/lib/obs-box-coredump.sh",
         "scripts/lib/strih-provision.sh",
         "scripts/lib/strih-drm-output.sh",
         // issue 1424: the X config of the fixed HDMI outputs (sourced by strih-drm-output.sh)

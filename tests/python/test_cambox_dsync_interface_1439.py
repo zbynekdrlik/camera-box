@@ -178,7 +178,7 @@ def test_step17_renders_the_unit_through_the_lib_with_the_resolved_nic():
     guard = s.index('if [ "${BASH_SOURCE[0]}" != "${0}" ]')
     assert src < guard, "the lib loads before the source guard, so a sourced setup-device has it"
     assert "<< 'DANTEEOF'" not in s, "the unit heredoc moved into scripts/lib/cambox-dsync-unit.sh"
-    resolve = s.index('_DSYNC_NIC="$(cambox_lan_nic /sys)" || fail')
+    resolve = s.index('_DSYNC_NIC="$(cambox_dsync_iface_arg /sys "$_DSYNC_VER")" || fail')
     render = s.index('_DSYNC_UNIT="$(cambox_dsync_unit_text "$_DSYNC_NIC")" || fail')
     write = s.index('printf \'%s\\n\' "$_DSYNC_UNIT" > /etc/systemd/system/dsync.service')
     reload_ = s.index("systemctl daemon-reload", write)
@@ -189,18 +189,19 @@ def test_step17_renders_the_unit_through_the_lib_with_the_resolved_nic():
     assert "systemctl restart dsync" not in step, "STEP 17 stays enable-only"
 
 
-def _step17(tmp_path, nics):
+def _step17(tmp_path, nics, dsync_bin=None):
     """Run STEP 17's REAL resolve + render lines with /sys and the unit path moved into tmp_path."""
     s = SETUP.read_text()
-    a = s.index('_DSYNC_NIC="$(cambox_lan_nic /sys)"')
+    a = s.index('_DSYNC_VER="$(/usr/local/bin/dsync --version')
     b = s.index("systemctl daemon-reload", a)
-    block = s[a:b].replace("cambox_lan_nic /sys", 'cambox_lan_nic "$SYSROOT"') \
+    block = s[a:b].replace("cambox_dsync_iface_arg /sys", 'cambox_dsync_iface_arg "$SYSROOT"') \
+                  .replace("/usr/local/bin/dsync --version", '"$DSYNC_BIN" --version') \
                   .replace("/etc/systemd/system/dsync.service", '"$UNIT_OUT"')
     sysroot = _sysfs(tmp_path, nics)
     out = tmp_path / "dsync.service"
-    script = ('. "$1"\nfail() { echo "FAIL $*"; exit 7; }\nSYSROOT="$2"; UNIT_OUT="$3"\n' + block
+    script = ('. "$1"\nfail() { echo "FAIL $*"; exit 7; }\nSYSROOT="$2"; UNIT_OUT="$3"; DSYNC_BIN="$4"\n' + block
               + '\necho END\n')
-    return _bash(script, str(UNIT_LIB), str(sysroot), str(out)), out
+    return _bash(script, str(UNIT_LIB), str(sysroot), str(out), str(dsync_bin or tmp_path / "no-dsync")), out
 
 
 def test_step17_writes_the_bound_unit(tmp_path):

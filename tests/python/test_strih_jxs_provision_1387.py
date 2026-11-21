@@ -59,17 +59,41 @@ def _fact(box, key):
     raise KeyError(key)
 
 
+JXS_KEYS = ("STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS", "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS")
+
+
+def _ndi_only_pp(tmp_path):
+    """A copy of the real fact files in which the PP pair declares no JPEG XS (every JXS fact `none`): the
+    NDI-only venue PP was until issue 1535 (18.11.2026). Returns the env that points the loader at it."""
+    d = tmp_path / "facts"
+    d.mkdir()
+    for f in FACTS_DIR.glob("*.env"):
+        shutil.copy(f, d)
+    for box in ("strih-pp", "stream-pp"):
+        p = d / f"{box}.env"
+        p.write_text("\n".join(f"{ln.split('=', 1)[0]}=none" if ln.split("=", 1)[0] in JXS_KEYS else ln
+                               for ln in p.read_text().splitlines()) + "\n")
+    return {"STRIH_BOXES_DIR": str(d)}
+
+
 # --- the facts ----------------------------------------------------------------------------------------
 
-def test_the_four_fact_files_declare_the_live_path_and_pp_is_deferred():
+def test_the_four_fact_files_declare_the_live_snv_path_and_the_pp_path_of_issue_1535():
     assert _fact("strih-snv", "STRIH_JXS_CAMERAS") == "2:7002 3:7003 5:7000"
     assert _fact("strih-snv", "STRIH_JXS_CAMERA_PIN_MS") == "36"
-    assert (_fact("stream-snv", "STRIH_JXS_PROGRAM_PORT"), _fact("stream-snv", "STRIH_JXS_PROGRAM_PIN_MS")) == ("7100", "1064")
-    for box in ("strih-pp", "stream-pp"):
-        for key in ("STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS", "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS"):
+    assert (_fact("stream-snv", "STRIH_JXS_PROGRAM_PORT"), _fact("stream-snv", "STRIH_JXS_PROGRAM_PIN_MS")) == ("7100", "1019")
+    # issue 1535 (owner 18.11.2026): PP moves to the JPEG XS link like SNV
+    assert _fact("strih-pp", "STRIH_JXS_CAMERAS") == "1:7001 4:7004 6:7006 7:7007"
+    assert _fact("strih-pp", "STRIH_JXS_CAMERA_PIN_MS") == "36"
+    assert (_fact("stream-pp", "STRIH_JXS_PROGRAM_PORT"), _fact("stream-pp", "STRIH_JXS_PROGRAM_PIN_MS")) == ("7100", "3")
+    # the program facts stay none on a strih, the camera facts none on a stream
+    for box, keys in (("strih-snv", JXS_KEYS[2:]), ("strih-pp", JXS_KEYS[2:]),
+                      ("stream-snv", JXS_KEYS[:2]), ("stream-pp", JXS_KEYS[:2])):
+        for key in keys:
             assert _fact(box, key) == "none", (box, key)
-    for n in [e.split(":")[0] for e in _fact("strih-snv", "STRIH_JXS_CAMERAS").split()]:
-        assert n in _fact("strih-snv", "STRIH_CAMERAS").split()
+    for box in ("strih-snv", "strih-pp"):
+        for n in [e.split(":")[0] for e in _fact(box, "STRIH_JXS_CAMERAS").split()]:
+            assert n in _fact(box, "STRIH_CAMERAS").split(), (box, n)
 
 
 def test_every_fact_file_loads():
@@ -142,8 +166,8 @@ def test_port_of_reads_one_camera():
 
 # --- the manifest ---------------------------------------------------------------------------------------
 
-def _manifest(box):
-    r = _bash('strih_box_load "$1"\nstrih_jxs_seed_manifest_json', box)
+def _manifest(box, env=None):
+    r = _bash('strih_box_load "$1"\nstrih_jxs_seed_manifest_json', box, env=env)
     assert r.returncode == 0, r.stderr
     return r.stdout
 
@@ -163,19 +187,41 @@ def test_stream_snv_declares_its_program_input_on_the_programs_stream_id():
     assert _bash('printf "%s\\n" "$STRIH_JXS_PROGRAM_STREAM_ID"').stdout.strip() == str(sid)
     (s,) = oji.parse_manifest(_manifest("stream-snv"))
     assert s.name == "JXS PGM src" and s.scene == "JXS PGM"
-    assert s.settings == {"jxs_port": 7100, "jxs_camera": sid, "jxs_max_bpp": 0, "genlock_latency_ms_src": 1064,
+    assert s.settings == {"jxs_port": 7100, "jxs_camera": sid, "jxs_max_bpp": 0, "genlock_latency_ms_src": 1019,
                           "genlock_fifo": True, "genlock_grid": False}
 
 
-def test_a_pp_box_declares_nothing():
-    assert _manifest("strih-pp") == "" and _manifest("stream-pp") == ""
+def test_the_pp_boxes_declare_their_four_camera_inputs_and_the_program_input():
+    specs = oji.parse_manifest(_manifest("strih-pp"))
+    assert [(s.name, s.scene) for s in specs] == [(f"JXS cam{n} src", f"JXS cam{n}") for n in (1, 4, 6, 7)]
+    assert [(s.settings["jxs_port"], s.settings["jxs_camera"]) for s in specs] == [(7001, 1), (7004, 4), (7006, 6),
+                                                                                  (7007, 7)]
+    for s in specs:
+        assert s.settings["genlock_latency_ms_src"] == 36 and s.settings["genlock_grid"] is True
+    sid = int(re.search(r"#define CB_JXS_OUT_STREAM_ID_DEFAULT (\d+)u", OUT_DECIDE.read_text()).group(1))
+    (s,) = oji.parse_manifest(_manifest("stream-pp"))
+    assert s.name == "JXS PGM src" and s.scene == "JXS PGM"
+    assert s.settings == {"jxs_port": 7100, "jxs_camera": sid, "jxs_max_bpp": 0, "genlock_latency_ms_src": 3,
+                          "genlock_fifo": True, "genlock_grid": False}
+
+
+def test_a_venue_that_declares_no_jpeg_xs_declares_nothing(tmp_path):
+    env = _ndi_only_pp(tmp_path)
+    assert _manifest("strih-pp", env) == "" and _manifest("stream-pp", env) == ""
 
 
 # --- the program target ----------------------------------------------------------------------------------
 
 def test_the_program_target_is_the_venues_stream_box():
     r = _bash('for b in strih-snv stream-snv strih-pp stream-pp; do strih_box_load "$b"; strih_jxs_program_target; done')
-    assert r.stdout.splitlines() == ["10.77.9.204:7100", "none", "none", "none"], r.stderr
+    assert r.stdout.splitlines() == ["10.77.9.204:7100", "none", "10.77.8.204:7100", "none"], r.stderr
+    assert _fact("stream-pp", "STRIH_IP") == "10.77.8.204"
+
+
+def test_a_venue_that_declares_no_program_has_no_program_target(tmp_path):
+    r = _bash('for b in strih-pp stream-pp; do strih_box_load "$b"; strih_jxs_program_target; done',
+              env=_ndi_only_pp(tmp_path))
+    assert r.stdout.splitlines() == ["none", "none"], r.stderr
 
 
 def test_two_stream_boxes_in_one_venue_refuse(tmp_path):
@@ -212,11 +258,11 @@ def _seams(tmp_path):
             "STRIH_JXS_SEEDER_BIN": str(tmp_path / "bin" / "obs_jxs_inputs.py")}
 
 
-def _provision(tmp_path, box):
+def _provision(tmp_path, box, env=None):
     home = tmp_path / "home"
     user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
     return _bash('strih_box_load "$1"\nstrih_jxs_provision "$2/.config/obs-studio" "$3" "$2" "$4"',
-                 box, home, user, REPO, env=_seams(tmp_path), baseline=True), home
+                 box, home, user, REPO, env=dict(_seams(tmp_path), **(env or {})), baseline=True), home
 
 
 def test_step6_on_strih_snv_writes_the_manifest_the_seeder_and_the_live_output_file(tmp_path):
@@ -239,8 +285,16 @@ def test_step6_on_the_stream_box_writes_its_manifest_and_no_output_file(tmp_path
     assert not (home / ".config/obs-studio/plugin_config").exists()
 
 
-def test_step6_on_a_pp_box_writes_nothing_jxs(tmp_path):
+def test_step6_on_strih_pp_writes_its_manifest_and_the_output_file_to_stream_pp(tmp_path):
     r, home = _provision(tmp_path, "strih-pp")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "opt" / "jxs-seed.json").read_text() == _manifest("strih-pp")
+    out = json.loads((home / ".config/obs-studio/plugin_config/distroav/jxs-output.json").read_text())
+    assert out["enabled"] is True and out["jxs_target"] == "10.77.8.204:7100" and out["jxs_stream_id"] == 100
+
+
+def test_step6_on_a_box_of_a_venue_without_jpeg_xs_writes_nothing_jxs(tmp_path):
+    r, home = _provision(tmp_path, "strih-pp", _ndi_only_pp(tmp_path))
     assert r.returncode == 0, r.stderr
     assert not (tmp_path / "opt" / "jxs-seed.json").exists() and not (home / ".config").exists()
     assert "left as it is" in r.stdout
@@ -277,14 +331,15 @@ def test_step6_disables_a_hand_enabled_output_where_the_venue_declares_none(tmp_
     out = tmp_path / "home/.config/obs-studio/plugin_config/distroav/jxs-output.json"
     out.parent.mkdir(parents=True)
     out.write_text(LIVE_OUTPUT)
-    r, home = _provision(tmp_path, "strih-pp")
+    ndi = _ndi_only_pp(tmp_path)
+    r, home = _provision(tmp_path, "strih-pp", ndi)
     assert r.returncode == 0, r.stderr
     d = json.loads(out.read_text())
     assert d["enabled"] is False and d["jxs_target"] == "10.77.9.204:7100" and d["jxs_pace_mbps"] == 0
-    r = _verify(tmp_path, "strih-pp", home)
+    r = _verify(tmp_path, "strih-pp", home, env=ndi)
     assert "FAIL" not in r.stdout, r.stdout
     # a disabled file is left alone
-    r, _ = _provision(tmp_path, "strih-pp")
+    r, _ = _provision(tmp_path, "strih-pp", ndi)
     assert "nothing enabled" in r.stdout
 
 
@@ -298,9 +353,9 @@ def _closed_port():
     return port
 
 
-def _verify(tmp_path, box, home, obs_runs=False):
+def _verify(tmp_path, box, home, obs_runs=False, env=None):
     env = dict(_seams(tmp_path), STRIH_JXS_OBS_PORT=str(_closed_port()),
-               STRIH_OPERATOR_OBS_RUNNING_CMD="true" if obs_runs else "false")
+               STRIH_OPERATOR_OBS_RUNNING_CMD="true" if obs_runs else "false", **(env or {}))
     return _bash('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
                  'strih_box_load "$1"\nstrih_jxs_config_verify_row "$2"', box, home, env=env)
 
@@ -339,14 +394,24 @@ def test_verify_fails_a_stale_installed_manifest(tmp_path):
     assert "FAIL (jxs-seed)" in _verify(tmp_path, "strih-snv", home).stdout
 
 
-def test_verify_on_a_pp_box_notes_and_fails_a_hand_enabled_output(tmp_path):
+def test_verify_on_a_box_of_a_venue_without_jpeg_xs_notes_and_fails_a_hand_enabled_output(tmp_path):
     home = tmp_path / "home"
-    r = _verify(tmp_path, "strih-pp", home)
+    ndi = _ndi_only_pp(tmp_path)
+    r = _verify(tmp_path, "strih-pp", home, env=ndi)
     assert [ln.split(" ", 2)[:2] for ln in r.stdout.splitlines()] == [["NOTE", "(jxs-seed)"], ["NOTE", "(jxs-output)"]]
     out = home / ".config/obs-studio/plugin_config/distroav/jxs-output.json"
     out.parent.mkdir(parents=True)
     out.write_text(LIVE_OUTPUT)
-    assert "FAIL (jxs-output)" in _verify(tmp_path, "strih-pp", home).stdout
+    assert "FAIL (jxs-output)" in _verify(tmp_path, "strih-pp", home, env=ndi).stdout
+
+
+def test_verify_passes_a_provisioned_strih_pp_with_obs_down(tmp_path):
+    _, home = _provision(tmp_path, "strih-pp")
+    lines = _verify(tmp_path, "strih-pp", home).stdout.splitlines()
+    assert lines[0].startswith("PASS (jxs-seed)"), lines
+    out = [ln for ln in lines if ln.startswith(("PASS (jxs-output)", "FAIL (jxs-output)"))]
+    assert len(out) == 1 and out[0].startswith("PASS") and "10.77.8.204:7100" in out[0], lines
+    assert not [ln for ln in lines if ln.startswith("FAIL")], lines
 
 
 # --- the wiring ------------------------------------------------------------------------------------------

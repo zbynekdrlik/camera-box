@@ -259,6 +259,16 @@ something `verify-device.sh` should be loosened to tolerate.
   non-zero and `mount -o remount,ro /` returns `mount point is busy` with NO open-for-write fd or
   swap to blame. Restarting dbus & co. is worse than the reboot — plan the reboot, and until then
   expect verify-device `(j)` to fail on that box alone.
+  **Since 21.11.2026 STEP 16's package installs carry `--no-upgrade`** (PP cam6: the re-run upgraded
+  systemd via systemd-journal-remote and mesa via the mpv set, and the box stayed rw): a re-run installs
+  what is missing and leaves installed packages as they are, so it no longer causes this by itself.
+  **`/root/.itmp` must EXIST before the run on a read-only root** (PP cam4, 21.11.2026: `mkdir` on the ro
+  root failed, STEP 17b's `mktemp` under TMPDIR then failed and the run stopped with the root rw). Create
+  it inside a short rw window first (`mount -o remount,rw / && mkdir -p /root/.itmp && mount -o remount,ro /`).
+  **Since 21.11.2026 a byte-identical camera-box binary keeps its inode** (`install_executable_if_changed`):
+  replacing it under the running service left the old inode mapped and the remount busy (PP cam1/cam4). A
+  CHANGED binary (or the relay) still holds the old inode until its service restarts: restart the
+  services you deployed, then `mount -o remount,ro /`.
   Re-run recipe from dev1: `git archive HEAD scripts systemd` → scp to `/tmp` → `systemd-run
   --unit=cam2-setupN --collect --working-directory=/tmp/<stage>/scripts --setenv=FRAME_PROBE_BINARY_URL=
   /tmp/frame-probe --setenv=TMPDIR=/root/.itmp --property=StandardInput=file:/tmp/yes.txt

@@ -183,8 +183,9 @@ _FAKE_CURL = _py("""import os, sys
 st = os.environ["FAKE_STATE"]
 a = sys.argv[1:]
 open(os.path.join(st, "calls"), "a").write("curl " + " ".join(a) + "\\n")
-url = [x for x in a if x.startswith("https://")][-1]
-rest = url[len("https://"):]
+url = [x for x in a if x.startswith(("https://", "http://"))][-1]
+plain = url.startswith("http://")
+rest = url.split("://", 1)[1]
 host, _, path = rest.partition("/")
 key = host + "_" + path.replace("/", "_")
 p = os.path.join(st, "http", key)
@@ -193,6 +194,8 @@ if "-D" in a and a[a.index("-D") + 1] == "-" and code:
     sys.stdout.write("HTTP/1.1 %s X\\r\\nServer: fake\\r\\n\\r\\n" % code)
 if "-w" in a:
     sys.stdout.write(code or "000")
+if plain and "-D" not in a and "-w" not in a:
+    sys.stdout.write(code)  # a plain-http read (the hub's /api/phone): the file is the body
 sys.exit(0 if code else 7)
 """)
 

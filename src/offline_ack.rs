@@ -8,7 +8,7 @@
 //! `src/bin/recording-verdict.rs` and everything under `src/probe/` are
 //! `#[cfg(feature = "probe")]`-gated, which the project's Tier-0 local-build policy BANS
 //! compiling/testing locally (see CLAUDE.md's Local Build Policy). This module is the PURE
-//! parsing seam — the same pattern as `src/reannounce.rs` / `src/colour_scale.rs` — so it unit
+//! parsing seam — the same pattern as `vstack:av/ndi/src/reannounce.rs` / `src/colour_scale.rs` — so it unit
 //! tests on default features (Tier-0 testable), while `recording-verdict.rs` stays thin glue
 //! that just calls [`parse`] and looks a camera name up in the returned map.
 //!

@@ -16,6 +16,9 @@ import sys
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import vban_leg_fakes_1439 as fk  # noqa: E402
+
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
@@ -85,8 +88,9 @@ def test_only_the_snv_boxes_take_the_program_from_dante():
               'if strih_program_dante_declared; then echo "$b yes $(strih_dante_input_device)"; '
               'else echo "$b no"; fi); done')
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split("\n")[:4] == ["strih-snv yes strih-obs", "strih-pp no", "stream-snv yes stream-obs",
-                                        "stream-pp no"]
+    # issue 1536 (18.11.2026): the PP boxes take their program over Dante too (dsg on VLAN 70)
+    assert r.stdout.split("\n")[:4] == ["strih-snv yes strih-obs", "strih-pp yes strih-obs",
+                                        "stream-snv yes stream-obs", "stream-pp yes stream-obs"]
 
 
 def test_strih_snv_has_no_vban_program_and_keeps_its_input_name():
@@ -119,7 +123,8 @@ def test_the_seed_manifest_declares_the_dante_program():
 
 
 def test_a_vban_strih_manifest_is_unchanged():
-    r = _bash('strih_box_load strih-pp >/dev/null; strih_lx_seed_manifest_json')
+    r = _bash('strih_box_load strih-pp >/dev/null; strih_lx_seed_manifest_json',
+              env={"STRIH_BOXES_DIR": fk.pp_pre_1536_boxes_dir()})   # issue 1536: strih-pp's VBAN rollback shape
     m = json.loads(r.stdout)
     assert "program_audio_dante" not in m and m["program_audio_vban"]["stream_name"] == "strih-obs"
 
@@ -189,6 +194,8 @@ def test_install_writes_the_file_and_a_missing_site_file_fails(tmp_path):
            "STRIH_DANTE_INPUT_SITE_FILE": str(site), "STRIH_DANTE_RX_PIN_ROOT": str(root),
            "STRIH_DANTE_RX_PIN_OWNER": "%s:%s" % (user, group),
            "STRIH_DANTE_PTP_OBS_PIN": str(obs_pin), "STRIH_DANTE_PTP_INTERCOM_PIN": str(ic_pin),
+           # issue 1536: strih-pp below is the box WITHOUT a device, i.e. its pre-1536 VBAN shape
+           "STRIH_BOXES_DIR": fk.pp_pre_1536_boxes_dir(),
            "PATH": "%s:%s" % (tmp_path / "bin", os.environ["PATH"])}
     rx_conf = root / "etc" / "strih-dante-rx-cpu.conf"
     body = ('. scripts/lib/obs-box-baseline.sh; fail() { echo "FAIL $*" >&2; exit 1; }; strih_box_load strih-snv >/dev/null; '
@@ -574,3 +581,23 @@ def test_every_dante_device_takes_its_flow_ports_from_its_arc_slot():
                 continue
             arc, cmc, flows = (int(p) for p in ports.split(":"))
             assert 4440 <= arc <= 4471, f"{env.name}: {name} ARC port {arc} outside dstack's slots"
+
+
+# owner 18.11.2026 ("preco e2e dovoli aby bol v produkcii rig co takto straca obsah"): the green runs of 14.11
+# and 15.11 read 0 in their 4-5 min windows while stream-snv lost 85632 / 59808 packets between them. The
+# counters are totals since the device started (0 at an OBS start), so a loss EARLIER in the session FAILs.
+@pytest.mark.parametrize("key", ["rx_loss", "rx_holes", "underruns", "rx_gaps", "socket_drops", "rebootstraps",
+                                 "rx_written_late", "re_anchors", "obs_dropped"])
+def test_a_loss_earlier_in_the_obs_session_fails_even_with_a_clean_window(key):
+    w = [_status("12:00:00.000", 100, **{key: "64"}), "mark", _status("12:00:10.000", 200, **{key: "64"}), "stop",
+         _status("12:00:20.000", 300, **{key: "64"}), _status("12:00:30.000", 400, **{key: "64"})]
+    r = CONT.decide(w, 1, 3)
+    assert r["verdict"] == "FAIL", r
+    assert r["failures"] == ["%s=64 earlier in this OBS session (the device's total since it started)" % key], r
+    assert r["session"] == {key: 64}, r
+
+
+def test_a_loss_inside_the_window_is_not_counted_twice_as_session():
+    w = _window(rx_loss="2")
+    r = CONT.decide(w, 1, 3)
+    assert r["failures"] == ["rx_loss +2"] and r["session"] == {}, r

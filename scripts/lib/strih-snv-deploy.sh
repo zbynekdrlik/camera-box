@@ -567,9 +567,9 @@ _strih_lx_ssh() {
     "${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}" "$1"
 }
 
-_strih_lx_rsync() {  # SRC_DIR/ DEST_DIR/ [RSYNC_ARG...] -- --timeout=120 is rsync's own I/O-stall bound
+_strih_lx_rsync() {  # SRC DEST [ARG...]: --timeout=120 = rsync's I/O-stall bound; --bwlimit (KiB/s) keeps the live JPEG XS whole (21.11.2026)
   local src="$1" dest="$2"; shift 2
-  sshpass -p "$STRIH_LX_PREP_PW" rsync -a --delete --timeout=120 "$@" -e "ssh $STRIH_LX_SSH_OPTS" \
+  sshpass -p "$STRIH_LX_PREP_PW" rsync -a --delete --timeout=120 --bwlimit="${STRIH_LX_RSYNC_BWLIMIT:-12500}" "$@" -e "ssh $STRIH_LX_SSH_OPTS" \
     "$src" "${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$dest"
 }
 
@@ -974,8 +974,8 @@ strih_lx_plan_steps() {
 #            $(strih_lx_remote_sweep_cmd)   < scripts/obs-backup-retention.sh (the committed tree)
 #            $(strih_lx_remote_stage_check_cmd "$stage")
 # STEP 4 (stage, OBS still running):
-#            rsync -a --delete --timeout=120 -e "ssh ${STRIH_LX_SSH_OPTS}" ${lstage}/bundle/ ${u}@${host}:${stage}/bundle/
-#            rsync -a --delete --timeout=120 -e "ssh ${STRIH_LX_SSH_OPTS}" ${lstage}/repo/ ${u}@${host}:${stage}/repo/
+#            rsync -a --delete --timeout=120 --bwlimit=${STRIH_LX_RSYNC_BWLIMIT:-12500} -e "ssh ${STRIH_LX_SSH_OPTS}" ${lstage}/bundle/ ${u}@${host}:${stage}/bundle/
+#            rsync -a --delete --timeout=120 --bwlimit=${STRIH_LX_RSYNC_BWLIMIT:-12500} -e "ssh ${STRIH_LX_SSH_OPTS}" ${lstage}/repo/ ${u}@${host}:${stage}/repo/
 # STEP 5 (stop, delegated to the sanctioned stop code; the deploy sends no kill itself):
 #            $(strih_lx_remote_stop_cmd)
 # STEP 6 (setup, detached on the box): 'setup-strih.sh --box ${box}' as root with

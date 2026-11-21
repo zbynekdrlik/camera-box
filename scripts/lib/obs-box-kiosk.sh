@@ -380,6 +380,45 @@ obs_box_gpu_ready_install() {
     fi
 }
 
+# --- issue 1483: lightdm starts only once dsync placed the boot date ------------------------------
+# strih-pp, 25.10.2026: OBS came up 48 s before dsync (the PP date master) stepped its own wall back
+# 3.7 s, so the running OBS saw the step (stream-pp NDI 2ME PGM underruns, audio_place_err_ms=3506);
+# every boot repeated it. dsync >= 1.30 sends READY=1 only once the boot date is placed, bounded at
+# 30 s, and its unit is Type=notify (strih_dantesync_unit_text). This lightdm drop-in orders the
+# display manager after it, so the kiosk session and its `--user` strih-obs unit (which cannot order
+# on a system unit itself) start on a placed wall. Wants, never Requires: a dsync that fails or times
+# out must never leave the operator a black screen. A box without dsync.service ignores both lines.
+
+# obs_box_dsync_ready_dropin_path -> where the drop-in lives (the grader reads the same path).
+obs_box_dsync_ready_dropin_path() {
+    printf '%s' /etc/systemd/system/lightdm.service.d/55-obs-box-dsync-ready.conf
+}
+
+# obs_box_dsync_ready_dropin_text -> the lightdm.service drop-in.
+obs_box_dsync_ready_dropin_text() {
+    cat <<'EOF'
+# camera-box shared OBS-box kiosk (issue 1483): start X only once dsync placed the boot date (its
+# Type=notify READY), so OBS never starts on a wall clock dsync will still step. Wants, never Requires.
+[Unit]
+After=dsync.service
+Wants=dsync.service
+EOF
+}
+
+# obs_box_dsync_ready_install [DROPIN_DEST [OWNER]] -- the item: the drop-in (0644) through
+# obs_box_write_if_changed, then a daemon-reload (never a lightdm restart: it takes effect at the next
+# display-manager start). Fails loud via the caller's fail().
+# shellcheck disable=SC2120  # the destination args are passed only by the tests (temp paths)
+obs_box_dsync_ready_install() {
+    local dropin_dest="${1:-$(obs_box_dsync_ready_dropin_path)}" owner="${2:-root:root}"
+    mkdir -p "${dropin_dest%/*}" || fail "dsync-ready: could not create ${dropin_dest%/*}"
+    obs_box_write_if_changed_rendered "$dropin_dest" 0644 "$owner" "dsync-ready (lightdm drop-in, issue 1483)" obs_box_dsync_ready_dropin_text \
+        || fail "dsync-ready: the lightdm drop-in could not be installed (above)"
+    if [ -z "${1:-}" ]; then
+        systemctl daemon-reload || fail "dsync-ready: systemctl daemon-reload failed -- lightdm would start before dsync placed the date"
+    fi
+}
+
 # obs_box_kiosk DESKTOP_USER BOX -- the imag step 15 (#504) kiosk: lightdm autologin -> openbox on PLAIN
 # Xorg (no GNOME Shell, no Wayland/XWayland), display-manager.service -> lightdm BEFORE any purge, the
 # desktop-bloat services disabled, gdm3 disabled for the next boot, the owner's explicit GNOME purge list.
@@ -453,6 +492,8 @@ EOF
 # issue 1454: lightdm starts X only once every display GPU is registered with udev (a GPU X adds later
 # as a hotplugged screen aborted Xorg and lightdm fell back to the login screen on strih-snv 21.10.2026).
 obs_box_gpu_ready_install
+# issue 1483: and only once dsync placed the boot date, so OBS never starts on a wall dsync will step.
+obs_box_dsync_ready_install
 
 # (c) Switch the display-manager to lightdm EXPLICITLY via the symlink — NOT `systemctl enable
 #     lightdm`, which fails "Failed to enable unit: Invalid unit name ... instance name specified"

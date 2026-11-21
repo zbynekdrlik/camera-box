@@ -1082,8 +1082,9 @@ strih_install_bundle_prefix() {
 # unit-tested in tests/strih_provision_pure_functions.rs.
 
 # strih_dantesync_unit_text ROLE [ARGS] -> print the systemd unit text for the strih-snv dantesync
-# daemon (the EXACT cambox unit shape: Type=simple, Restart=always, RestartSec=5,
-# WantedBy=multi-user.target). ROLE is `server` (NTP master, the M4 default -- ExecStart is the BARE
+# daemon (the cambox unit shape: Restart=always, RestartSec=5, WantedBy=multi-user.target; since issue
+# 1483 Type=notify + NotifyAccess=main + TimeoutStartSec=120, the lines of dsync's own installer unit,
+# so systemd reports it started only once the boot date is placed and lightdm can order after it). ROLE is `server` (NTP master, the M4 default -- ExecStart is the BARE
 # `/usr/local/bin/dsync`, folding the live 10-ntp-master.conf drop-in into the unit) or `client`
 # (ExecStart `/usr/local/bin/dsync <ARGS>`, ARGS defaulting to the client args). `--service` is
 # NOT an installer flag -- it is a run mode, so it never appears here. Fail-closed via
@@ -1123,7 +1124,11 @@ After=network.target
 Wants=network.target
 
 [Service]
-Type=simple
+# issue 1483: dsync >= 1.30 sends READY=1 only once the boot date is placed (bounded at 30 s), so
+# lightdm, ordered After=dsync.service, starts the operator session and OBS on a placed wall.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=120
 ExecStart=/usr/local/bin/dsync${execargs}${iface}
 Restart=always
 RestartSec=5
@@ -1266,11 +1271,27 @@ EOF
 # sudo; an unreadable config reads as `nopw` (never a false ready). Only the key's PRESENCE is read, the
 # (encrypted) value is never printed. Always rc 0.
 strih_rustdesk_state() {
-  local conf="${STRIH_RUSTDESK_CONF:-/root/.config/rustdesk/RustDesk.toml}" text
+  local conf="${STRIH_RUSTDESK_CONF:-/root/.config/rustdesk/RustDesk.toml}" text opts
+  local conf2="${STRIH_RUSTDESK_CONF2:-/root/.config/rustdesk/RustDesk2.toml}"
   command -v rustdesk >/dev/null 2>&1 || { printf absent; return 0; }
+  # issue 1544: RustDesk's own "Stop service" writes stop-service = 'Y'; the service then stops itself
+  opts="$({ cat "$conf2" 2>/dev/null || sudo -n cat "$conf2" 2>/dev/null; } || true)"
+  if grep -qE "^stop-service[[:space:]]*=[[:space:]]*'Y'" <<<"$opts"; then printf stopped; return 0; fi
   [ "$(systemctl is-active rustdesk 2>/dev/null || true)" = active ] || { printf down; return 0; }
   text="$({ cat "$conf" 2>/dev/null || sudo -n cat "$conf" 2>/dev/null; } || true)"
   if grep -qE "^password[[:space:]]*=[[:space:]]*'[^']+'" <<<"$text"; then printf ready; else printf nopw; fi
+}
+
+# strih_rustdesk_clear_stop_cmds ROOT_CONF2 USER_CONF2 -> issue 1544: the on-box statements that remove the
+# one `stop-service = 'Y'` line RustDesk's "Stop service" wrote into root's and the operator's RustDesk2.toml
+# (a missing file is skipped, nothing else is touched), then enable --now the unit. An emitter: run it as
+# `( eval "$(...)" ) || fail`.
+strih_rustdesk_clear_stop_cmds() {
+  local f
+  for f in "${1:?root RustDesk2.toml required}" "${2:?operator RustDesk2.toml required}"; do
+    printf "if [ -f %q ]; then sed -i \"/^stop-service[[:space:]]*=[[:space:]]*'Y'\$/d\" %q || { echo 'rustdesk: cannot edit %s' >&2; exit 1; }; fi;\n" "$f" "$f" "$f"
+  done
+  printf 'systemctl enable --now rustdesk || { echo "rustdesk: enable --now failed" >&2; exit 1; };\n'
 }
 
 # strih_rustdesk_apply_hint BOX -> the dev1 command that applies the permanent password to BOX from the
@@ -1291,6 +1312,7 @@ strih_rustdesk_grade_row() {
     down) printf 'FAIL|(rustdesk) installed but the service is %s -- systemctl enable --now rustdesk; re-run setup-strih.sh step 16b\n' \
       "$(systemctl is-active rustdesk 2>/dev/null || echo unknown)" ;;
     nopw) printf 'FAIL|(rustdesk) active but no permanent password is set -- %s\n' "$(strih_rustdesk_apply_hint "$box")" ;;
+    stopped) printf "FAIL|(rustdesk) stop-service = 'Y' in RustDesk2.toml (\"Stop service\" was pressed in its window): the service stops itself -- re-run setup-strih.sh step 16b, which clears it (issue 1544)\n" ;;
     *)
       id="$(timeout 10 rustdesk --get-id 2>/dev/null | head -1 || true)"
       if [ -n "$id" ]; then
@@ -1597,7 +1619,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=newlevel
-ExecStart=/opt/bkshading/bkshading --config /etc/bkshading/bkshading.toml
+# shading v0.2.7: the /next/ panel's layout (bkshading-layout.json) in a dir the operator can write
+StateDirectory=bkshading
+ExecStart=/opt/bkshading/bkshading --config /etc/bkshading/bkshading.toml --layout-file /var/lib/bkshading/bkshading-layout.json
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -1622,6 +1646,9 @@ EOF
 # overrides of the default cambox-relay at camN.lan:8771; an sbc-relay override is written as it is. A wrong
 # RELAYS prints nothing and returns 1, never a partial config.
 # Seeded ONLY IF absent (setup-strih step 16c [ ! -f ] guard) so the operator's live edits are kept.
+# strih_bkshading_tally_url -> the strih tally service's /state on this box (issue 1417, port 9240).
+strih_bkshading_tally_url() { printf '%s' "http://127.0.0.1:9240/state"; }
+
 strih_bkshading_config_text() {
   local bind="${1:-0.0.0.0:8770}" relays cams fleet n e transport address
   if [ "$#" -ge 2 ]; then relays="$2"; else relays="$(strih_lx_bkshading_relays)" || return 1; fi
@@ -1656,6 +1683,11 @@ fps = 3.0
 jpeg_quality = 55
 capture_timeout_ms = 1000
 reconnect_backoff_ms = 2000
+
+# The strih tally service on this box (issue 1417): the panel tints the program camera red and the
+# preview green (shading v0.2.11, shading#24). Without the key the tally is off.
+[tally]
+url = "$(strih_bkshading_tally_url)"
 EOF
   for n in $cams; do
     transport="${tr[$n]:-cambox-relay}"
@@ -1677,6 +1709,21 @@ EOF
     printf 'transport = "cambox-relay"\naddress = "register:cam%s"\nvisiting = true\n' "$n"
     printf 'ndi_preview = "CAM%s (usb)"\ngrab_fps = 60\n' "$n"
   done
+}
+
+# strih_bkshading_tally_ensure FILE -> the operator config FILE gets the [tally] block of the seed once when it
+# has none (shading v0.2.11 reads the box's tally service through it; the key is additive in the shading
+# contract). A file that already has a [tally] table is the operator's and is left as it is. Appends only.
+strih_bkshading_tally_ensure() {
+  local f="${1:?strih_bkshading_tally_ensure: FILE}"
+  [ -f "$f" ] || { echo "strih_bkshading_tally_ensure: ${f} does not exist" >&2; return 1; }
+  if grep -qE '^[[:space:]]*\[tally\][[:space:]]*(#.*)?$' "$f"; then
+    echo "  ${f}: [tally] present -- left as it is"
+    return 0
+  fi
+  printf '\n# The strih tally service on this box (issue 1417, shading v0.2.11): PGM red / PVW green.\n[tally]\nurl = "%s"\n' \
+    "$(strih_bkshading_tally_url)" >>"$f" || return 1
+  echo "  ${f}: [tally] url = $(strih_bkshading_tally_url) added (shading v0.2.11 tally tint)"
 }
 
 # strih_bkshading_listener_owner reads `ss -tlnp` output on stdin and prints the process NAME that

@@ -232,7 +232,7 @@ def _log(tmp_path):
 
 @pytest.mark.parametrize("box,verdict,words", [
     ("strih-snv", "purge", ("STRIH_PROGRAM_VBAN_STREAMS=dante:strih-obs", "intercom.strih-snv.toml")),   # issue 1485
-    ("strih-pp", "purge", ("STRIH_PROGRAM_VBAN_STREAMS=strih-obs", "intercom.strih-pp.toml")),
+    ("strih-pp", "purge", ("STRIH_PROGRAM_VBAN_STREAMS=dante:strih-obs", "intercom.strih-pp.toml")),   # issue 1536
     ("stream-pp", "keep", ("stream role", "1465")),
     ("stream-snv", "keep", ("stream role", "1465")),
 ])

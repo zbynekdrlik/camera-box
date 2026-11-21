@@ -25,6 +25,9 @@ paths:
   - "scripts/lib/dtray.sh"
   - "scripts/dtray-release.pin"
   - "tests/python/test_dtray_1485.py"
+  - "systemd/intercom-tray.service"
+  - "scripts/lib/intercom-tray.sh"
+  - "tests/python/test_intercom_tray_1542.py"
 ---
 
 # strih-snv session apps: the browser-source keeper, the shading panel window, Companion Satellite + its watch (issue 1399)
@@ -141,6 +144,11 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
   FINISHED of a load that did not fail; a FINISHED follows a failed load too). A service down all
   day would otherwise write ~29 000 journal lines.
 - **Closing the window exits the app**; the unit's `Restart=always` (3 s) brings it back.
+- **A fully covered window hides its WebView** (issue 1541, shading v0.2.14 / shading#19). The
+  service connects the NDI preview receivers only while a visible panel calls it. WebKitGTK reports a
+  window under OBS as visible, so `PanelWindow` (given `Gdk`) handles X `visibility-notify-event`:
+  `FULLY_OBSCURED` hides the view (the page turns `hidden`), `UNOBSCURED` / `PARTIAL` shows it, one
+  log line per change. It needs real X visibility events, which plain Xorg with no compositor sends.
 - **It is a NORMAL window.** Never keep-above / keep-below and no special type hint: the live
   4.10.2026 trial first put it `below` the multiview and openbox Alt+Tab could not reach it.
 - **WM_CLASS** comes from `GLib.set_prgname("bkshading-panel-app")`, called BEFORE `from
@@ -320,11 +328,11 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
 
 camera-box decision 3.11.2026: the strih OBS's `dante_input` device and the intercom hub's Dante device
 show in dstack's shared tray `dtray`. Design comment 6609295433 (Approach 1). The seventh entry, LAST on
-both roles (`STRIH_SESSION_APP_UNITS`, `OBS_BOX_STREAM_SESSION_APP_UNITS`), so every Linux workstation runs
+both roles (`STRIH_SESSION_APP_UNITS`, `OBS_BOX_STREAM_SESSION_APP_UNITS`; on the strih role only the issue-1542 intercom tray follows it), so every Linux workstation runs
 it. setup-strih.sh / verify-strih.sh carry no line of their own: it rides step 16d's loop and the grader.
 
-- **ONE pin, `scripts/dtray-release.pin`:** `DTRAY_RELEASE_TAG` (v0.6.19), `DTRAY_RELEASE_ASSET`
-  (`dtray-v0.6.19-linux-x86_64`), `DTRAY_RELEASE_SHA256` (the release's own sha256, read from
+- **ONE pin, `scripts/dtray-release.pin`:** `DTRAY_RELEASE_TAG` (v0.6.143, issue 1532: v0.6.19 refreshed every Dante record every 96 s, dstack#319), `DTRAY_RELEASE_ASSET`
+  (`dtray-v0.6.143-linux-x86_64`), `DTRAY_RELEASE_SHA256` (the release's own sha256, read from
   `gh release view <tag> -R zbynekdrlik/dstack` and the downloaded asset), `DTRAY_DEVICE_FIRST_DSTACK`
   (v0.6.13: a device on an older dstack is not discoverable). A bump edits the tag, asset and sha
   together and `tests/python/test_dtray_1485.py` pins the shipped values.
@@ -379,12 +387,55 @@ it. setup-strih.sh / verify-strih.sh carry no line of their own: it rides step 1
   `dtray --print` once on strih-snv (the NOTE until the hub and obs pins reach dstack v0.6.13), and the
   tint2 panel shows the icon.
 
+## The intercom tray (`intercom-tray.service`, issue 1542)
+
+intercom#34 (owner 19.11.2026): the cutters' headphone level sliders open from a tray icon in the bottom
+bar. The intercom project ships the program (`tray/` in its repo, released with the hub); camera-box
+installs and supervises it. The eighth entry, LAST, on the STRIH role only (`STRIH_SESSION_APP_UNITS`;
+`OBS_BOX_STREAM_SESSION_APP_UNITS` never lists it: the stream role moves the hub aside, so there is no level
+page). No line in setup-strih.sh / verify-strih.sh: it rides step 16d's loop and the grader.
+
+- **The program** is the 7th member `intercom-tray` of the PINNED hub bundle (`scripts/intercom-release.pin`,
+  v1.9.26 is the first with it). It is an OPTIONAL member (`STRIH_INTERCOM_OPTIONAL_FILES`): the hub install
+  (step 13) never depends on a menu icon, so a hub pin rolled back below v1.9.26 still installs; the tray's own
+  install then refuses (`has no intercom-tray`) and verify FAILs its row. Its menu opens `/snap/bin/firefox --new-window http://127.0.0.1:8791/` (the hub's
+  loopback-only level page); one tray per session (its lock in `XDG_RUNTIME_DIR`, a second one exits 0); logs
+  on stderr; runtime libgtk-3 + libayatana-appindicator3 (already in `STRIH_SESSION_APP_PACKAGES`).
+- **The install** (`intercom_tray_install ROOT`, `scripts/lib/intercom-tray.sh`, step 16d inside the
+  per-entry loop): the bundle through `strih_intercom_release_ensure` on the same tree step 13 used (a
+  tarball already there on the pin = no network), the member copied 0755 as a `<bin>.new.<pid>` sibling and
+  renamed over `/usr/local/bin/intercom-tray` (a running tray keeps its inode; the second ensure after
+  step 13 is deliberate: it re-proves the extracted member against the tarball and the pin), kept with its mtime when
+  already that member, the record `<tag> <sha256>` in `/usr/local/share/intercom-tray/release`. No
+  fallback: a failure is rc 1 + stderr, step 16d WARNs once and provisions the rest, verify FAILs the row.
+- **The unit** is the dtray shape: foreground, no args, `DISPLAY=:0`, `PartOf=` + `After=graphical-session.target`,
+  `ConditionFileIsExecutable=`, `Restart=on-failure` (the menu's exit item exits 0 = closed until the next
+  login), `RestartSec=10`, `StartLimitIntervalSec=300` + `StartLimitBurst=5` (no desktop = exit 1, never
+  a restart loop).
+- **Verify:** the `(intercom-tray)` unit row is the binary branch (unit byte-identical, enabled, autostart
+  line, active, `/proc/<MainPID>/exe` = the binary, started after the files). `intercom_tray_state ROOT`
+  (no network): `absent` / `stale:no-release-record` / `stale:installed-<tag>-pin-<tag>` /
+  `stale:sha256-is-not-the-recorded-<tag>` / `stale:not-the-<tag>-bundle-member` (binary + record agree
+  but the pinned bundle extracted in the tree holds another member) / `ok`. A tree with no extracted
+  bundle grades by the record alone. No extra row.
+- **Tests:** `tests/python/test_intercom_tray_1542.py` (a local bundle tarball proved against a fixture pin
+  through `STRIH_INTERCOM_TARBALL_SRC`; the install loop runs on a scratch tree, so no release dir lands in
+  the checkout). The shared fakes' `HERMETIC` points the tray's binary, record and pin at
+  `/nonexistent-1542`, so every other session-app test leaves the real checkout and GitHub alone.
+- **Live steps (supervisor):** strih-pp first (strih-snv after the 19.11.2026 SNV event): setup-strih step
+  13 (the v1.9.26 hub; the hub try-restart follows 16i) + step 16d logs `installed intercom-tray v1.9.26 ->
+  /usr/local/bin/intercom-tray`; start it (`systemctl --user start intercom-tray.service`, or the next login
+  / genlock deploy). Read: `curl -s http://127.0.0.1:8790/api/version` = 1.9.26, `curl -s -H 'Host:
+  127.0.0.1:8791' http://127.0.0.1:8791/api/levels` (the three sliders), `journalctl --user -u intercom-tray
+  -n 20` (`intercom-tray starting`), the icon in tint2 and its menu opening Firefox on the page; verify-strih
+  `(intercom-tray) ... OK`.
+
 ## Start path: the kiosk autostart, not default.target
 
 Every entry is `WantedBy=graphical-session.target` like `strih-obs.service`, and like it STARTED by the
 kiosk openbox autostart (`strih_openbox_autostart_text` calls `strih_session_apps_autostart_lines`,
 after strih-obs + the bundle-state server, in `STRIH_SESSION_APP_UNITS` order: keeper, panel, Satellite,
-watch timer, dantesync tray, display watch, dtray).
+watch timer, dantesync tray, display watch, dtray, and on the strih role the intercom tray).
 - openbox never reaches graphical-session.target, so the WantedBy only makes `enable` meaningful.
 - A `default.target` unit would also start on a user-manager start with no X session (an ssh login,
   linger), where the panel or the Satellite tray cannot open a window. ONE login start path, the one OBS

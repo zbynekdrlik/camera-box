@@ -7,7 +7,8 @@
 # routing files. ONE pin, scripts/intercom-release.pin: the tag + the sha256 of the release tarball.
 # Root Cargo.toml's `intercom-vban` git tag must equal it (tests/intercom_pin_1487.rs).
 #
-# The bundle `intercom-hub-linux-amd64.tar.gz` carries the binary, the unit and the four routing TOMLs.
+# The bundle `intercom-hub-linux-amd64.tar.gz` carries the binary, the unit, the four routing TOMLs and
+# (since v1.9.26, issue 1542) the strih role's tray `intercom-tray`.
 # `--check-config` makes TOML and binary a pair, so everything step 13 installs comes from one verified
 # directory: <tree>/intercom-release/<tag>/. The strih deploy fills it in its staged tree on dev1 (the box
 # then needs no network for it); a setup-strih run from a checkout fills it there (git-ignored).
@@ -21,6 +22,10 @@ STRIH_INTERCOM_REPO_URL="https://github.com/zbynekdrlik/intercom/releases/downlo
 STRIH_INTERCOM_TARBALL="intercom-hub-linux-amd64.tar.gz"
 STRIH_INTERCOM_FILES=(intercom-hub intercom-hub.service intercom.strih-snv.toml intercom.strih-pp.toml
   intercom.stream-snv.toml intercom.stream-pp.toml)
+# issue 1542: members placed when the release carries them, never required: a hub pin rolled back below
+# v1.9.26 (the first with intercom-tray) must still install the hub. intercom_tray_install
+# (scripts/lib/intercom-tray.sh) refuses a bundle without the tray on its own, verify FAILs that row.
+STRIH_INTERCOM_OPTIONAL_FILES=(intercom-tray)
 
 # _strih_intercom_pin_field ROOT KEY -> the value of KEY in ROOT's scripts/intercom-release.pin.
 _strih_intercom_pin_field() {
@@ -97,18 +102,25 @@ strih_intercom_release_ensure() {
     if [ ! -f "${x}/${f}" ]; then rm -rf "$x"; echo "strih-intercom-release: ${tag} has no ${f}" >&2; return 1; fi
   done
   chmod 0755 "${x}/intercom-hub"
+  # an optional member this release does not carry: none of it stays from another extraction
+  for f in "${STRIH_INTERCOM_OPTIONAL_FILES[@]}"; do
+    [ -f "${x}/${f}" ] || rm -f "${dir}/${f}" \
+      || { rm -rf "$x"; echo "strih-intercom-release: cannot remove the stale ${dir}/${f}" >&2; return 1; }
+  done
   name="intercom-hub ${tag#v}"
   have="$(timeout 10 "${x}/intercom-hub" --version 2>/dev/null | head -n 1 || true)"
   if [ "$have" != "$name" ]; then
     rm -rf "$x"; echo "strih-intercom-release: the ${tag} binary says '${have:-nothing}', not '${name}'" >&2; return 1
   fi
-  for f in "${STRIH_INTERCOM_FILES[@]}"; do
+  for f in "${STRIH_INTERCOM_FILES[@]}" "${STRIH_INTERCOM_OPTIONAL_FILES[@]}"; do
+    [ -f "${x}/${f}" ] || continue  # an optional member the release does not carry
     mv -f "${x}/${f}" "${dir}/${f}" || { rm -rf "$x"; echo "strih-intercom-release: cannot place ${f} in ${dir}" >&2; return 1; }
   done
   rm -rf "$x"
   # Run as root by setup-strih inside the operator's staged tree: the files take the directory's owner,
   # so the next deploy's rsync (the operator) can replace them (3.11.2026, rsync rc 23).
-  for f in "${STRIH_INTERCOM_FILES[@]}"; do
+  for f in "${STRIH_INTERCOM_FILES[@]}" "${STRIH_INTERCOM_OPTIONAL_FILES[@]}"; do
+    [ -f "${dir}/${f}" ] || continue
     chown --reference="$dir" "${dir}/${f}" \
       || { echo "strih-intercom-release: cannot give ${dir}/${f} the owner of ${dir}" >&2; return 1; }
   done

@@ -413,8 +413,9 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
 
 ## The stream role (setup / seed / verify)
 
-- **Facts:** `STRIH_PROGRAM_VBAN_STREAMS` / `_PORT` / `_RESERVE_MS`: stream-pp `stream` / `6980` /
-  `40`, stream-snv `stream` / `6980` / `80` (finding 6348583939: mbc's gaps reached 52 ms under the
+- **Facts** (issue 1536, 18.11.2026: both PP boxes take Dante now, so every deployed box declares `none`;
+  the values below are the VBAN rollback shapes): `STRIH_PROGRAM_VBAN_STREAMS` / `_PORT` / `_RESERVE_MS`:
+  stream-pp `stream` / `6980` / `40`, stream-snv `stream` / `6980` / `80` (finding 6348583939: mbc's gaps reached 52 ms under the
   22.10.2026 production load, lv1's are 26-29 ms; R - one packet - the 2 ms deadline margin must sit
   above the sender's worst gap, pinned by the pytest); strih-snv `strih-obs` / `6981` / `30` (phase 2), strih-pp `strih-obs` / `6981` / `40` (24.10.2026,
   lv1 straight to the rig NIC, R = lv1's proven stream-pp value);
@@ -553,7 +554,7 @@ for the hub (one UDP port has one receiver). The console-side setting is the own
   `/api/state` without `program_out`. The OBS input must be live before the hub TOML loses
   `program_out` (otherwise a gap in the program audio).
 
-### strih-pp (issue 1439, design 6385519443, 24.10.2026)
+### strih-pp (issue 1439, design 6385519443, 24.10.2026; the VBAN rollback shape since issue 1536)
 
 - **What lv1 sends** (tcpdump on strih-pp, 24.10.2026 ~16:45, read by the main): lv1 10.77.8.230 sends
   `strih-obs` to 10.77.8.202:6981 (48 kHz, 103 frames per packet, 2 ch, PCM16, ~460 packets/s) and
@@ -738,11 +739,30 @@ USB NIC stayed invisible; the lib now retires it (`_strih_vban_leg_nic_legs` / `
 
 ## The Dante variant of the leg (issue 1485, strih-snv; stream-snv since issue 1495)
 
-Owner 2.11.2026: each application is its own Dante device; PP gets no Dante. Fact
-`STRIH_DANTE_DEVICES` = `none` everywhere but strih-snv + stream-snv (`name=arc:cmc:flows`, space-joined; issue
+Owner 2.11.2026: each application is its own Dante device; PP got no Dante then. Since issue 1536
+(18.11.2026, PP's new switch + dsg) every OBS box declares its program device: strih-snv (+ the hub's),
+stream-snv, strih-pp `strih-obs`, stream-pp `stream-obs` (`name=arc:cmc:flows`, space-joined; issue
 1519 dropped the `rxfirst-rxlast` part). The loader refuses malformed ports, a port used twice, an ARC port
-outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender on a Dante box. A box with
+outside dstack's slots 4440-4471, and a leg VBAN sender on a Dante box. A box with
 `none` renders byte-identically to the section above (pinned). `scripts/lib/strih-dante-leg.sh`.
+
+- **A Dante box WITHOUT a leg (issue 1536, dstack 18.11.2026: written for PP's flat 10.77.8.0/23 before its
+  new switch arrived the same day; no deployed box has this shape now, it stays the generic case):** `STRIH_DANTE_DEVICES` with `STRIH_PROGRAM_VBAN_LEG=none` loads. The devices run on the rig
+  NIC (`_strih_dante_input_iface` -> `strih_lx_rig_nic`), and NOTHING of this section applies there: dstack's
+  dante-leg.nft must never load on the shared LAN NIC (it would cut the box's LAN), so
+  `strih_dante_leg_declared` is false without a leg, `strih_vban_leg_install` SKIPs and verify item 9's leg
+  grade is one NOTE. A leg filter left from an earlier leg keeps today's behaviour (not removed by the SKIP).
+  Moving to the VLAN later = only the leg facts (`vlan:<id>` + the /24 address). Tests:
+  `tests/python/test_strih_dante_legless_1536.py`.
+- **PP on its new switch (issue 1536, 18.11.2026): VLAN 70 legs, SNV's shape.** strih-pp `vlan:70`
+  10.77.7.202 (`enp5s0f1.70`), stream-pp 10.77.7.204 (`rig0.70`: its USB RTL8156 `enx6c1ff7618e74` is renamed
+  rig0 by the issue-1502 fact `STRIH_NIC_RENAME`, a 15-character name has no room for `.70`), one `<role>-obs`
+  device each (the program from dsg, the SoundGrid<->Dante bridge), the terms 1 / 12.041666, no TX; strih-pp's
+  hub also carries its own device `strih-pp-intercom=4442:8802:4457` (dstack slot 2, never SNV's slot 1;
+  intercom#32, its TOML is the intercom project's), so item 16's `(intercom-dante)` rows run there. `STRIH_DANTE_GM=10.77.7.200` ("dante-ptp" on VLAN 70); the PP switch also copies its
+  PTP onto the LAN untagged, so dsync stays on the rig NIC exactly like SNV. Tests:
+  `tests/python/test_pp_dante_leg_1536.py`; the VBAN-shape tests run the PP boxes in their pre-1536 rollback
+  shape (`vban_leg_fakes_1439.PP_PRE_1536`, `pp_pre_1536_boxes_dir`).
 
 - **The address:** a real `/24` with `ipv4.route-table=70`: NetworkManager puts the connected route in table
   70, so only sockets bound to the leg's address reach it (`from <addr> lookup 70`), and main stays free of
@@ -755,7 +775,7 @@ outside dstack's slots 4440-4471, devices without a leg, and a leg VBAN sender o
   `scripts/lib/strih-dante-leg-filter.sh`. Every dstack device binds fixed ports from its slot (dstack >=
   0.6.117: slot k receives on 29800+64k..+31, sends from the next 32), so the file names no device.
   - **A test fixture never types the leg-filter tag** (the strih-snv deploy tests' file:// mirror read a literal v0.6.119 and broke CI at the v0.6.129 bump, run 43584925476): it reads `DSTACK_LEG_FILTER_TAG` from the pin.
-  - **The pin** `scripts/dstack-leg-filter.pin`: the tag (v0.6.129, issue 1524: + the mDNS out rate limit, dstack#288), its COMMIT (fb6d292f69 for v0.6.129; read
+  - **The pin** `scripts/dstack-leg-filter.pin`: the tag (v0.6.141, issue 1531: + the query-only cap of 10/s before the 50/s mDNS out limit, dstack#288 step 2; v0.6.129 issue 1524 added the 50/s), its COMMIT (355aaf74 for v0.6.141; read
     `refs/tags/<tag>^{}`: the bare ref is the annotated TAG object, not a commit), the sha256 of `tools/linux/dante-leg.nft` and
     `tools/linux/dante-leg-notrack.nft`. `strih_dante_leg_filter_ensure ROOT` fetches both by the exact tag
     (raw.githubusercontent) into `<tree>/dstack-release/<tag>/` (git-ignored), proves each against the pin,

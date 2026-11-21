@@ -23,7 +23,7 @@
 # 1-6 or 8 channels (the plugin's rule), RX numbers contiguous from 1, printable ASCII without `"`, `\`
 # or `|` in a field. Setup refuses loudly when the box is on Dante and the file is missing or malformed.
 #
-#   strih_dante_input_install USER HOME   setup-strih step 13 (after the leg: the iface is the leg's)
+#   strih_dante_input_install USER HOME   setup-strih step 13 (after the leg: the leg's iface, else the rig NIC)
 #   strih_dante_input_grade LOG           verify-strih item 9's `(program-dante)` rows (ok/bad/note),
 #                                         the `media clock` + `ptp-port` rows (strih-dante-ptp.sh)
 #   strih_program_audio_declared / strih_program_audio_grade SCN WS LOG   item 9's dispatcher: the
@@ -263,10 +263,16 @@ strih_dante_input_tx_grade() {
 # _strih_dante_input_dest HOME -> where the plugin reads it.
 _strih_dante_input_dest() { printf '%s' "${STRIH_DANTE_INPUT_TOML:-${1%/}/.camera-box/dante-input.toml}"; }
 
-# _strih_dante_input_iface -> the leg's interface (the Dante devices live on it, issue 1485).
+# _strih_dante_input_iface -> the interface the Dante devices live on: the leg's (issue 1485), or on a box
+# with no leg (STRIH_PROGRAM_VBAN_LEG=none, issue 1536: PP's flat network) the rig NIC from the ONE resolver
+# strih_lx_rig_nic. rc 1 + its stderr line when it cannot be resolved (never a guessed interface).
 _strih_dante_input_iface() {
   local res
   if [ -n "${STRIH_DANTE_INPUT_IFACE:-}" ]; then printf '%s\n' "$STRIH_DANTE_INPUT_IFACE"; return 0; fi
+  if [ "$(strih_vban_leg_kind)" = none ]; then
+    res="$(strih_lx_rig_nic "$(_strih_vban_leg_sysfs)" "$(ip -o -4 addr show 2>/dev/null || true)" "$(strih_lx_ip)")" || return 1
+    printf '%s\n' "$res"; return 0
+  fi
   res="$(strih_vban_leg_resolve)" || return 1
   res="${res##*$'\n'}"
   printf '%s\n' "${res%% *}"
@@ -294,7 +300,7 @@ strih_dante_input_install() {
   fi
   ports="$(strih_dante_input_ports "$(strih_lx_dante_devices)")" || return 1
   chans="$(strih_dante_input_site_rows "$(strih_dante_input_site_file)")" || return 1
-  iface="$(_strih_dante_input_iface)" || { echo "dante-input: the leg's interface cannot be resolved (above)" >&2; return 1; }
+  iface="$(_strih_dante_input_iface)" || { echo "dante-input: the Dante interface (the leg's, or the rig NIC without a leg) cannot be resolved (above)" >&2; return 1; }
   group="$(id -gn "$user" 2>/dev/null)" || { echo "dante-input: no user ${user}" >&2; return 1; }
   install -d -m 0755 -o "$user" -g "$group" "$(dirname "$dest")" || return 1
   obs_box_write_if_changed_rendered "$dest" 0644 "${user}:${group}" "dante-input" strih_dante_input_toml "$iface" "$ports" "$chans" || return 1

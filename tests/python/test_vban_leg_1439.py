@@ -124,12 +124,14 @@ def test_stream_snv_and_strih_snv_have_the_vlan_leg_every_other_box_none():
     assert _bash(LEG_BODY, "strih-snv", env=real).stdout.strip() == "vlan:70|%s|%s" % (STRIH_LEG_ADDR, STRIH_SENDER)
     # the pre-1495 shape the `mac:` tests below run on
     assert _bash(LEG_BODY, "stream-snv").stdout.strip() == "mac:%s|%s|%s" % (LEG_MAC, LEG_ADDR, SENDER)
+    # issue 1536 (18.11.2026): the PP boxes on VLAN 70 of their rig NIC too, no VBAN sender (a Dante leg)
+    pp = {"strih-pp": "vlan:70|10.77.7.202|none", "stream-pp": "vlan:70|10.77.7.204|none"}
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
         if box in ("stream-snv", "strih-snv"):
             continue
         r = _bash(LEG_BODY, box, env=real)
         assert r.returncode == 0, (box, r.stderr)
-        assert r.stdout.strip() == "none|none|none", box
+        assert r.stdout.strip() == pp.get(box, "none|none|none"), box
 
 
 @pytest.mark.parametrize("box,edits,word", [
@@ -267,7 +269,7 @@ class Box:
         # the oneshot that runs its ExecStart lines through the fake nft, the real netns render they list as
         self.dstack_dir = self.etc / "dstack"
         self.dstack_unit = self.etc / "systemd" / "system" / "dstack-dante-leg-filter.service"
-        mirror = tmp_path / "dstack-mirror" / "v0.6.129" / "tools" / "linux"
+        mirror = tmp_path / "dstack-mirror" / "v0.6.141" / "tools" / "linux"
         mirror.mkdir(parents=True, exist_ok=True)
         for f in ("dante-leg.nft", "dante-leg-notrack.nft"):
             (mirror / f).write_bytes((DSTACK_FIX / f).read_bytes())
@@ -550,8 +552,10 @@ def _mutations(s):
 
 
 def test_only_the_snv_boxes_declare_dante_devices():
-    """Owner 2.11.2026: PP gets no Dante, and VBAN stays. issue 1495: stream-snv's own device stream-obs."""
-    want = {"strih-snv": STRIH_DEVICES, "stream-snv": "stream-obs=4440:8800:4455"}
+    """Owner 2.11.2026: PP got no Dante then. issue 1495: stream-snv's own device stream-obs. issue 1536
+    (18.11.2026, PP's new switch + dsg): the PP boxes take their program over Dante too (no intercom device)."""
+    want = {"strih-snv": STRIH_DEVICES, "stream-snv": "stream-obs=4440:8800:4455",
+            "strih-pp": "strih-pp-intercom=4442:8802:4457 strih-obs=4440:8800:4455", "stream-pp": "stream-obs=4440:8800:4455"}   # intercom#32
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
         r = _bash('strih_box_load "$1" || exit 9\nstrih_lx_dante_devices', box, env={"STRIH_BOXES_DIR": str(BOXES)})
         assert r.returncode == 0, (box, r.stderr)
@@ -574,10 +578,14 @@ def test_the_loader_refuses_malformed_or_overlapping_devices(tmp_path, value, wo
     assert r.returncode != 0 and word in r.stderr, r.stderr
 
 
-def test_the_loader_refuses_devices_without_a_leg(tmp_path):
+def test_the_loader_takes_devices_without_a_leg_but_never_beside_a_vban_program(tmp_path):
+    """issue 1536 (dstack 18.11.2026, PP's flat network): a Dante box may run on its rig NIC with no leg
+    (tests/python/test_strih_dante_legless_1536.py); strih-pp still declares its VBAN program, so the one
+    program source rule refuses it -- never a "needs a leg" refusal any more."""
     d = _boxes_with(tmp_path, "strih-pp", [("STRIH_DANTE_DEVICES=none", "STRIH_DANTE_DEVICES=" + STRIH_DEVICES)])
     r = _bash('strih_box_load strih-pp', env={"STRIH_BOXES_DIR": str(d)})
-    assert r.returncode != 0 and "needs a leg" in r.stderr, r.stderr
+    assert r.returncode != 0 and "needs a leg" not in r.stderr, r.stderr
+    assert "is the program source" in r.stderr, r.stderr
 
 
 def test_the_live_32_moves_to_the_24_by_reapply_never_a_link_change(tmp_path):

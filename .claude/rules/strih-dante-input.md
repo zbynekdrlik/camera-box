@@ -11,6 +11,7 @@ paths:
   - "tests/python/test_stream_snv_dante_1495.py"
   - "scripts/strih-boxes/stream-snv.env"
   - "tests/python/test_strih_dante_terms_1513.py"
+  - "tests/python/test_strih_dante_legless_1536.py"
 ---
 
 # strih-snv's program audio over Dante: the obs release's `dante_input` source (issue 1485)
@@ -48,7 +49,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   no leg VBAN sender (issue 1519: dstack's generic leg filter, `obs-vban-receive.md`).
 - **The file:** `~/.camera-box/dante-input.toml` of the OBS user, read ONCE at OBS start (no file = no
   device and no source kind). setup-strih step 13 writes it after the leg (`strih_dante_input_install`):
-  name `strih-obs`, iface = the leg's (`enp7s0.70`), `network_rate = 96000`, no `sample_rate`,
+  name `strih-obs`, iface = the leg's (`enp7s0.70`), or on a box with no leg (issue 1536, PP's flat network)
+  the rig NIC from `strih_lx_rig_nic` (no leg filter there, `obs-vban-receive.md`), `network_rate = 96000`, no `sample_rate`,
   never `latency_ms` (obs v0.4.27 refuses it), the named latency terms + the program TX from the box facts
   (the bullet below), the fact's arc / cmc / flows ports, never `rx_port_base` or `tx_port_base` (issue 1519,
   obs v0.4.28: unset = the slot's fixed block from the ARC port; a kept base warns), one `[[subscribe]]` per RX
@@ -68,6 +70,8 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   5/6, owner yes on issue 1513). A change of (a) or (b) is an owner decision. Clocks + latencies:
   `.claude/rules/audio-clock-map.md` ("The named Dante latency terms"). Tests:
   `tests/python/test_strih_dante_terms_1513.py`.
+- **PP (issue 1536, 18.11.2026):** strih-pp `strih-obs` + stream-pp `stream-obs` on their VLAN 70 legs (the
+  transmitter is dsg, the SoundGrid<->Dante bridge), plus strih-pp's hub device `strih-pp-intercom` (slot 2); each box's site file is placed by the supervisor like SNV's.
 - **Site data is never in git (the repo is public):** the per-box untracked
   `/etc/camera-box/dante-input.site.conf` (`STRIH_DANTE_INPUT_SITE_FILE`), placed by the supervisor:
   `RX<n>=<rx label>|<tx device>|<tx channel>`, 1-6 or 8 channels, contiguous. Missing or malformed on a
@@ -220,3 +224,15 @@ proof took one 10-min capture, and nothing else would have shown it:
   only its counter was wrong (dstack #278). Since obs v0.4.29 the status line carries `rx_reordered`
   and `rx_loss` counts only holes still open at playout; since v0.4.30 `start_holes` holds the OBS-start
   burst. `scripts/dante_input_continuity.py` reports both and gates neither (OPTIONAL tuple).
+
+## What an OBS restart does to the stream A/V (issue 1527, 15.11.2026)
+
+- Before obs v0.4.39 the dante-input program audio re-latched at each OBS start on whichever OBS
+  audio tick its first chunk met, so one stream OBS restart could move the stream A/V by a whole tick
+  (21.8 ms measured on v0.4.32).
+- Since obs v0.4.39 every chunk carries dlink's play time (`chunks carry dlink's play time` at start,
+  0 re-anchors, 0 play_at_steps). Four starts on stream-snv read -48.0 / -45.7 / -43.2 / -44.5 ms on the
+  stream av-sync dock: a spread of 4.8 ms, inside its ~±2 ms sample noise per run. An OBS restart is
+  no longer an A/V step; a move of a tick after a restart is a regression to report to obs.
+- Never pin an obs whose dlink failed obs's soak gate (v0.6.140 did); the stream TX underruns wait
+  for a soak-passed dlink >= v0.6.143.

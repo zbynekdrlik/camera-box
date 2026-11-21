@@ -106,10 +106,12 @@ fn lib_gates_the_linux_appliance_modules() {
         "ndi",
         "ndi_display",
     ] {
-        // Issue 1487: `capture` lives in vstack's av-capture, re-exported at its old path, and the
-        // re-export carries the same gate (the v4l crate is Linux only there too).
+        // Issue 1487: `capture` lives in vstack's av-capture and `ndi` in av-ndi, re-exported at
+        // their old paths, and each re-export carries the same gate (Linux only there too).
         let decl = if module == "capture" {
             "pub use av_capture::capture;".to_string()
+        } else if module == "ndi" {
+            "pub use av_ndi::ndi;".to_string()
         } else {
             format!("pub mod {module};")
         };

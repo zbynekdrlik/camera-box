@@ -42,7 +42,7 @@ def test_always_on_follows_the_real_pin_map():
               'for b in "$@"; do if bkshading_relay_box_always_on "$b"; then echo "$b yes"; else echo "$b no"; fi; done',
               args=["cam3", "CAM5", "cam2", "cam1", "bogus/x", ""])
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split("\n")[:6] == ["cam3 yes", "CAM5 yes", "cam2 no", "cam1 no", "bogus/x no", " no"], r.stdout
+    assert r.stdout.split("\n")[:6] == ["cam3 yes", "CAM5 yes", "cam2 no", "cam1 yes", "bogus/x no", " no"], r.stdout
 
 
 def test_always_on_reads_the_map_not_a_literal(tmp_path):

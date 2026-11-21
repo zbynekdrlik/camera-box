@@ -147,7 +147,7 @@ const FACT_KEYS: &[&str] = &[
     // issue 1425 (design 6443440513): the box's FIXED OBS audio buffering, ms (0..960).
     "STRIH_AUDIO_BUFFERING_MS",
     // issue 1387: the JPEG XS link -- the strih's N:PORT cameras + their pin, the stream's program
-    // port + its pin (none on every PP box: the PP rollout is deferred).
+    // port + its pin (the PP pair since issue 1535, 18.11.2026).
     "STRIH_JXS_CAMERAS",
     "STRIH_JXS_CAMERA_PIN_MS",
     "STRIH_JXS_PROGRAM_PORT",

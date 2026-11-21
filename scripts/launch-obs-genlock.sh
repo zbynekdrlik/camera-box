@@ -545,12 +545,14 @@ Toggling the measurement burn does NOT relaunch OBS — it is a per-source genlo
 OBS WebSocket: scripts/obs_burn_filter.py add|remove (driven by rig-mode.sh test|event).
 
 Usage:
-  scripts/launch-obs-genlock.sh --box stream|resolume [--force] [--obs-dir 'C:\Program Files\obs-studio']
+  scripts/launch-obs-genlock.sh --box stream|resolume|resolume-pp|grading-pp [--force] [--obs-dir 'C:\Program Files\obs-studio']
   scripts/launch-obs-genlock.sh --help
 
   --box     stream (win-stream-snv, 10.77.9.204) or resolume (win-resolume, resolume.lan — the
-            traveling cg OBS box, issue 1295) — selects the MCP. The Windows strih PC is RETIRED
-            (issue 1317): strih-snv is a Linux box launched by its strih-obs.service user unit.
+            traveling cg OBS box, issue 1295), or a PP Windows box (issue 1505): resolume-pp
+            (win-resolume-pp, the PP cg OBS) or grading-pp (win-grading-pp, the PP grading
+            notebook) — selects the MCP. The Windows strih PC is RETIRED (issue 1317): strih-snv
+            is a Linux box launched by its strih-obs.service user unit.
   --force   force-kill a wedged obs64 first (documented obs-ops recovery; DEV rig).
   --obs-dir override the OBS install root (default 'C:\Program Files\obs-studio'; its bin\64bit is cwd).
 
@@ -595,7 +597,7 @@ main() {
   # restarted by its strih-obs.service user unit, never by a Windows program.
   obs_fleet_refuse_linux_target "$box" launch-obs-genlock.sh || exit 2
   if ! mcp="$(fleet_box_mcp "$box")" || ! box_ip="$(fleet_box_ip "$box")"; then
-    echo "ERROR: --box must be a Windows genlock box: 'stream' or 'resolume' (got '${box}')" >&2; usage >&2; exit 2
+    echo "ERROR: --box must be a Windows genlock box: 'stream', 'resolume', 'resolume-pp' or 'grading-pp' (got '${box}')" >&2; usage >&2; exit 2
   fi
   ahk_mode="$(fleet_box_ahk_mode "$box")"
   title_profile="$(fleet_box_obs_profile "$box")" || title_profile=""
@@ -606,6 +608,18 @@ main() {
   # (stream / resolume), never a fleet name -- the role is the fleet name before its venue.
   role="$(obs_fleet_canonical_name "$box")"
   role="${role%%-*}"
+  # issue 1505: the role tools know strih|stream|imag|resolume only. grading-pp's role has no agreed-pins
+  # baseline and no imag restart mark, so its STEP 3b / STEP 5 lines say "not applicable" in place of
+  # a command that would only fail (the known roles print byte-identical commands).
+  local pins_line mark_line
+  case "$role" in
+    strih|stream|imag|resolume)
+      pins_line="python3 scripts/latency_pins_verify.py --box ${role} --host ${box_ip}"
+      mark_line="scripts/mark-imag-restart.sh --box ${role} --reason \"<why you relaunched>\"" ;;
+    *)
+      pins_line="NOT APPLICABLE for ${box} (issue 1505): role '${role}' has no latency-pins baseline -- skip STEP 3b."
+      mark_line="NOT APPLICABLE for ${box} (issue 1505): no imag restart mark for role '${role}' -- skip STEP 5." ;;
+  esac
 
   echo "# ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) ====="
   # resolume (issue 1295): the STEP-3/3b dev1-side WS ops below are keyed on the HOSTNAME
@@ -623,6 +637,9 @@ main() {
 #         win-resolume MCP, rig-state-inspection.md §2), and use that confirmed address in place of
 #         `resolume.lan` in the --host args if the lease has drifted.
 RESCAVEAT
+  else
+    # issue 1505: a traveling PP Windows box (resolume-pp, grading-pp) gets the generic identity line.
+    fleet_box_identity_confirm_note "$box"
   fi
   cat <<PLAN
 # Run the program below via the ${mcp} MCP Shell — a GUI relaunch + on-screen log verification is
@@ -660,7 +677,7 @@ ${PROGRAM}
 #         committed agreed-pins baseline (scripts/latency-pins-baseline.json) — it NEVER overwrites
 #         (forcing would fight the operator). Run ON DEV1 (read-only WS, session-agnostic, per
 #         win-ssh-vs-mcp), NOT in the ${mcp} MCP Shell:
-#           python3 scripts/latency_pins_verify.py --box ${role} --host ${box_ip}
+#           ${pins_line}
 #         exit 0 = every agreed pin on baseline; exit 1 = drift (LOUD, names box+input+got+want — an
 #         ADVISORY signal, NOT a launch abort); exit 2 = a WS read failure (fail-closed). If the
 #         drift is a legitimate re-tune, record it by updating the baseline in a PR; if it is an
@@ -670,7 +687,7 @@ ${PROGRAM}
 #         (or use scripts/rig-mode.sh test|event, which does it for both boxes).
 # STEP 5 (#674): once STEP 2 confirms the relaunch succeeded, mark it on imag-nb's own journald so
 #         a future imag judder report can be time-correlated against this restart:
-#         scripts/mark-imag-restart.sh --box ${role} --reason "<why you relaunched>"
+#         ${mark_line}
 PLAN
 }
 

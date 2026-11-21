@@ -1,7 +1,6 @@
 ---
 paths:
   - "src/genlock_pacing.rs"
-  - "src/ndi.rs"
   - "vendor/distroav/src/ndi-output.cpp"
   - "vendor/distroav/src/ndi-source.cpp"
 ---
@@ -38,7 +37,7 @@ The load-bearing invariants the contract pins to this code (keep them honest):
   bracketed mono/wall/mono read per captured frame; a move of 2 ms or more is adopted in that frame,
   so camera-box stamps the stepped wall like an OBS sender that floors the wall at emit (contract
   §1). The old 100-frame-only re-sample left the stamps up to 1.67 s in the old epoch.
-- **Sender create `clock_video=false, clock_audio=false`** (`src/ndi.rs`) — the app owns cadence,
+- **Sender create `clock_video=false, clock_audio=false`** (`vstack:av/ndi/src/ndi.rs`) — the app owns cadence,
   never the NDI SDK's free-running clock.
 - **Pacing on the SAME per-second grid as the stamps** (#1355 step 3 — before it the emit gate
   paced on `now % interval` from 1970, 40 ns/s off the stamps at 60 fps) — one frame per boundary,

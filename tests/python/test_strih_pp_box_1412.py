@@ -99,12 +99,12 @@ def test_strih_pp_loads_with_every_fact_answered():
 EXPECTED_PP = {
     "STRIH_HOSTNAME": "strih-pp", "STRIH_IP": "10.77.8.202", "STRIH_NDI_PREFIX": "STRIH-PP",
     "STRIH_DANTESYNC_ROLE": "server", "STRIH_DANTESYNC_UPSTREAM": "",
-    "STRIH_INTERCOM_CONFIG": "intercom.strih-pp.toml", "STRIH_NIC_DRIVER": "r8169",
-    "STRIH_NIC_OOT_DRIVER": "none", "STRIH_NIC_MIN_USB_MBPS": "none", "STRIH_NIC_MIN_LINK_MBPS": "2500",
+    "STRIH_INTERCOM_CONFIG": "intercom.strih-pp.toml", "STRIH_NIC_DRIVER": "ixgbe",  # issue 1535
+    "STRIH_NIC_OOT_DRIVER": "none", "STRIH_NIC_MIN_USB_MBPS": "none", "STRIH_NIC_MIN_LINK_MBPS": "10000",
     "STRIH_OBS_PROFILE": "strih-pp", "STRIH_OBS_COLLECTION": "strih-pp", "STRIH_NDI_RUNTIME_PEER": PEER,
     "STRIH_COMPANION_HOST": "10.77.8.205", "STRIH_CG_SENDER": "RESOLUME-PP (SP-program)",
     "STRIH_CAMERAS": "1 4 6 7", "STRIH_HDMI_OUTPUT_BACKEND": "vk-direct", "STRIH_ROLE": "strih",
-    "STRIH_DANTE_GM": "10.77.8.110", "STRIH_PROGRAM_AUDIO_SAMPLER": "off",
+    "STRIH_DANTE_GM": "10.77.7.200", "STRIH_PROGRAM_AUDIO_SAMPLER": "off",  # issue 1536: the Dante GM on VLAN 70
     "STRIH_PROGRAM_SENDER": "none", "STRIH_VENUE": "pp",
     # issue 1413: dev1 dials the PP camboxes as 10.76.9.<octet> through companion-pp.
     "STRIH_CAMERA_DEV1_NET": "10.76.9",
@@ -398,15 +398,19 @@ def test_the_pp_matrix_satisfies_the_hub_load_rules():
     assert m["hub"]["sample_rate"] == 48000 and m["hub"]["block_frames"] > 0
     parts = m["participant"]
     assert len({p["name"] for p in parts}) == len(parts)
-    assert all(p["role"] in KNOWN_ROLES and p["adapter"] in {"vban", "none", "janus", "pipewire", "alsa_hdmi", "alsa"} for p in parts)
+    assert all(p["role"] in KNOWN_ROLES and p["adapter"] in {"vban", "none", "janus", "pipewire", "alsa_hdmi", "alsa", "dlink"} for p in parts)
     assert not any(p["role"] == "program_out" or p["name"] == "program_out" for p in parts)
     assert not any(pt["src"] == "program_out" or pt["dst"] == "program_out" for pt in m["point"])
     assert not any(p["adapter"] == "pipewire" for p in parts), "nothing on strih-pp needs PipeWire (issue 1440)"
     # issue 1431: cam1-7, so a joint event's SNV cameras are served here too
-    assert len(parts) == 11 and len(m["point"]) == 164, (len(parts), len(m["point"]))
-    # lv1's `strih` still feeds the vestibule at unity and the cutters' cans 8 dB down
+    # issue 1536 (18.11.2026): + the hub's own Dante device dsg_dante (adapter dlink), the program from dsg
+    assert len(parts) == 12 and len(m["point"]) == 164, (len(parts), len(m["point"]))
+    # dsg's program over Dante feeds the vestibule at unity and the cutters' cans 8 dB down; lv1 feeds nothing
+    assert not [pt for pt in m["point"] if pt["src"] == "lv1"]
+    dante = next(p for p in parts if p["name"] == "dsg_dante")
+    assert (dante["role"], dante["adapter"], dante["in_channels"], dante["out_channels"]) == ("program_ref", "dlink", 2, 0)
     assert sorted((pt["dst"], pt["in_ch"], pt["out_ch"], pt.get("gain_db", 0.0)) for pt in m["point"]
-                  if pt["src"] == "lv1") == [("cutters", 1, 1, -8.0), ("cutters", 2, 2, -8.0),
+                  if pt["src"] == "dsg_dante") == [("cutters", 1, 1, -8.0), ("cutters", 2, 2, -8.0),
                                              ("vestibule", 1, 1, 0.0), ("vestibule", 2, 2, 0.0)]
     src = next(p for p in parts if p["name"] == "lv1")
     assert (src["role"], src["host"], src["in_channels"], src["in_stream"]) == ("program_ref", "lv1.lan", 2, "strih")
@@ -434,8 +438,8 @@ def test_the_pp_matrix_carries_the_camera_intercom():
             if a != b:
                 assert (a, b) in routes, (a, b)       # everyone hears everyone else
     assert not [r for r in routes if r[0] == r[1]], "never a participant to itself (N-1)"
-    assert ("lv1", "cutters") in routes and ("lv1", "phones") not in routes
-    assert not [r for r in routes if r[1] in cams and r[0] == "lv1"], "the cameramen never get the program"
+    assert ("dsg_dante", "cutters") in routes and ("dsg_dante", "phones") not in routes  # issue 1536
+    assert not [r for r in routes if r[1] in cams and r[0] in ("lv1", "dsg_dante")], "the cameramen never get the program"
     # a cutter's mic reaches every camera on both ears, as on SNV
     for c in cams:
         assert {(pt["in_ch"], pt["out_ch"]) for pt in m["point"] if pt["src"] == "cutters" and pt["dst"] == c} \
@@ -502,7 +506,7 @@ def test_the_pp_vestibule_hears_the_lv1_program_on_hdmi_1_1424():
     assert (ves["in_channels"], ves["out_channels"]) == (0, 2)
     assert not any(k in ves for k in ("host", "pipewire_target", "pipewire_source", "out_stream"))
     assert sorted((pt["src"], pt["in_ch"], pt["out_ch"], pt.get("gain_db", 0.0))
-                  for pt in m["point"] if pt["dst"] == "vestibule") == [("lv1", 1, 1, 0.0), ("lv1", 2, 2, 0.0)]
+                  for pt in m["point"] if pt["dst"] == "vestibule") == [("dsg_dante", 1, 1, 0.0), ("dsg_dante", 2, 2, 0.0)]  # issue 1536
     assert not [pt for pt in m["point"] if pt["src"] == "vestibule"], "an output only"
     hdmi = [p for p in m["participant"] if p["adapter"] == "alsa_hdmi"]
     assert len({p["hdmi_connector"] for p in hdmi}) == len(hdmi), "one participant per connector"

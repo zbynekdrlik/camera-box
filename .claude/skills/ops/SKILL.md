@@ -801,13 +801,13 @@ all live senders (observed live: finder returned only {CAM2} while CAM1/3/4 were
 rebooted box appears "gone"). Setting `ndi_source_name` by hand still connects → the source IS
 reachable, only DISCOVERY fails.
 
-**Sender-side fix (shipped, code):** the camera-box NDI sender (`NDIlib_send_create`, `src/ndi.rs`)
+**Sender-side fix (shipped, code):** the camera-box NDI sender (`NDIlib_send_create`, `vstack:av/ndi/src/ndi.rs`)
 used to be created ONCE at startup and never re-register. It now **re-announces** (re-creates the
 sender → re-runs the mDNS announce on the CURRENT network) when the host's usable **LAN** address
-set CHANGES or RECOVERS from an outage. Pure trigger in `src/reannounce.rs`
+set CHANGES or RECOVERS from an outage. Pure trigger in `vstack:av/ndi/src/reannounce.rs`
 (`should_reannounce(announced, current, saw_down_since_announce)`, `is_discoverable_interface()`
 LAN-NIC denylist, `REANNOUNCE_POLL_INTERVAL=2s`); Linux IO (`getifaddrs`) +
-`NdiSender::maybe_reannounce()` in `src/ndi.rs`; called each report tick by the capture loop.
+`NdiSender::maybe_reannounce()` in `vstack:av/ndi/src/ndi.rs`; called each report tick by the capture loop.
 Steady state never re-creates (would drop connected OBS receivers) — only a real change does.
 
 **GOTCHA — re-announce MUST destroy before create (#297 dev.139 infinite loop):** `NDIlib_send_create`
@@ -819,10 +819,10 @@ without ever advancing the announced signature → infinite WARN loop, box never
 invariants: (1) advance the trigger (`announced`) ONLY on a SUCCESSFUL create — `ReannounceState::record_reannounce_attempt(current, created_ok)`; a failed create leaves state unchanged so the next
 poll retries. (2) the emit path (`send_frame_data_with_timecode`) must GUARD a null `self.sender` (drop
 the frame, don't call `send_send_video_v2(NULL)` = UB) for the brief destroy→create window. Convergence
-+ retry are unit-tested purely in `src/reannounce.rs`.
++ retry are unit-tested purely in `vstack:av/ndi/src/reannounce.rs`.
 
-**FFI ORDERING is now LOCKED by a test seam (#317):** the pure `src/reannounce.rs` tests never call the
-FFI, so a revert to create-first kept them green while reintroducing the loop. `src/ndi.rs` has a private
+**FFI ORDERING is now LOCKED by a test seam (#317):** the pure `vstack:av/ndi/src/reannounce.rs` tests never call the
+FFI, so a revert to create-first kept them green while reintroducing the loop. `vstack:av/ndi/src/ndi.rs` has a private
 `trait NdiSendOps { send_create; send_destroy }` separating the two FFI calls from `NdiLib`'s
 `libloading::Library`; `NdiLib` impls it as a thin `#[inline]` pass-through (live path byte-identical),
 and `fn reannounce_dance<O: NdiSendOps>(ops, &mut sender, settings, &mut trigger, current)` holds the

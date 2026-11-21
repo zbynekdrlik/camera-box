@@ -42,6 +42,12 @@ paths:
     which is why they are not facets.
   - `bundle_state_serverlog`: the ONE timestamped stdout `log()` the server and those readers
     share (the hyphenated server cannot be imported back by a sibling).
+  - `bundle_state_video` (issue 1540): `GET /video-connections.json` for dcontroller. A STATEFUL
+    log follower held on `_State.video`: the newest log's path + byte offset + running totals, only
+    the new bytes read per request (the whole log once at start), a new log file = a new run. The
+    genlock audit + dante counters are cumulative (newest value, `counters_since` moves when one goes
+    backwards); the JPEG XS `jxs-source` / `jxs-output` lines are per 5-s window and summed. It never
+    goes through the bounded read: the 5 MB tail covers only ~110 min of a session.
   - The server keeps the orchestration (`_windows_*_facets`) and calls the readers through its OWN
     globals, and re-exports every reader, parser and cache its tests reach as `bss.<name>`.
   - **A `bss.<name>` patch reaches ONLY the calls the server itself makes:** the readers

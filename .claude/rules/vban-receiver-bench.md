@@ -71,6 +71,12 @@ designs 6338127636 and 6338457001.
 - **The emulator's own send lateness is graded.** A sender wake late by more than
   `--emulator-late-bound-ms` (5 ms) changes the profile's shape, so that profile is `INVALID`
   (bench.tsv column `emulator_late_ms`), never blamed on the receiver and never a PASS.
+- **The test track is EXCLUSIVE during a run (21.11.2026).** Every strih input feeds tracks 1-6 (OBS's
+  default) and the Dante program input `ASIO zvuk` is audible, so the R = 80 ms run of 21.11 recorded
+  the program audio on track 6 (every profile INVALID). setup takes the test track out of every OTHER
+  feeder (`_make_track_exclusive`, each feeder's tracks saved in the state file before its change, a
+  read-back that still feeds it fails the setup) and teardown puts it back (`_restore_feeders`), leaving
+  a feeder the operator switched back on meanwhile alone. Tests: `test_vban_bench_exclusive_track_1460.py`.
 - **The test input is removed on every exit**, also during a broadcast: a silent input on a
   non-program track is safe to remove. `teardown` removes only an input whose kind, port and stream
   name are the bench's, and restores RecTracks only while it still holds the value setup wrote.

@@ -188,14 +188,15 @@ def test_strih_pp_keeps_every_session_app_and_lists_the_pp_boxes(boxes):
     a = _applied(boxes, "strih-pp")
     assert a["UNITS"].split() == ["strih-browser-keeper.service", "bkshading-panel-app.service",
                                   "companion-satellite.service", "strih-satellite-watch.timer",
-                                  "dsync-tray.service", "strih-display-watch.service", "dtray.service"]
-    assert a["ROWS"] == "13"
+                                  "dsync-tray.service", "strih-display-watch.service", "dtray.service",
+                                  "intercom-tray.service"]  # issue 1542: the intercom tray, strih role only
+    assert a["ROWS"] == "14"
     assert a["PINNED"] == "10.77.8.204,10.77.8.202"
 
 
 def test_strih_lx_keeps_the_snv_fleet_list(boxes):
     a = _applied(boxes, "strih-snv")
-    assert a["ROWS"] == "13"
+    assert a["ROWS"] == "14"  # issue 1542: + the intercom tray's unit row
     assert a["PINNED"] == "10.77.9.202,10.77.9.204"
 
 

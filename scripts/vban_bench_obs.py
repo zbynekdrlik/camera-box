@@ -257,6 +257,7 @@ def _setup_changes(rpc, state_path, state, facts, settings, track, sleep, monoto
     mon = (rpc("GetInputAudioMonitorType", {"inputName": input_name}) or {}).get("monitorType")
     if mon != MONITOR_OFF:
         raise BenchError("the test input's monitoring reads back %r, want %s" % (mon, MONITOR_OFF))
+    _make_track_exclusive(rpc, state_path, state, facts.get("track_feeders") or [], track)
     orig = facts["rectracks"]
     new = rectracks_with(orig, track)
     state.update({"rectracks_orig": orig, "rectracks_set": new, "audio_stream_index": audio_stream_index(new, track)})
@@ -286,6 +287,43 @@ def _setup_changes(rpc, state_path, state, facts, settings, track, sleep, monoto
     state["steps"].append("active")
     _save(state_path, state)
     return state
+
+
+def _make_track_exclusive(rpc, state_path, state, feeders, track):
+    """Issue 1460 (21.11.2026): take the test track out of every OTHER input that feeds it. Every strih
+    input feeds tracks 1-6 by OBS's default and the Dante program input is audible, so without this the
+    test track records the program audio. Each feeder's tracks are saved BEFORE its change."""
+    key = str(track)
+    saved = state.setdefault("feeder_tracks", {})
+    for name in feeders:
+        cur = (rpc("GetInputAudioTracks", {"inputName": name}) or {}).get("inputAudioTracks") or {}
+        if not cur.get(key):
+            continue
+        saved[name] = dict(cur)
+        state["steps"].append("exclusive:" + name)
+        _save(state_path, state)
+        rpc("SetInputAudioTracks", {"inputName": name, "inputAudioTracks": {key: False}})
+        got = (rpc("GetInputAudioTracks", {"inputName": name}) or {}).get("inputAudioTracks") or {}
+        if got.get(key):
+            raise BenchError("the input %r still feeds the test track %d after taking it out" % (name, track))
+
+
+def _restore_feeders(rpc, state, actions, left):
+    """Put the test track back on every input setup took it from; one switched back on meanwhile is left."""
+    key = str(state.get("track"))
+    for name, orig in sorted((state.get("feeder_tracks") or {}).items()):
+        if not orig.get(key):
+            continue
+        cur = (rpc("GetInputAudioTracks", {"inputName": name}, ignore_err=True) or {}).get("inputAudioTracks")
+        if cur is None:
+            left.append("the tracks of %r are unreadable: track %s may still be off" % (name, key))
+        elif cur.get(key):
+            actions.append("%r already feeds track %s again -- left alone" % (name, key))
+        else:
+            rpc("SetInputAudioTracks", {"inputName": name, "inputAudioTracks": {key: True}}, ignore_err=True)
+            back = (rpc("GetInputAudioTracks", {"inputName": name}, ignore_err=True) or {}).get("inputAudioTracks") or {}
+            (actions if back.get(key) else left).append(
+                ("track %s back on %r" if back.get(key) else "track %s did not come back on %r") % (key, name))
 
 
 # OBS lists a removed input until its release runs (live strih-snv 28.10.2026: one read right after
@@ -335,6 +373,7 @@ def teardown(rpc, state, sleep=time.sleep):
                 "RecTracks restored to %d" % orig if back == orig else "RecTracks reads %r after restoring %d" % (back, orig))
         elif cur != orig:
             left.append("RecTracks is %r, neither the bench's %d nor the original %d -- left alone" % (cur, setv, orig))
+    _restore_feeders(rpc, state, actions, left)
     steps = state.get("steps") or []
     prev = state.get("preview_scene")
     if "reprogram" in steps and "active" not in steps and state.get("studio_mode") and prev:

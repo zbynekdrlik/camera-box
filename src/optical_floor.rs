@@ -36,7 +36,7 @@
 //!
 //! The whole `probe` module is `#[cfg(feature = "probe")]` (it pulls `image`/`rqrr`/`drm`, which
 //! balloon the shared dev1 `target/` — CLAUDE.md's Local Build Policy). This module is the PURE
-//! decision seam — the same pattern as `src/reannounce.rs`, `src/colour_scale.rs`, and
+//! decision seam — the same pattern as `vstack:av/ndi/src/reannounce.rs`, `src/colour_scale.rs`, and
 //! `src/presentation_cadence.rs`: no probe deps, so it unit-tests Tier-0 (default features, no
 //! framebuffer, no QR decode). `probe::recording_segments::window_segment` /
 //! `segment_continuity` only CALL these two functions; they never re-derive the thresholds.

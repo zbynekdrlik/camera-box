@@ -4,6 +4,7 @@ paths:
   - "scripts/lib/obs-box-kiosk.sh"
   - "scripts/lib/obs-box-baseline-verify.sh"
   - "scripts/lib/obs-box-background.sh"
+  - "scripts/lib/obs-box-coredump.sh"
   - "scripts/background-load-bench.sh"
   - "scripts/background_load_decision.py"
   - "scripts/lib/rig-timezone.sh"
@@ -209,6 +210,43 @@ any dGPU + iGPU notebook has it.
   the install; the real gather with its paths moved; the row), the `gpu_wait` / `x_core` rows in
   `tests/obs_box_baseline_1357.rs`.
 
+## lightdm waits for dsync's placed boot date (kiosk facet, issue 1483)
+
+strih-pp, 25.10.2026: OBS came up 48 s before dsync (the PP date master) stepped its own wall back
+3.7 s, so the running OBS saw a 3.5 s wall step; it repeated on every boot. dsync >= 1.30 (the pin is
+1.35.2) sends READY=1 only once the boot date is placed, bounded at 30 s.
+
+- The OBS-box dsync unit (`strih_dantesync_unit_text`) is `Type=notify` + `NotifyAccess=main` +
+  `TimeoutStartSec=120`, the lines of dsync's own installer unit (`install.sh` at the pinned tag). The
+  cambox unit (`cambox_dsync_unit_text`) stays `Type=simple`.
+- `obs_box_kiosk` runs `obs_box_dsync_ready_install` right after the GPU wait:
+  `/etc/systemd/system/lightdm.service.d/55-obs-box-dsync-ready.conf` = `[Unit]` `After=dsync.service`
+  + `Wants=dsync.service`, through `obs_box_write_if_changed_rendered`, then a daemon-reload. The
+  `--user` strih-obs unit cannot order on a system unit, so the order lives on lightdm. Never
+  `Requires=`: a failed or timed-out dsync must still give the operator a desktop.
+- A `systemctl restart dsync` now returns only after READY (at most ~30 s after the loop starts), so
+  setup-strih step 2's restart of a changed unit takes that long. The first setup-strih run after
+  this change rewrites the unit (Type= changed) and restarts dsync once per box: on strih-snv, the
+  date master, schedule it in the nightly window (the date-master rule in strih-linux-provisioning.md).
+- **Never the notify unit over a dsync below 1.30** (it sends no READY: systemd would kill it at every
+  120 s start timeout, a flapping clock). `strih_dantesync_install` reads the installed binary's
+  `--version` first (`strih_dantesync_notify_binary_ok`, scripts/lib/strih-dantesync.sh) and refuses,
+  touching nothing, when it is older; roll the box with `dantesync-fleet-upgrade.sh`. An unreadable
+  version is a named WARN; no binary yet (a fresh box) needs no read.
+- **The worst case is a 120 s black boot, not 30 s.** dsync waits for its pinned `--interface` NIC
+  BEFORE its 30 s READY bound starts (v1.35.2 `src/main.rs`: the pinned wait at ~717, the ReadyGate at
+  ~871), and that wait is unbounded. A rig NIC that never appears (a missing cable, an unauthorized
+  Thunderbolt NIC, stream-snv's renamed USB `rig0`) leaves lightdm waiting until `TimeoutStartSec=120`;
+  `Wants=` then lets it start, and systemd restarts dsync every ~125 s while the NIC stays away.
+- **imag** gets the drop-in through `obs_box_kiosk`, but setup-imag writes its own dsync unit, still
+  `Type=simple`: there the drop-in only orders lightdm after dsync STARTED. imag is retired; move it onto
+  `strih_dantesync_unit_text` when it is provisioned again.
+- Grader row `kiosk` also needs `dsync_ready=1` (the drop-in byte-identical to its renderer).
+- Tests: `tests/python/test_dsync_ready_boot_order_1483.py`, the `dsync_ready` rows in
+  `tests/obs_box_baseline_1357.rs`, the 1361 golden's `dantesync-unit` section.
+- Read-back (supervisor, a cold boot after a day off): `journalctl -b -u dsync` shows `[READY] the
+  wall is placed` before lightdm starts, and the first OBS log line is after it.
+
 ## The iGPU panel sink on the modesetting DDX (item `obs_box_igpu_sink_modesetting`, grader row `igpu-sink`, issue 1418)
 
 On an NVIDIA-primary notebook (PRIME nvidia-primary) NVIDIA renders the X screen and the iGPU scans
@@ -288,6 +326,42 @@ OBS browser source and the restreamer (14.10.2026 09:37).
 - Tests: `tests/python/test_obs_box_swap_1428.py` (stubbed tools, path seams `OBS_BOX_SWAPFILE` /
   `OBS_BOX_FSTAB` / `OBS_BOX_MEMINFO`), the `swap` rows in `tests/obs_box_baseline_1357.rs`.
 
+## A crashing OBS never freezes its box (item `obs_box_coredump_bound`, grader row `coredump`, issue 1441)
+
+stream-pp, 18.11.2026 17:16: OBS aborted (SIGABRT after `amdgpu: Not enough memory for command
+submission`), then systemd-coredump (installed by the crash-popup item) read, wrote and compressed the
+multi-GB core under its compiled 32G defaults. The notebook froze for minutes until a power cycle.
+
+- **The bound:** `/etc/systemd/coredump.conf.d/90-obs-box-coredump.conf` = `ProcessSizeMax` +
+  `ExternalSizeMax` = `obs_box_coredump_size_max` (256M, the ONE value). Storage stays `external`.
+- **Why it works (systemd v255/v258 `coredump.c`, `save_external_coredump`):** at most
+  `MIN(RLIMIT_CORE, MAX(ProcessSizeMax, <Storage>SizeMax))` bytes are streamed to disk; past it the core
+  is `truncated` (`COREDUMP_TRUNCATED=1`), systemd-coredump exits, the kernel's pipe closes and the dump
+  ends. Both sizes must be capped, and `Storage=journal` would lift it to `JournalSizeMax` (767M).
+- **What is lost:** the stack trace of a core bigger than the cap (the trace needs the core on disk,
+  coredump.conf(5)). The journal still records `Process N (obs) ... dumped core.` with signal, exe and
+  cmdline. Small cores (Xorg, dsync, the hub, the session apps) keep a full core + stack in coredumpctl;
+  that is why a cap, not `Storage=none` + `ProcessSizeMax=0` (which drops every core) and not a per-unit
+  `LimitCORE=` (misses a hand-started OBS, imag's launcher, CEF helpers).
+- **imag's issue-882 core capture still holds under the cap.** imag's OBS unit sets
+  `LimitCORE=infinity` so a segfault leaves an inspectable core; the 30.7.2026 live proof was an 88 MB
+  OBS core, which fits 256M whole (with its stack). Only a multi-GB core (stream-pp's amdgpu OBS) is
+  truncated. If a debuggable OBS core over the cap is ever needed, raise the ONE value
+  (`obs_box_coredump_size_max`) on purpose, never per box.
+- **A FAILing row can be a foreign drop-in**, not a missing setup: a file sorted after `90-` that lifts a
+  size wins in systemd too. The row's detail names `systemd-analyze cat-config systemd/coredump.conf`.
+- **No restart:** systemd-coredump runs `parse_config()` (coredump.conf + coredump.conf.d) at every
+  invocation, one per crash. The item never calls systemctl.
+- **Install:** `scripts/lib/obs-box-coredump.sh` (sourced by the system half, its line budget), through
+  `obs_box_write_if_changed_rendered`, on the `obs_box_rtprio_off ; obs_box_swap ...` line of BOTH setups
+  (`obs_box_coredump_bound || fail`).
+- **Grader row `coredump`** (last): the drop-in byte-identical to its renderer (`coredump_dropin`) AND the
+  EFFECTIVE values (`coredump_effective` = `Storage,ProcessSizeMax,ExternalSizeMax`, the last assignment
+  in the `[Coredump]` section of `systemd-analyze cat-config systemd/coredump.conf`, pure filter
+  `obs_box_coredump_effective`) are `external|none` + the bound. A later drop-in that lifts it FAILs; an
+  unreadable merge prints nothing and FAILs.
+- Tests: `tests/python/test_obs_box_coredump_1441.py`, the `coredump` rows in `tests/obs_box_baseline_1357.rs`.
+
 ## Background work off the OBS cores (item `obs_box_background_slice`, grader row `background`, issue 1387)
 
 Owner 2.11.2026: OBS on a broadcast box must be immune to background load; backups are never disabled or
@@ -353,6 +427,19 @@ sibling. The E-core pin of the decode is empty on AMD (no `cpu_atom`).
   page cache, so `MemoryHigh` is not measured by it. No sound, no scene change, no recording.
 - **Tests:** `tests/python/test_obs_box_background_1387.py` (stubs + moved paths, the real installer, runner
   and gather), the `background` row in `tests/obs_box_baseline_1357.rs`.
+
+## EEE off on every wired NIC (row `eee`, owner 20.11.2026 via dstack#465)
+
+EEE enabled on ANY wired NIC of a rig box is a serious failure (owner). `obs_box_eee_off_cmds` turns it off on
+every `/sys/class/net` entry with a `device` link that is not wireless, up or down, from three places: the
+immediate apply, rc.local (boot) and the networkd-dispatcher hook. Flow control stays scoped to the rig NIC.
+**The follow-the-device half:** r8152 forgets `--set-eee` on every USB re-attach, and the networkd-dispatcher
+hook never fires for a NetworkManager NIC (stream-snv rig0 read `enabled - inactive` again after dstack's
+unbind/bind, 20.11.2026). `obs_box_eee_udev_install` writes `/etc/udev/rules.d/70-obs-box-eee-off.rules`
+(`ACTION=="add", SUBSYSTEM=="net"`, wired only, `RUN+=` ethtool), applied at add before the link comes up:
+a set on an UP link renegotiates it (a ~4 s outage). Row `eee` FAILs on any wired NIC reading enabled
+(also `enabled - inactive`) or unreadable, or a rule that is not byte-identical to `obs_box_eee_udev_rule`.
+dstack's `tools/linux/nic-standard-check.py` grades the same rule independently.
 
 ## The rig time zone (item `obs_box_timezone`, grader row `timezone`, issue 1415)
 

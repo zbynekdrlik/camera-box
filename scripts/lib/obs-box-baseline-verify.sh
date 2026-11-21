@@ -25,7 +25,8 @@
 # -> openbox, no GNOME), websocket (python3-websocket for the OBS seeders), brightness (the kiosk
 # panel-brightness keys),
 # autostart (the openbox autostart contract), power (thermald purged + PL1 envelope units), touchpad,
-# swap (a RAM-sized swapfile, active + in fstab, issue 1428).
+# swap (a RAM-sized swapfile, active + in fstab, issue 1428), coredump (systemd-coredump capped so a crashing OBS
+# never freezes its box, issue 1441).
 # Fail-closed: a fact the gather could not read grades FAIL ("unreadable"), never a silent pass.
 
 # (the directory is a pure parameter expansion -- no dirname/cd -- like obs-box-baseline.sh's own)
@@ -128,6 +129,25 @@ obs_box_holds_generic_kernel() {
 # detectors it needs (obs_box_has_discrete_nvidia, obs_box_crash_popup_units) are embedded from THIS lib
 # via `declare -f` -- one source of truth on the provisioning AND the grading side. Every read is `|| true`
 # guarded: a missing tool/file yields an empty value, which the verdict grades FAIL (unreadable).
+# obs_box_eee_state [SYSROOT] -- owner 20.11.2026: `eee_on=` the wired NICs (up or down) whose
+# `ethtool --show-eee` reads enabled (also "enabled - inactive"), `eee_unread=` the ones whose state could
+# not be read; a NIC with no EEE support ("not supported") is fine. Wireless and virtual entries are skipped.
+obs_box_eee_state() {
+    local sys="${1:-/sys}" d n out on="" unread=""
+    for d in "$sys"/class/net/*; do
+        n="${d##*/}"
+        [ -e "$d/device" ] || continue
+        if [ -e "$d/wireless" ] || [ -e "$d/phy80211" ]; then continue; fi
+        out="$(ethtool --show-eee "$n" 2>&1)" || true
+        case "$out" in
+            *"EEE status: enabled"*) on="${on:+$on }$n" ;;
+            *"EEE status: disabled"* | *"EEE status: not supported"* | *"Operation not supported"*) ;;
+            *) unread="${unread:+$unread }$n" ;;
+        esac
+    done
+    printf 'eee_on=%s\neee_unread=%s\n' "$on" "$unread"
+}
+
 obs_box_baseline_gather_snippet() {
     # issue 1466: SESSION = the lightdm autologin session the kiosk wrote (openbox, imag's only value; a strih
     # box passes its STRIH_DESKTOP, openbox | xfce).
@@ -142,10 +162,12 @@ obs_box_baseline_gather_snippet() {
         obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
         obs_box_cpu_latency_bound_us rig_timezone_read obs_box_amdgpu_ddx_package obs_box_pkg_status \
         obs_box_gpu_ready_wait_path obs_box_gpu_ready_dropin_path obs_box_gpu_ready_wait_text obs_box_gpu_ready_dropin_text \
+        obs_box_dsync_ready_dropin_path obs_box_dsync_ready_dropin_text \
         obs_box_cpulist_expand obs_box_cpulist_compress obs_box_background_cpus obs_box_background_smt_shared \
         obs_box_background_slice_name obs_box_background_slice_path obs_box_background_dropin_path \
         obs_box_background_run_path obs_box_background_memory_high obs_box_background_slice_text \
-        obs_box_background_dropin_text obs_box_background_run_text
+        obs_box_background_dropin_text obs_box_background_run_text obs_box_eee_state obs_box_eee_udev_rule \
+        obs_box_coredump_size_max obs_box_coredump_dropin_path obs_box_coredump_dropin_text obs_box_coredump_effective
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
@@ -159,6 +181,10 @@ echo "nic_hook=$(if [ -x /etc/networkd-dispatcher/routable.d/optimize-nic ]; the
 echo "cpu_perf_unit=$(systemctl is-enabled cpu-performance.service 2>/dev/null | first)"
 echo "rc_local_eee=$(if [ -x /etc/rc.local ] && grep -qF 'ethtool --set-eee' /etc/rc.local 2>/dev/null; then echo 1; else echo 0; fi)"
 echo "rc_local_active=$(systemctl is-active rc-local.service 2>/dev/null | first)"
+_eee_facts="$(obs_box_eee_state)"
+echo "eee_on=$(printf '%s\n' "$_eee_facts" | sed -n 's/^eee_on=//p')"
+echo "eee_unread=$(printf '%s\n' "$_eee_facts" | sed -n 's/^eee_unread=//p')"
+echo "eee_udev=$(if cmp -s /etc/udev/rules.d/70-obs-box-eee-off.rules <(obs_box_eee_udev_rule); then echo 1; else echo 0; fi)"
 echo "cpufreq_policies=$(ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | wc -l)"
 echo "governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')"
 echo "maxperf_active=$(systemctl is-active "${BOX}-maxperf.service" 2>/dev/null | first)"
@@ -280,6 +306,9 @@ echo "autologin=$(if grep -qxF "autologin-user=${U}" "$_al" 2>/dev/null && grep 
 # Xorg core dumps (an Xorg abort made lightdm fall back to the login screen).
 _gw="$(obs_box_gpu_ready_wait_path)"; _gd="$(obs_box_gpu_ready_dropin_path)"
 echo "gpu_wait=$(if [ -x "$_gw" ] && cmp -s "$_gw" <(obs_box_gpu_ready_wait_text) && cmp -s "$_gd" <(obs_box_gpu_ready_dropin_text); then echo 1; else echo 0; fi)"
+# issue 1483: lightdm ordered after dsync (its Type=notify READY = the boot date placed), byte-identical.
+_dd="$(obs_box_dsync_ready_dropin_path)"
+echo "dsync_ready=$(if cmp -s "$_dd" <(obs_box_dsync_ready_dropin_text); then echo 1; else echo 0; fi)"
 # One per crashed Xorg (systemd-coredump logs "terminated abnormally" and/or "dumped core" per crash). An
 # unreadable system journal (no PID 1 line this boot: a user outside adm/systemd-journal) prints empty,
 # never 0.
@@ -321,6 +350,10 @@ echo "touchpad=$(_tp=/etc/X11/xorg.conf.d/30-touchpad-tap.conf; if grep -qF 'Opt
 echo "swap_bytes=$(swapon --show=SIZE --bytes --noheadings 2>/dev/null | awk '{s += $1} END {print s + 0}')"
 echo "mem_bytes=$(awk '/^MemTotal:/{print $2 * 1024; exit}' /proc/meminfo 2>/dev/null)"
 echo "swap_fstab=$(grep -cE '^[^#[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+swap[[:space:]]' /etc/fstab 2>/dev/null)"
+# issue 1441: the coredump bound -- the drop-in byte-identical to its renderer, and what systemd will
+# really use (the cat-config merge; an unreadable merge prints nothing)
+echo "coredump_dropin=$(if cmp -s "$(obs_box_coredump_dropin_path)" <(obs_box_coredump_dropin_text); then echo 1; else echo 0; fi)"
+echo "coredump_effective=$(systemd-analyze cat-config systemd/coredump.conf 2>/dev/null | obs_box_coredump_effective)"
 echo "gather_done=1"
 GATHER_EOF
 }
@@ -354,7 +387,7 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in timezone net perf cstate nosleep boot kernel affinity rtprio background gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap; do
+        for v in timezone net perf cstate nosleep boot kernel affinity rtprio background gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap coredump eee; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
@@ -481,8 +514,8 @@ obs_box_baseline_verdict() {
     ok=0; [ "$(_obs_box_f lightdm)" = "install ok installed" ] && [ "$(_obs_box_f openbox)" = "install ok installed" ] \
         && [ -n "$(_obs_box_f dm)" ] && [ "$(_obs_box_f dm)" = "$(_obs_box_f dm_lightdm)" ] && [ "$(_obs_box_f autologin)" = 1 ] \
         && [ "$(_obs_box_f gdm3)" != "install ok installed" ] && [ "$(_obs_box_f gnome_shell)" != "install ok installed" ] \
-        && [ "$(_obs_box_f gpu_wait)" = 1 ] && [ "$(_obs_box_f x_core)" = 0 ] && ok=1
-    _obs_box_item kiosk "$ok" "lightdm='$(_obs_box_f lightdm)' openbox='$(_obs_box_f openbox)' display-manager=$(_obs_box_f dm) autologin->session=$(_obs_box_f autologin) gdm3='$(_obs_box_f gdm3)' gnome-shell='$(_obs_box_f gnome_shell)' gpu-ready wait installed=$(_obs_box_f gpu_wait) Xorg core dumps this boot=$(_obs_box_f x_core)"
+        && [ "$(_obs_box_f gpu_wait)" = 1 ] && [ "$(_obs_box_f dsync_ready)" = 1 ] && [ "$(_obs_box_f x_core)" = 0 ] && ok=1
+    _obs_box_item kiosk "$ok" "lightdm='$(_obs_box_f lightdm)' openbox='$(_obs_box_f openbox)' display-manager=$(_obs_box_f dm) autologin->session=$(_obs_box_f autologin) gdm3='$(_obs_box_f gdm3)' gnome-shell='$(_obs_box_f gnome_shell)' gpu-ready wait installed=$(_obs_box_f gpu_wait) dsync-ready order installed=$(_obs_box_f dsync_ready) Xorg core dumps this boot=$(_obs_box_f x_core)"
     # websocket -- python3-websocket installed AND importable by the system python3 (issue 1361): the
     # strih/imag OBS launchers run a websocket scene seeder and strih-obs-start.sh refuses to start OBS
     # without it
@@ -514,5 +547,17 @@ obs_box_baseline_verdict() {
     case "$sb$mb" in '' | *[!0-9]*) ;; *) [ "$((sb * 10))" -ge "$((mb * 9))" ] && [ "$sb" -gt 0 ] \
         && case "$(_obs_box_f swap_fstab)" in '' | 0 | *[!0-9]*) false ;; *) true ;; esac && ok=1 ;; esac
     _obs_box_item swap "$ok" "active swap=${sb:-unreadable} B, RAM=${mb:-unreadable} B, fstab swap lines=$(_obs_box_f swap_fstab) -- setup obs_box_swap (issue 1428)"
+    # coredump -- issue 1441: the bound drop-in installed AND the effective config is the bound (Storage
+    # external or none, both sizes = obs_box_coredump_size_max); an unread merge is a FAIL, never a pass
+    local cd_want
+    cd_want="$(obs_box_coredump_size_max)"
+    ok=0
+    case "$(_obs_box_f coredump_effective)" in "external,${cd_want},${cd_want}" | "none,${cd_want},${cd_want}")
+        [ "$(_obs_box_f coredump_dropin)" = 1 ] && ok=1 ;; esac
+    _obs_box_item coredump "$ok" "drop-in=$(_obs_box_f coredump_dropin) effective Storage,ProcessSizeMax,ExternalSizeMax=$(_obs_box_f coredump_effective) (want external,${cd_want},${cd_want}) -- setup obs_box_coredump_bound, or a later drop-in overrides it: systemd-analyze cat-config systemd/coredump.conf (issue 1441)"
+    # eee -- owner 20.11.2026 (dstack#465): EEE enabled on ANY wired NIC, up or down, is a serious failure;
+    # an unreadable NIC FAILs too. Setup turns it off on every wired NIC (obs_box_eee_off_cmds).
+    ok=0; [ -z "$(_obs_box_f eee_on)" ] && [ -z "$(_obs_box_f eee_unread)" ] && [ "$(_obs_box_f eee_udev)" = 1 ] && ok=1
+    _obs_box_item eee "$ok" "EEE enabled on=[$(_obs_box_f eee_on)] unreadable=[$(_obs_box_f eee_unread)] udev-add-rule=$(_obs_box_f eee_udev) -- setup obs_box_network_tuning turns it off on every wired NIC and installs the udev add rule"
     [ "$fails" -eq 0 ]
 }

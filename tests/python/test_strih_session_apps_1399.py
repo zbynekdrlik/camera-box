@@ -120,6 +120,7 @@ def test_script_mapping_and_items():
         "dsync-tray.service [] dsync-tray",
         "strih-display-watch.service [strih_display_watch.py] display-watch",
         "dtray.service [] dtray",
+        "intercom-tray.service [] intercom-tray",
         "REFUSED",
     ]
 
@@ -687,6 +688,61 @@ def test_panel_url_port_is_the_service_default_bind_port():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from shading_release_fake_1487 import service_port
     assert _load_panel().PANEL_URL == "http://127.0.0.1:%s/" % service_port()
+
+
+class _Gdk:
+    class EventMask:
+        VISIBILITY_NOTIFY_MASK = 1 << 17
+
+    class VisibilityState:
+        UNOBSCURED, PARTIAL, FULLY_OBSCURED = 0, 1, 2
+
+
+class _VisEvent:
+    def __init__(self, state):
+        self.state = state
+
+
+def _panel_gdk():
+    mod = _load_panel()
+    tk = _Toolkit()
+    logs = []
+    app = mod.PanelWindow(tk.Gtk, tk.WebKit2, tk.GLib, log=logs.append, Gdk=_Gdk)
+    return tk, app, logs
+
+
+def test_panel_watches_its_x_visibility():
+    tk, _app, _logs = _panel_gdk()
+    win = tk.windows[0]
+    assert ("add_events", (_Gdk.EventMask.VISIBILITY_NOTIFY_MASK,)) in win.calls
+    assert "visibility-notify-event" in win.handlers
+
+
+def test_panel_hides_the_view_while_fully_covered_and_shows_it_again():
+    """shading v0.2.14 (shading#19): a panel under OBS must stop asking for previews, so the
+    service's NDI receivers disconnect; WebKitGTK alone reports a covered window as visible."""
+    tk, app, logs = _panel_gdk()
+    win, view = tk.windows[0], tk.views[0]
+    vis = win.handlers["visibility-notify-event"]
+    assert vis(win, _VisEvent(_Gdk.VisibilityState.FULLY_OBSCURED)) is False
+    assert view.calls[-1] == ("hide", ())
+    assert app.obscured is True
+    n = len(view.calls)
+    vis(win, _VisEvent(_Gdk.VisibilityState.FULLY_OBSCURED))
+    assert len(view.calls) == n, "a repeated event changes nothing"
+    vis(win, _VisEvent(_Gdk.VisibilityState.PARTIAL))
+    assert view.calls[-1] == ("show", ())
+    assert app.obscured is False
+    vis(win, _VisEvent(_Gdk.VisibilityState.UNOBSCURED))
+    assert view.calls[-1] == ("show", ()) and len(view.calls) == n + 1
+    assert sum("panel hidden" in line for line in logs) == 1
+    assert sum("panel shown" in line for line in logs) == 1
+
+
+def test_panel_main_passes_gdk_so_production_watches_visibility():
+    body = PANEL_APP.read_text().split('"""', 2)[2]
+    assert "from gi.repository import Gdk, Gtk, WebKit2" in body
+    assert "Gdk=Gdk)" in body
 
 
 def test_panel_source_never_uses_the_deprecated_or_stacking_calls():

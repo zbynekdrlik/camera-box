@@ -87,7 +87,7 @@ fn own_output_abort_is_skipped_for_terminal_box() {
 
 /// Review hardening (#91): when the terminal box's own OBS cannot self-discover its
 /// own output, setup MUST NOT emit the BARE generic Main-Output name. dev1's tap
-/// binds by substring (`name.contains` in src/ndi.rs), so a short generic bare word
+/// binds by substring (`name.contains` in vstack:av/ndi/src/ndi.rs), so a short generic bare word
 /// (the stream box's output name is literally `stream`) would collide with ANY other
 /// LAN source whose name merely contains it (`livestream`, `mainstream`, …) and bind
 /// the WRONG source — silently corrupting the strih→stream hop verdict, which is

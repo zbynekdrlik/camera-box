@@ -632,7 +632,7 @@ pub fn genlock_latency_depth_frames(
 // rate difference accumulates; it cannot eliminate it.
 //
 // Timestamp-aligned release fixes it. Every camera-box frame carries its real
-// DanteSync wall-clock CAPTURE instant (src/ndi.rs stamps the NDI timecode; DistroAV
+// DanteSync wall-clock CAPTURE instant (vstack:av/ndi/src/ndi.rs stamps the NDI timecode; DistroAV
 // passes it into `obs_source_frame->timestamp` in Source-Timecode mode). The strih
 // render tick is ALSO on the shared DanteSync wall clock. So at each tick we present,
 // from every source, the frame captured at the SAME instant `present_ts = tick_wall -

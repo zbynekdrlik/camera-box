@@ -444,6 +444,9 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # issue 1387 slice 2: the BLOCKING JPEG XS link continuity gate (a lost or concealed slice in the window = RED).
 # shellcheck source=scripts/lib/jxs-link-continuity.sh
 . "$HERE/lib/jxs-link-continuity.sh"
+# issue 1534: the BLOCKING whole-session video gate (a repeated frame or lost slice since the OBS start = RED).
+# shellcheck source=scripts/lib/genlock-session-continuity.sh
+. "$HERE/lib/genlock-session-continuity.sh"
 # #1134: the SOURCE-camera role (the "cam1 role") is no longer hard-pinned to cam1 -- it is the
 # first strih-routable member of CAMERA_ACTIVE_SET (camera_source_box, scripts/camera-set.sh), so
 # retiring cam1 from the active set (its USB grabber hw-faulted -- #1110 -EPROTO, owner order
@@ -1292,6 +1295,7 @@ done
 # issue 1271: guard immediately BEFORE this fleet MUTATION (it deploys + restarts camera-box.service
 # on the whole active fleet, and the painter align below redeploys cam2). A broadcast that started
 # during the read-only [0/8] gates above must be caught here, before the fleet's binary is touched.
+genlock_session_touch begin "$RUN_ID" "$STRIH" || true   # issue 1534: the run's own camera handling starts
 stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the camera-box + painter parity auto-align"
 cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 "$HERE/camera-box-version-gate.sh" \
@@ -2392,6 +2396,7 @@ fi"
   echo "[cleanup] #808 bkshading-relay restore (was-active: $CAMERA_NAME=$BKSH_PAUSE_CAM1_WAS_ACTIVE, cam2=$BKSH_PAUSE_PAINTER_WAS_ACTIVE)"
   bkshading_e2e_pause_restore "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW" "${BKSH_PAUSE_CAM1_WAS_ACTIVE:-0}"
   bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"
+  genlock_session_touch end "$RUN_ID" "$STRIH" || true   # issue 1534: the run's own camera handling ends
 }
 # #657: a plain foreground `sleep N` defers ALL signal handling — trapped OR default — until
 # that `wait4()` syscall returns on its own, i.e. until the sleep completes naturally. This is
@@ -4626,6 +4631,7 @@ youtube_leg_start "$HERE" "$STRIH" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDI
 genlock_audit_snapshot_capture before "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" || true
 program_audio_continuity_mark start "$OUTDIR" "$STREAM" || true   # issue 1439: program-audio window START (stream OBS log line count)
 jxs_link_continuity_mark start "$OUTDIR" "$STRIH" "$STREAM" || true   # issue 1387: JPEG XS link window START (byte marks)
+genlock_session_continuity_mark start "$OUTDIR" "$STRIH" "$STREAM" || true   # issue 1534: whole-session video, window START
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
 # #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
 # raises (nonzero exit) if the output isn't genuinely active + writing growing bytes — a
@@ -4907,6 +4913,7 @@ youtube_leg_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "${STRE
 genlock_audit_snapshot_capture after "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" || true
 program_audio_continuity_mark stop "$OUTDIR" "$STREAM" || true   # issue 1439: program-audio window END (graded after the merge)
 jxs_link_continuity_mark stop "$OUTDIR" "$STRIH" "$STREAM" || true   # issue 1387: JPEG XS link window END (graded after the merge)
+genlock_session_continuity_mark stop "$OUTDIR" "$STRIH" "$STREAM" || true   # issue 1534: whole-session video, window END
 
 # #1124 item 3 — POST-record stomp re-check (profile mode only, report-only). Runs HERE, right
 # after StopRecord while the measurement pins/hold are STILL in force (cleanup()'s teardown
@@ -5804,6 +5811,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     if ! youtube_leg_gate "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "$REPORT_JSON" "${STREAM_HOST_PATH:-}" "$MARKER_CSV" "$SWITCH_SCHEDULE_JSON" "$PROBE_BIN_DIR"; then [ "$GATE" -ne 0 ] || GATE=1; fi
     # issue 1387: a JPEG XS link loss (a concealed slice included) or an unprovable window is a blocking FAIL.
     if ! jxs_link_continuity_gate "$HERE" "$STRIH" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
+    # issue 1534: a repeated frame or a lost slice anywhere in the OBS session (not only the window) is a blocking FAIL.
+    if ! genlock_session_continuity_gate "$HERE" "$STRIH" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
     # #827: merge the fleet-preflight exclusion list into the verdict JSON so a run that excluded
     # boxes (ALL_CAMBOX only — PREFLIGHT_EXCLUDED_CAMS is otherwise unset/empty, and the merge
     # below is then a harmless no-op `excluded_cams: []`) can NEVER be read back as "full-fleet
@@ -6085,6 +6094,8 @@ if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; t
 if ! youtube_leg_gate "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "$REPORT_JSON" "${STREAM_HOST_PATH:-}" "$MARKER_CSV" "$SWITCH_SCHEDULE_JSON" "$PROBE_BIN_DIR"; then [ "$GATE" -ne 0 ] || GATE=1; fi
 # issue 1387: the JPEG XS link continuity gate, the legacy path's twin of the execute branch's.
 if ! jxs_link_continuity_gate "$HERE" "$STRIH" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
+# issue 1534: the whole-session video gate, the legacy path's twin of the execute branch's.
+if ! genlock_session_continuity_gate "$HERE" "$STRIH" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
 
 # #758 item 3 — the in-run freeze watch's own verdict (same check as the E2E_EXECUTE_VERDICT=1
 # branch's own early exit above; this is the LEGACY/plan-print path's equivalent tail).

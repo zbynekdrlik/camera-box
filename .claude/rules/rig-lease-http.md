@@ -273,6 +273,16 @@ the lease through the write routes below. The read contract above stays for any 
 - Live: the token install + restart is in `systemd/rig-lease-server.README.md`; restart only while
   `held=false`.
 
+### Since issue 1548: a re-run reclaims its own earlier attempt's lease
+
+A GitHub re-run keeps its run id. When the runner host dies mid-run (dev1 rebooted twice on
+21.11.2026), the dead attempt's holder kept a fresh-enough heartbeat and an in-progress run, so
+the next attempt waited its whole 1800 s and failed `RIG_LEASE_HELD`. `rig_lease_acquire` now
+reclaims a holder whose `repo` + `run_id` equal the caller's (`RIG_LEASE_RECLAIMED` + a
+`RIG LEASE SAME RUN RECLAIM` warning) before the stale test. GitHub never runs two attempts of one
+run at once; a local caller's id is `local-<pid>`. Any other holder is unchanged
+(`tests/python/test_rig_lease_same_run_reclaim_1548.py`).
+
 ### Since issue 1432: a lockdir with no holder.json is held for 10 s, then reclaimable
 
 `rig_lease_is_stale` (bash) and `rig_lease_state` (python, the GET view) treat a lockdir without

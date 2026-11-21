@@ -46,6 +46,7 @@ import argparse
 import glob
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -63,6 +64,7 @@ import bundle_state_gather as bsg  # noqa: E402
 # its caches, subprocess) resolves there, so patch or reset that module for it -- a cache in place,
 # never rebound.
 from bundle_state_serverlog import log  # noqa: E402
+import bundle_state_video  # noqa: E402  (issue 1540: the per-connection video counters)
 from bundle_state_windows import (  # noqa: E402
     _parse_tasklist_obs_process_names,
     gather_vb_matrix_facet,
@@ -517,6 +519,7 @@ class _State:
     def __init__(self):
         self.lock = threading.Lock()
         self.last_record_dir = None
+        self.video = bundle_state_video.VideoFollower(socket.gethostname().split(".")[0])  # issue 1540
 
 
 def make_handler(args, state):
@@ -532,8 +535,19 @@ def make_handler(args, state):
                 self._serve_bundle_state()
             elif path == "/record-dir-stats.json":
                 self._serve_record_dir_stats()
+            elif path == "/video-connections.json":
+                state.video.update(args.obs_log_dir)
+                self._send_json(state.video.snapshot())
             else:
                 self._serve_record_file(path)
+
+        def _send_json(self, payload):
+            body = json.dumps(payload, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _serve_bundle_state(self):
             try:

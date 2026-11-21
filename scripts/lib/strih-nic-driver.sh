@@ -646,6 +646,170 @@ strih_nic_single_homed_verdict() {
   printf 'OK|(nic-homed) only %s carries the rig subnet (%s/%s)\n' "$nic" "$ip" "$rig_pfx"
 }
 
+# The RX ring the USB r8152 rig NIC needs (issue 1534, live 18.11.2026 stream-snv: the driver's default 100 of
+# a possible 4096 dropped bursts before the kernel, rx_missed 20978 = holes in the Dante program audio). The
+# ring only fills under a burst, so it adds no latency in steady state. r8152 takes a ring change WITHOUT a
+# link reset (live: carrier_changes unchanged); atlantic resets its link on one (issue 1411), never set there.
+STRIH_NIC_R8152_RING_RX=4096
+
+# strih_nic_ring_live NIC -> the NIC's CURRENT RX ring from `ethtool -g` (nothing when unreadable).
+strih_nic_ring_live() {
+  local nic="${1-}"
+  [ -n "$nic" ] && command -v ethtool >/dev/null 2>&1 || return 0
+  ethtool -g "$nic" 2>/dev/null | awk '/^Current hardware settings/ { cur = 1; next } cur && /^RX:/ { print $2; exit }' || true
+}
+
+# strih_nic_r8152_ring_verdict NAME PROFILE_RING LIVE_RING NIC -> one `OK|(nic-ring)` (rc 0) or `FAIL|(nic-ring)`
+# (rc 1) row: the NetworkManager connection NAME pinned to the r8152 rig NIC must carry ethtool.ring-rx
+# STRIH_NIC_R8152_RING_RX (so every activation sets it) AND the NIC must run with at least that ring now.
+strih_nic_r8152_ring_verdict() {
+  local name="${1-}" prof="${2-}" live="${3-}" nic="${4-}" want="$STRIH_NIC_R8152_RING_RX"
+  if [ "$prof" != "$want" ]; then
+    printf 'FAIL|(nic-ring) NetworkManager connection %s on the r8152 rig NIC %s carries ethtool.ring-rx %s, want %s (issue 1534: the driver default drops bursts) -- setup-strih.sh step 1c sets it\n' "$name" "$nic" "${prof:-<none>}" "$want"
+    return 1
+  fi
+  if ! [[ "$live" =~ ^[0123456789]+$ ]] || [ "$live" -lt "$want" ]; then
+    printf 'FAIL|(nic-ring) the r8152 rig NIC %s runs with an RX ring of %s, want %s (issue 1534) -- setup-strih.sh step 1c sets it live (no link reset on r8152)\n' "$nic" "${live:-<unreadable>}" "$want"
+    return 1
+  fi
+  printf 'OK|(nic-ring) %s: RX ring %s on the NIC and ethtool.ring-rx %s in %s\n' "$nic" "$live" "$prof" "$name"
+}
+
+# strih_nic_ring_apply SYSROOT IP_ADDR_TEXT -> setup-strih step 1c: on an r8152 rig NIC, write ethtool.ring-rx
+# STRIH_NIC_R8152_RING_RX into every NetworkManager connection pinned to it (a profile edit only: no reapply,
+# no up/down, the ssh link is never touched) and set the NIC's ring live with `ethtool -G` when it is lower,
+# then read it back. Any other driver: nothing. rc 1 on a failed write or read-back.
+strih_nic_ring_apply() {
+  local sysroot="${1:-/sys}" addrs="${2-}" drv ip nic want="$STRIH_NIC_R8152_RING_RX" rows u n ifn cur live changed=0
+  drv="$(strih_lx_nic_driver)" || return 1
+  [ "$drv" = r8152 ] || return 0
+  ip="$(strih_lx_ip)" || return 1
+  nic="$(strih_lx_rig_nic "$sysroot" "$addrs" "$ip" 2>/dev/null || true)"
+  if [ -z "$nic" ]; then
+    echo "  WARN (nic-ring): the r8152 rig NIC does not resolve -- its RX ring is not set this run" >&2
+    return 0
+  fi
+  if rows="$(_strih_nic_nm_rows)"; then
+    while IFS='|' read -r u n ifn _; do
+      [ -n "$u" ] && [ "$ifn" = "$nic" ] || continue
+      cur="$(nmcli -g ethtool.ring-rx connection show "$u" 2>/dev/null || true)"
+      [ "$cur" = "$want" ] && continue
+      nmcli connection modify "$u" ethtool.ring-rx "$want" \
+        || { echo "  FAIL (nic-ring): nmcli could not set ethtool.ring-rx ${want} on ${n}" >&2; return 1; }
+      echo "  ${n}: ethtool.ring-rx ${cur:-<none>} -> ${want} (applies at every activation)"
+      changed=1
+    done <<<"$rows"
+  fi
+  live="$(strih_nic_ring_live "$nic")"
+  if ! [[ "$live" =~ ^[0123456789]+$ ]] || [ "$live" -lt "$want" ]; then
+    ethtool -G "$nic" rx "$want" || { echo "  FAIL (nic-ring): ethtool -G ${nic} rx ${want} failed" >&2; return 1; }
+    live="$(strih_nic_ring_live "$nic")"
+    [ "$live" = "$want" ] || { echo "  FAIL (nic-ring): ${nic} reads an RX ring of ${live:-<unreadable>} after the set" >&2; return 1; }
+    echo "  ${nic}: RX ring set to ${want} live (r8152: no link reset)"
+    changed=1
+  fi
+  [ "$changed" = 1 ] || echo "  ${nic}: RX ring ${want} unchanged"
+  return 0
+}
+
+# USB3 hardware LPM on the r8152 rig NIC (issue 1534, live 18.11.2026): stream-snv's RTL8156B on the Intel xhci
+# ran with U1+U2 on and lost packets on the device (rx_missed) between frames even at an even 900 Mb/s pace;
+# stream-pp's AMD xhci has no hardware LPM and lost none. The sysfs u1/u2 files are read-only, so LPM is turned
+# off by usbcore's USB_QUIRK_NO_LPM (`k`) for the NIC's vid:pid: on the kernel command line for every boot (a
+# grub.d drop-in) and in the runtime parameter, which applies at the device's next enumeration.
+STRIH_NIC_LPM_DROPIN=60-camera-box-rig-nic-no-lpm.cfg
+
+# strih_nic_usb_dev_dir SYSROOT NIC -> the USB device directory above the NIC's interface node (rc 1 if none).
+strih_nic_usb_dev_dir() {
+  local f
+  f="$(strih_nic_usb_speed_file "${1-}" "${2-}")" || return 1
+  printf '%s' "${f%/speed}"
+}
+
+# strih_nic_usb_id DEV_DIR -> `<vid>:<pid>` (four lower-case hex each) of the USB device, rc 1 when unreadable.
+strih_nic_usb_id() {
+  local v p
+  v="$(cat "${1-}/idVendor" 2>/dev/null || true)"
+  p="$(cat "${1-}/idProduct" 2>/dev/null || true)"
+  _strih_nic_usb_id_ok "${v}:${p}" || return 1
+  printf '%s:%s' "$v" "$p"
+}
+
+_strih_nic_usb_id_ok() {
+  local LC_ALL=C hex='0123456789abcdef'
+  [[ "${1-}" =~ ^[${hex}]{4}:[${hex}]{4}$ ]]
+}
+
+# strih_nic_lpm_grub_dropin_text VID:PID -> the grub.d drop-in that adds usbcore.quirks=VID:PID:k (rc 1, nothing
+# printed, on a malformed id). Appends to GRUB_CMDLINE_LINUX_DEFAULT like 99-lowlatency.cfg does.
+strih_nic_lpm_grub_dropin_text() {
+  _strih_nic_usb_id_ok "${1-}" || return 1
+  printf '# camera-box issue 1534: USB3 hardware LPM off on the r8152 rig NIC (written by setup-strih step 1c)\n'
+  printf 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT usbcore.quirks=%s:k"\n' "$1"
+}
+
+# strih_nic_lpm_state DEV_DIR -> `on` (u1 or u2 enabled), `off` (both read, neither enabled), `none` (no
+# hardware LPM files: the host controller has none, nothing to grade).
+strih_nic_lpm_state() {
+  local u1 u2
+  u1="$(cat "${1-}/power/usb3_hardware_lpm_u1" 2>/dev/null || true)"
+  u2="$(cat "${1-}/power/usb3_hardware_lpm_u2" 2>/dev/null || true)"
+  if [ -z "$u1" ] && [ -z "$u2" ]; then printf 'none'; return 0; fi
+  if [ "$u1" = enabled ] || [ "$u2" = enabled ]; then printf 'on'; else printf 'off'; fi
+}
+
+# strih_nic_lpm_grade_row SYSROOT NIC -> one `OK|(nic-lpm)` / `FAIL|(nic-lpm)` row, nothing when the host has no
+# hardware LPM. Always rc 0 (the row is the verdict).
+strih_nic_lpm_grade_row() {
+  local dev id st
+  dev="$(strih_nic_usb_dev_dir "${1-}" "${2-}")" || return 0
+  st="$(strih_nic_lpm_state "$dev")"
+  [ "$st" = none ] && return 0
+  id="$(strih_nic_usb_id "$dev" || true)"
+  if [ "$st" = on ]; then
+    printf 'FAIL|(nic-lpm) %s: USB3 hardware LPM U1/U2 is on (issue 1534: the NIC drops packets waking from it) -- setup-strih.sh step 1c adds usbcore.quirks=%s:k (next boot, or re-authorize the USB device)\n' "$2" "${id:-<vid:pid unreadable>}"
+    return 0
+  fi
+  printf 'OK|(nic-lpm) %s: USB3 hardware LPM off (%s)\n' "$2" "${id:-?}"
+}
+
+# strih_nic_lpm_apply SYSROOT IP_ADDR_TEXT -> setup-strih step 1c, r8152 only: write the grub.d drop-in when it
+# differs (then safe_grub_regen), add the runtime usbcore quirk beside the existing ones. Never bounces the NIC:
+# while LPM is still on it prints the re-authorize command. rc 1 on a failed write.
+strih_nic_lpm_apply() {
+  local sysroot="${1:-/sys}" addrs="${2-}" drv ip nic dev id text dir f cur param
+  drv="$(strih_lx_nic_driver)" || return 1
+  [ "$drv" = r8152 ] || return 0
+  ip="$(strih_lx_ip)" || return 1
+  nic="$(strih_lx_rig_nic "$sysroot" "$addrs" "$ip" 2>/dev/null || true)"
+  if [ -z "$nic" ] || ! dev="$(strih_nic_usb_dev_dir "$sysroot" "$nic")" || ! id="$(strih_nic_usb_id "$dev")"; then
+    echo "  WARN (nic-lpm): the r8152 rig NIC's USB device does not resolve -- LPM is not set this run" >&2
+    return 0
+  fi
+  text="$(strih_nic_lpm_grub_dropin_text "$id")" || return 1
+  dir="${STRIH_NIC_LPM_GRUB_DIR:-/etc/default/grub.d}"
+  f="${dir}/${STRIH_NIC_LPM_DROPIN}"
+  if [ "$(cat "$f" 2>/dev/null || true)" != "$text" ]; then
+    mkdir -p "$dir" && printf '%s\n' "$text" > "${f}.tmp" && chmod 0644 "${f}.tmp" && mv -f "${f}.tmp" "$f" \
+      || { echo "  FAIL (nic-lpm): could not write ${f}" >&2; return 1; }
+    safe_grub_regen || { echo "  FAIL (nic-lpm): grub regeneration failed" >&2; return 1; }
+    echo "  ${f}: usbcore.quirks=${id}:k (LPM off from the next boot)"
+  else
+    echo "  ${f}: unchanged"
+  fi
+  param="${STRIH_NIC_LPM_QUIRKS_PARAM:-${sysroot}/module/usbcore/parameters/quirks}"
+  cur="$(cat "$param" 2>/dev/null || true)"
+  case ",${cur}," in
+    *",${id}:k,"*) ;;
+    *) printf '%s\n' "${cur:+${cur},}${id}:k" > "$param" \
+         || { echo "  FAIL (nic-lpm): could not set the runtime usbcore quirk" >&2; return 1; } ;;
+  esac
+  if [ "$(strih_nic_lpm_state "$dev")" = on ]; then
+    echo "  NOTE (nic-lpm): ${nic} still runs with LPM on until the next boot; to apply it now (a ~15 s NIC bounce): echo 0 > ${dev#"${sysroot}"}/authorized; sleep 2; echo 1 > ${dev#"${sysroot}"}/authorized (sysfs: /sys${dev#"${sysroot}"})"
+  fi
+  return 0
+}
+
 # strih_nic_ring_note DRIVER -> the ring-rx part of setup-strih step 1's operator note: " and set
 # ethtool.ring-rx 4096" for the USB r8152 NIC, a "never" for atlantic (issue 1411), nothing otherwise.
 strih_nic_ring_note() {
@@ -707,6 +871,7 @@ strih_nic_grade_rows() {
     printf 'FAIL|(nic-usb) %s: no USB device above its interface node (%s/class/net/%s/device/..) -- speed unreadable\n' "$nic" "$sysroot" "$nic"
   fi
   strih_nic_speed_verdict link "$(cat "${sysroot}/class/net/${nic}/speed" 2>/dev/null || true)" "$minlink" "$nic" || true
+  [ "$nicdrv" = r8152 ] && strih_nic_lpm_grade_row "$sysroot" "$nic"
   present=""
   for n in "${sysroot}"/class/net/*; do [ -e "$n" ] && present="${present} ${n##*/}"; done
   if nmrows="$(_strih_nic_nm_rows)"; then
@@ -714,6 +879,8 @@ strih_nic_grade_rows() {
     while IFS='|' read -r u n ifn _; do
       [ -n "$u" ] && [ "$ifn" = "$nic" ] || continue
       strih_nic_nm_ring_verdict "$nicdrv" "$n" "$(nmcli -g ethtool.ring-rx connection show "$u" 2>/dev/null || true)" || true
+      [ "$nicdrv" = r8152 ] && { strih_nic_r8152_ring_verdict "$n" \
+        "$(nmcli -g ethtool.ring-rx connection show "$u" 2>/dev/null || true)" "$(strih_nic_ring_live "$nic")" "$nic" || true; }
     done <<<"$nmrows"
   else
     printf 'FAIL|(nic-nm) nmcli is not installed -- the NetworkManager pinning cannot be read\n'

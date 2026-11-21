@@ -1663,3 +1663,24 @@ fn strih_lx_refuses_when_a_broadcast_starts_during_staging_1317() {
     }
     assert!(r.fleet_log().is_empty(), "{}", r.fleet_log());
 }
+
+/// 21.11.2026: staging the ~2 GB bundle over the venue network at full speed made strih-pp's four
+/// JPEG XS camera inputs lose slices for the whole transfer (01:39-01:52, 0 before and after). The
+/// stage rsync is bandwidth-capped, so a deploy never costs a live picture its datagrams.
+#[test]
+fn strih_lx_stage_rsync_is_bandwidth_capped() {
+    let r = run_exec(&[]);
+    assert_eq!(r.code, 0, "err={}", r.err);
+    let rsyncs: Vec<&str> = r
+        .calls
+        .lines()
+        .filter(|l| l.starts_with("sshpass ") && l.contains(" rsync "))
+        .collect();
+    assert!(!rsyncs.is_empty(), "{}", r.calls);
+    for l in rsyncs {
+        assert!(
+            l.contains("--bwlimit=12500"),
+            "an uncapped stage rsync: {l}"
+        );
+    }
+}

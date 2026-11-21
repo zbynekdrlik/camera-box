@@ -34,6 +34,9 @@
 #     design 6386467303 layer 2): an operator monitor that comes on joins the X layout, a fixed HDMI output
 #     of the drm-output config stays out of it, and with no operator monitor the screen stays usable
 #     (>= 1920x1080), so tint2 and OBS always have one. Its extra row is its last pass (--check-state).
+#   * intercom-tray.service -> /usr/local/bin/intercom-tray, the STRIH role only (issue 1542, intercom#34):
+#     the intercom hub bundle's tray icon whose menu opens the cutters' level page (127.0.0.1:8791).
+#     Step 16d installs it from the pinned bundle through intercom_tray_install (scripts/lib/intercom-tray.sh).
 #   * strih-stream-monitor.service -> scripts/strih_stream_monitor.py, the STREAM role only (issue 1436,
 #     owner 15.10.2026): the headphones play the audio of the real outgoing RTMP stream straight to the
 #     jack's ALSA PCM, never through PipeWire. Its packages + three extra verify rows live in
@@ -93,9 +96,14 @@ if ! declare -F dtray_install >/dev/null; then
   # shellcheck source=scripts/lib/dtray.sh
   . "$(dirname "${BASH_SOURCE[0]}")/dtray.sh"
 fi
+# issue 1542: the intercom tray (the pinned hub bundle's member, its record).
+if ! declare -F intercom_tray_install >/dev/null; then
+  # shellcheck source=scripts/lib/intercom-tray.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/intercom-tray.sh"
+fi
 
 # The session apps, in start order (the kiosk autostart and the deploy start them in this order).
-STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer dsync-tray.service strih-display-watch.service dtray.service)
+STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer dsync-tray.service strih-display-watch.service dtray.service intercom-tray.service)
 # issue 1429: libgtk-3-0t64 + libayatana-appindicator3-1 + libxdo3 = the dantesync tray's runtime.
 STRIH_SESSION_APP_PACKAGES=(python3-gi gir1.2-webkit2-4.1 python3-websocket libgtk-3-0t64 libayatana-appindicator3-1 libxdo3)
 STRIH_SESSION_APP_WANTS_TARGET=graphical-session.target
@@ -119,6 +127,8 @@ STRIH_COMPANION_SATELLITE_UNIT=companion-satellite.service
 STRIH_DANTESYNC_TRAY_UNIT=dsync-tray.service
 # issue 1485: dstack's tray (its binary: dtray_bin, scripts/lib/dtray.sh).
 STRIH_DTRAY_UNIT=dtray.service
+# issue 1542: the intercom tray, strih role only (its binary: intercom_tray_bin, scripts/lib/intercom-tray.sh).
+STRIH_INTERCOM_TRAY_UNIT=intercom-tray.service
 # The 4.10.2026 hand-made stopgaps (issue comments 5977460330 panel, 5979039607 Satellite): units
 # WantedBy=default.target, and the panel's ~/.local/bin copy of the app. Paths relative to the
 # operator's home; the wants dir holds the link of any entry enabled that way.
@@ -138,6 +148,7 @@ strih_session_app_script() {
     strih-satellite-watch.timer) printf 'strih_satellite_watch.py' ;;
     dsync-tray.service) printf '' ;;
     dtray.service) printf '' ;;
+    intercom-tray.service) printf '' ;;
     strih-display-watch.service) printf 'strih_display_watch.py' ;;
     strih-stream-monitor.service) printf 'strih_stream_monitor.py' ;;
     *) return 1 ;;
@@ -153,6 +164,7 @@ strih_session_app_item() {
     strih-satellite-watch.timer) printf 'satellite-watch' ;;
     dsync-tray.service) printf 'dsync-tray' ;;
     dtray.service) printf 'dtray' ;;
+    intercom-tray.service) printf 'intercom-tray' ;;
     strih-display-watch.service) printf 'display-watch' ;;
     strih-stream-monitor.service) printf 'stream-monitor' ;;
     *) return 1 ;;
@@ -174,6 +186,8 @@ strih_session_app_program() {
     dantesync_install_tray_bin
   elif [ "${1-}" = "$STRIH_DTRAY_UNIT" ]; then
     dtray_bin
+  elif [ "${1-}" = "$STRIH_INTERCOM_TRAY_UNIT" ]; then
+    intercom_tray_bin
   else
     printf '%s' "${STRIH_SESSION_APPS_SATELLITE_BIN:-$STRIH_COMPANION_SATELLITE_BIN}"
   fi
@@ -185,6 +199,7 @@ strih_session_app_binary_installer() {
   case "${1-}" in
     dsync-tray.service) printf 'setup-strih.sh step 16d (it installs the dantesync tray from the pinned dantesync release, v%s+)' "$DANTESYNC_TRAY_FIRST_VERSION" ;;
     dtray.service) printf 'setup-strih.sh step 16d (it installs dtray from the pinned dstack release, scripts/dtray-release.pin)' ;;
+    intercom-tray.service) printf 'setup-strih.sh step 16d (it installs intercom-tray from the pinned intercom hub bundle, scripts/intercom-release.pin)' ;;
     *) printf 'setup-strih.sh step 16 (the Companion Satellite install)' ;;
   esac
 }
@@ -254,7 +269,7 @@ strih_session_apps_missing_packages() {
 # strih_session_apps_import_check -> the python the import preflight runs: everything the two programs
 # import at runtime (the keeper: websocket; the panel: Gtk 3 + WebKit2 4.1 through gi).
 strih_session_apps_import_check() {
-  printf '%s' 'import websocket, gi; gi.require_version("Gtk", "3.0"); gi.require_version("WebKit2", "4.1"); from gi.repository import GLib, Gtk, WebKit2'
+  printf '%s' 'import websocket, gi; gi.require_version("Gtk", "3.0"); gi.require_version("Gdk", "3.0"); gi.require_version("WebKit2", "4.1"); from gi.repository import Gdk, GLib, Gtk, WebKit2'
 }
 
 # strih_session_apps_user_run USER CMD... -> CMD as USER with USER's runtime dir: as root through
@@ -376,6 +391,15 @@ strih_session_apps_install() {
       dtray_devices_apply || echo "  WARN: the dtray device markers failed (above) -- verify-strih (dtray-devices) names what is missing"
       after="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
       [ "$before" = "$after" ] || w1=written
+    elif [ "$u" = "$STRIH_INTERCOM_TRAY_UNIT" ]; then
+      # issue 1542: the pinned intercom bundle's tray; a replaced binary restarts a running tray
+      before="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
+      intercom_tray_install "$repo" || {
+        tray_failed=1
+        echo "  WARN: the intercom-tray step failed (above) -- verify-strih (intercom-tray) names what is missing; re-run setup-strih.sh step 16d"
+      }
+      after="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
+      [ "$before" = "$after" ] || w1=written
     fi
     uw=unchanged
     while IFS= read -r f; do
@@ -386,7 +410,7 @@ strih_session_apps_install() {
       changed+=("$u")
       if [ -n "$script" ]; then
         echo "  installed ${u} -> ${unitdir}/${u} (runs ${program}): program ${w1}, unit ${uw}"
-      elif [ "$u" = "$STRIH_DANTESYNC_TRAY_UNIT" ] || [ "$u" = "$STRIH_DTRAY_UNIT" ]; then
+      elif [ "$u" = "$STRIH_DANTESYNC_TRAY_UNIT" ] || [ "$u" = "$STRIH_DTRAY_UNIT" ] || [ "$u" = "$STRIH_INTERCOM_TRAY_UNIT" ]; then
         echo "  installed ${u} -> ${unitdir}/${u} (runs ${program}): binary ${w1}, unit ${uw}"
       else
         echo "  installed ${u} -> ${unitdir}/${u} (runs ${program}, installed by step 16): unit ${uw}"
@@ -698,6 +722,9 @@ strih_session_apps_grade_rows() {
     elif [ "$u" = "$STRIH_DTRAY_UNIT" ]; then
       # issue 1485: dtray against its release record and the pin (absent / stale:<why> / ok)
       sstate="$(dtray_state || true)"
+    elif [ "$u" = "$STRIH_INTERCOM_TRAY_UNIT" ]; then
+      # issue 1542: the tray against its record, the pin and the pinned bundle's member (no network)
+      sstate="$(intercom_tray_state "$repo" || true)"
     else
       sstate=absent; [ -x "$program" ] && sstate=ok  # the /opt binary step 16 installs: present, no checkout copy
     fi

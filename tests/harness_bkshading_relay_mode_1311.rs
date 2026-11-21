@@ -183,7 +183,9 @@ fn run_apply(
 #[test]
 fn apply_test_stops_and_disables_each_roster_box() {
     let (dir, log) = fake_sshpass_dir();
-    let (rc, stdout) = run_apply("test", &["cam1=10.0.0.1", "cam2=10.0.0.2"], &log, &dir);
+    // Two boxes the real shading-release-boxes.txt does NOT keep always-on (issue 1452): cam2 and cam8.
+    // cam1 left that set when issue 1537 put pp-cam1 on the REST pin.
+    let (rc, stdout) = run_apply("test", &["cam8=10.0.0.1", "cam2=10.0.0.2"], &log, &dir);
     assert_eq!(rc, 0, "apply must never fail the caller");
     let logged = std::fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(
@@ -194,7 +196,7 @@ fn apply_test_stops_and_disables_each_roster_box() {
     assert!(logged.contains("systemctl stop bkshading-relay.service"));
     assert!(logged.contains("systemctl disable bkshading-relay.service"));
     assert!(!logged.contains("systemctl enable"));
-    assert!(stdout.contains("cam1") && stdout.contains("cam2"));
+    assert!(stdout.contains("cam8") && stdout.contains("cam2"));
 }
 
 #[test]
