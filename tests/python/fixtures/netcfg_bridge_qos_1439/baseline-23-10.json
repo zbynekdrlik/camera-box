@@ -1,0 +1,950 @@
+{
+  "_captured": "2026-08-17",
+  "_comment": "#797 venue MikroTik switch-chain config baseline. REPORT-ONLY source of truth: scripts/netcfg-audit.sh --check diffs the live chain vs this and reports drift LOUD; it NEVER overwrites (a legitimate re-config is recorded by updating this file in a PR, exactly like scripts/latency-pins-baseline.json). Seeded from a live read-only snapshot. See .claude/rules/netcfg-audit.md.",
+  "nodes": {
+    "foh1_audio": {
+      "board": "CRS310-8G+2S+",
+      "bridge": {
+        "bridge": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp": "yes",
+          "pvid": "1",
+          "vlan-filtering": "yes"
+        }
+      },
+      "bridge_port": {
+        "ether1": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether2": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "1"
+        },
+        "ether3": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "70"
+        },
+        "ether4": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether5": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether6": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether7": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "70"
+        },
+        "ether8": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "70"
+        },
+        "sfp-sfpplus1": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "1"
+        },
+        "sfp-sfpplus2": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "1"
+        }
+      },
+      "bridge_vlan": {
+        "70": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        },
+        "89": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        }
+      },
+      "identity": "foh1_audio_switch",
+      "ip": "10.77.9.2",
+      "port": {
+        "ether1": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether2": {
+          "comment": "trunk",
+          "dq1": "21113",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether3": {
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether4": {
+          "comment": "dante",
+          "dq1": "287",
+          "fcs": "0",
+          "fullduplex": "false",
+          "rate": "100Mbps",
+          "running": "true"
+        },
+        "ether5": {
+          "comment": "dante",
+          "dq1": "157",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether6": {
+          "comment": "dante",
+          "dq1": "48",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether7": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether8": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus1": {
+          "comment": "stage",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus2": {
+          "comment": "trunk::video",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        }
+      },
+      "qos_profile": {
+        "dante-audio": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "46",
+          "pcp": "5",
+          "traffic-class": "5"
+        },
+        "dante-low": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "8",
+          "pcp": "1",
+          "traffic-class": "0"
+        },
+        "dante-ptp": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "56",
+          "pcp": "7",
+          "traffic-class": "7"
+        },
+        "default": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "0",
+          "pcp": "0",
+          "traffic-class": "1"
+        }
+      },
+      "reachable": "true",
+      "role": "switch",
+      "ros": "7.23.3",
+      "shared_buffers": "80%",
+      "switch_rule": {}
+    },
+    "foh1_video": {
+      "board": "CRS310-8G+2S+",
+      "bridge": {
+        "bridge": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp": "yes",
+          "pvid": "1",
+          "vlan-filtering": "yes"
+        }
+      },
+      "bridge_port": {
+        "ether1": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether2": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether3": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether4": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether5": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether6": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether7": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether8": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "sfp-sfpplus1": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "1"
+        },
+        "sfp-sfpplus2": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "1"
+        }
+      },
+      "bridge_vlan": {
+        "70": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        },
+        "89": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        }
+      },
+      "identity": "foh1_video_switch",
+      "ip": "10.77.9.4",
+      "port": {
+        "ether1": {
+          "comment": "basic",
+          "dq1": "4104191",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether2": {
+          "comment": "dante",
+          "dq1": "79268",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether3": {
+          "comment": "basic",
+          "dq1": "24",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether4": {
+          "comment": "basic",
+          "dq1": "21",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether5": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether6": {
+          "comment": "basic",
+          "dq1": "21497",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether7": {
+          "comment": "basic",
+          "dq1": "11059",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether8": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "sfp-sfpplus1": {
+          "comment": "trunk",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus2": {
+          "comment": "trunk",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        }
+      },
+      "qos_profile": {
+        "dante-audio": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "46",
+          "pcp": "5",
+          "traffic-class": "5"
+        },
+        "dante-low": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "8",
+          "pcp": "1",
+          "traffic-class": "0"
+        },
+        "dante-ptp": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "56",
+          "pcp": "7",
+          "traffic-class": "7"
+        },
+        "default": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "0",
+          "pcp": "0",
+          "traffic-class": "1"
+        }
+      },
+      "reachable": "true",
+      "role": "switch",
+      "ros": "7.23.3",
+      "shared_buffers": "80%",
+      "switch_rule": {}
+    },
+    "foh2_video": {
+      "board": "CRS310-8G+2S+",
+      "bridge": {
+        "bridge": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp": "yes",
+          "pvid": "1",
+          "vlan-filtering": "yes"
+        }
+      },
+      "bridge_port": {
+        "ether1": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether2": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether3": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether4": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether5": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether6": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether7": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "70"
+        },
+        "ether8": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "70"
+        },
+        "sfp-sfpplus1": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "1"
+        },
+        "sfp-sfpplus2": {
+          "disabled": "no",
+          "frame-types": "admit-all",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        }
+      },
+      "bridge_vlan": {
+        "70": {
+          "disabled": "no",
+          "tagged": [
+            "bridge",
+            "sfp-sfpplus2"
+          ],
+          "untagged": []
+        },
+        "89": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        }
+      },
+      "identity": "foh2_video_switch",
+      "ip": "10.77.9.5",
+      "port": {
+        "ether1": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "100Mbps",
+          "running": "true"
+        },
+        "ether2": {
+          "comment": "dante",
+          "dq1": "100054",
+          "fcs": "1",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether3": {
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether4": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "22",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether5": {
+          "comment": "basic",
+          "dq1": "125638",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether6": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "5",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether7": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether8": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus1": {
+          "comment": "trunk::foh1",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus2": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "17",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        }
+      },
+      "qos_profile": {
+        "dante-audio": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "46",
+          "pcp": "5",
+          "traffic-class": "5"
+        },
+        "dante-low": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "8",
+          "pcp": "1",
+          "traffic-class": "0"
+        },
+        "dante-ptp": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "56",
+          "pcp": "7",
+          "traffic-class": "7"
+        },
+        "default": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "0",
+          "pcp": "0",
+          "traffic-class": "1"
+        }
+      },
+      "reachable": "true",
+      "role": "switch",
+      "ros": "7.23.3",
+      "shared_buffers": "80%",
+      "switch_rule": {
+        "camera-box issue 1439: VBAN from mbc -> strict-priority TC5 (dante-audio)": {
+          "copy-to-cpu": "no",
+          "disabled": "no",
+          "dst-port": "6980",
+          "invalid": "no",
+          "keep-qos-fields": "no",
+          "mac-protocol": "ip",
+          "mirror": "no",
+          "new-qos-profile": "dante-audio",
+          "ports": "ether7",
+          "protocol": "udp",
+          "redirect-to-cpu": "no",
+          "switch": "switch1"
+        }
+      }
+    },
+    "router_snv": {
+      "board": "RB4011iGS+",
+      "identity": "router_snv",
+      "ip": "10.77.8.1",
+      "reachable": "true",
+      "role": "router",
+      "ros": "7.22"
+    },
+    "stage_av": {
+      "board": "CRS310-8G+2S+",
+      "bridge": {
+        "bridge": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp": "yes",
+          "pvid": "1",
+          "vlan-filtering": "yes"
+        }
+      },
+      "bridge_port": {
+        "ether1": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether2": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether3": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether4": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether5": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether6": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether7": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        },
+        "ether8": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "70"
+        },
+        "sfp-sfpplus1": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "1"
+        },
+        "sfp-sfpplus2": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
+          "pvid": "89"
+        }
+      },
+      "bridge_vlan": {
+        "70": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        },
+        "89": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        }
+      },
+      "identity": "stage_av_switch",
+      "ip": "10.77.9.3",
+      "port": {
+        "ether1": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether2": {
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether3": {
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether4": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether5": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether6": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether7": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether8": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus1": {
+          "comment": "trunk::foh1",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus2": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        }
+      },
+      "qos_profile": {
+        "dante-audio": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "46",
+          "pcp": "5",
+          "traffic-class": "5"
+        },
+        "dante-low": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "8",
+          "pcp": "1",
+          "traffic-class": "0"
+        },
+        "dante-ptp": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "56",
+          "pcp": "7",
+          "traffic-class": "7"
+        },
+        "default": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "0",
+          "pcp": "0",
+          "traffic-class": "1"
+        }
+      },
+      "reachable": "true",
+      "role": "switch",
+      "ros": "7.23.3",
+      "shared_buffers": "80%",
+      "switch_rule": {}
+    }
+  }
+}

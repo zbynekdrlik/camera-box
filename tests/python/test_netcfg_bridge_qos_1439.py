@@ -366,8 +366,15 @@ def test_no_baseline_facet_checks_nothing():
 # --------------------------------------------------------------------------- baseline
 
 
+# The switch outputs under fixtures/ were read on 23.10.2026; the baseline captured from the same
+# devices that day is frozen next to them. scripts/netcfg-baseline.json is the LIVE baseline and is
+# re-captured whenever the network changes (issue 1543: mikrotik reconfigured the SNV switches in
+# November), so a test of these fixtures must not read it.
+_FIXTURE_BASELINE = pathlib.Path(__file__).resolve().parent / "fixtures" / "netcfg_bridge_qos_1439" / "baseline-23-10.json"
+
+
 def test_checked_in_baseline_carries_the_23_10_switch_changes():
-    nodes = json.loads((_SCRIPTS / "netcfg-baseline.json").read_text())["nodes"]
+    nodes = json.loads(_FIXTURE_BASELINE.read_text())["nodes"]
     for node in SWITCHES:
         assert nodes[node]["qos_profile"]["dante-audio"]["dscp"] == "46"
         assert nodes[node]["qos_profile"]["dante-audio"]["traffic-class"] == "5"
@@ -428,7 +435,7 @@ def orch(tmp_path):
     for node in SWITCHES:
         (raw_dir / f"{node}.txt").write_bytes(_raw(node).encode("ascii"))
     baseline = tmp_path / "baseline.json"
-    baseline.write_text((_SCRIPTS / "netcfg-baseline.json").read_text())
+    baseline.write_text(_FIXTURE_BASELINE.read_text())
     env = dict(os.environ)
     env.update(
         PATH=f"{bindir}:{env['PATH']}",
