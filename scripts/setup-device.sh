@@ -330,6 +330,20 @@ ROOT_WAS_RO=false
 # rw until the next reboot -- bounded/self-healing (the ro fstab from the PRIOR successful pass
 # still pins ro on reboot), not the claims-success-while-wrong failure #599 targets, so no explicit
 # trap is added here.
+# install_executable_if_changed SRC DEST (issue 1394) -- install SRC at DEST 0755 through a NEW inode
+# (`install`, safe over a running binary) only when the bytes differ or DEST is missing. A byte-identical
+# DEST keeps its inode: replacing it under the running service left the old inode mapped, and STEP 18's
+# remount read-only then failed busy (PP cam1/cam4, 21.11.2026).
+install_executable_if_changed() {
+    local src="$1" dest="$2"
+    if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+        chmod 0755 "$dest" || return 1
+        echo "  ${dest}: byte-identical to the new binary -- unchanged (no new inode)"
+        return 0
+    fi
+    install -m 0755 "$src" "$dest"
+}
+
 ensure_root_writable() {
     local opts
     # `findmnt` failing outright (missing binary, unreadable /proc) must not silently read as "not
@@ -713,7 +727,7 @@ echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
 BINARY_SRC="${BINARY_ARG:-${CAMERA_BOX_BINARY_URL:-}}"
 if [ -n "$BINARY_SRC" ] && [ -f "$BINARY_SRC" ]; then
     echo "  Using local binary: $BINARY_SRC"
-    install -m 0755 "$BINARY_SRC" /usr/local/bin/camera-box
+    install_executable_if_changed "$BINARY_SRC" /usr/local/bin/camera-box
     echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
 elif [ -n "$BINARY_SRC" ]; then
     echo "  Downloading binary from: $BINARY_SRC"
@@ -732,7 +746,7 @@ elif [ -n "$BINARY_SRC" ]; then
         rm -f "$_camera_box_dl_tmp"
         fail "downloaded binary from $BINARY_SRC is empty"
     }
-    install -m 0755 "$_camera_box_dl_tmp" /usr/local/bin/camera-box || {
+    install_executable_if_changed "$_camera_box_dl_tmp" /usr/local/bin/camera-box || {
         rm -f "$_camera_box_dl_tmp"
         fail "could not install downloaded binary from $BINARY_SRC to /usr/local/bin/camera-box"
     }
@@ -750,7 +764,7 @@ elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
     DIST_DIR="$(mktemp -d)"
     if gh run download "$RUN_ID" --repo "$GITHUB_REPO" -n camera-box-linux-amd64 --dir "$DIST_DIR" 2>/dev/null \
         && [ -f "$DIST_DIR/camera-box" ]; then
-        install -m 0755 "$DIST_DIR/camera-box" /usr/local/bin/camera-box
+        install_executable_if_changed "$DIST_DIR/camera-box" /usr/local/bin/camera-box
         echo "  Binary installed from CI run $RUN_ID: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
     else
         rm -rf "$DIST_DIR"
@@ -1416,7 +1430,7 @@ apt-get update -qq
 # silently no-op'ing recording-e2e.sh's capture-release busy-wait.
 # dantesync issue 52: nftables provides `nft`, needed by STEP 17c to install the NTP-client
 # DSCP OUTPUT-mangle rule (rsntp cannot setsockopt(IP_TOS) -- see scripts/lib/dscp-nft.sh).
-apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables systemd-journal-remote efibootmgr 2>/dev/null || true
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables systemd-journal-remote efibootmgr --no-upgrade 2>/dev/null || true
 systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc, nftables"
 
@@ -1455,7 +1469,7 @@ fi
 # packages (it Depends on the ffmpeg libav* codecs already present, so --no-install-recommends still
 # decodes the H.264 test asset). ffmpeg/EGL stay installed -- harmless, and ffmpeg's libav* are
 # mpv's own decode dependency anyway.
-apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri mpv
+apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri mpv --no-upgrade
 echo "  Installed: ffmpeg, libsdl2-2.0-0, libegl1, libegl-mesa0, libgl1-mesa-dri, mpv (#930/#1187 lipsync-test-mode runtime)"
 
 # Create rc.local for power management settings (USB autosuspend, etc.)
@@ -1666,8 +1680,10 @@ echo "  #1307/#1066: /etc/dsync/config.json installed (gm_allowlist=[\"${_RG_GM_
 # issue 1439 (ROZHODNUTE 1.11.2026): dsync binds PTP to this box's LAN NIC, never to the first IPv4
 # interface it lists (the bkshading USB camera link, enx*, took the join on cam1 on 20.8.2026). The unit
 # text and the NIC rule (the ONE cabled enp* with a device link) live in scripts/lib/cambox-dsync-unit.sh, which
-# verify-device (ba) and the live apply (scripts/cambox-ro-units-apply.sh) read too.
-_DSYNC_NIC="$(cambox_lan_nic /sys)" || fail "cannot resolve this cambox's LAN NIC (the line above) -- dsync is never bound to a guessed NIC (issue 1439)"
+# verify-device (ba) and the live apply (scripts/cambox-ro-units-apply.sh) read too. Issue 1545: a dsync
+# >= 1.35.16 gets BOTH onboard ports (the crew plugs the cable into either), an older one the cabled port.
+_DSYNC_VER="$(/usr/local/bin/dsync --version 2>/dev/null | sed -n '1s/^[^ ]* //p')" || _DSYNC_VER=""
+_DSYNC_NIC="$(cambox_dsync_iface_arg /sys "$_DSYNC_VER")" || fail "cannot resolve this cambox's LAN NIC (the line above) -- dsync is never bound to a guessed NIC (issue 1439)"
 _DSYNC_UNIT="$(cambox_dsync_unit_text "$_DSYNC_NIC")" || fail "LAN NIC name '${_DSYNC_NIC}' is not a usable interface name (issue 1439)"
 printf '%s\n' "$_DSYNC_UNIT" > /etc/systemd/system/dsync.service
 echo "  dsync.service: PTP bound to the LAN NIC ${_DSYNC_NIC} (--interface, issue 1439)"

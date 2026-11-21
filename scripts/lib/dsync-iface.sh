@@ -24,13 +24,15 @@
 #   dsync_iface_grade NIC            -> one read + the verdict; a dead endpoint is `unreadable`, never a pass
 
 dsync_iface_verdict() {
-  local read="${1-}" conf="${2-}" joined="${3-}" nic="${4-}"
+  # issue 1545: an optional 5th argument = the port it must have JOINED (a cambox lists both onboard
+  # ports in NIC and must have joined the cabled one); without it the joined port must equal NIC.
+  local read="${1-}" conf="${2-}" joined="${3-}" nic="${4-}" want="${5:-${4-}}"
   if [ "$read" != 1 ]; then echo unreadable
   elif [ -z "$nic" ]; then echo norig
   elif [ -z "$conf" ]; then echo not-configured
   elif [ "$conf" != "$nic" ]; then echo "configured-elsewhere:${conf}:${nic}"
-  elif [ "$joined" != "$nic" ]; then echo "joined-elsewhere:${joined:--}:${nic}"
-  else echo "ok:${nic}"
+  elif [ "$joined" != "$want" ]; then echo "joined-elsewhere:${joined:--}:${want}"
+  else echo "ok:${want}"
   fi
 }
 

@@ -322,3 +322,58 @@ def test_a_tool_killed_before_its_bound_is_named_killed_not_ran_over(fk, tmp_pat
     b = json.loads(verdict.read_text())["youtube_leg"]
     assert b["verdict"] == "UNKNOWN"
     assert "killed (exit 137)" in b["reasons"][0] and "ran over" not in b["reasons"][0]
+
+
+# --- issue 1534: a red YouTube verdict keeps its evidence on the host -----------------------------
+
+def _fail_result():
+    r = json.loads(json.dumps(PASS_RESULT))
+    r["overall"] = "FAIL"
+    r["windows"][0]["audio"]["lag_jumps"] = 1
+    return r
+
+
+def test_a_red_verdict_keeps_the_vod_and_the_capture_outside_the_swept_stage(fk, tmp_path):
+    d = _stopped(fk, tmp_path)
+    args, _ = _measure_inputs(tmp_path, fk)
+    assert _run(fk, d, "prefetch", "--stream-path", STREAM_PATH).returncode == 0
+    fk.script("verdict", "verdict", 1, _fail_result())
+    r = _run(fk, d, *args)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert fk.host_stage_dirs() == []  # the stage itself still goes
+    kept = fk.home / "youtube-leg-evidence" / tmp_path.name
+    assert (kept / "vod-AbCdEfGhIjK.mp4").read_text() == "a video"
+    assert not _videos_on_dev1(d)
+
+
+def test_a_green_verdict_keeps_nothing(fk, tmp_path):
+    d = _stopped(fk, tmp_path)
+    args, _ = _measure_inputs(tmp_path, fk)
+    assert _run(fk, d, "prefetch", "--stream-path", STREAM_PATH).returncode == 0
+    fk.script("verdict", "verdict", 0, PASS_RESULT)
+    assert _run(fk, d, *args).returncode == 0
+    assert not (fk.home / "youtube-leg-evidence").exists()
+
+
+def test_the_host_keeps_only_the_newest_evidence_runs(fk, tmp_path, monkeypatch):
+    base = fk.home / "youtube-leg-evidence"
+    for i, name in enumerate(("old-a", "old-b", "old-c", "old-d")):
+        p = base / name
+        p.mkdir(parents=True)
+        (p / "vod-x.mp4").write_text("v")
+        os.utime(p, (1000 + i, 1000 + i))
+    for k, v in fk.env.items():
+        monkeypatch.setenv(k, v)
+    h = ylh.Host("newlevel@dev2", "new-run")
+    h.root = str(fk.home / "youtube-leg-1404" / "new-run")
+    Path(h.root, "verdict").mkdir(parents=True)
+    Path(h.root, "verdict", "vod-y.mp4").write_text("v")
+    Path(h.root, "inpoint-capture.mkv").write_text("c")
+    kept = h.keep_evidence()
+    assert sorted(kept) == ["inpoint-capture.mkv", "vod-y.mp4"]
+    assert sorted(p.name for p in base.iterdir()) == ["new-run", "old-c", "old-d"]
+
+
+def test_the_kept_capture_name_is_the_one_the_point_pulls():
+    import youtube_leg_points as ylp
+    assert ylh.CAPTURE_FILE == ylp.CAPTURE_NAME

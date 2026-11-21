@@ -31,6 +31,8 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import audio_mixer_decision as amd  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import vban_leg_fakes_1439 as fk  # noqa: E402
 import bundle_state_gather as bsg  # noqa: E402
 import dante_input_continuity as dic  # noqa: E402
 
@@ -282,8 +284,8 @@ def _rx_key(name):
 
 
 @pytest.mark.parametrize("box, want", [
-    ("stream-pp", ["obs-vban:Zvuk z mixu", "rc=0"]),
-    ("strih-pp", ["obs-vban:ASIO zvuk", "rc=0"]),
+    ("stream-pp", ["dante", "rc=0"]),   # issue 1536: PP takes its program over Dante (dsg)
+    ("strih-pp", ["dante", "rc=0"]),
     ("strih-snv", ["dante", "rc=0"]),
     ("stream-snv", ["dante", "rc=0"]),
     ("resolume-snv", ["rc=0"]),
@@ -329,6 +331,8 @@ def _run(tmp_path, body, state, box="stream-pp|stream-pp.lan", dry_run=True, not
     fetch.write_text(f"#!/usr/bin/env bash\ncat '{body_file}'\n", encoding="utf-8")
     fetch.chmod(fetch.stat().st_mode | stat.S_IEXEC)
     env = dict(os.environ)
+    # issue 1536: the obs-vban receiver tests run stream-pp in its VBAN rollback shape (the SNV boxes as they are)
+    env["STRIH_BOXES_DIR"] = fk.pp_pre_1536_boxes_dir()
     env.update({"AUDIO_MIXER_FETCH_CMD": str(fetch), "AUDIO_MIXER_BOXES": box,
                 "AUDIO_MIXER_PRODUCTION_CMD": str(prod),
                 "OBS_FLEET_HOME": "stream-pp strih-pp resolume-snv",

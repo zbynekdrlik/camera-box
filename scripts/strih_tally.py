@@ -295,11 +295,11 @@ class Tally:
         cameras = {}
         for inp in (await obs.request("GetInputList")).get("inputs", []):
             kind = inp.get("unversionedInputKind") or inp.get("inputKind")
-            if kind != NDI_INPUT_KIND:
+            if kind not in (NDI_INPUT_KIND, decision.JXS_INPUT_KIND):
                 continue
             name = inp.get("inputName")
             settings = (await obs.request("GetInputSettings", {"inputName": name})).get("inputSettings", {})
-            cam = decision.camera_of_ndi_name(settings.get("ndi_source_name"))
+            cam = decision.camera_of_input(kind, settings)
             if cam:
                 cameras[name] = cam
         if len(cameras) != len(self.cameras):

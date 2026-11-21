@@ -22,9 +22,12 @@ if ! declare -F strih_dante_leg_filter_apply >/dev/null; then
   . "$(dirname "${BASH_SOURCE[0]}")/strih-dante-leg-filter.sh"
 fi
 
-# strih_dante_leg_declared -> rc 0 when the LOADED box declares Dante devices on the leg.
+# strih_dante_leg_declared -> rc 0 when the LOADED box declares Dante devices ON a leg. A Dante box with no
+# leg (issue 1536, PP's flat network: the devices on the rig NIC) is rc 1, so nothing keyed on this (dstack's
+# leg filter, the /24, rp_filter, the dante-leg grade) ever runs against the shared rig NIC.
 strih_dante_leg_declared() {
-  local v
+  local v l
   v="$(strih_lx_dante_devices 2>/dev/null)" || return 1
-  [ -n "$v" ] && [ "$v" != none ]
+  l="$(strih_lx_program_vban_leg 2>/dev/null)" || return 1
+  [ -n "$v" ] && [ "$v" != none ] && [ -n "$l" ] && [ "$l" != none ]
 }

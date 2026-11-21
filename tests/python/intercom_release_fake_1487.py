@@ -19,9 +19,13 @@ def fake_release_env(tmp_path, version="9.9.3"):
     hub = d / "intercom-hub"
     hub.write_text("#!/bin/sh\necho 'intercom-hub %s'\n" % version)
     hub.chmod(0o755)
+    tray = d / "intercom-tray"  # issue 1542: the 7th member (the strih role's tray)
+    tray.write_text("#!/bin/sh\necho 'intercom-tray %s'\n" % version)
+    tray.chmod(0o755)
     tb = d / "bundle.tar.gz"
     with tarfile.open(tb, "w:gz") as t:
         t.add(hub, arcname="intercom-hub")
+        t.add(tray, arcname="intercom-tray")
         for f in FILES:
             t.add(PINNED / f, arcname=f)
     pin = d / "pin"

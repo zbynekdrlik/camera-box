@@ -11,6 +11,7 @@ JPEG XS input shows ("Kamera" list in jxs-source.cpp), like the NDI source's lis
 Tier-0: a fake obs-websocket `rpc`, a fake seeder for the lib, the issue-1407 harness for the mode bodies.
 """
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,8 +21,26 @@ from test_obs_jxs_inputs_1387 import CAM2, DEFAULTS, FakeObs, _live_cam2, _manif
 from test_rig_mode_relay_rc_1407 import _at, _run  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
+REPO_FACTS = REPO / "scripts" / "strih-boxes"
 LIB = REPO / "scripts" / "lib" / "jxs-mapping-enforce.sh"
 RIG = REPO / "scripts" / "rig-mode.sh"
+
+JXS_KEYS = ("STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS", "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS")
+
+
+def _ndi_only_pp(tmp_path):
+    """A copy of the real fact files in which the PP pair declares no JPEG XS (every JXS fact `none`): the
+    NDI-only venue PP was until issue 1535 (18.11.2026). Returns the fact dir."""
+    d = tmp_path / "ndi-only-facts"
+    d.mkdir()
+    for f in (REPO_FACTS).glob("*.env"):
+        shutil.copy(f, d / f.name)
+    for box in ("strih-pp", "stream-pp"):
+        p = d / f"{box}.env"
+        p.write_text("\n".join(f"{ln.split('=', 1)[0]}=none" if ln.split("=", 1)[0] in JXS_KEYS else ln
+                               for ln in p.read_text().splitlines()) + "\n")
+    return d
+
 
 CAM3 = dict(CAM2, name="JXS cam3 src", scene="JXS cam3",
             settings=dict(CAM2["settings"], jxs_port=7003, jxs_camera=3))
@@ -248,7 +267,7 @@ sys.exit({rc})
     return fake, log
 
 
-def _lib(tmp_path, ip, rc=0, mode="event"):
+def _lib(tmp_path, ip, rc=0, mode="event", env=None):
     """Run the lib function under the caller's set -euo pipefail with the record-and-fold call shape."""
     fake, log = _fake_seeder(tmp_path, rc)
     script = tmp_path / "drive.sh"
@@ -258,7 +277,7 @@ _r=0
 jxs_mapping_enforce {mode} "$1" "" || _r=$?
 echo "AFTER rc=$_r"
 """)
-    env = dict(os.environ, JXS_MAPPING_ENFORCE_SEEDER=str(fake), HOME=str(tmp_path))
+    env = dict(os.environ, JXS_MAPPING_ENFORCE_SEEDER=str(fake), HOME=str(tmp_path), **(env or {}))
     proc = subprocess.run(["bash", str(script), ip], capture_output=True, text=True, env=env, timeout=60)
     return proc, (log.read_text() if log.exists() else "")
 
@@ -293,13 +312,24 @@ def test_a_failed_enforce_returns_its_rc_and_warns_by_name_and_the_caller_contin
 
 
 def test_a_strih_that_declares_no_jpeg_xs_camera_or_no_fact_file_is_a_note(tmp_path):
-    # strih-pp declares none; stream-snv is no strih (its JXS PGM src is never enforced from here); no box at
-    # the TEST-NET address
+    # strih-pp declaring none (a synthetic venue: PP is on JPEG XS since issue 1535); stream-snv is no strih
+    # (its JXS PGM src is never enforced from here); no box at the TEST-NET address
+    env = {"STRIH_BOXES_DIR": str(_ndi_only_pp(tmp_path))}
     for ip in ("10.77.8.202", "10.77.9.204", "192.0.2.9"):
-        proc, log = _lib(tmp_path, ip)
+        proc, log = _lib(tmp_path, ip, env=env)
         assert proc.returncode == 0 and "AFTER rc=0" in proc.stdout, proc.stdout + proc.stderr
         assert log == ""
         assert "NOTE" in proc.stdout and "issue 1387" in proc.stdout, proc.stdout
+
+
+def test_strih_pp_enforces_its_four_declared_cameras(tmp_path):
+    # issue 1535: the real strih-pp facts declare cam1/4/6/7, so its mapping is enforced like SNV's
+    proc, log = _lib(tmp_path, "10.77.8.202")
+    assert proc.returncode == 0 and "AFTER rc=0" in proc.stdout, proc.stdout + proc.stderr
+    args = log.split("\n", 1)[0].split()
+    assert "--enforce-mapping" in args and args[args.index("--host") + 1] == "10.77.8.202"
+    for n, port in ((1, 7001), (4, 7004), (6, 7006), (7, 7007)):
+        assert f'"JXS cam{n} src"' in log and f'"jxs_port": {port}' in log, log
 
 
 def test_the_lib_has_no_side_effect_when_sourced():

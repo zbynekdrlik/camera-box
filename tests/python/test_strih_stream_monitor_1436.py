@@ -267,7 +267,7 @@ def test_the_strih_role_never_runs_the_monitor(boxes):
     for box in ("strih-snv", "strih-pp"):
         a = _applied(boxes, box)
         assert "strih-stream-monitor" not in a["UNITS"]
-        assert a["ROWS"] == "13"  # seven unit rows + six extra rows (issue 1424: the display watch's pass + X config; issue 1485: dtray's devices)
+        assert a["ROWS"] == "14"  # eight unit rows (issue 1542: + the intercom tray) + six extra rows (issue 1424: the display watch's pass + X config; issue 1485: dtray's devices)
         assert "ffmpeg" not in a["PKGS"].split()
 
 

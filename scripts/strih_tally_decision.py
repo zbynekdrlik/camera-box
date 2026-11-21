@@ -2,8 +2,8 @@
 
 Owner rule (12.10.2026): a scene lights camera n when its enabled content, nested scenes and groups
 included, holds exactly ONE distinct camera n; anything else (no camera, several) lights nothing (0).
-A camera is identified by the NDI source name `CAM<n> (...)` of an ndi_source input, never by the
-OBS input name.
+A camera is identified by the NDI source name `CAM<n> (...)` of an ndi_source input, or the
+`jxs_camera` setting of a JPEG XS input (issue 1536), never by the OBS input name.
 
 The service (scripts/strih_tally.py) builds the inputs from obs-websocket:
   * tree: scene OR group name -> its items, each {"name", "kind": "scene"|"group"|"input", "enabled"};
@@ -18,6 +18,21 @@ def camera_of_ndi_name(ndi_name):
     """`CAM<n> (...)` -> n, anything else (a program feed, a CG sender, None) -> 0."""
     m = _CAM.match(ndi_name or "")
     return int(m.group(1)) if m else 0
+
+
+NDI_INPUT_KIND = "ndi_source"
+JXS_INPUT_KIND = "camera_box_jxs_source"
+
+
+def camera_of_input(kind, settings):
+    """The camera an input shows: an ndi_source by its NDI source name `CAM<n> (...)`, a JPEG XS
+    input (issue 1536, PP 18.11.2026) by its integer `jxs_camera` setting; anything else -> 0."""
+    if kind == NDI_INPUT_KIND:
+        return camera_of_ndi_name(settings.get("ndi_source_name"))
+    if kind == JXS_INPUT_KIND:
+        v = settings.get("jxs_camera")
+        return v if type(v) is int and v > 0 else 0
+    return 0
 
 
 def cameras_in(scene, tree, cameras, _seen=None):

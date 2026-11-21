@@ -1,5 +1,5 @@
 //! (#1113) Genlock capture→emit pacing gate — the pure wall-clock decimation math extracted
-//! verbatim from `src/ndi.rs` (surfaced by the issue-1111 review: `ndi.rs` had grown to ~2555
+//! verbatim from `vstack:av/ndi/src/ndi.rs` (surfaced by the issue-1111 review: `ndi.rs` had grown to ~2555
 //! lines, ~2.5× the ~1000-line budget). This is a cohesive, dependency-free cluster that only
 //! shared the `ndi` module by history, not by need — it has zero NDI/FFI dependency.
 //!
@@ -87,7 +87,8 @@ pub const GENLOCK_MAX_CATCHUP_INTERVALS: u64 = 8;
 /// module doc): for the SAME instant the gate's slot and the stamp's slot coincide (the gate reads
 /// the poll instant, the stamp the capture instant — the module doc says what that leaves).
 /// `interval_ns == 0` disables the gate and is the guarded divisor case, matching
-/// [`crate::ndi::next_boundary_100ns`] which also guards a zero divisor rather than panicking.
+/// `next_boundary_100ns` (`vstack:av/ndi/src/ndi.rs`, crate-private there) which also guards a
+/// zero divisor rather than panicking.
 pub fn genlock_emit_gate(
     now_ns: u64,
     next_boundary_ns: u64,

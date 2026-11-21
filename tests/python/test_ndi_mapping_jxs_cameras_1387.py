@@ -10,7 +10,9 @@ spec.loader.exec_module(m)
 
 def test_the_box_facts_name_the_jpeg_xs_cameras_by_address():
     assert m.jxs_cameras_of("10.77.9.202") == {"cam2", "cam3", "cam5"}
-    assert m.jxs_cameras_of("10.77.8.202") == set(), "strih-pp declares none"
+    # issue 1535 (owner 18.11.2026): strih-pp takes cam1/4/6/7 over JPEG XS
+    assert m.jxs_cameras_of("10.77.8.202") == {"cam1", "cam4", "cam6", "cam7"}
+    assert m.jxs_cameras_of("10.77.8.204") == set(), "stream-pp is no strih: it declares no camera"
     assert m.jxs_cameras_of("192.0.2.1") == set()
 
 

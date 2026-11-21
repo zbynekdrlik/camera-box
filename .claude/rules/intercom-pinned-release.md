@@ -17,7 +17,7 @@ the boxes and keeps the glue: `strih-intercom-hub-unit.sh`, `strih-interkom-publ
 
 - **One pin:** `scripts/intercom-release.pin` (tag + tarball sha256). Root `Cargo.toml`'s `intercom-vban`
   git tag must equal it (`tests/intercom_pin_1487.rs`).
-- **The bundle** `intercom-hub-linux-amd64.tar.gz` carries the binary, the unit and the four TOMLs.
+- **The bundle** `intercom-hub-linux-amd64.tar.gz` carries the binary, the unit, the four TOMLs and (since v1.9.26) the strih role's tray `intercom-tray`, an OPTIONAL member (`STRIH_INTERCOM_OPTIONAL_FILES`: placed when present, never required by the hub install; installed by step 16d, `.claude/rules/strih-session-apps.md` issue 1542).
   `--check-config` makes TOML and binary a pair, so step 13 installs all three from one directory,
   `<tree>/intercom-release/<tag>/` (git-ignored).
 - **`strih_intercom_release_ensure`:** by the exact tag only; the sha256 must equal the pin AND the

@@ -120,7 +120,7 @@ def test_strih_pp_and_stream_pp_read_their_address_from_obs_fleet(tmp_path):
 # ---------------------------------------------------------------------------------------------
 
 def test_the_pp_grandmaster_comes_from_the_strih_pp_fact_file(tmp_path, monkeypatch):
-    assert PP_GM == "10.77.8.110"
+    assert PP_GM == "10.77.7.200"  # issue 1536: the Dante GM on VLAN 70, the LAN GM 10.77.8.110 is gone
     r = _bash(tmp_path, 'echo "V=$(dantesync_fleet_role_gm_host video-pp)"; echo "M=$(dantesync_fleet_role_gm_host ntp-master-pp)";'
                         ' echo "I=$(dantesync_fleet_role_gm_ip video-pp)"; echo "S=$(dantesync_fleet_role_gm_host video)"')
     assert r.returncode == 0, r.stderr

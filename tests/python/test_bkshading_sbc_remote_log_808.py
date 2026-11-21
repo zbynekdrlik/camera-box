@@ -88,6 +88,7 @@ def test_every_live_board_resolves_to_the_strih_boxes_that_name_it():
         for e in _facts(f.name).get("STRIH_BKSHADING_RELAYS", "none").split():
             if "@register:" in e:
                 boards.add(e.split("@register:", 1)[1])
+    # issue 1537 (18.11.2026 evening, the owner reversed 15.11): PP's cam1 and cam4 run on their Oranges again.
     assert {"cam1-shading", "cam2-shading", "cam4-shading"} <= boards
     for board in sorted(boards):
         r = _bash('remote_log_board_sink_ips "$1"', board)
@@ -99,8 +100,8 @@ def test_each_board_gets_the_venue_that_lists_it():
     snv = _facts("strih-snv.env")["STRIH_IP"]
     pp = _facts("strih-pp.env")["STRIH_IP"]
     assert _bash('remote_log_board_sink_ips cam2-shading').stdout.split() == [snv]
+    # issue 1537 (18.11.2026 evening): strih-pp lists cam1-shading and cam4-shading again (the PP Oranges)
     assert _bash('remote_log_board_sink_ips cam1-shading').stdout.split() == [pp]
-    # issue 1452: cam3's camera moved onto cam3's own USB (10.11.2026), so only strih-pp lists cam4-shading.
     assert _bash('remote_log_board_sink_ips cam4-shading').stdout.split() == [pp]
 
 

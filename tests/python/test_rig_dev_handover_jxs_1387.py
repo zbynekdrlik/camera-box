@@ -24,6 +24,7 @@ fact files; the verifier and the facet reader are fakes).
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -38,11 +39,29 @@ LIB = _SCRIPTS / "lib" / "program-inputs.sh"
 ORCH = _SCRIPTS / "rig-dev-handover-check.sh"
 SNV_STRIH, SNV_STREAM = "10.77.9.202", "10.77.9.204"
 NOWHERE = "192.0.2.10"
+REPO_FACTS = _SCRIPTS / "strih-boxes"
 
 _SCRUB = ("E2E_PROGRAM_PATH", "CAMERA_STRIH_JXS_SET", "STRIH_PROG_SOURCE", "STREAM_PROG_SOURCE",
           "STRIH_BOXES_DIR", "OBS_FLEET", "PROGRAM_INPUTS_VERIFY_TIMEOUT_S", "PROGRAM_INPUTS_OBS_PORT",
           "OBS_PASSWORD", "STRIH_HOST", "STREAM_HOST", "STRIH_LX_USER", "STRIH_LX_PW", "STREAM_USER",
           "STREAM_PW", "EVENT_JXS_SSH_TIMEOUT")
+
+
+JXS_KEYS = ("STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS", "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS")
+
+
+def _ndi_only_pp(tmp_path):
+    """A copy of the real fact files in which the PP pair declares no JPEG XS (every JXS fact `none`): the
+    NDI-only venue PP was until issue 1535 (18.11.2026). Returns the fact dir."""
+    d = tmp_path / "ndi-only-facts"
+    d.mkdir()
+    for f in (REPO_FACTS).glob("*.env"):
+        shutil.copy(f, d / f.name)
+    for box in ("strih-pp", "stream-pp"):
+        p = d / f"{box}.env"
+        p.write_text("\n".join(f"{ln.split('=', 1)[0]}=none" if ln.split("=", 1)[0] in JXS_KEYS else ln
+                               for ln in p.read_text().splitlines()) + "\n")
+    return d
 
 
 def _env(extra=None):
@@ -229,11 +248,14 @@ def test_a_box_no_fact_file_names_is_one_none_row_and_never_dialled(tmp_path):
 
 
 def test_a_box_whose_facts_declare_no_jpeg_xs_is_one_none_row(tmp_path):
+    # strih-pp declaring none (a synthetic venue: PP is on JPEG XS since issue 1535).
     # the fact loader checks the fleet row against the box's own STRIH_IP: dial it by that address
-    facts = (_SCRIPTS / "strih-boxes" / "strih-pp.env").read_text(encoding="utf-8").splitlines()
+    d = _ndi_only_pp(tmp_path)
+    facts = (d / "strih-pp.env").read_text(encoding="utf-8").splitlines()
     pp_ip = next(ln.split("=", 1)[1].strip() for ln in facts if ln.startswith("STRIH_IP="))
     here, log = _fake_seeder(tmp_path, {})
-    out = _rows(tmp_path, here, pp_ip, "strih", env={"OBS_FLEET": f"strih-pp|{pp_ip}|linux-genlock|always"})
+    out = _rows(tmp_path, here, pp_ip, "strih", env={"OBS_FLEET": f"strih-pp|{pp_ip}|linux-genlock|always",
+                                                      "STRIH_BOXES_DIR": str(d)})
     assert out.startswith(f"NONE (jxs) strih {pp_ip}:") and "strih-pp" in out, out
     assert not log.exists()
 

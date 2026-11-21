@@ -308,7 +308,7 @@ def _kiosk_row(gpu_wait, x_core):
     facts = "\n".join([
         "gather_done=1", "lightdm=install ok installed", "openbox=install ok installed",
         "dm=/usr/lib/systemd/system/lightdm.service", "dm_lightdm=/usr/lib/systemd/system/lightdm.service",
-        "autologin=1", "gdm3=", "gnome_shell=", f"gpu_wait={gpu_wait}", f"x_core={x_core}"]) + "\n"
+        "autologin=1", "gdm3=", "gnome_shell=", f"gpu_wait={gpu_wait}", "dsync_ready=1", f"x_core={x_core}"]) + "\n"
     r = subprocess.run(["bash", "-c", '. "$1"; obs_box_baseline_verdict', "h", str(VERIFY_LIB)],
                        input=facts, capture_output=True, text=True, timeout=30)
     rows = [line for line in r.stdout.splitlines() if line.startswith("kiosk|")]

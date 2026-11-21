@@ -63,12 +63,59 @@ cambox_lan_nic() {
   return 1
 }
 
+# issue 1545: every onboard port, cabled or not (the box's two r8169 ports; dsync >= 1.35.16 joins the
+# listed one that has an IPv4 and re-joins when the cable moves), sorted, comma-joined.
+cambox_lan_nics() {
+  # pure bash (the glob sorts under the C locale): the live apply runs it on a box PATH without sort/paste
+  local sys="${1-}" d n found="" LC_ALL=C
+  for d in "$sys"/class/net/*; do
+    n="${d##*/}"
+    case "$n" in enp*) ;; *) continue ;; esac
+    [ -e "$d/device" ] || [ -L "$d/device" ] || continue
+    found="${found:+$found,}$n"
+  done
+  if [ -z "$found" ]; then
+    echo "cambox_lan_nics: no enp* interface with a device under ${sys}/class/net -- the onboard ports are unknown, dsync is not bound to a guess" >&2
+    return 1
+  fi
+  printf '%s\n' "$found"
+}
+
+# issue 1545: rc 0 iff the dsync VERSION (X.Y.Z, nothing else) takes an --interface list (>= 1.35.16)
+cambox_dsync_list_capable() {
+  local v="${1-}" a b c
+  [[ "$v" =~ ^([0123456789]+)\.([0123456789]+)\.([0123456789]+)$ ]] || return 1
+  a=$((10#${BASH_REMATCH[1]})) b=$((10#${BASH_REMATCH[2]})) c=$((10#${BASH_REMATCH[3]}))
+  [ "$a" -gt 1 ] && return 0
+  [ "$a" -lt 1 ] && return 1
+  [ "$b" -gt 35 ] && return 0
+  [ "$b" -lt 35 ] && return 1
+  [ "$c" -ge 16 ]
+}
+
+# issue 1545: the --interface value for this box: every onboard port on a dsync that takes a list,
+# else the one cabled port (issue 1439). rc 1 (by name) when it does not resolve.
+cambox_dsync_iface_arg() {
+  local sys="${1-}" ver="${2-}"
+  if cambox_dsync_list_capable "$ver"; then
+    cambox_lan_nics "$sys"
+  else
+    cambox_lan_nic "$sys"
+  fi
+}
+
 cambox_dsync_unit_text() {
   local iface=""
   if [ "$#" -ge 1 ]; then
-    local nic="${1-}" LC_ALL=C up='ABCDEFGHIJKLMNOPQRSTUVWXYZ' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789'
-    [[ "$nic" =~ ^[-._${dg}${up}${lo}]{1,15}$ ]] || return 1
-    case "$nic" in -*) return 1 ;; esac
+    local nic="${1-}" one LC_ALL=C up='ABCDEFGHIJKLMNOPQRSTUVWXYZ' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789'
+    local -a parts=()
+    # issue 1545: one name, or a comma list of names (dsync >= 1.35.16)
+    case "$nic" in '' | ,* | *, | *,,* | *$'\n'*) return 1 ;; esac
+    IFS=, read -r -a parts <<<"$nic"
+    for one in "${parts[@]}"; do
+      [[ "$one" =~ ^[-._${dg}${up}${lo}]{1,15}$ ]] || return 1
+      case "$one" in -*) return 1 ;; esac
+    done
     iface=" --interface ${nic}"
   fi
   cat <<UNIT
@@ -97,10 +144,15 @@ UNIT
 }
 
 cambox_dsync_gather_remote_snippet() {
-  local sys="${1:-/sys}" unit="${2:-/etc/systemd/system/dsync.service}"
-  declare -f cambox_lan_nic dsync_iface_status_fields dsync_iface_read_status
+  local sys="${1:-/sys}" unit="${2:-/etc/systemd/system/dsync.service}" bin="${3:-/usr/local/bin/dsync}"
+  declare -f cambox_lan_nic cambox_lan_nics dsync_iface_status_fields dsync_iface_read_status
   printf '_d_nic="$(cambox_lan_nic %q 2>/dev/null)" || _d_nic=""\n' "$sys"
   printf 'echo "NIC=$_d_nic"\n'
+  # issue 1545: every onboard port + the dsync version (a list is wanted from 1.35.16 on)
+  printf '_d_nics="$(cambox_lan_nics %q 2>/dev/null)" || _d_nics=""\n' "$sys"
+  printf 'echo "NICS=$_d_nics"\n'
+  printf '_d_ver="$(%q --version 2>/dev/null | sed -n '\''1s/^[^ ]* //p'\'')" || _d_ver=""\n' "$bin"
+  printf 'echo "VER=$_d_ver"\n'
   printf 'echo "EXEC=$(sed -n '\''s/^ExecStart=//p'\'' %q 2>/dev/null | tail -n 1)"\n' "$unit"
   printf 'command -v python3 >/dev/null 2>&1 || echo "NOPY=1"\n'
   printf 'if _d_f="$(dsync_iface_read_status)"; then echo "STATUS=1"; echo "FIELDS=$_d_f"; else echo "STATUS=0"; fi\n'
@@ -108,11 +160,13 @@ cambox_dsync_gather_remote_snippet() {
 }
 
 cambox_dsync_verify_verdict() {
-  local block="${1-}" line nic="" exec_="" status="" fields="" end=0 nopy=0 rest conf joined v
+  local block="${1-}" line nic="" nics="" ver="" want="" exec_="" status="" fields="" end=0 nopy=0 rest conf joined v
   while IFS= read -r line; do
     case "$line" in
       NOPY=1) nopy=1 ;;
       NIC=*) nic="${line#NIC=}" ;;
+      NICS=*) nics="${line#NICS=}" ;;
+      VER=*) ver="${line#VER=}" ;;
       EXEC=*) exec_="${line#EXEC=}" ;;
       STATUS=*) status="${line#STATUS=}" ;;
       FIELDS=*) fields="${line#FIELDS=}" ;;
@@ -121,8 +175,11 @@ cambox_dsync_verify_verdict() {
   done <<<"$block"
   if [ "$end" != 1 ]; then echo gather-incomplete; return 0; fi
   if [ -z "$nic" ]; then echo nic-unresolved; return 0; fi
+  # issue 1545: a dsync that takes a list must carry every onboard port; the joined one = the cabled one
+  want="$nic"
+  if [ -n "$nics" ] && cambox_dsync_list_capable "$ver"; then want="$nics"; fi
   case " ${exec_} " in
-    *" --interface ${nic} "*) ;;
+    *" --interface ${want} "*) ;;
     *) echo "unit-not-bound:${exec_:-<no ExecStart>}"; return 0 ;;
   esac
   rest="${fields#*$'\t'}"
@@ -130,7 +187,7 @@ cambox_dsync_verify_verdict() {
   joined="${rest#*$'\t'}"
   [ "$status" = 1 ] || { conf=""; joined=""; }
   [ "$nopy" != 1 ] || { echo "unreadable:no-python3-on-the-box"; return 0; }
-  v="$(dsync_iface_verdict "${status:-0}" "$conf" "$joined" "$nic")"
+  v="$(dsync_iface_verdict "${status:-0}" "$conf" "$joined" "$want" "$nic")"
   echo "$v"
 }
 
@@ -150,7 +207,7 @@ cambox_dsync_verify_verdict() {
 #                                    reads and the seconds it took
 
 cambox_dsync_apply_prelude() {
-  local unit="${1-}" sys="${2-}" wait="${3-}" poll="${4-}"
+  local unit="${1-}" sys="${2-}" wait="${3-}" poll="${4-}" bin="${5:-/usr/local/bin/dsync}"
   [[ "$wait" =~ ^[0123456789]{1,4}$ ]] || wait=150
   [[ "$poll" =~ ^[123456789][0123456789]{0,2}$ ]] || poll=5
   wait=$((10#$wait))
@@ -161,7 +218,9 @@ cambox_dsync_apply_prelude() {
   printf '_rou_ds_sys=%q\n' "$sys"
   printf '_rou_ds_wait=%s\n' "$wait"
   printf '_rou_ds_poll=%s\n' "$poll"
-  declare -f cambox_lan_nic cambox_dsync_unit_text dsync_iface_verdict dsync_iface_status_fields dsync_iface_read_status
+  printf '_rou_ds_bin=%q\n' "$bin"
+  declare -f cambox_lan_nic cambox_lan_nics cambox_dsync_list_capable cambox_dsync_iface_arg \
+    cambox_dsync_unit_text dsync_iface_verdict dsync_iface_status_fields dsync_iface_read_status
 }
 
 cambox_dsync_apply_plan_cmds() {
@@ -171,11 +230,16 @@ cambox_dsync_apply_plan_cmds() {
 _rou_ds_present=0
 [ ! -e "$_rou_ds_unit" ] || _rou_ds_present=1
 _rou_ds_nic=""
+_rou_ds_join=""
 _rou_ds_body=""
 _rou_do_ds=0
 _rou_ds_bad=0
+# issue 1545: a dsync >= 1.35.16 gets every onboard port (it joins the cabled one, re-joins when the
+# cable moves); an older one keeps the one cabled port. The cabled port is what it must have joined.
+_rou_ds_ver="$("$_rou_ds_bin" --version 2>/dev/null | sed -n '1s/^[^ ]* //p')" || _rou_ds_ver=""
+_rou_ds_join="$(cambox_lan_nic "$_rou_ds_sys" 2>/dev/null)" || _rou_ds_join=""
 if [ "$_rou_ds_present" = 1 ]; then
-  if _rou_ds_nic="$(cambox_lan_nic "$_rou_ds_sys")" && _rou_ds_body="$(cambox_dsync_unit_text "$_rou_ds_nic")"; then
+  if _rou_ds_nic="$(cambox_dsync_iface_arg "$_rou_ds_sys" "$_rou_ds_ver")" && _rou_ds_body="$(cambox_dsync_unit_text "$_rou_ds_nic")"; then
     if _rou_rl_need "$_rou_ds_unit" "$_rou_ds_body"; then _rou_do_ds=1; fi
   else
     _rou_ds_bad=1
@@ -219,21 +283,21 @@ if [ "$_rou_ds_written" = 1 ]; then
       _rou_ds_reads=$((_rou_ds_reads + 1))
       _rou_ds_lk="${_rou_ds_f%%$'\t'*}"
       _rou_ds_rest="${_rou_ds_f#*$'\t'}"
-      _rou_ds_v="$(dsync_iface_verdict "$_rou_ds_read" "${_rou_ds_rest%%$'\t'*}" "${_rou_ds_rest#*$'\t'}" "$_rou_ds_nic")"
-      if [ "$_rou_ds_v" = "ok:$_rou_ds_nic" ] && [ "$_rou_ds_lk" = true ]; then break; fi
+      _rou_ds_v="$(dsync_iface_verdict "$_rou_ds_read" "${_rou_ds_rest%%$'\t'*}" "${_rou_ds_rest#*$'\t'}" "$_rou_ds_nic" "$_rou_ds_join")"
+      if [ "$_rou_ds_v" = "ok:${_rou_ds_join:-$_rou_ds_nic}" ] && [ "$_rou_ds_lk" = true ]; then break; fi
     done
     _rou_ds_took="${_rou_ds_reads} read(s) in $(($(date +%s) - _rou_ds_t0)) s, budget ${_rou_ds_wait} s"
     if [ "$_rou_ds_v" = unreadable ] && ! command -v python3 >/dev/null 2>&1; then
       echo "FAIL: [issue 1394] dsync's /status on $_rou_box cannot be read: no python3 on the box ($_rou_ds_took, issue 1439)" >&2
       _rou_rc=1
-    elif [ "$_rou_ds_v" != "ok:$_rou_ds_nic" ]; then
+    elif [ "$_rou_ds_v" != "ok:${_rou_ds_join:-$_rou_ds_nic}" ]; then
       echo "FAIL: [issue 1394] dsync on $_rou_box is not bound to $_rou_ds_nic: $_rou_ds_v ($_rou_ds_took, issue 1439)" >&2
       _rou_rc=1
     elif [ "$_rou_ds_lk" != true ]; then
       echo "FAIL: [issue 1394] dsync on $_rou_box is bound to $_rou_ds_nic but not locked ($_rou_ds_took) -- re-read /status, the cold lock takes ~95 s (issue 1439)" >&2
       _rou_rc=1
     else
-      echo "OK: dsync locked on $_rou_ds_nic (--interface, configured and joined; $_rou_ds_took; issue 1439)"
+      echo "OK: dsync locked on ${_rou_ds_join:-$_rou_ds_nic} (--interface $_rou_ds_nic, configured and joined; $_rou_ds_took; issue 1439)"
     fi
   fi
 fi

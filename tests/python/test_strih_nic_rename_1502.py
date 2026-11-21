@@ -86,13 +86,13 @@ def _nic(sysroot, name, mac, driver="r8152", usb=True):
 def test_stream_snv_declares_the_usb_25g_adapter_renamed_rig0():
     f = _facts("stream-snv")
     assert (f["STRIH_NIC_DRIVER"], f["STRIH_NIC_OOT_DRIVER"], f["STRIH_NIC_MIN_USB_MBPS"],
-            f["STRIH_NIC_MIN_LINK_MBPS"]) == ("r8152", "none", "5000", "2500")
+            f["STRIH_NIC_MIN_LINK_MBPS"]) == ("r8152", "realtek-r8152-2.21.4", "5000", "2500")  # issue 1534
     assert f["STRIH_NIC_RENAME"] == MAC + "=rig0"
     assert f["STRIH_PROGRAM_VBAN_LEG"] == "vlan:70"
     assert len("rig0." + f["STRIH_PROGRAM_VBAN_LEG"].split(":")[1]) <= 15
 
 
-@pytest.mark.parametrize("box", ["strih-snv", "strih-pp", "stream-pp"])
+@pytest.mark.parametrize("box", ["strih-snv", "strih-pp"])   # stream-pp: rig0 since issue 1536
 def test_every_other_box_declares_no_rename(box):
     assert _facts(box)["STRIH_NIC_RENAME"] == "none"
 

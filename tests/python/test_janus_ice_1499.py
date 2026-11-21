@@ -35,6 +35,8 @@ sys.path.insert(0, str(SCRIPTS))
 import janus_ice_cfg as ice  # noqa: E402
 from janus_turn_rest_cfg import JcfgError  # noqa: E402
 import janus_turn_rest_cfg as turn  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import vban_leg_fakes_1439 as fk  # noqa: E402
 
 # The shape of strih-snv's live janus.jcfg nat section (read 11.11.2026), the TURN block in place.
 PACKAGE = """general: {
@@ -178,14 +180,14 @@ def _bash(script, box, env):
                           capture_output=True, text=True, env=env, timeout=60)
 
 
-def _fact(box, name):
-    for ln in (SCRIPTS / "strih-boxes" / ("%s.env" % box)).read_text().splitlines():
+def _fact(box, name, boxes=None):
+    for ln in (Path(boxes or SCRIPTS / "strih-boxes") / ("%s.env" % box)).read_text().splitlines():
         if ln.startswith(name + "="):
             return ln.split("=", 1)[1]
     raise AssertionError("no %s in %s" % (name, box))
 
 
-@pytest.mark.parametrize("box", ["strih-snv", "stream-snv"])
+@pytest.mark.parametrize("box", ["strih-snv", "stream-snv", "strih-pp", "stream-pp"])   # PP: issue 1536
 def test_a_box_with_a_leg_gets_its_lan_address(rig, box):
     jcfg, env = rig
     assert _fact(box, "STRIH_PROGRAM_VBAN_LEG") != "none"
@@ -201,7 +203,9 @@ def test_a_box_with_a_leg_gets_its_lan_address(rig, box):
 @pytest.mark.parametrize("box", ["strih-pp", "stream-pp"])
 def test_a_box_without_a_leg_gets_no_block_and_a_leftover_is_removed(rig, box):
     jcfg, env = rig
-    assert _fact(box, "STRIH_PROGRAM_VBAN_LEG") == "none"
+    # issue 1536: the PP boxes have their VLAN 70 legs now; the leg-less case is their pre-1536 shape
+    env = dict(env, STRIH_BOXES_DIR=fk.pp_pre_1536_boxes_dir())
+    assert _fact(box, "STRIH_PROGRAM_VBAN_LEG", env["STRIH_BOXES_DIR"]) == "none"
     jcfg.write_text(ice.apply(PACKAGE, "10.77.8.202"))
     r = _bash("strih_janus_ice_apply", box, env)
     assert r.returncode == 0, r.stderr

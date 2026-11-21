@@ -257,3 +257,12 @@ comment does not add the bare name earlier in the sliced region than the real ca
 (drop the bare function-name literal from the comment — `EVENT-assert` instead of `event_mode_assert`),
 never a logic change. Same class as the top-level CLAUDE.md "comment duplicates a `.find` anchor"
 GOTCHA, but specifically for the SCOPED-slice case the count sweep cannot see.
+
+## A camera with no picture: `CAMERA_MEASURE_EXCLUDE`, never a silent drop (issue 1547, owner 21.11.2026)
+
+Owner: "musi to ostat ako otazka, nie ze zistim za mesiac ze vlastne sa to netestuje lebo si to vyradil".
+A camera that has no picture leaves the DEFAULT measured set through `CAMERA_MEASURE_EXCLUDE` (space-separated
+names), set in ONE place, the Full-path E2E workflow env, next to its open `needs-owner-action` ticket. Every
+source of `scripts/camera-set.sh` prints a NOTE naming it; an explicit `CAMERA_ACTIVE_SET` is never filtered;
+the venue's STRIH_CAMERAS and the default literal stay unchanged. The ticket closes only when the camera is
+measured again, together with removing the workflow line.

@@ -68,6 +68,8 @@ def _expected(cams, addresses):
 
 SNV_LIVE = _expected((2, 3, 5), {n: ("cambox-relay", "cam%d.lan:8771" % n) for n in range(1, 8)}
                      | {2: ("sbc-relay", "register:cam2-shading")})
+# issue 1537 (18.11.2026 evening, the owner reversed 15.11): the Orange handhelds DO run in PP, cam1 and cam4 on
+# their boards (cam1-shading, handheld-1 = cam4-shading), cam6/cam7 on their camboxes' relays.
 PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)}
                     | {1: ("sbc-relay", "register:cam1-shading"), 4: ("sbc-relay", "register:cam4-shading")})
 
@@ -76,8 +78,8 @@ PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) f
 
 @pytest.mark.parametrize("box,want", [
     ("strih-snv", "2=sbc-relay@register:cam2-shading"),
-    ("strih-pp", "1=sbc-relay@register:cam1-shading 4=sbc-relay@register:cam4-shading 6=cambox-relay@10.77.9.66:8771 "
-                 "7=cambox-relay@10.77.9.67:8771"),
+    ("strih-pp", "1=sbc-relay@register:cam1-shading 4=sbc-relay@register:cam4-shading "
+                 "6=cambox-relay@10.77.9.66:8771 7=cambox-relay@10.77.9.67:8771"),
     ("stream-snv", "none"),
     ("stream-pp", "none"),
 ])
@@ -204,3 +206,47 @@ def test_the_visiting_blocks_follow_the_fact_files_not_a_literal_range_1431(boxe
     assert r.returncode == 0 and r.stdout.strip() == "1 2 3 4 5 6", r.stdout + r.stderr
     _t, cfg = _seed(boxes, "strih-snv")
     assert sorted(c["id"] for c in cfg["camera"]) == ["cam%d" % n for n in (1, 2, 3, 4, 5, 6)], cfg["camera"]
+
+
+def test_every_pp_cambox_relay_is_on_the_rest_pin_1537():
+    """issue 1537: each PP camera's box relay is listed on the REST pin (cam1 joined cam4/6/7)."""
+    rows = {}
+    for line in (REPO / "scripts" / "shading-release-boxes.txt").read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            box, pin = line.split()
+            rows[box] = pin
+    for n in (1, 4, 6, 7):
+        assert rows.get("cam%d" % n) == "shading-release-rest.pin", ("cam%d" % n, rows)
+
+
+# shading v0.2.11 (shading#24, the PP operators): the panel tints the program camera red / the preview green
+# from the strih tally service on the same box. The key is additive in the shading CONTRACT; without it the
+# tally is OFF. Every strih box runs strih-tally.service, so every seed carries it.
+TALLY_URL = "http://127.0.0.1:9240/state"
+
+
+@pytest.mark.parametrize("box", ["strih-snv", "strih-pp"])
+def test_the_seed_points_the_panel_at_the_box_tally_service(boxes, box):
+    _text, cfg = _seed(boxes, box)
+    assert cfg["tally"] == {"url": TALLY_URL}
+
+
+def test_an_existing_config_without_the_tally_key_gets_it_once_and_keeps_the_rest(boxes, tmp_path):
+    f = tmp_path / "bkshading.toml"
+    f.write_text('bind = "0.0.0.0:8770"\n\n[[camera]]\nid = "cam4"\naddress = "register:cam4-shading"\n')
+    for _ in range(2):
+        r = _bash('strih_bkshading_tally_ensure "$1"', boxes, str(f))
+        assert r.returncode == 0, r.stderr
+    cfg = tomllib.loads(f.read_text())
+    assert cfg["tally"] == {"url": TALLY_URL}
+    assert cfg["camera"] == [{"id": "cam4", "address": "register:cam4-shading"}]
+    assert f.read_text().count("[tally]") == 1
+
+
+def test_an_operator_tally_block_is_left_as_it_is(boxes, tmp_path):
+    f = tmp_path / "bkshading.toml"
+    f.write_text('bind = "0.0.0.0:8770"\n\n[tally]\nurl = "http://10.0.0.9:9240/state"\n')
+    before = f.read_text()
+    r = _bash('strih_bkshading_tally_ensure "$1"', boxes, str(f))
+    assert r.returncode == 0, r.stderr
+    assert f.read_text() == before

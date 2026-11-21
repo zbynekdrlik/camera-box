@@ -282,7 +282,9 @@ jobs:
           # touched. A red ci.yml still blocks the merge by itself; this step needs only the exe.
           FOUND_RUN_ID=""
           for i in $(seq 1 60); do
-            RUN_ID_CAND="$(gh run list --workflow ci.yml --json databaseId,headSha \
+            # --commit: a measure=true dispatch on main runs on a commit whose ci.yml run can be
+            # days old, far past gh run list's newest-20 page (restreamer's gate, 20.11.2026).
+            RUN_ID_CAND="$(gh run list --workflow ci.yml --commit "$SHA" --json databaseId,headSha \
               --jq ".[] | select(.headSha==\"$SHA\") | .databaseId" | head -1)"
             JOB_STATE=""
             if [ -n "$RUN_ID_CAND" ]; then
@@ -377,6 +379,10 @@ jobs:
           # through to the checked-in rig-fleet.txt default. A manual workflow_dispatch's
           # offline_ack input, when non-empty, overrides that default outright.
           CAMBOX_OFFLINE_ACK: ${{ github.event_name == 'workflow_dispatch' && inputs.offline_ack || '' }}
+          # issue 1547 (owner 21.11.2026): cam3 has no picture (its splitter HDMI), so it leaves the
+          # measured set until the re-plug -- and stays ASKED on issue 1547 (needs-owner-action) until
+          # it is measured again. Remove this line together with closing issue 1547.
+          CAMERA_MEASURE_EXCLUDE: cam3
           # #1136: only a workflow_dispatch soak may disable the camera-box main-pin gate; the
           # automatic pull_request gate leaves this empty and always enforces the pin.
           CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN: ${{ github.event_name == 'workflow_dispatch' && inputs.no_main_pin && '1' || '' }}

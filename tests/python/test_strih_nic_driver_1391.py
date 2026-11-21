@@ -177,11 +177,11 @@ def test_a_usb_box_with_the_vendored_driver_still_loads(tmp_path):
 
 
 def test_strih_pp_declares_its_pcie_nic_facts():
-    # issue 1412: strih-pp's rig NIC is the RTL8125 on PCIe (in-tree r8169, no USB device, 2.5 GbE);
-    # the facts are decided now (read off the box in the 11.10.2026 recon), never TODO_OWNER.
+    # issue 1412: strih-pp's rig NIC was the RTL8125 on PCIe (r8169, 2.5 GbE). Issue 1535 (18.11.2026): the
+    # Intel X520-2 (82599ES, in-tree ixgbe) SFP+ port at 10 GbE is the rig NIC now; never TODO_OWNER.
     lines = (BOXES / "strih-pp.env").read_text().splitlines()
-    for want in ("STRIH_NIC_DRIVER=r8169", "STRIH_NIC_OOT_DRIVER=none", "STRIH_NIC_MIN_USB_MBPS=none",
-                 "STRIH_NIC_MIN_LINK_MBPS=2500"):
+    for want in ("STRIH_NIC_DRIVER=ixgbe", "STRIH_NIC_OOT_DRIVER=none", "STRIH_NIC_MIN_USB_MBPS=none",
+                 "STRIH_NIC_MIN_LINK_MBPS=10000"):
         assert want in lines, want
     r = _bash("strih_box_load strih-pp", sources=(FACTS,))
     for k in NEW_KEYS:
@@ -815,13 +815,26 @@ case "$args" in
 esac
 '''
 
-GOOD_NM = "u-1|strih-lan|%s|10.77.9.202/23\n" % NIC
+# issue 1534 (18.11.2026): the r8152 rig NIC's profile carries ethtool.ring-rx 4096 (5th field)
+GOOD_NM = "u-1|strih-lan|%s|10.77.9.202/23|4096\n" % NIC
+
+# fake ethtool: `-g IF` prints the ring with the current RX from $FAKE_RING (empty file = unreadable),
+# `-G IF rx N` records N there and logs the call to $FAKE_RING.log
+FAKE_ETHTOOL = r'''#!/bin/bash
+case "$1" in
+  -g) r="$(cat "$FAKE_RING" 2>/dev/null)"; [ -n "$r" ] || exit 1
+      printf 'Ring parameters for %s:\nPre-set maximums:\nRX:\t\t\t4096\nCurrent hardware settings:\nRX:\t\t\t%s\n' "$2" "$r" ;;
+  -G) echo "ethtool $*" >> "$FAKE_RING.log"; printf '%s\n' "$4" > "$FAKE_RING" ;;
+  *) echo "fake ethtool: $*" >&2; exit 2 ;;
+esac
+'''
 
 
 class Sysfs:
     """A fake /sys with the RTL8157 on usb2/2-3 (r8152), an onboard r8169 NIC and lo."""
 
-    def __init__(self, tmp_path, usb="10000", link="5000", loaded=LOADED, nm=GOOD_NM, dkms_db=None):
+    def __init__(self, tmp_path, usb="10000", link="5000", loaded=LOADED, nm=GOOD_NM, dkms_db=None,
+                 ring="4096"):
         self.tmp = tmp_path
         s = tmp_path / "sys"
         self.sys = s
@@ -859,6 +872,8 @@ class Sysfs:
         self.fake.mkdir()
         _exe(self.bin / "dkms", FAKE_DKMS)
         _exe(self.bin / "nmcli", FAKE_NMCLI)
+        _exe(self.bin / "ethtool", FAKE_ETHTOOL)
+        (tmp_path / "ring").write_text(ring + "\n" if ring else "")
         (self.fake / "dkms.db").write_text(dkms_db if dkms_db is not None else
                                             "realtek-r8152|2.21.4|%s|installed\n" % KERNEL)
         (tmp_path / "nm.tsv").write_text(nm)
@@ -869,7 +884,8 @@ class Sysfs:
             boxes.mkdir(exist_ok=True)
             facts_env = _fixture(boxes, [])
         env = {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "FAKE": str(self.fake),
-               "FAKE_NM": str(self.tmp / "nm.tsv"), "STRIH_NIC_DRV_KERNEL": KERNEL,
+               "FAKE_NM": str(self.tmp / "nm.tsv"), "FAKE_RING": str(self.tmp / "ring"),
+               "STRIH_NIC_DRV_KERNEL": KERNEL,
                "STRIH_NIC_DRV_MODULES_ROOT": str(self.tmp / "no-modules")}
         for name in drop:
             (self.bin / name).unlink()
@@ -888,7 +904,7 @@ def _states(rows):
 def test_grade_passes_the_live_target_state(tmp_path):
     rows = Sysfs(tmp_path).grade()
     assert _states(rows) == {"(nic-driver)": "OK", "(nic-dkms)": "OK", "(nic-usb)": "OK", "(nic-link)": "OK",
-                             "(nic-nm)": "OK", "(nic-rename)": "NOTE"}, rows  # issue 1502: no rename declared
+                             "(nic-nm)": "OK", "(nic-rename)": "NOTE", "(nic-ring)": "OK"}, rows  # issue 1502: no rename declared
     text = "\n".join(d for _, d in rows)
     assert "USB link 10000 Mb/s >= 10000" in text
     assert "Ethernet link 5000 Mb/s >= 5000" in text
@@ -1168,3 +1184,169 @@ def test_setup_step1_prints_the_driver_ring_note_1411():
     assert 'strih_nic_ring_note "$(strih_lx_nic_driver)"' in text
     assert "set ethtool.ring-rx 4096 --" not in text
 
+
+
+# --- issue 1534: the r8152 USB rig NIC needs its RX ring at 4096, kept by setup and graded by verify -----------
+# Live 18.11.2026 on stream-snv (RTL8156B, r8152): the ring sat at the driver's 100 of a possible 4096 and the
+# NIC dropped bursts before the kernel saw them (rx_missed 20978, the Dante program audio holes from 11:29).
+# The step-1 note had asked for 4096 since issue 1391, but nothing set or graded it after the issue-1502 swap.
+# r8152 changes the ring without a link reset (live: carrier_changes unchanged); atlantic never gets one.
+
+@pytest.mark.parametrize("profile,live,state", [
+    ("4096", "4096", "OK"), ("", "4096", "FAIL"), ("4096", "100", "FAIL"), ("4096", "", "FAIL"),
+    ("2048", "4096", "FAIL")])
+def test_r8152_ring_verdict_wants_4096_in_the_profile_and_on_the_nic_1534(profile, live, state):
+    r = _bash('strih_nic_r8152_ring_verdict strih-lan "$P" "$L" rig0', env={"P": profile, "L": live})
+    assert r.stdout.startswith(state + "|(nic-ring)"), r.stdout
+    assert (r.returncode == 0) == (state == "OK"), r
+    if state == "FAIL":
+        assert "4096" in r.stdout and "setup-strih" in r.stdout, r.stdout
+
+
+def test_grade_fails_an_r8152_nic_whose_ring_is_the_driver_default_1534(tmp_path):
+    rows = Sysfs(tmp_path, ring="100").grade()
+    assert _states(rows)["(nic-ring)"] == "FAIL", rows
+    assert any("100" in d for s, d in rows if d.startswith("(nic-ring)")), rows
+
+
+def test_grade_fails_an_r8152_profile_without_the_ring_1534(tmp_path):
+    rows = Sysfs(tmp_path, nm="u-1|strih-lan|%s|10.77.9.202/23\n" % NIC).grade()
+    assert _states(rows)["(nic-ring)"] == "FAIL", rows
+
+
+def _apply(tmp_path, nm, ring, facts=None):
+    box = Sysfs(tmp_path, nm=nm, ring=ring)
+    log = tmp_path / "nmcli.log"
+    nmcli = box.bin / "nmcli"
+    nmcli.write_text(FAKE_NMCLI.replace('args="$*"', 'args="$*"\necho "nmcli $args" >> "$NM_LOG"\n'
+                                        'case "$args" in "connection modify "*) exit 0 ;; esac', 1))
+    boxes = tmp_path / "usb-box"
+    boxes.mkdir(exist_ok=True)
+    env = {"PATH": "%s:%s" % (box.bin, os.environ["PATH"]), "FAKE_NM": str(tmp_path / "nm.tsv"),
+           "FAKE_RING": str(tmp_path / "ring"), "NM_LOG": str(log), "SYSROOT": str(box.sys)}
+    env.update(facts if facts is not None else _fixture(boxes, []))
+    r = _bash('strih_nic_ring_apply "$SYSROOT" ""', env=env, sources=(PROVISION, LIB))
+    calls = log.read_text() if log.exists() else ""
+    eth = (tmp_path / "ring.log").read_text() if (tmp_path / "ring.log").exists() else ""
+    return r, calls, eth, (tmp_path / "ring").read_text().strip()
+
+
+def test_apply_sets_the_ring_in_the_profile_and_on_the_nic_1534(tmp_path):
+    r, calls, eth, live = _apply(tmp_path, "u-1|strih-lan|%s|10.77.9.202/23\n" % NIC, "100")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "nmcli connection modify u-1 ethtool.ring-rx 4096" in calls, calls
+    assert "ethtool -G %s rx 4096" % NIC in eth, eth
+    assert live == "4096"
+    for banned in ("device reapply", "connection up", "connection down"):
+        assert banned not in calls, calls
+
+
+def test_apply_changes_nothing_on_a_box_already_at_4096_1534(tmp_path):
+    r, calls, eth, live = _apply(tmp_path, GOOD_NM, "4096")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "connection modify" not in calls and eth == "", (calls, eth)
+    assert "unchanged" in r.stdout, r.stdout
+
+
+def test_apply_never_touches_a_non_r8152_rig_nic_1534(tmp_path):
+    r = _bash('strih_nic_ring_apply /nonexistent ""', env={"STRIH_BOXES_DIR": str(SCRIPTS / "strih-boxes"),
+                                                        "STRIH_FACT_BOX": "strih-snv"},
+              sources=(PROVISION, LIB))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ethtool -G" not in r.stdout and "modify" not in r.stdout, r.stdout
+
+
+def test_setup_step1c_applies_the_ring_1534():
+    text = SETUP.read_text()
+    assert 'strih_nic_ring_apply /sys "$(ip -o -4 addr show 2>/dev/null || true)"' in text
+
+
+# --- issue 1534: USB3 hardware LPM off on the r8152 rig NIC ------------------------------------------------
+# Live 18.11.2026: stream-snv's RTL8156B on the Intel xhci had USB3 hardware LPM U1+U2 enabled and lost
+# packets device-side (rx_missed) even at an even 900 Mb/s; stream-pp (AMD xhci, no hardware LPM) lost none.
+# usbcore.quirks=<vid>:<pid>:k (USB_QUIRK_NO_LPM) on the kernel command line keeps it off from boot.
+
+def _lpm_box(tmp_path, u1, u2, product="8156"):
+    box = Sysfs(tmp_path)
+    usbdev = box.sys / "devices/pci0000:00/0000:00:14.0/usb2/2-3"
+    (usbdev / "idProduct").write_text(product + "\n")
+    power = usbdev / "power"
+    power.mkdir(exist_ok=True)
+    if u1 is not None:
+        (power / "usb3_hardware_lpm_u1").write_text(u1 + "\n")
+    if u2 is not None:
+        (power / "usb3_hardware_lpm_u2").write_text(u2 + "\n")
+    return box
+
+
+@pytest.mark.parametrize("u1,u2,state", [
+    ("disabled", "disabled", "OK"), (None, None, None),  # no hardware LPM on the host: nothing to grade ("enabled", "disabled", "FAIL"),
+    ("disabled", "enabled", "FAIL"), ("enabled", "enabled", "FAIL")])
+def test_grade_fails_an_r8152_rig_nic_with_usb3_lpm_on_1534(tmp_path, u1, u2, state):
+    rows = _lpm_box(tmp_path, u1, u2).grade()
+    assert _states(rows).get("(nic-lpm)") == state, rows
+    if state == "FAIL":
+        text = [d for s, d in rows if d.startswith("(nic-lpm)")][0]
+        assert "usbcore.quirks=0bda:8156:k" in text and "setup-strih" in text, text
+
+
+def test_lpm_dropin_text_names_the_quirk_on_the_default_cmdline_1534():
+    r = _bash('strih_nic_lpm_grub_dropin_text 0bda:8156')
+    assert r.returncode == 0, r.stderr
+    lines = [l for l in r.stdout.splitlines() if not l.startswith("#")]
+    assert lines == ['GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT usbcore.quirks=0bda:8156:k"'], r.stdout
+
+
+@pytest.mark.parametrize("bad", ["", "0bda", "0BDA:8156", "0bda:8156:k", "0bda:81x6", "0bda:8156 x"])
+def test_lpm_dropin_text_refuses_a_malformed_usb_id_1534(bad):
+    r = _bash('strih_nic_lpm_grub_dropin_text "$ID"', env={"ID": bad})
+    assert r.returncode != 0 and r.stdout == "", (bad, r.stdout)
+
+
+def _lpm_apply(tmp_path, u1="enabled", quirks=""):
+    box = _lpm_box(tmp_path, u1, u1)
+    grubd = tmp_path / "grub.d"
+    grubd.mkdir()
+    param = tmp_path / "quirks"
+    param.write_text(quirks + "\n")
+    regen = tmp_path / "regen.log"
+    boxes = tmp_path / "usb-box"
+    boxes.mkdir(exist_ok=True)
+    env = {"PATH": "%s:%s" % (box.bin, os.environ["PATH"]), "SYSROOT": str(box.sys),
+           "STRIH_NIC_LPM_GRUB_DIR": str(grubd), "STRIH_NIC_LPM_QUIRKS_PARAM": str(param),
+           "REGEN": str(regen)}
+    env.update(_fixture(boxes, []))
+    r = _bash('safe_grub_regen() { echo regen >> "$REGEN"; }; strih_nic_lpm_apply "$SYSROOT" ""',
+              env=env, sources=(PROVISION, LIB))
+    return r, grubd, param, regen
+
+
+def test_apply_writes_the_dropin_regenerates_grub_and_sets_the_runtime_quirk_1534(tmp_path):
+    r, grubd, param, regen = _lpm_apply(tmp_path, quirks="")
+    assert r.returncode == 0, r.stdout + r.stderr
+    f = grubd / "60-camera-box-rig-nic-no-lpm.cfg"
+    assert "usbcore.quirks=0bda:8156:k" in f.read_text()
+    assert regen.read_text().count("regen") == 1
+    assert param.read_text().strip() == "0bda:8156:k"
+    assert "next boot" in r.stdout and "authorized" in r.stdout, r.stdout  # never bounces the NIC itself
+
+
+def test_apply_keeps_other_runtime_quirks_and_is_quiet_on_a_rerun_1534(tmp_path):
+    r, grubd, param, regen = _lpm_apply(tmp_path, quirks="1234:5678:g")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert param.read_text().strip() == "1234:5678:g,0bda:8156:k"
+    r2 = _bash('safe_grub_regen() { echo regen >> "$REGEN"; }; strih_nic_lpm_apply "$SYSROOT" ""',
+               env={"PATH": os.environ["PATH"], "SYSROOT": "/nonexistent"}, sources=(PROVISION, LIB))
+    assert r2.returncode == 0  # a box that is not r8152 (the default strih-snv facts) is untouched
+
+
+def test_apply_on_a_box_with_lpm_already_off_writes_the_dropin_only_1534(tmp_path):
+    r, grubd, param, regen = _lpm_apply(tmp_path, u1="disabled", quirks="0bda:8156:k")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (grubd / "60-camera-box-rig-nic-no-lpm.cfg").exists()
+    assert "authorized" not in r.stdout, r.stdout
+
+
+def test_setup_step1c_applies_the_lpm_quirk_1534():
+    text = SETUP.read_text()
+    assert 'strih_nic_lpm_apply /sys "$(ip -o -4 addr show 2>/dev/null || true)"' in text

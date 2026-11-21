@@ -570,7 +570,7 @@ IMAG_ISOLATED_CPUS="$OBS_BOX_ISOLATED_CPUS"
 # issue 1357: rtprio stays OFF. The #484 grant served the render-tick SCHED_FIFO pin, which now lands only
 # on isolated nohz_full cores; obs_box_cpu_affinity above keeps kernel isolation off, so the grant served
 # nothing and its FIFO leaked to the NDI threads (issue comment 5793075833). Remove a leftover grant.
-obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice imag "$DESKTOP_USER"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice
+obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice imag "$DESKTOP_USER" ; obs_box_coredump_bound || fail "issue 1441: the coredump bound could not be installed (above)"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice; issue 1441 coredump bound
 
 # =============================================================================
 step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary"
@@ -1759,7 +1759,7 @@ chmod 0644 /opt/camera-box/*.py
 # issue 1386: the files come from origin dev, the list from this checkout -- prove the installed
 # tree is complete (the gather facade imports every facet module, bundle_state_windows the
 # server-side modules) before enabling the unit.
-python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/camera-box"); import bundle_state_gather, bundle_state_windows' \
+python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/camera-box"); import bundle_state_gather, bundle_state_windows, bundle_state_video' \
     || fail "issue 1386: /opt/camera-box holds a partial bundle-state server tree -- re-run from a current checkout"
 
 sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user"

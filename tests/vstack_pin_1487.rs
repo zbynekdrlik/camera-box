@@ -6,13 +6,14 @@ mod vstack;
 
 use std::path::PathBuf;
 
-const CRATES: [&str; 6] = [
+const CRATES: [&str; 7] = [
     "camera-box-jxs",
     "rig-core",
     "qpsk-marker",
     "svt-jpegxs-sys",
     "burn-geom",
     "av-capture",
+    "av-ndi",
 ];
 
 fn root() -> PathBuf {
@@ -112,13 +113,18 @@ fn the_moved_code_left_this_repo() {
         "src/genlock_stamp.rs",
         "src/send_stall.rs",
         "tests/obs_frame_stamp_1367.rs",
+        // vstack v0.1.10: the NDI side.
+        "src/ndi.rs",
+        "src/send_stagger.rs",
+        "src/reannounce.rs",
+        "src/preview_source.rs",
     ] {
         assert!(!root().join(gone).exists(), "{gone} must be gone");
     }
     let cargo = read("Cargo.toml");
     assert!(!cargo.contains("path = \"jxs/") && !cargo.contains("path = \"rig/"));
-    // The stamp floor lives in rig_core::genlock_stamp since v0.1.8; ndi.rs imports it.
-    assert!(!read("src/ndi.rs").contains("fn floor_boundary_100ns("));
+    // The stamp floor lives in rig_core::genlock_stamp since v0.1.8; the pinned ndi.rs imports it.
+    assert!(!vstack::read("av/ndi/src/ndi.rs").contains("fn floor_boundary_100ns("));
 }
 
 #[test]
@@ -148,6 +154,10 @@ fn the_old_paths_stay_as_reexports() {
         "pub use av_capture::capture_rate_health;",
         "pub use av_capture::capture_stall;",
         "pub use av_capture::capture_wedge;",
+        "pub use av_ndi::ndi;",
+        "pub use av_ndi::send_stagger;",
+        "pub use av_ndi::reannounce;",
+        "pub use av_ndi::preview_source;",
     ] {
         assert!(lib.contains(line), "{line}");
     }

@@ -92,8 +92,31 @@ def test_the_snv_venue_resolves_to_the_jpeg_xs_path_from_the_facts():
     assert "[program-inputs] issue 1387: the jxs path" in r.stderr
 
 
-def test_the_pp_venue_stays_on_the_ndi_path_and_presets_nothing():
+def test_the_pp_venue_resolves_to_the_jpeg_xs_path_from_the_facts():
+    # issue 1535 (owner 18.11.2026): PP on the JPEG XS link like SNV
     r = _bash(f'program_inputs_resolve "$1" "$2" cam1\n{RESOLVED}', "strih-pp.lan", "stream-pp.lan")
+    assert r.returncode == 0, r.stderr
+    got = _resolved(r.stdout)
+    assert got["path"] == "jxs"
+    assert got["set"] == "cam1 cam4 cam6 cam7"
+    assert got["strih"] == "JXS cam1 src" and got["stream"] == "JXS PGM src"
+    assert got["pin"] == _fact("stream-pp", "STRIH_JXS_PROGRAM_PIN_MS") == "3"
+    assert got["boxes"] == "strih-pp/stream-pp"
+    assert "[program-inputs] issue 1387: the jxs path" in r.stderr
+
+
+def _ndi_only_pp(tmp_path):
+    """The real fact files with every JPEG XS fact of the PP pair set back to `none`: a venue that declares no
+    JPEG XS (PP until issue 1535)."""
+    return _boxes_copy(tmp_path, [(f"{box}.env", key, "none") for box in ("strih-pp", "stream-pp")
+                                  for key in ("STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS",
+                                              "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS")])
+
+
+def test_a_venue_that_declares_no_jpeg_xs_stays_on_the_ndi_path_and_presets_nothing(tmp_path):
+    d = _ndi_only_pp(tmp_path)
+    r = _bash(f'program_inputs_resolve "$1" "$2" cam1\n{RESOLVED}', "strih-pp.lan", "stream-pp.lan",
+              env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode == 0, r.stderr
     got = _resolved(r.stdout)
     assert got["path"] == "ndi" and got["set"] == ""
@@ -175,14 +198,15 @@ def test_an_empty_source_camera_leaves_the_strih_input_to_the_caller():
     assert got["strih"] == "<unset>" and got["stream"] == "JXS PGM src"
 
 
-def test_the_ndi_only_opt_ins_refuse_on_jpeg_xs_and_pass_on_ndi():
+def test_the_ndi_only_opt_ins_refuse_on_jpeg_xs_and_pass_on_ndi(tmp_path):
+    ndi = _ndi_only_pp(tmp_path)
     for var, val in (("MEASUREMENT_EQ", "1"), ("PRERECORD_PHASE_CALIBRATE", "1"), ("COLD_CUT_BYPASS_CAM", "CAM5")):
         r = _bash('program_inputs_resolve "$1" "$2" cam5 && program_inputs_refuse_ndi_only_optins || echo "RC=$?"',
                   SNV_STRIH, SNV_STREAM, env={var: val})
         assert "RC=1" in r.stdout, (var, r.stderr)
         assert f"{var}=" in r.stderr and "NDI-only measurement opt-in on the JPEG XS path" in r.stderr
         r = _bash('program_inputs_resolve "$1" "$2" cam1 && program_inputs_refuse_ndi_only_optins && echo OK',
-                  "strih-pp.lan", "stream-pp.lan", env={var: val})
+                  "strih-pp.lan", "stream-pp.lan", env={var: val, "STRIH_BOXES_DIR": str(ndi)})
         assert r.stdout.strip() == "OK", (var, r.stderr)
 
 

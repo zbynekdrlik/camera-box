@@ -764,6 +764,18 @@ def _measure(ctx, stage):
         return "UNKNOWN", [str(e)], None, None, windows, dropped
 
 
+def _keep_evidence(ctx, stage):
+    """Issue 1534: a red verdict keeps the VOD + the restreamer-input capture on the host for the
+    pts reading; never raises."""
+    host = ctx.measure_host(stage)
+    try:
+        kept = host.keep_evidence()
+        _set(stage, f"evidence kept on {host.host} (~/{ylh.EVIDENCE_BASE}/{host.key}): "
+                    + (", ".join(kept) or "nothing to keep"))
+    except ylh.HostError as e:
+        _set(stage, f"the evidence on {host.host} could NOT be kept: {e}")
+
+
 def _cleanup_host(ctx, stage):
     """Stop a running prefetch and delete the measurement host's stage dir; never raises."""
     _end_prefetch(stage, "the measurement is over")
@@ -875,6 +887,8 @@ def do_measure(ctx, stage):
     except Exception:  # noqa: BLE001
         traceback.print_exc()
     if stage.read().get("measure_host"):  # the host was used: its stage dir goes, the videos with it
+        if verdict != "PASS":
+            _keep_evidence(ctx, stage)
         _cleanup_host(ctx, stage)
     block["events"] = stage.read().get("events", [])  # with the point's and the cleanup's own lines
     _write_and_fold(ctx, stage, block)

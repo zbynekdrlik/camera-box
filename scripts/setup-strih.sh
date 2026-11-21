@@ -126,6 +126,8 @@ else
 fi
 step "1c" "Rig NIC stable name (issue 1502: a systemd .link from STRIH_NIC_RENAME, never a live rename)"
 strih_nic_rename_apply "$(strih_lx_nic_rename)" "$(strih_lx_nic_driver)" || fail "rig NIC rename: the .link file could not be written (above)"
+strih_nic_ring_apply /sys "$(ip -o -4 addr show 2>/dev/null || true)" || fail "rig NIC RX ring (issue 1534): not set (above)"
+strih_nic_lpm_apply /sys "$(ip -o -4 addr show 2>/dev/null || true)" || fail "rig NIC USB3 LPM (issue 1534): not set (above)"
 
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->
@@ -542,7 +544,7 @@ if [ -n "${GH_TOKEN:-}" ]; then
   # issue 1386: the files come from origin dev, the list from this checkout -- prove the installed
   # tree is complete (the gather facade imports every facet module, bundle_state_windows the
   # server-side modules) before enabling the unit.
-  python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/camera-box"); import bundle_state_gather, bundle_state_windows' \
+  python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/camera-box"); import bundle_state_gather, bundle_state_windows, bundle_state_video' \
     || fail "issue 1386: /opt/camera-box holds a partial bundle-state server tree -- re-run from a current checkout"
   echo "  installed bundle-state server tree -> /opt/camera-box (${BUNDLE_STATE_SERVER_FILES[*]})"
   sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-bundle-state-server.service 2>/dev/null \
@@ -614,7 +616,7 @@ fi
 # rtprio stays OFF (issue 1357): the retired 11c grant pinned the render tick SCHED_FIFO on cores strih-snv
 # never reserved and the FIFO + affinity leaked to 28 NDI threads (issue comment 5793075833). The shared
 # item removes a leftover grant; the grader's `rtprio` row (verify item 32) FAILs while one exists.
-obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice strih "$DESKTOP_USER"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice
+obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice strih "$DESKTOP_USER" ; obs_box_coredump_bound || fail "issue 1441: the coredump bound could not be installed (above)"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice; issue 1441 coredump bound
 
 # ---------------------------------------------------------------------------------------------
 # Lettered sub-step (TOTAL_STEPS unchanged -- the issue 1352/1353 precedent): the NIC-IRQ placement
@@ -877,6 +879,9 @@ step "16b" "RustDesk remote desktop (owner request 22.9.2026) -- pinned .deb, th
 RD_VER="$(strih_rustdesk_version)"; RD_URL="$(strih_rustdesk_deb_url)"; RD_SHA="$(strih_rustdesk_deb_sha256)"
 RD_PW_FILE="${STRIH_LX_RUSTDESK_PW_FILE:-/etc/rustdesk/permanent-password.secret}"
 RD_STATE="$(strih_rustdesk_state)"
+if [ "$RD_STATE" = stopped ]; then  # issue 1544: "Stop service" in the RustDesk window
+  ( eval "$(strih_rustdesk_clear_stop_cmds /root/.config/rustdesk/RustDesk2.toml "${USER_HOME}/.config/rustdesk/RustDesk2.toml")" ) \
+    || fail "RustDesk: clearing stop-service = 'Y' failed"; RD_STATE="$(strih_rustdesk_state)"; fi
 if [ "$RD_STATE" = ready ]; then
   echo "  RustDesk active with its permanent password set; connect ID: $(timeout 10 rustdesk --get-id 2>/dev/null | head -1 || true)"
 elif [ -s "$RD_PW_FILE" ]; then
@@ -909,7 +914,7 @@ if [ ! -f /etc/bkshading/bkshading.toml ]; then
     || fail "could not seed /etc/bkshading/bkshading.toml"
   echo "  seeded /etc/bkshading/bkshading.toml (the box's STRIH_CAMERAS + its STRIH_BKSHADING_RELAYS; edit for the live camera set)"
 else
-  echo "  /etc/bkshading/bkshading.toml already present -- leaving the operator's config"
+  echo "  /etc/bkshading/bkshading.toml already present -- leaving the operator's config"; strih_bkshading_tally_ensure /etc/bkshading/bkshading.toml || fail "bkshading [tally] key (above)"
 fi
 # Install the SYSTEM unit from the printer (source of truth) + ENABLE (NEVER start -- the supervisor
 # deploys the running service).

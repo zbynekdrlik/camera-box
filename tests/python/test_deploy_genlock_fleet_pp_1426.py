@@ -110,7 +110,9 @@ def test_the_default_box_set_is_unchanged():
     assert r.returncode == 0 and r.stdout.strip() == "strih-snv,stream-snv"
 
 
-@pytest.mark.parametrize("bad", ["bogus", "resolume-pp", "strih-pp.lan"])
+# issue 1505: resolume-pp is a deployable Windows box now (win-resolume-pp); the still-refused names
+# are an unknown box, a fleet HOST in place of a name, and a near-miss of the new PP box names.
+@pytest.mark.parametrize("bad", ["bogus", "strih-pp.lan", "grading", "resolume-pp.lan"])
 def test_an_unknown_or_undeployable_box_is_refused(bad):
     r = _sourced("fleet_normalize_boxes %s" % bad)
     assert r.returncode == 2 and bad in r.stderr
@@ -335,7 +337,8 @@ def test_the_plan_and_execute_route_a_box_by_the_same_predicate():
     assert 'if fleet_box_runs_setup_strih "$b"; then emit_strih_lx_plan' in plan
     r = _sourced("fleet_deploy_order")
     order = r.stdout.split()
-    assert order == ["strih-snv", "stream-snv", "strih-pp", "stream-pp", "imag", "resolume-snv"]
+    assert order == ["strih-snv", "stream-snv", "strih-pp", "stream-pp", "imag", "resolume-snv",
+                     "resolume-pp", "grading-pp"]   # issue 1505: the PP Windows boxes last
     assert len(order) == len(set(order))
 
 

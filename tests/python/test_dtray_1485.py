@@ -69,12 +69,12 @@ def _install(tmp_path, home=None, env=None):
 
 def test_the_shipped_pin_names_the_dstack_release():
     pin = dict(ln.split("=", 1) for ln in PIN.read_text().splitlines() if ln)
-    assert pin == {"DTRAY_RELEASE_TAG": "v0.6.19", "DTRAY_RELEASE_ASSET": "dtray-v0.6.19-linux-x86_64",
-                   "DTRAY_RELEASE_SHA256": "408d6cea7e70a4e682ba51776994dfa37d4db4a6fa78a97a1f94ce17121d88bd",
+    assert pin == {"DTRAY_RELEASE_TAG": "v0.6.143", "DTRAY_RELEASE_ASSET": "dtray-v0.6.143-linux-x86_64",
+                   "DTRAY_RELEASE_SHA256": "e8e707bc75a3604faa689ce4cf7806940964e0278f7256f06522366078ded846",
                    "DTRAY_DEVICE_FIRST_DSTACK": "v0.6.13"}
     r = _dt('dtray_release_url', env={"DTRAY_RELEASE_BASE": ""})
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "https://github.com/zbynekdrlik/dstack/releases/download/v0.6.19/dtray-v0.6.19-linux-x86_64"
+    assert r.stdout == "https://github.com/zbynekdrlik/dstack/releases/download/v0.6.143/dtray-v0.6.143-linux-x86_64"
 
 
 def test_the_intercom_and_obs_pins_name_their_dstack_version():
@@ -286,10 +286,11 @@ def test_the_markers_follow_the_strih_snv_fact_file():
     r = F.bash('unset DTRAY_DANTE_DEVICES; strih_box_load stream-snv >/dev/null || exit 9; dtray_expected_devices',
                sources=(F.SCRIPTS / "lib" / "strih-box-facts.sh", DTRAY_LIB))
     assert r.returncode == 0 and r.stdout.split() == ["stream-obs"], r.stderr   # issue 1495
-    for box in ("strih-pp", "stream-pp"):
+    # issue 1536: the PP boxes carry their program devices too (no PP intercom device)
+    for box, want in (("strih-pp", ["strih-pp-intercom", "strih-obs"]), ("stream-pp", ["stream-obs"])):   # + intercom#32
         r = F.bash('unset DTRAY_DANTE_DEVICES; strih_box_load %s >/dev/null || exit 9; dtray_expected_devices' % box,
                    sources=(F.SCRIPTS / "lib" / "strih-box-facts.sh", DTRAY_LIB))
-        assert r.returncode == 0 and r.stdout == "", (box, r.stderr)
+        assert r.returncode == 0 and r.stdout.split() == want, (box, r.stderr)
 
 
 # --- the dtray --print grade ------------------------------------------------------------------------------
@@ -430,13 +431,14 @@ def test_the_unit_text():
     assert r.stdout == u["ExecStart"]
 
 
-def test_dtray_is_the_last_session_app_on_both_roles():
+def test_dtray_follows_every_other_app_on_both_roles():
+    # issue 1542: on the strih role only the intercom tray comes after it
     r = F.bash('printf "%s\\n" "${STRIH_SESSION_APP_UNITS[@]}"; strih_session_app_item dtray.service; echo;'
                'printf "[%s]" "$(strih_session_app_script dtray.service)"; echo; strih_session_app_program dtray.service',
                env={"DTRAY_BIN": ""})
     lines = r.stdout.splitlines()
-    assert lines[:7] == list(F.UNITS) and lines[6] == UNIT
-    assert lines[7:] == ["dtray", "[]", "/usr/local/bin/dtray"]
+    assert lines[:8] == list(F.UNITS) and lines[6] == UNIT and lines[7] == "intercom-tray.service"
+    assert lines[8:] == ["dtray", "[]", "/usr/local/bin/dtray"]
     role = (F.SCRIPTS / "lib" / "obs-box-role.sh").read_text()
     line = [ln for ln in role.splitlines() if ln.startswith("OBS_BOX_STREAM_SESSION_APP_UNITS=(")][0]
     assert line.endswith(" dtray.service)"), line

@@ -289,7 +289,8 @@ do_install() {
     exit 1
   fi
   install -d -m 755 "$(dirname "$CF_INI")"
-  shading_https_cf_ini_content "$token" | install -m 600 /dev/stdin "$CF_INI"
+  # rm first: uutils install (the CI runner since 11.2026) refuses /dev/stdin over an existing file
+  rm -f "$CF_INI" && shading_https_cf_ini_content "$token" | install -m 600 /dev/stdin "$CF_INI"
   unset token
 
   echo "[3/6] DNS A record $SHADING_HOST -> $LAN_IP (DNS-only, not proxied)$( [ "$DRY_RUN" = 1 ] && echo ' [dry-run]')"
@@ -347,7 +348,7 @@ PY
 
   echo "[6/6] certbot deploy hook -> $DEPLOY_HOOK (755, reloads nginx on renewal)"
   install -d -m 755 "$(dirname "$DEPLOY_HOOK")"
-  shading_https_deploy_hook_content | install -m 755 /dev/stdin "$DEPLOY_HOOK"
+  rm -f "$DEPLOY_HOOK" && shading_https_deploy_hook_content | install -m 755 /dev/stdin "$DEPLOY_HOOK"
 
   echo "OK — shading HTTPS front installed. Verify: $HERE/dev1-shading-https-install.sh --check"
 }

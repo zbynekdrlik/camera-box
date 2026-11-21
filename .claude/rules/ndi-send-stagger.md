@@ -1,6 +1,5 @@
 ---
 paths:
-  - "src/send_stagger.rs"
   - "tests/harness_send_stagger_1242.rs"
 ---
 
@@ -19,7 +18,7 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
 
 ## What it does
 
-`src/send_stagger.rs` (pure, crate-root, std-only):
+`vstack:av/ndi/src/send_stagger.rs` (pure, std-only; in vstack's av-ndi since issue 1487, re-exported as `camera_box::send_stagger`):
 
 - `camera_number_from_hostname("CAM7") == Some(7)`: the OS hostname set by `setup-device.sh` STEP 1.
   It is the same `gethostname(2)` value the NDI SDK publishes as the source's machine name. Anything
@@ -87,7 +86,7 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
 
 ## Invariants — do not break
 
-- **The timecode never moves.** It is computed BEFORE the sleep, and `src/ndi.rs` does not know about
+- **The timecode never moves.** It is computed BEFORE the sleep, and `vstack:av/ndi/src/ndi.rs` does not know about
   the stagger (`tests/harness_send_stagger_1242.rs` pins both).
 - **The emit grid never moves.** `decimation_gate.poll(wall_clock_ns(), …)` runs before the anchor,
   and the next boundary never derives from the send instant. On a stamp-driven stream (issue 1367
@@ -109,7 +108,7 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
 ## Verifying a change
 
 `cargo test --lib send_stagger`, `cargo test --test harness_send_stagger_1242` (it reads only
-`src/main.rs` / `src/ndi.rs` text) and `cargo clippy --all-targets -- -D warnings` (on #1242 clippy
+`src/main.rs` / `vstack:av/ndi/src/ndi.rs` text) and `cargo clippy --all-targets -- -D warnings` (on #1242 clippy
 caught a `double_comparisons` error in the first draft of the lib.rs equality pin).
 
 ## Live acceptance (supervisor)

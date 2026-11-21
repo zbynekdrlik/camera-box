@@ -442,6 +442,18 @@ strih_https_status() {
   printf '%s' "${code:-000}"
 }
 
+# strih_https_hub_phone_transport -> `webrtc` | `janus`: the hub's phone transport from its own
+# `GET /api/phone` (intercom#42 phase 4: with webrtc phones the hub answers /janus 503). An unreadable or
+# unknown answer prints `janus`, so the /janus check runs as before and never silently skips. rc 0.
+strih_https_hub_phone_transport() {
+  local body
+  body="$( { curl -s --max-time 3 "${STRIH_HTTPS_HUB_URL:-http://127.0.0.1:8790}/api/phone" 2>/dev/null || true; } | tr -d ' \n' || true)"
+  case "$body" in
+    *'"transport":"webrtc"'*) printf 'webrtc' ;;
+    *) printf 'janus' ;;
+  esac
+}
+
 # strih_https_janus_ws_listeners -> where Janus's WebSocket (:STRIH_HTTPS_JANUS_PORT) listens, read
 # from `ss -ltnH`: `loopback <addrs>` when every listener is on 127.0.0.0/8 or [::1], `exposed <addrs>`
 # when any is not (the LAN IP, 0.0.0.0, [::], *), `not listening at all` when nothing does. Issue 1453:
@@ -482,7 +494,7 @@ strih_https_row_count() {
 # strih_https_grade_rows -> verify-strih rows `OK|text`, `NOTE|text` or `FAIL|text`
 # (strih_https_row_count of them). Always rc 0.
 strih_https_grade_rows() {
-  local sites nginx avail enabled tmp site first aliases up janus paths cert key origin st act listen
+  local sites nginx avail enabled tmp site first aliases up janus paths cert key origin st act listen tr_
   local problems="" names_ok="" pem sans end name h1 h2 jl te ini hook stat_line owner live fp_s fp_l
   local -a names
   sites="$(strih_https_sites 2>/dev/null)" || { printf 'FAIL|(https) the box facts are unreadable\n'; return 0; }
@@ -564,10 +576,21 @@ strih_https_grade_rows() {
   while IFS='|' read -r site first aliases up janus; do
     if [ "$site" = interkom ]; then
       h1="$(strih_https_status "$first" /api/state)"
+      tr_="$(strih_https_hub_phone_transport)"
+      jl="$(strih_https_janus_ws_listeners)"
+      if [ "$tr_" = webrtc ]; then   # intercom#42 phase 4: the phones join the hub's WebRTC leg, /janus answers 503
+        if [ "$h1" != 200 ]; then
+          printf 'FAIL|(https-upstream) interkom through nginx: the hub /api/state %s (want 200) -- systemctl status intercom-hub\n' "$h1"
+        elif [ "${jl%% *}" = loopback ]; then
+          printf 'OK|(https-upstream) interkom through nginx: the hub /api/state 200, phones on the hub webrtc leg (/janus relay not graded), the fallback Janus WebSocket on loopback only (%s)\n' "${jl#* }"
+        else
+          printf 'FAIL|(https-upstream) interkom: the fallback Janus WebSocket :%s is %s, not loopback only -- re-run setup-strih.sh step 14 and restart janus (issue 1453)\n' "$STRIH_HTTPS_JANUS_PORT" "$jl"
+        fi
+        continue
+      fi
       h2="$(strih_https_status "$first" /janus --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
         -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
         -H 'Sec-WebSocket-Protocol: janus-protocol')"
-      jl="$(strih_https_janus_ws_listeners)"
       if [ "$h1" != 200 ] || [ "$h2" != 101 ]; then
         printf 'FAIL|(https-upstream) interkom through nginx: the hub /api/state %s (want 200), the /janus upgrade through the hub relay %s (want 101) -- systemctl status intercom-hub janus\n' "$h1" "$h2"
       elif [ "${jl%% *}" = loopback ]; then

@@ -157,9 +157,18 @@ until the fleet-parity watchdog. Now:
   imag is linux-genlock with no fact file and keeps its own setup-imag path. A new venue's Linux OBS
   box is one fleet row + one fact file; no planner edit.
 - **Order + default:** `fleet_deploy_order` = the setup-strih boxes in fleet row order, then
-  stream-snv, imag, resolume-snv. The default `--boxes` stays `strih-snv,stream-snv`; the PP boxes are
-  named explicitly (`--boxes strih-pp,stream-pp`). resolume-pp has no deploy path (no win-* MCP) and is
-  refused like an unknown box.
+  stream-snv, imag, resolume-snv, resolume-pp, grading-pp. The default `--boxes` stays
+  `strih-snv,stream-snv`; the PP boxes are named explicitly (`--boxes strih-pp,stream-pp`).
+- **The PP Windows boxes (issue 1505):** resolume-pp (`win-resolume-pp`, `resolume-pp.lan`, AHK `guard`,
+  title profile `cg`) and grading-pp (`win-grading-pp`, the PP grading notebook, computer name
+  NOTEBOOKASUS, no DNS name from dev1 so its fleet row dials `10.76.8.62`, AHK `0`, NO title check: its
+  obs64 title reads the projector `Projektor - Program`). Both are explicit-only, take the pinned zip
+  through the one Windows program, and get a generic STEP -1 identity line
+  (`fleet_box_identity_confirm_note`: confirm `$env:COMPUTERNAME` = the `OBS_FLEET_IDENTITY` name in
+  the box's MCP Shell). Adding another Windows box = its fleet row + its arm in `fleet_box_mcp` /
+  `fleet_box_ip` / `fleet_deploy_order` + the two `case` lists in deploy-genlock-fleet.sh.
+  **grading-pp loads DistroAV from `Program Files\obs-plugins\64bit`** (no ProgramData copy, read
+  15.11.2026). The program handles that on any Windows box (next section's step 6e).
 - **Dial the fleet NAME, never the venue IP.** A PP box is dialled at its obs-fleet row host
   (`strih-pp.lan` / `stream-pp.lan`, which dev1 reaches through companion-pp), via `fleet_box_ip`. The
   fact file's `STRIH_IP` (10.77.8.x) is the box's address on its own venue LAN and is not routable from
@@ -407,6 +416,20 @@ load path, a `distroav.dll.pre-789` backup alongside `obs.dll.pre-789`, and a fa
 verify of the DEPLOYED ProgramData DLL against the manifest's distroav entry (mirrors the obs.dll
 verify). Every Windows deploy is a FULL one (issue 1522 removed the obs.dll-only FAST program).
 
+- **ONE DistroAV per OBS (issue 1505, step 6e).** A box whose DistroAV lives only in Program Files
+  (grading-pp, read 15.11.2026: the 14.10 setup moved the stock ProgramData one to a backup) gets the
+  ProgramData install CREATED by step 6b from the bundle (the DLL + the bundle's
+  `data\obs-plugins\distroav` tree, refused with exit 4 before anything is created when the bundle has
+  none; an existing install's data tree stays unmanaged); a box with no DistroAV anywhere is still
+  refused. The leftover list is `@(@(...) | Where-Object ...)` so an empty result counts 0 on PS 5.1 too. Step 6e then MOVES a leftover `Program Files\obs-studio\
+  obs-plugins\64bit\distroav.dll` (+ `.pdb`) into the deploy's dated backup dir as
+  `<name>.programfiles.pre-789`, judged by the files (leftover gone, backup there), never by the cmdlet
+  alone (pwsh 7 left a failed cross-dir move silent). A failed move = exit 4 before the relaunch step,
+  the leftover untouched. Then the read-back `READBACK distroav copies=N programdata=… programfiles=…`
+  requires exactly the ProgramData copy (any `distroav.dll` left under `obs-plugins` = exit 4). No
+  leftover = one logged no-op line (resolume-snv). Tests RUN the emitted block in pwsh 7:
+  `tests/python/test_deploy_distroav_leftover_1505.py` (the block is INLINED into the harness: an
+  `exit` in a dot-sourced file only leaves that file).
 - **DLL-scoped on purpose.** The `distroav\data\` tree is NOT mirrored: the byte-parity gate hashes
   only the DLL, and DistroAV data is stable across genlock rebuilds at the pinned 6.2.1. The
   bundle→ProgramData layout is NOT 1:1 (bundle `obs-plugins/64bit/distroav.dll` + `data/obs-plugins/
@@ -691,3 +714,10 @@ with PowerShell's generic failure code, not N. It still fails loud and early, so
 `exit 2/4/9/10` lines are safe, but a caller or test that keys on the NUMBER sees the wrong one.
 A new step that needs its own exit code prints the failure with `Write-Host "..." -ForegroundColor
 Red` and then `exit N` (the issue-1357 power-plan step 0b, `scripts/lib/obs-box-baseline-win.sh`).
+
+## The stage rsync is bandwidth-capped (21.11.2026)
+
+Staging the ~2 GB bundle at full speed made strih-pp's four JPEG XS camera inputs lose slices for the
+whole transfer (01:39-01:52, 0 before and after): the rsync competed with the cameras on the box's rig
+NIC. `_strih_lx_rsync` passes `--bwlimit=${STRIH_LX_RSYNC_BWLIMIT:-12500}` (KiB/s, ~100 Mbit/s, a
+bundle in ~3 min); the plan printer shows the same flag. A deploy must never cost a live picture.
