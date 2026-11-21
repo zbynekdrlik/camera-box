@@ -71,7 +71,8 @@ class FakeObs:
         if rtype == "GetInputAudioTracks":
             return {"inputAudioTracks": self.inputs[d["inputName"]]["tracks"]}
         if rtype == "SetInputAudioTracks":
-            self.inputs[d["inputName"]]["tracks"] = dict(d["inputAudioTracks"])
+            # obs-websocket sets only the tracks the request names (a partial update), like OBS
+            self.inputs[d["inputName"]]["tracks"].update(d["inputAudioTracks"])
             return {}
         if rtype == "GetStudioModeEnabled":
             return {"studioModeEnabled": self.studio}
