@@ -714,3 +714,10 @@ with PowerShell's generic failure code, not N. It still fails loud and early, so
 `exit 2/4/9/10` lines are safe, but a caller or test that keys on the NUMBER sees the wrong one.
 A new step that needs its own exit code prints the failure with `Write-Host "..." -ForegroundColor
 Red` and then `exit N` (the issue-1357 power-plan step 0b, `scripts/lib/obs-box-baseline-win.sh`).
+
+## The stage rsync is bandwidth-capped (21.11.2026)
+
+Staging the ~2 GB bundle at full speed made strih-pp's four JPEG XS camera inputs lose slices for the
+whole transfer (01:39-01:52, 0 before and after): the rsync competed with the cameras on the box's rig
+NIC. `_strih_lx_rsync` passes `--bwlimit=${STRIH_LX_RSYNC_BWLIMIT:-12500}` (KiB/s, ~100 Mbit/s, a
+bundle in ~3 min); the plan printer shows the same flag. A deploy must never cost a live picture.
