@@ -330,6 +330,20 @@ ROOT_WAS_RO=false
 # rw until the next reboot -- bounded/self-healing (the ro fstab from the PRIOR successful pass
 # still pins ro on reboot), not the claims-success-while-wrong failure #599 targets, so no explicit
 # trap is added here.
+# install_executable_if_changed SRC DEST (issue 1394) -- install SRC at DEST 0755 through a NEW inode
+# (`install`, safe over a running binary) only when the bytes differ or DEST is missing. A byte-identical
+# DEST keeps its inode: replacing it under the running service left the old inode mapped, and STEP 18's
+# remount read-only then failed busy (PP cam1/cam4, 21.11.2026).
+install_executable_if_changed() {
+    local src="$1" dest="$2"
+    if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+        chmod 0755 "$dest" || return 1
+        echo "  ${dest}: byte-identical to the new binary -- unchanged (no new inode)"
+        return 0
+    fi
+    install -m 0755 "$src" "$dest"
+}
+
 ensure_root_writable() {
     local opts
     # `findmnt` failing outright (missing binary, unreadable /proc) must not silently read as "not
@@ -713,7 +727,7 @@ echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
 BINARY_SRC="${BINARY_ARG:-${CAMERA_BOX_BINARY_URL:-}}"
 if [ -n "$BINARY_SRC" ] && [ -f "$BINARY_SRC" ]; then
     echo "  Using local binary: $BINARY_SRC"
-    install -m 0755 "$BINARY_SRC" /usr/local/bin/camera-box
+    install_executable_if_changed "$BINARY_SRC" /usr/local/bin/camera-box
     echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
 elif [ -n "$BINARY_SRC" ]; then
     echo "  Downloading binary from: $BINARY_SRC"
@@ -732,7 +746,7 @@ elif [ -n "$BINARY_SRC" ]; then
         rm -f "$_camera_box_dl_tmp"
         fail "downloaded binary from $BINARY_SRC is empty"
     }
-    install -m 0755 "$_camera_box_dl_tmp" /usr/local/bin/camera-box || {
+    install_executable_if_changed "$_camera_box_dl_tmp" /usr/local/bin/camera-box || {
         rm -f "$_camera_box_dl_tmp"
         fail "could not install downloaded binary from $BINARY_SRC to /usr/local/bin/camera-box"
     }
@@ -750,7 +764,7 @@ elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
     DIST_DIR="$(mktemp -d)"
     if gh run download "$RUN_ID" --repo "$GITHUB_REPO" -n camera-box-linux-amd64 --dir "$DIST_DIR" 2>/dev/null \
         && [ -f "$DIST_DIR/camera-box" ]; then
-        install -m 0755 "$DIST_DIR/camera-box" /usr/local/bin/camera-box
+        install_executable_if_changed "$DIST_DIR/camera-box" /usr/local/bin/camera-box
         echo "  Binary installed from CI run $RUN_ID: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
     else
         rm -rf "$DIST_DIR"
