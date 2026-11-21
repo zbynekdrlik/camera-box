@@ -475,6 +475,17 @@ rig_lease_acquire() {
     return 0
   fi
 
+  # issue 1548: a GitHub re-run keeps its run id, so a holder with OUR repo + run_id is our own
+  # earlier attempt (it died with the runner; GitHub never runs two attempts of one run at once).
+  local held_pair; held_pair="$(rig_lease_read_holder_repo_run_id)"
+  if [ -n "$repo" ] && [ -n "$run_id" ] && [ "$held_pair" = "${repo}"$'\t'"${run_id}" ]; then
+    echo "::warning title=RIG LEASE SAME RUN RECLAIM (issue 1548)::the lease is held by this same run (${repo}#${run_id}), an earlier attempt that never released it -- reclaiming it for this attempt." >&2
+    RIG_LEASE_HOLDER_RESOURCES="$resolved" \
+      rig_lease_write_holder "$repo" "$run_id" "$run_url" "$job" "$expected_release_at"
+    printf 'RIG_LEASE_RECLAIMED\n'
+    return 0
+  fi
+
   if rig_lease_is_stale "$stale_secs"; then
     local old_summary; old_summary="$(rig_lease_holder_summary)"
     echo "::warning title=RIG LEASE STALE RECLAIM (#830)::previous holder (${old_summary}) looks dead -- heartbeat stale and/or its run is no longer in progress. Reclaiming the rig lease now rather than deadlocking (mirrors the #657 self-heal principle: never a permanent deadlock)." >&2
