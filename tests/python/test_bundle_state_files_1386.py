@@ -136,7 +136,7 @@ def test_the_closure_reaches_every_facet_module():
 
 
 _SMOKE = ("import sys; sys.path.insert(0, \"/opt/camera-box\"); "
-          "import bundle_state_gather, bundle_state_windows")
+          "import bundle_state_gather, bundle_state_windows, bundle_state_video")
 # The two tree files the smoke import cannot load: the server itself and obs_phase2 need the
 # websocket-client package, which `-I` (no user site-packages) hides on some boxes.
 _NOT_SMOKE_IMPORTABLE = {_SERVER, "obs_phase2.py"}
