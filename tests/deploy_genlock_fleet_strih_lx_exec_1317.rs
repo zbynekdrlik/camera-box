@@ -1678,6 +1678,9 @@ fn strih_lx_stage_rsync_is_bandwidth_capped() {
         .collect();
     assert!(!rsyncs.is_empty(), "{}", r.calls);
     for l in rsyncs {
-        assert!(l.contains("--bwlimit=12500"), "an uncapped stage rsync: {l}");
+        assert!(
+            l.contains("--bwlimit=12500"),
+            "an uncapped stage rsync: {l}"
+        );
     }
 }
