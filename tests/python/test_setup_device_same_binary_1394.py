@@ -32,7 +32,9 @@ def test_a_different_binary_is_installed_through_a_new_inode(tmp_path):
     src.write_bytes(b"NEW")
     dest.write_bytes(b"OLD")
     ino = dest.stat().st_ino
-    r = _run(src, dest)
+    with open(dest, "rb") as held:  # like the running service: the old inode stays allocated, never reused
+        r = _run(src, dest)
+        assert held.read() == b"OLD", "the running copy keeps its bytes (a new inode, never a truncate)"
     assert r.returncode == 0, r.stderr
     assert dest.read_bytes() == b"NEW" and dest.stat().st_ino != ino
     assert oct(dest.stat().st_mode & 0o777) == "0o755"
