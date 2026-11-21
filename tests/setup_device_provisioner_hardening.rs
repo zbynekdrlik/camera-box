@@ -631,7 +631,9 @@ fn setup_device_install_from_temp_fails_loud_and_cleans_up_on_failure_1289() {
         (
             "_camera_box_dl_tmp",
             "/usr/local/bin/camera-box",
-            "install -m 0755 \"$_camera_box_dl_tmp\" /usr/local/bin/camera-box || {",
+            // issue 1394: the camera-box install goes through install_executable_if_changed (a
+            // byte-identical binary keeps its inode, so a re-run can remount the root read-only).
+            "install_executable_if_changed \"$_camera_box_dl_tmp\" /usr/local/bin/camera-box || {",
         ),
         (
             "_frame_probe_dl_tmp",
