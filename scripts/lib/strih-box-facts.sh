@@ -76,7 +76,7 @@ strih_box_fact_keys() {
     STRIH_JXS_CAMERAS STRIH_JXS_CAMERA_PIN_MS \
     STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS \
     STRIH_DESKTOP \
-    STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK \
+    STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK STRIH_DANTE_RX_STAMP_MARGIN_MS \
     STRIH_NIC_RENAME
 }
 
@@ -332,6 +332,7 @@ strih_box_validate() {
   _strih_box_dante_devices_ok "$name" "${f[STRIH_DANTE_DEVICES]}" "${f[STRIH_PROGRAM_VBAN_LEG]}" "${f[STRIH_PROGRAM_VBAN_SENDER]}" || bad=1
   v=0; [[ " ${f[STRIH_DANTE_DEVICES]} " != *" ${f[STRIH_ROLE]}-obs="* ]] || v=1   # issues 1510 + 1513
   _strih_box_dante_terms_ok "$name" "$v" "${f[STRIH_DANTE_NETWORK_LATENCY_MS]}" "${f[STRIH_DANTE_RECEIVE_BUFFER_MS]}" "${f[STRIH_DANTE_TX]}" "${f[STRIH_DANTE_TX_TRACK]}" || bad=1
+  _strih_box_dante_margin_ok "$name" "$v" "${f[STRIH_DANTE_RX_STAMP_MARGIN_MS]}" || bad=1   # issue 1425
   # issue 1439 (ROZHODNUTÉ 6360417876, owner 23.10.2026): the VBAN-only leg on the console's audio VLAN
   # (scripts/lib/strih-vban-leg.sh). STRIH_PROGRAM_VBAN_LEG = `mac:<MAC>` (a second NIC, its MAC lower-case
   # as sysfs prints it; stream-snv) | `vlan:<id>` (a tagged VLAN 1..4094 on the rig NIC; strih-snv, the

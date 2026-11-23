@@ -152,14 +152,17 @@ _strih_dante_input_float() { case "$1" in *.*) printf '%s' "$1" ;; *) printf '%s
 
 # strih_dante_input_terms_toml -> the loaded box's named latency terms + program TX as dante-input.toml lines
 # (issues 1510 + 1513, obs v0.4.27 / dstack 244): `network_latency_ms` (a) + `receive_buffer_ms` (b) = the Dante
-# latency P, and on a TX box `tx` + `tx_track`. A `none` fact writes no line. Before the [[subscribe]] tables.
+# latency P, and on a TX box `tx` + `tx_track`; issue 1425 (obs#96, obs v0.4.61): `rx_stamp_margin_ms` = the RX hand-off
+# margin. A `none` fact writes no line. Before the [[subscribe]] tables.
 strih_dante_input_terms_toml() {
-  local net rb tx tr
+  local net rb tx tr mg
   net="$(strih_box_fact STRIH_DANTE_NETWORK_LATENCY_MS)" && rb="$(strih_box_fact STRIH_DANTE_RECEIVE_BUFFER_MS)" \
-    && tx="$(strih_box_fact STRIH_DANTE_TX)" && tr="$(strih_box_fact STRIH_DANTE_TX_TRACK)" || return 1
+    && tx="$(strih_box_fact STRIH_DANTE_TX)" && tr="$(strih_box_fact STRIH_DANTE_TX_TRACK)" \
+    && mg="$(strih_box_fact STRIH_DANTE_RX_STAMP_MARGIN_MS)" || return 1
   [ "$net" = none ] || printf 'network_latency_ms = %s\n' "$(_strih_dante_input_float "$net")"
   [ "$rb" = none ] || printf 'receive_buffer_ms = %s\n' "$(_strih_dante_input_float "$rb")"
   [ "$tx" = none ] || printf 'tx = ["%s", "%s"]\ntx_track = %s\n' "${tx%%,*}" "${tx#*,}" "$tr"
+  [ "$mg" = none ] || printf 'rx_stamp_margin_ms = %s\n' "$(_strih_dante_input_float "$mg")"
 }
 
 # strih_dante_input_expected_latency_ns -> the Dante latency P = (a) + (b) of the loaded box in ns (rounded).
@@ -184,11 +187,38 @@ strih_dante_input_terms_toml_grade() {
     [ -z "$line" ] || grep -qxF -- "$line" "$dest" 2>/dev/null || miss="${miss}${miss:+; }${line%% =*}"
   done <<<"$want"
   if [[ "$want" != *"tx = "* ]] && grep -qE '^(tx|tx_track) =' "$dest" 2>/dev/null; then miss="${miss}${miss:+; }a tx the facts do not declare"; fi
+  if [[ "$want" != *"rx_stamp_margin_ms = "* ]] && grep -qE '^rx_stamp_margin_ms *=' "$dest" 2>/dev/null; then
+    miss="${miss}${miss:+; }an rx_stamp_margin_ms the facts do not declare"   # issue 1425
+  fi
   if [ -n "$miss" ]; then
     bad "(program-dante) latency terms in ${dest} differ from the box facts (${miss}) -- re-run setup-strih.sh step 13, then restart OBS"
   else
     ok "(program-dante) latency terms in ${dest}: $(printf '%s' "$want" | tr '\n' ' ' | sed 's/ $//')"
   fi
+}
+
+# strih_dante_input_margin_grade LOG -> issue 1425 (obs#96): the `(program-dante) rx stamp margin` row. obs v0.4.61 prints
+# `dante-input start: every RX chunk is stamped X.XXX ms after dlink's play time` at start only for a non-zero margin, so
+# a declared margin needs that line with the fact's value (%.3f), and `none` needs no such line. Through ok / bad.
+strih_dante_input_margin_grade() {
+  local log="$1" mg want line got
+  mg="$(strih_box_fact STRIH_DANTE_RX_STAMP_MARGIN_MS)" || { bad "(program-dante) rx stamp margin: the box facts are unreadable"; return 0; }
+  line="$(LC_ALL=C grep -a 'dante-input start: every RX chunk is stamped ' "$log" | tail -n 1 || true)"
+  got="$(printf '%s' "$line" | sed -n 's/^.* every RX chunk is stamped \([0123456789.]*\) ms after .*$/\1/p')"
+  if [ "$mg" = none ]; then
+    if [ -z "$line" ]; then ok "(program-dante) rx stamp margin: none (no start line, as the facts declare)"
+    else bad "(program-dante) rx stamp margin ${got:-?} ms on a device whose facts declare none -- re-run setup-strih.sh step 13, then restart OBS"; fi
+    return 0
+  fi
+  want="$(LC_ALL=C awk -v m="$mg" 'BEGIN { printf "%.3f", m }')"
+  if [ -z "$line" ]; then
+    bad "(program-dante) no 'dante-input start: every RX chunk is stamped' line in ${log}: OBS started without the ${want} ms margin (an obs release before v0.4.61, or the TOML lacked it) -- restart OBS"
+  elif [ "$got" = "$want" ]; then
+    ok "(program-dante) rx stamp margin ${got} ms (the start line, = the fact; computed, obs#96)"
+  else
+    bad "(program-dante) rx stamp margin ${got:-?} ms, the facts say ${want} ms -- OBS runs another config: restart OBS"
+  fi
+  return 0
 }
 
 # strih_dante_input_tx_grade LOG L1 L2 -> verify item 9's TX rows (issue 1513) + the dante latency and the
@@ -205,6 +235,7 @@ strih_dante_input_tx_grade() {
   else
     bad "(program-dante) dante latency ${got:-?} ns, the facts say ${want:-?} ns -- OBS runs another config: restart OBS (a latency change needs the owner, issue 1510)"
   fi
+  strih_dante_input_margin_grade "$log"   # issue 1425 (obs#96): the RX hand-off margin OBS started with
   # dlink's own statement of the terms (live 13.11.2026: `dlink latency: Dante latency P 13.041666 ms = network latency
   # (a) 1 ms (default) + receive buffer (b) 12.041666 ms (default)`), named; `(default)` = OBS read no term
   line="$(LC_ALL=C grep -a 'dlink latency: Dante latency P' "$log" | tail -n 1 | sed 's/^.*dlink latency: /dlink latency: /' || true)"

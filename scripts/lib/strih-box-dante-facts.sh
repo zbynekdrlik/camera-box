@@ -60,3 +60,15 @@ _strih_box_dante_terms_ok() {
   [ "$rb" != none ] || { echo "$n STRIH_DANTE_TX needs an explicit STRIH_DANTE_RECEIVE_BUFFER_MS: a TX without it lowers the RX latency to 8.365 ms (issue 1513)" >&2; rc=1; }
   return "$rc"
 }
+
+# _strih_box_dante_margin_ok NAME PROG MARGIN -> issue 1425 (obs#96, obs v0.4.61 loader 0..=50): the RX hand-off margin
+# `rx_stamp_margin_ms` is none or ms 0..50, up to 6 decimals, no leading zero (TOML refuses `05.0`); PROG=0 none.
+_strih_box_dante_margin_ok() {
+  local n="strih-box $1:" prog="$2" m="$3" d='[0123456789]'
+  [ "$m" != none ] || return 0
+  if [ "$prog" = 0 ]; then
+    echo "$n STRIH_DANTE_RX_STAMP_MARGIN_MS must be none: no <role>-obs program device in STRIH_DANTE_DEVICES" >&2; return 1; fi
+  if [[ ! "$m" =~ ^(0|[123456789]${d}?)(\.${d}{1,6})?$ ]] || [ "$((10#${m%%.*}))" -gt 50 ] || [[ "$m" =~ ^50\.0*[123456789] ]]; then
+    echo "$n STRIH_DANTE_RX_STAMP_MARGIN_MS '${m}' must be none or ms 0..50, up to 6 decimals (obs#96, issue 1425)" >&2; return 1; fi
+  return 0
+}
