@@ -26,6 +26,8 @@ const ALSA_DEVICE: &str = "hw:CARD=HID,DEV=0";
 const SAMPLE_RATE: u32 = 48000;
 const PERIOD_SIZE: u32 = 256; // ~5.3ms at 48kHz - low latency
 const BUFFER_PERIODS: u32 = 4; // 4 periods = ~21ms total buffer
+/// Issue 1539: the playback ring counts as full (the device is the bottleneck) from here.
+const PLAYBACK_FULL_RING_FRAMES: i64 = (PERIOD_SIZE * (BUFFER_PERIODS - 1)) as i64;
 
 // =============================================================================
 // Power Button Mute Toggle
@@ -761,8 +763,11 @@ fn run_intercom_inner(
     let mut capture_stall_count = 0u32;
 
     // Issue 1539: playback stall detector, one observation per check window.
-    let mut stall_detector =
-        PlaybackStallDetector::new(SAMPLE_RATE, opened_card_identity(&playback));
+    let mut stall_detector = PlaybackStallDetector::new(
+        SAMPLE_RATE,
+        PLAYBACK_FULL_RING_FRAMES,
+        opened_card_identity(&playback),
+    );
     let mut window_start = std::time::Instant::now();
     let mut window_written = 0u64;
     let mut window_received_start = frames_received.load(Ordering::Relaxed);
@@ -932,7 +937,8 @@ fn run_intercom_inner(
         if let Some(reason) = reopen_reason {
             let (fresh, identity) = reopen_playback(playback, playback_reopens, &reason)?;
             playback = fresh;
-            stall_detector = PlaybackStallDetector::new(SAMPLE_RATE, identity);
+            stall_detector =
+                PlaybackStallDetector::new(SAMPLE_RATE, PLAYBACK_FULL_RING_FRAMES, identity);
             window_start = std::time::Instant::now();
             window_written = 0;
             window_received_start = frames_received.load(Ordering::Relaxed);

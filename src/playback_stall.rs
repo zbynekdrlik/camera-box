@@ -77,17 +77,21 @@ pub enum PlaybackVerdict {
 #[derive(Debug)]
 pub struct PlaybackStallDetector {
     sample_rate: u32,
+    #[allow(dead_code)]
+    full_ring_frames: i64,
     opened: Option<CardIdentity>,
     prev_delay: Option<i64>,
     low_windows: u32,
 }
 
 impl PlaybackStallDetector {
+    /// `full_ring_frames` = the delay from which the ring counts as full (buffer - period).
     /// `opened` = the card identity read right after the playback open (`None` = unreadable,
     /// then only `CardGone` is checked).
-    pub fn new(sample_rate: u32, opened: Option<CardIdentity>) -> Self {
+    pub fn new(sample_rate: u32, full_ring_frames: i64, opened: Option<CardIdentity>) -> Self {
         Self {
             sample_rate,
+            full_ring_frames,
             opened,
             prev_delay: None,
             low_windows: 0,
@@ -146,6 +150,31 @@ impl PlaybackStallDetector {
     }
 }
 
+/// At most this many playback re-opens per [`REOPEN_BUDGET_WINDOW_NS`].
+pub const REOPEN_BUDGET_MAX: usize = 3;
+pub const REOPEN_BUDGET_WINDOW_NS: u64 = 60_000_000_000;
+
+/// A sliding-window cap on playback re-opens, so a device that keeps failing never turns into
+/// a reopen/log storm.
+#[derive(Debug)]
+pub struct ReopenBudget {
+    #[allow(dead_code)]
+    max: usize,
+    #[allow(dead_code)]
+    window_ns: u64,
+}
+
+impl ReopenBudget {
+    pub fn new(max: usize, window_ns: u64) -> Self {
+        Self { max, window_ns }
+    }
+
+    /// Spend one re-open at monotonic `now_ns`; `false` = the budget is used up (nothing spent).
+    pub fn try_spend(&mut self, _now_ns: u64) -> bool {
+        true
+    }
+}
+
 /// `/proc/asound/HID` is a symlink to `cardN`: the card index, or `None`.
 pub fn card_index_from_link(target: &str) -> Option<i32> {
     let name = target.rsplit('/').next()?;
@@ -180,8 +209,11 @@ mod tests {
         }
     }
 
+    /// The intercom's ring: 4 periods of 256 frames, "full" from buffer - period.
+    const FULL_RING: i64 = 1024 - 256;
+
     fn det() -> PlaybackStallDetector {
-        PlaybackStallDetector::new(RATE, Some(id(0, "001/004")))
+        PlaybackStallDetector::new(RATE, FULL_RING, Some(id(0, "001/004")))
     }
 
     #[test]
@@ -203,22 +235,47 @@ mod tests {
     }
 
     #[test]
-    fn frozen_drain_while_packets_arrive_reopens_after_confirm_windows_1539() {
+    fn slow_drain_with_a_full_ring_while_packets_arrive_reopens_after_confirm_windows_1539() {
+        // The device drains far below its rate: the blocking writes land only what it drains,
+        // so the ring stays full (delay = the whole buffer) and the window consumed ~10k of 48k.
+        // (A device that drains NOTHING blocks writei until the kernel's 10 s timeout returns
+        // EIO; that takes the intercom's write-error reopen path, not this window.)
         let mut d = det();
         d.observe(&obs(48_000, Some(512), 187));
-        // The device stops draining: writes block, only the buffer's worth lands, delay pegs full.
         assert_eq!(
-            d.observe(&obs(512, Some(1024), 187)),
-            PlaybackVerdict::Ok { consumed: Some(0) },
+            d.observe(&obs(10_512, Some(1024), 187)),
+            PlaybackVerdict::Ok {
+                consumed: Some(10_000)
+            },
             "one LOW window is not yet a verdict"
         );
         assert_eq!(
-            d.observe(&obs(0, Some(1024), 187)),
+            d.observe(&obs(10_000, Some(1024), 187)),
             PlaybackVerdict::Reopen(StallReason::NotConsuming {
-                consumed: 0,
+                consumed: 10_000,
                 expected: 48_000
             })
         );
+    }
+
+    #[test]
+    fn starved_writer_with_an_empty_ring_is_never_a_device_stall_1539() {
+        // The LOOP wrote little (a slow capture read): the ring ran empty, so the device was
+        // not the bottleneck -- never re-open a healthy playback for it.
+        let mut d = det();
+        d.observe(&obs(48_000, Some(0), 187));
+        for _ in 0..10 {
+            assert_eq!(
+                d.observe(&obs(2_000, Some(0), 187)),
+                PlaybackVerdict::Ok {
+                    consumed: Some(2_000)
+                }
+            );
+            assert_eq!(
+                d.observe(&obs(0, Some(0), 187)),
+                PlaybackVerdict::Ok { consumed: Some(0) }
+            );
+        }
     }
 
     #[test]
@@ -253,21 +310,21 @@ mod tests {
     #[test]
     fn half_rate_boundary_counts_as_low_1539() {
         let mut d = det();
-        d.observe(&obs(48_000, Some(512), 187));
-        // 23_999 frames consumed of 48_000 expected: below half
-        d.observe(&obs(23_999, Some(512), 187));
+        d.observe(&obs(48_000, Some(1024), 187));
+        // 23_999 frames consumed of 48_000 expected with the ring full: below half
+        d.observe(&obs(23_999, Some(1024), 187));
         assert_eq!(
-            d.observe(&obs(23_999, Some(512), 187)),
+            d.observe(&obs(23_999, Some(1024), 187)),
             PlaybackVerdict::Reopen(StallReason::NotConsuming {
                 consumed: 23_999,
                 expected: 48_000
             })
         );
         let mut d = det();
-        d.observe(&obs(48_000, Some(512), 187));
+        d.observe(&obs(48_000, Some(1024), 187));
         for _ in 0..5 {
             assert_eq!(
-                d.observe(&obs(24_000, Some(512), 187)),
+                d.observe(&obs(24_000, Some(1024), 187)),
                 PlaybackVerdict::Ok {
                     consumed: Some(24_000)
                 },
@@ -277,18 +334,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_delay_read_neither_confirms_nor_clears_1539() {
+    fn failed_delay_read_breaks_the_run_and_rebaselines_1539() {
         let mut d = det();
         d.observe(&obs(48_000, Some(512), 187));
-        d.observe(&obs(0, Some(1024), 187)); // LOW 1
+        d.observe(&obs(512, Some(1024), 187)); // LOW 1
         assert_eq!(
             d.observe(&obs(0, None, 187)),
             PlaybackVerdict::Ok { consumed: None }
         );
-        // The next measured window re-baselines from the failed read, then LOW 2 confirms.
+        // The next measured window only re-baselines; the LOW run starts over ("in a row").
         assert_eq!(
             d.observe(&obs(0, Some(1024), 187)),
             PlaybackVerdict::Ok { consumed: None }
+        );
+        assert_eq!(
+            d.observe(&obs(0, Some(1024), 187)),
+            PlaybackVerdict::Ok { consumed: Some(0) },
+            "LOW 1 of a new run"
         );
         assert!(matches!(
             d.observe(&obs(0, Some(1024), 187)),
@@ -347,7 +409,7 @@ mod tests {
 
     #[test]
     fn unreadable_open_identity_still_catches_card_gone_1539() {
-        let mut d = PlaybackStallDetector::new(RATE, None);
+        let mut d = PlaybackStallDetector::new(RATE, FULL_RING, None);
         let mut o = obs(48_000, Some(512), 187);
         assert!(matches!(d.observe(&o), PlaybackVerdict::Ok { .. }));
         o.identity = IdentityRead::Gone;
@@ -364,5 +426,31 @@ mod tests {
         assert_eq!(card_index_from_link("/proc/asound/card3"), Some(3));
         assert_eq!(card_index_from_link("HID"), None);
         assert_eq!(card_index_from_link("cardx"), None);
+    }
+
+    const S: u64 = 1_000_000_000;
+
+    #[test]
+    fn reopen_budget_allows_three_per_minute_then_refuses_1539() {
+        let mut b = ReopenBudget::new(REOPEN_BUDGET_MAX, REOPEN_BUDGET_WINDOW_NS);
+        assert!(b.try_spend(0));
+        assert!(b.try_spend(5 * S));
+        assert!(b.try_spend(10 * S));
+        assert!(!b.try_spend(11 * S), "a 4th reopen inside 60 s is refused");
+        assert!(!b.try_spend(59 * S));
+        // the first spend ages out at 60 s: one more is allowed, then refused again
+        assert!(b.try_spend(60 * S));
+        assert!(!b.try_spend(61 * S));
+        assert!(b.try_spend(130 * S));
+    }
+
+    #[test]
+    fn reopen_budget_refusals_do_not_consume_it_1539() {
+        let mut b = ReopenBudget::new(1, 10 * S);
+        assert!(b.try_spend(0));
+        for t in 1..10 {
+            assert!(!b.try_spend(t * S));
+        }
+        assert!(b.try_spend(10 * S), "only the granted spend counts");
     }
 }
