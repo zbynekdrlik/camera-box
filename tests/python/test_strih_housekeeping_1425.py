@@ -301,6 +301,7 @@ def test_a_box_with_none_removes_ours_and_keeps_a_foreign_file(tmp_path):
     assert _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env,
                 path_prefix=bin_dir).returncode == 0
     foreign = root / "etc" / "sysctl.d" / "60-strih-housekeeping.conf"
+    foreign.parent.mkdir(parents=True, exist_ok=True)   # setup no longer creates sysctl.d (no budget drop-in)
     foreign.write_text("net.core.netdev_budget_usecs = 800\n")
     env.update(_box_with(tmp_path, "none"))
     (tmp_path / "systemctl.log").write_text("")
