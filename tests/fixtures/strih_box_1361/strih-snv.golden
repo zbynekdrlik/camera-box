@@ -173,9 +173,10 @@ systemctl --user start obs-box-panel.service || true
 # /usr/local/bin/strih-nic-irq-affinity.sh
 set -euo pipefail
 # strih-snv rig-NIC IRQ placement (issue 1317 item H, issue 1425). Emitted by
-# strih_nic_irq_affinity_script_text in scripts/lib/strih-provision.sh, installed by
-# scripts/setup-strih.sh, run at boot by strih-nic-irq-affinity.service (and once live by the
-# supervisor). It keeps the rig NIC's NET_RX softirq off the OBS cores. With housekeeping CPUs
+# strih_nic_irq_affinity_script_text in scripts/lib/strih-nic-irq.sh, installed by
+# scripts/setup-strih.sh, run at boot by strih-nic-irq-affinity.service, on every NetworkManager `up` of the
+# rig NIC by the issue-1425 dispatcher hook (a link reset can re-place the IRQs), and once live by the
+# supervisor. It keeps the rig NIC's NET_RX softirq off the OBS cores. With housekeeping CPUs
 # (box fact STRIH_HOUSEKEEPING_CPUS, issue 1425) it first cuts the NIC's RSS queues to the number of
 # housekeeping CPUs (ethtool -L combined, only when it differs) and pins EVERY IRQ of the rig NIC
 # (/sys/class/net/<nic>/device/msi_irqs; a USB NIC: its xhci interrupt) to them. Without them
@@ -190,6 +191,7 @@ CPU_ATOM_FILE="${CPU_ATOM_FILE:-/sys/devices/cpu_atom/cpus}"
 CPU_ONLINE_FILE="${CPU_ONLINE_FILE:-/sys/devices/system/cpu/online}"
 IRQ_DIR="${IRQ_DIR:-/proc/irq}"
 ETHTOOL="${ETHTOOL:-ethtool}"
+CARRIER_WAIT_S="${CARRIER_WAIT_S:-5}"
 TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
 HOUSEKEEPING_CPUS="${STRIH_HOUSEKEEPING_CPUS:-0-1}"
 
@@ -245,16 +247,26 @@ fi
 
 if [ "$HOUSEKEEPING_CPUS" != none ] && [ -d "$msi_dir" ]; then
   # (2a) issue 1425: RSS queues = the housekeeping CPU count, changed only when it differs (a change
-  # re-initialises the NIC's rings: the driver may drop the link for a moment, once).
+  # re-initialises the NIC's rings: the driver may drop the link for a moment, once). At boot the
+  # udev rule of scripts/lib/strih-housekeeping.sh already set it at `add`, before the link came up, so
+  # this is a no-op there; the carrier_changes counter around a change shows any link drop it caused.
   want="$(printf '%s\n' $hk | wc -l | tr -d '[:space:]')"
   chan() { "$ETHTOOL" -l "$iface" 2>/dev/null | awk '/^Current hardware settings/ { c = 1 } c && /^Combined:/ { print $2; exit }' || true; }
   cur="$(chan)"
   case "$cur" in ''|*[!0123456789]*) die "cannot read the RSS channel count of ${iface} (ethtool -l printed '${cur}')" ;; esac
   if [ "$cur" != "$want" ]; then
+    cc0="$(cat "${SYS_ROOT}/class/net/${iface}/carrier_changes" 2>/dev/null || echo '?')"
     "$ETHTOOL" -L "$iface" combined "$want" || die "ethtool -L ${iface} combined ${want} failed (was ${cur})"
     got="$(chan)"
     [ "$got" = "$want" ] || die "read-back mismatch on ${iface}: set combined ${want}, read '${got}'"
-    log "${iface}: RSS queues ${cur} -> ${want} (combined)"
+    # the driver drops the link about a second after -L returns: wait for the counter to move
+    for ((_w = 0; _w < CARRIER_WAIT_S; _w++)); do
+      cc1="$(cat "${SYS_ROOT}/class/net/${iface}/carrier_changes" 2>/dev/null || echo '?')"
+      [ "$cc1" = "$cc0" ] || break
+      sleep 1
+    done
+    cc1="$(cat "${SYS_ROOT}/class/net/${iface}/carrier_changes" 2>/dev/null || echo '?')"
+    log "${iface}: RSS queues ${cur} -> ${want} (combined); carrier_changes ${cc0} -> ${cc1}"
   else
     log "${iface}: RSS queues already ${want} (combined) -- unchanged"
   fi

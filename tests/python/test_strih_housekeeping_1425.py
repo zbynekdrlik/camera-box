@@ -147,6 +147,7 @@ def _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env):
     full = {k: v for k, v in os.environ.items() if k not in LEAKY}
     full.update(env)
     full.update({"SYS_ROOT": str(sysr), "IRQ_DIR": str(irq_dir), "PATH": "%s:%s" % (bin_dir, full["PATH"]),
+                 "CARRIER_WAIT_S": env.get("CARRIER_WAIT_S", "0"),
                  "PROC_INTERRUPTS": str(tmp_path / "no-interrupts")})
     return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=full, timeout=60)
 
@@ -158,6 +159,7 @@ def test_the_oneshot_cuts_rss_to_two_and_pins_every_rig_nic_irq_to_0_1(tmp_path)
     calls = (tmp_path / "ethtool.log").read_text().splitlines()
     assert "-L enp7s0 combined 2" in calls
     assert "RSS queues 8 -> 2" in r.stdout
+    assert "carrier_changes ? -> ?" in r.stdout   # no carrier_changes file in the fixture: named, never fatal
     # the IRQs are read AFTER the channel change: the re-requested vectors 150-152, all on 0-1
     for n in (150, 151, 152):
         assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "0-1"
@@ -240,6 +242,7 @@ def _install_env(tmp_path):
     bin_dir = tmp_path / "sbin"
     bin_dir.mkdir()
     _exe(bin_dir / "systemctl", FAKE_SYSTEMCTL)
+    _exe(bin_dir / "udevadm", '#!/bin/sh\necho "udevadm $*" >> "$FAKE_SYSTEMCTL_LOG"\n')
     (tmp_path / "systemctl.log").write_text("")
     env = {"STRIH_HOUSEKEEPING_ROOT": str(root), "STRIH_HOUSEKEEPING_OWNER": "%s:%s" % (ME, MYGRP),
            "STRIH_SESSION_APPS_EUID": "1000", "FAKE_SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"),
@@ -259,8 +262,14 @@ def test_setup_writes_the_sysctl_the_two_dropins_the_launcher_file_and_restarts_
               home / ".config" / "systemd" / "user" / "strih-display-watch.service.d"):
         t = (d / "50-camera-box-housekeeping.conf").read_text()
         assert t.splitlines()[1:] == ["[Service]", "CPUAffinity=0-1", "Nice=10"]
+    rule = (root / "etc" / "udev" / "rules.d" / "71-strih-housekeeping-rss.rules").read_text().splitlines()
+    assert rule[1] == ('ACTION=="add", SUBSYSTEM=="net", DRIVERS=="atlantic", TEST=="device/msi_irqs", '
+                       'RUN+="/usr/sbin/ethtool -L $name combined 2"')
+    hook = root / "etc" / "NetworkManager" / "dispatcher.d" / "60-strih-housekeeping-irq"
+    assert hook.read_text().startswith("#!/bin/sh\n# camera-box issue 1425") and os.access(hook, os.X_OK)
     calls = (tmp_path / "systemctl.log").read_text().splitlines()
-    assert calls == ["daemon-reload", "is-active -q rustdesk.service", "restart rustdesk.service",
+    assert calls == ["udevadm control --reload-rules",
+                     "daemon-reload", "is-active -q rustdesk.service", "restart rustdesk.service",
                      "--user daemon-reload", "--user is-active -q strih-display-watch.service",
                      "--user restart strih-display-watch.service"], calls
 
@@ -300,6 +309,8 @@ def test_a_box_with_none_removes_ours_and_keeps_a_foreign_file(tmp_path):
     assert not (root / "etc" / "systemd" / "system" / "rustdesk.service.d" / "50-camera-box-housekeeping.conf").exists()
     assert not (home / ".config" / "systemd" / "user" / "strih-display-watch.service.d" / "50-camera-box-housekeeping.conf").exists()
     assert foreign.exists() and "not ours" in r.stderr
+    assert not (root / "etc" / "udev" / "rules.d" / "71-strih-housekeeping-rss.rules").exists()
+    assert not (root / "etc" / "NetworkManager" / "dispatcher.d" / "60-strih-housekeeping-irq").exists()
     calls = (tmp_path / "systemctl.log").read_text().splitlines()
     assert calls == ["daemon-reload", "--user daemon-reload"], calls
 
@@ -334,8 +345,12 @@ def _grade_env(tmp_path, irq_aff="0-1", combined=2, nice=10, cpus="0-1", running
         (proc / pid / "status").write_text("Name:\tx\nCpus_allowed_list:\t%s\n" % cpus)
         fields = ["S"] + ["0"] * 15 + [str(nice)] + ["1"] * 30
         (proc / pid / "stat").write_text("%s (a b) %s\n" % (pid, " ".join(fields)))
+    stats = sysr / "class" / "net" / "enp7s0" / "statistics"
+    stats.mkdir()
+    (stats / "rx_missed_errors").write_text("7\n")
+    (stats / "rx_dropped").write_text("0\n")
     env.update({"STRIH_HOUSEKEEPING_SYS": str(sysr), "STRIH_HOUSEKEEPING_PROC": str(proc), "STRIH_NIC_IFACE": "enp7s0",
-                "STRIH_HOUSEKEEPING_IPADDR": ""})
+                "STRIH_HOUSEKEEPING_IPADDR": "", "STRIH_HOUSEKEEPING_SAMPLE_S": "0"})
     return home, "%s:%s" % (bin_dir, sbin), env
 
 
@@ -349,8 +364,9 @@ def _grade(tmp_path, **kw):
 def test_a_placed_box_passes_every_row(tmp_path):
     out = _grade(tmp_path)
     rows = out.splitlines()
-    assert all(r.startswith("PASS") for r in rows), out
-    for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-sysctl)", "(hk-unit) rustdesk.service",
+    assert all(r.startswith("PASS") or r.startswith("NOTE (hk-rx)") for r in rows), out
+    assert "NOTE (hk-rx) enp7s0: rx_missed_errors +0, rx_dropped +0 over 0 s, total missed 7 (report-only)" in out
+    for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-unit) rustdesk.service",
                 "(hk-unit) strih-display-watch.service", "(hk-unit) launcher"):
         assert any(tag in r for r in rows), (tag, out)
 
@@ -450,3 +466,71 @@ def test_setup_and_verify_wire_the_lib_inside_their_budgets():
     grade = v.index('strih_housekeeping_grade_report "$USER_HOME"')
     assert gate < grade < v.index('IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}"')
     assert '. "$(dirname "${BASH_SOURCE[0]}")/strih-housekeeping.sh"' in PROVISION.read_text()
+
+
+def test_a_drifted_udev_rule_or_hook_fails(tmp_path):
+    home, path, env = _grade_env(tmp_path)
+    (pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "NetworkManager" / "dispatcher.d" /
+     "60-strih-housekeeping-irq").chmod(0o644)
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    assert "FAIL (hk-hooks) " in r.stdout and "not executable" in r.stdout
+
+
+def _hook(tmp_path):
+    r = _run('strih_box_load strih-snv; strih_housekeeping_hook_text "$(strih_lx_nic_driver)"')
+    assert r.returncode == 0, r.stderr
+    text = r.stdout
+    assert text.count("/sys/class/net/") == 1 and text.count("/usr/local/bin/strih-nic-irq-affinity.sh") == 2
+    sysr = tmp_path / "sys"
+    for nic, drv in (("enp7s0", "atlantic"), ("enp2s0", "r8169")):
+        dev = sysr / "devices" / nic
+        dev.mkdir(parents=True)
+        d = sysr / "bus" / "pci" / "drivers" / drv
+        d.mkdir(parents=True)
+        (dev / "driver").symlink_to(d)
+        (sysr / "class" / "net" / nic).mkdir(parents=True)
+        (sysr / "class" / "net" / nic / "device").symlink_to(dev)
+    (sysr / "class" / "net" / "enp7s0.70").mkdir()
+    marker = tmp_path / "ran"
+    script = _exe(tmp_path / "irq.sh", '#!/bin/sh\necho "ran $*" >> "%s"\n' % marker)
+    text = text.replace("/sys/class/net/", "%s/class/net/" % sysr).replace("/usr/local/bin/strih-nic-irq-affinity.sh", str(script))
+    return _exe(tmp_path / "hook", text), marker
+
+
+def test_the_dispatcher_hook_re_places_only_on_up_of_the_rig_nic_driver(tmp_path):
+    hook, marker = _hook(tmp_path)
+    for iface, action in (("enp7s0", "down"), ("enp2s0", "up"), ("enp7s0.70", "up"), ("lo", "up")):
+        assert subprocess.run([str(hook), iface, action], timeout=10).returncode == 0
+    assert not marker.exists()
+    assert subprocess.run([str(hook), "enp7s0", "up"], timeout=10).returncode == 0
+    assert marker.read_text() == "ran \n"
+
+
+LATE_DROP = """
+if sys.argv[1] == "-L":
+    import subprocess
+    subprocess.Popen(["sh", "-c", "sleep 1.2; echo 6 > '%s'"])
+"""
+
+
+def test_the_carrier_changes_read_waits_for_the_link_drop(tmp_path):
+    # the fake -L bumps carrier_changes 1.2 s after it returns, like atlantic's late link drop
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path)
+    cc = sysr / "class" / "net" / "enp7s0" / "carrier_changes"
+    cc.write_text("4\n")
+    _exe(bin_dir / "ethtool", (bin_dir / "ethtool").read_text() + LATE_DROP % cc)
+    env["CARRIER_WAIT_S"] = "5"
+    r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
+    assert r.returncode == 0, r.stderr
+    assert "carrier_changes 4 -> 6" in r.stdout
+
+
+def test_a_file_with_our_header_on_line_2_is_ours_only_after_a_shebang(tmp_path):
+    hdr = "# camera-box issue 1425: housekeeping off the OBS CPUs (scripts/lib/strih-housekeeping.sh) -- do not edit"
+    cases = {"a": hdr + "\nx\n", "b": "#!/bin/sh\n" + hdr + "\n", "c": "net.x = 1\n" + hdr + "\n", "d": ""}
+    want = {"a": "0", "b": "0", "c": "1", "d": "1"}
+    for k, text in cases.items():
+        f = tmp_path / k
+        f.write_text(text)
+        r = _run('rc=0; strih_housekeeping_ours "$1" || rc=$?; echo "$rc"', str(f))
+        assert r.stdout.strip() == want[k], (k, r.stdout, r.stderr)
