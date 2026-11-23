@@ -15,13 +15,21 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use crate::playback_stall::{PlaybackObservation, PlaybackStallDetector, PlaybackVerdict};
+
+mod playback_heal;
 use crate::vban::{VbanCodec, VbanHeader, MAX_VBAN_PACKET_SIZE, VBAN_HEADER_SIZE, VBAN_PORT};
+use playback_heal::{
+    current_hid_identity, opened_card_identity, stall_reason_text, PlaybackHeal, Reopen,
+};
 
 // ALSA configuration - optimized for low latency
 const ALSA_DEVICE: &str = "hw:CARD=HID,DEV=0";
 const SAMPLE_RATE: u32 = 48000;
 const PERIOD_SIZE: u32 = 256; // ~5.3ms at 48kHz - low latency
 const BUFFER_PERIODS: u32 = 4; // 4 periods = ~21ms total buffer
+/// Issue 1539: the playback ring counts as full (the device is the bottleneck) from here.
+const PLAYBACK_FULL_RING_FRAMES: i64 = (PERIOD_SIZE * (BUFFER_PERIODS - 1)) as i64;
 
 // =============================================================================
 // Power Button Mute Toggle
@@ -399,6 +407,9 @@ fn recover_alsa(pcm: &PCM, err: i32) -> bool {
     }
 }
 
+/// One stall check window (the detector confirms over `STALL_CONFIRM_WINDOWS` of them).
+const PLAYBACK_CHECK_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
 // =============================================================================
 // VBAN Receiver
 // =============================================================================
@@ -495,6 +506,8 @@ pub fn run_intercom(
 ) -> Result<()> {
     apply_intercom_priority();
     tracing::info!("🎤 Microphone starts MUTED - press power button to unmute");
+    // Issue 1539: the playback self-heal state (reopen count + budget) survives inner restarts.
+    let mut playback_heal = PlaybackHeal::new();
 
     while running.load(Ordering::Relaxed) {
         tracing::info!(
@@ -503,7 +516,12 @@ pub fn run_intercom(
             config.target_host
         );
 
-        match run_intercom_inner(&config, Arc::clone(&running), Arc::clone(&muted)) {
+        match run_intercom_inner(
+            &config,
+            Arc::clone(&running),
+            Arc::clone(&muted),
+            &mut playback_heal,
+        ) {
             Ok(()) => {
                 tracing::info!("Intercom stopped normally");
                 break;
@@ -571,6 +589,7 @@ fn run_intercom_inner(
     config: &IntercomConfig,
     running: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
+    playback_heal: &mut PlaybackHeal,
 ) -> Result<()> {
     // Open ALSA devices with retry
     let capture = loop {
@@ -586,7 +605,7 @@ fn run_intercom_inner(
         }
     };
 
-    let playback = loop {
+    let mut playback = loop {
         match open_alsa_playback() {
             Ok(p) => break p,
             Err(e) => {
@@ -675,6 +694,19 @@ fn run_intercom_inner(
     // Capture watchdog - detect if capture stops producing samples
     let mut last_capture_samples = 0u64;
     let mut capture_stall_count = 0u32;
+
+    // Issue 1539: playback stall detector, one observation per check window.
+    let mut stall_detector = PlaybackStallDetector::new(
+        SAMPLE_RATE,
+        PLAYBACK_FULL_RING_FRAMES,
+        opened_card_identity(&playback),
+    );
+    let mut window_start = std::time::Instant::now();
+    let mut window_written = 0u64;
+    let mut window_received_start = frames_received.load(Ordering::Relaxed);
+    // Measured playback consumption over the status-report interval (the live hw_ptr progress).
+    let mut report_consumed = 0u64;
+    let mut report_measured_ns = 0u64;
 
     tracing::info!(
         "Audio streams started with direct ALSA, period={}frames (~{:.1}ms)",
@@ -792,13 +824,72 @@ fn run_intercom_inner(
         }
 
         // Write to ALSA
-        let io_play = playback.io_i16()?;
-        match io_play.writei(&playback_buf) {
-            Ok(_) => {}
+        let write_result = {
+            let io_play = playback.io_i16()?;
+            io_play.writei(&playback_buf)
+        };
+        let mut reopen_reason: Option<String> = None;
+        let mut write_failed = false;
+        match write_result {
+            Ok(frames) => window_written += frames as u64,
             Err(e) => {
                 if !recover_alsa(&playback, e.errno()) {
-                    return Err(anyhow!("ALSA playback error: {}", e));
+                    write_failed = true;
+                    reopen_reason = Some(format!("write error: {e}"));
                 }
+            }
+        }
+
+        // Issue 1539: is the playback device consuming what we write? One cheap
+        // snd_pcm_delay + /proc read per window, on this (intercom) thread only.
+        let window_elapsed = window_start.elapsed();
+        if reopen_reason.is_none() && window_elapsed >= PLAYBACK_CHECK_WINDOW {
+            let received_now = frames_received.load(Ordering::Relaxed);
+            let obs = PlaybackObservation {
+                elapsed_ns: window_elapsed.as_nanos() as u64,
+                frames_written: window_written,
+                delay_frames: playback.delay().ok(),
+                packets_received: received_now.saturating_sub(window_received_start),
+                identity: current_hid_identity(),
+            };
+            match stall_detector.observe(&obs) {
+                PlaybackVerdict::Ok {
+                    consumed: Some(consumed),
+                } => {
+                    report_consumed += consumed;
+                    report_measured_ns += obs.elapsed_ns;
+                }
+                PlaybackVerdict::Ok { consumed: None } => {}
+                PlaybackVerdict::Reopen(reason) => {
+                    reopen_reason = Some(stall_reason_text(&reason));
+                }
+            }
+            window_start = std::time::Instant::now();
+            window_written = 0;
+            window_received_start = received_now;
+        }
+
+        if let Some(reason) = reopen_reason {
+            match playback_heal.reopen(playback, &reason, open_alsa_playback)? {
+                Reopen::Done(fresh, identity) => {
+                    playback = fresh;
+                    stall_detector = PlaybackStallDetector::new(
+                        SAMPLE_RATE,
+                        PLAYBACK_FULL_RING_FRAMES,
+                        identity,
+                    );
+                    window_start = std::time::Instant::now();
+                    window_written = 0;
+                    window_received_start = frames_received.load(Ordering::Relaxed);
+                }
+                // A failing write with the budget used up: the whole-intercom restart, as before.
+                Reopen::Refused(_) if write_failed => {
+                    return Err(anyhow!(
+                        "ALSA playback error: {} (playback re-open budget used up)",
+                        reason
+                    ));
+                }
+                Reopen::Refused(old) => playback = old,
             }
         }
 
@@ -812,12 +903,26 @@ fn run_intercom_inner(
             let capture_rate =
                 (captured - last_capture_samples) as f64 / report_interval.as_secs_f64();
 
+            // Issue 1539: the device's measured consumption (hw_ptr progress) + reopens.
+            let playback_rate = if report_measured_ns > 0 {
+                format!(
+                    "{:.0}",
+                    report_consumed as f64 * 1e9 / report_measured_ns as f64
+                )
+            } else {
+                "n/a".to_string()
+            };
             tracing::info!(
-                "Intercom: recv {:.1} pkt/s, send {:.1} pkt/s, capture {:.0} samp/s",
+                "Intercom: recv {:.1} pkt/s, send {:.1} pkt/s, capture {:.0} samp/s, playback {} samp/s, playback_reopens {}, playback_refused {}",
                 recv_rate,
                 send_rate,
-                capture_rate
+                capture_rate,
+                playback_rate,
+                playback_heal.reopens(),
+                playback_heal.refused_total()
             );
+            report_consumed = 0;
+            report_measured_ns = 0;
 
             // Watchdog: if no samples captured in this period, something is wrong
             if captured == last_capture_samples && capture_rate < 1000.0 {

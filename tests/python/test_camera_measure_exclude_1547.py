@@ -44,8 +44,7 @@ def test_an_explicit_active_set_is_never_filtered():
     assert active == "cam2 cam3"
 
 
-def test_the_exclusion_lives_in_the_e2e_workflow_next_to_its_ticket():
-    s = WORKFLOW.read_text()
-    assert "CAMERA_MEASURE_EXCLUDE: cam3" in s
-    i = s.index("CAMERA_MEASURE_EXCLUDE: cam3")
-    assert "1547" in s[max(0, i - 400):i + 200], "the ticket is named next to the exclusion"
+def test_cam3_is_back_in_the_measured_set_after_the_replug():
+    # issue 1547 (owner 23.11.2026): cam3's HDMI re-plugged, capture chroma reads colour again,
+    # so the E2E workflow carries no exclusion any more (the mechanism in camera-set.sh stays)
+    assert "CAMERA_MEASURE_EXCLUDE" not in WORKFLOW.read_text()
