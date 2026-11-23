@@ -70,6 +70,15 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   5/6, owner yes on issue 1513). A change of (a) or (b) is an owner decision. Clocks + latencies:
   `.claude/rules/audio-clock-map.md` ("The named Dante latency terms"). Tests:
   `tests/python/test_strih_dante_terms_1513.py`.
+- **The RX hand-off margin (issue 1425, design 7107436350, obs#96, obs v0.4.61):** the fact
+  `STRIH_DANTE_RX_STAMP_MARGIN_MS` (right after `STRIH_DANTE_TX_TRACK` in the key list; `none` or ms 0..50,
+  up to 6 decimals, no leading zero; `none` on a box without a program device) -> `rx_stamp_margin_ms`
+  (a TOML float, before `[[subscribe]]`). strih-snv `10`, every other box `none`. Verify item 9: the
+  `latency terms` row needs the line the fact declares and FAILs one it does not, and `rx stamp margin`
+  (`strih_dante_input_margin_grade`) reads obs's start line `every RX chunk is stamped X.XXX ms ...`
+  (printed only for a non-zero margin) against the fact: missing or another value = FAIL (restart OBS),
+  a line on a `none` box = FAIL; a fact of `0` expects no line too (obs prints none for a zero margin). Term (d) in `audio-clock-map.md`. Tests:
+  `tests/python/test_strih_dante_rx_margin_1425.py`.
 - **PP (issue 1536, 18.11.2026):** strih-pp `strih-obs` + stream-pp `stream-obs` on their VLAN 70 legs (the
   transmitter is dsg, the SoundGrid<->Dante bridge), plus strih-pp's hub device `strih-pp-intercom` (slot 2); each box's site file is placed by the supervisor like SNV's.
 - **Site data is never in git (the repo is public):** the per-box untracked

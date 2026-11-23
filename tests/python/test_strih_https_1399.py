@@ -326,12 +326,12 @@ def test_the_https_keys_close_the_fact_list():
     # issue 1424 part 2 appended the HDMI output list after them, issue 1453 the public-intercom switch,
     # issue 1462 the stream Development design.
     # issue 808 the shading relay overrides, issue 1425 the fixed OBS audio buffering, issue 1387 the
-    # four JPEG XS link facts, issue 1466 the desktop session, issues 1510 + 1513 the four Dante latency / TX terms, issue 1502 the rig-NIC rename.
-    assert r.stdout.split()[-17:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS",
+    # four JPEG XS link facts, issue 1466 the desktop session, issues 1510 + 1513 the four Dante latency / TX terms + issue 1425 the RX hand-off margin, issue 1502 the rig-NIC rename.
+    assert r.stdout.split()[-18:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS",
                                       "STRIH_HTTPS_PUBLIC", "STRIH_STREAM_DEV_SCENE", "STRIH_BKSHADING_RELAYS",
                                       "STRIH_AUDIO_BUFFERING_MS", "STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS",
                                       "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS",
-                            "STRIH_DESKTOP", "STRIH_DANTE_NETWORK_LATENCY_MS", "STRIH_DANTE_RECEIVE_BUFFER_MS", "STRIH_DANTE_TX", "STRIH_DANTE_TX_TRACK",
+                            "STRIH_DESKTOP", "STRIH_DANTE_NETWORK_LATENCY_MS", "STRIH_DANTE_RECEIVE_BUFFER_MS", "STRIH_DANTE_TX", "STRIH_DANTE_TX_TRACK", "STRIH_DANTE_RX_STAMP_MARGIN_MS",
                             "STRIH_NIC_RENAME"]
 
 
