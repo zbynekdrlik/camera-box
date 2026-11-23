@@ -913,12 +913,13 @@ fn run_intercom_inner(
                 "n/a".to_string()
             };
             tracing::info!(
-                "Intercom: recv {:.1} pkt/s, send {:.1} pkt/s, capture {:.0} samp/s, playback {} samp/s, playback_reopens {}",
+                "Intercom: recv {:.1} pkt/s, send {:.1} pkt/s, capture {:.0} samp/s, playback {} samp/s, playback_reopens {}, playback_refused {}",
                 recv_rate,
                 send_rate,
                 capture_rate,
                 playback_rate,
-                playback_heal.reopens()
+                playback_heal.reopens(),
+                playback_heal.refused_total()
             );
             report_consumed = 0;
             report_measured_ns = 0;

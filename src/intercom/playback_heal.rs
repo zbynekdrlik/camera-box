@@ -72,6 +72,8 @@ pub(super) struct PlaybackHeal {
     epoch: std::time::Instant,
     /// Re-opens refused since the last granted one (logged once per run of refusals).
     refused: u64,
+    /// Every refused re-open since this process started (the status line's `playback_refused`).
+    refused_total: u64,
 }
 
 impl PlaybackHeal {
@@ -81,12 +83,18 @@ impl PlaybackHeal {
             budget: ReopenBudget::new(REOPEN_BUDGET_MAX, REOPEN_BUDGET_WINDOW_NS),
             epoch: std::time::Instant::now(),
             refused: 0,
+            refused_total: 0,
         }
     }
 
     /// Playback re-opens since this process started (the status line's `playback_reopens`).
     pub(super) fn reopens(&self) -> u64 {
         self.reopens
+    }
+
+    /// Re-opens the budget refused since this process started (`playback_refused`).
+    pub(super) fn refused_total(&self) -> u64 {
+        self.refused_total
     }
 
     /// Close + re-open ONLY the playback PCM with `open` (the unchanged `open_alsa_playback`:
@@ -109,6 +117,7 @@ impl PlaybackHeal {
                 );
             }
             self.refused += 1;
+            self.refused_total += 1;
             return Ok(Reopen::Refused(old));
         }
         self.reopens += 1;

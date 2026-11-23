@@ -50,6 +50,8 @@ fn a_granted_reopen_rebuilds_the_detector_and_the_window_1539() {
 fn the_status_line_carries_playback_progress_and_reopens_1539() {
     assert!(INTERCOM.contains("playback {} samp/s, playback_reopens {}"));
     assert!(INTERCOM.contains("playback_heal.reopens()"));
+    assert!(INTERCOM.contains("playback_refused {}"));
+    assert!(INTERCOM.contains("playback_heal.refused_total()"));
 }
 
 #[test]
