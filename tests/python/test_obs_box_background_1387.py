@@ -287,10 +287,15 @@ def test_grade_fails_closed_on_an_unreadable_fence():
     assert r.returncode == 1 and "FENCE UNREADABLE" in r.stdout
 
 
-def _gather(tmp, procs="", exclude=None):
+def _gather(tmp, procs="", exclude=None, slice_text=None):
     """The real gather, its /etc, /sys and /proc paths moved into TMP; the tools it calls stubbed."""
     extra = "" if exclude is None else f" openbox '{exclude}'"
     text = bash(f". {VERIFY}\nobs_box_baseline_gather_snippet strih newlevel strih-obs.service{extra}").stdout
+    if slice_text is not None:
+        (tmp / "rig-background.slice").write_text(slice_text)
+        old = "cmp -s \"$(obs_box_background_slice_path)\""
+        assert old in text, old
+        text = text.replace(old, f"cmp -s \"{tmp / 'rig-background.slice'}\"")
     sysroot = tmp / "sys"
     cpu = sysroot / "devices/system/cpu"
     for c in range(4):
@@ -508,7 +513,12 @@ def test_grade_with_an_irq_cpu_wants_the_slice_without_it():
 
 
 def test_real_gather_carries_the_exclusion_into_the_file_check(tmp_path):
-    f = _gather(tmp_path, exclude="1")
-    assert f["bg_exclude"] == "1"
-    (tmp_path / "x").mkdir()
-    assert _gather(tmp_path / "x")["bg_exclude"] == "none", "imag passes nothing"
+    # the fixture box: online 0-3, OBS 2,3 -> the slice file must read AllowedCPUs=0 once CPU 1 is kept out
+    one = lib("obs_box_background_slice_text 0").stdout
+    both = lib("obs_box_background_slice_text 0-1").stdout
+    cases = (("a", "1", one, "1"), ("b", "1", both, "0"), ("c", None, both, "1"), ("d", None, one, "0"))
+    for sub, exclude, text, want in cases:
+        (tmp_path / sub).mkdir()
+        f = _gather(tmp_path / sub, exclude=exclude, slice_text=text)
+        assert f["bg_exclude"] == (exclude or "none"), (sub, f["bg_exclude"])
+        assert f["bg_file"] == want, (sub, f["bg_file"])

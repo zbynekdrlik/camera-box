@@ -646,6 +646,38 @@ def test_the_sampler_runs_on_the_task_cpus_on_an_amd_box(tmp_path):
 def test_setup_and_verify_keep_the_background_slice_off_the_irq_cpu():
     s = SETUP.read_text()
     v = VERIFY.read_text()
-    assert s.count('obs_box_background_slice strih "$DESKTOP_USER" "$(strih_housekeeping_irq_cpus)" ;') == 1
-    assert v.count('obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service '
-                   '"$(strih_box_desktop)" "$(strih_housekeeping_irq_cpus)"') == 1
+    # read ONCE and fail-loud (a substitution inside an argument would turn a failed read into `none`)
+    read = s.index('HK_SLICE_EXCL="$(strih_housekeeping_slice_exclude)" || fail "issue 1425:')
+    assert read < s.index('obs_box_background_slice strih "$DESKTOP_USER" "$HK_SLICE_EXCL" ;')
+    assert s.count('obs_box_background_slice strih "$DESKTOP_USER" "$HK_SLICE_EXCL" ;') == 1
+    vread = v.index('HK_SLICE_EXCL="$(strih_housekeeping_slice_exclude)" || { bad "(housekeeping)')
+    assert vread < v.index('obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service '
+                           '"$(strih_box_desktop)" "$HK_SLICE_EXCL")')
+
+
+def test_the_slice_exclusion_is_the_irq_cpu_unless_it_is_the_only_one():
+    for hk, want in (("0-1", "1"), ("0,1", "1"), ("0-3", "3"), ("3", "none"), ("none", "none")):
+        r = _run('strih_housekeeping_slice_exclude "$1"', hk)
+        assert r.returncode == 0 and r.stdout.strip() == want, (hk, r.stdout, r.stderr)
+    r = _run('strih_box_load strih-snv; strih_housekeeping_slice_exclude')
+    assert r.stdout.strip() == "1", r.stdout
+
+
+def test_a_one_cpu_set_keeps_the_slice_and_the_sampler_and_passes_the_slice_row(tmp_path):
+    # review finding: STRIH_HOUSEKEEPING_CPUS=0 gives IRQs and tasks CPU 0, so nothing may be kept out of the
+    # slice (else no CPU is left for it and setup fails); the sampler and the (hk-slice) row follow
+    box = _box_with(tmp_path, "0")
+    (tmp_path / "online").write_text("0-15\n")
+    (tmp_path / "iso").write_text("1-15\n")
+    env = dict(box, OBS_BOX_ONLINE_CPUS=str(tmp_path / "online"),
+               STRIH_PROGRAM_AUDIO_ISOLATED_CONF=str(tmp_path / "iso"), STRIH_PROGRAM_AUDIO_SYSFS=str(tmp_path / "nosys"))
+    r = _run('strih_box_load strih-snv; strih_housekeeping_slice_exclude; strih_program_audio_cpus; echo; '
+             'obs_box_background_cpus 0-15 1-15 "$(strih_housekeeping_slice_exclude)"', env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["none", "0", "0"], r.stdout
+    home, path, genv = _grade_env(tmp_path / "g")
+    genv.update(box)
+    genv["FAKE_ALLOWED_CPUS"] = "0"
+    r = _run('strih_box_load strih-snv; strih_housekeeping_slice_row "$(strih_housekeeping_slice_exclude)"',
+             env=genv, path_prefix=path)
+    assert "PASS (hk-slice) rig-background.slice: AllowedCPUs 0 (one housekeeping CPU: the rig NIC IRQs share it)" in r.stdout, r.stdout
