@@ -203,14 +203,24 @@ terms, and no buffer or latency change without consent. dstack 244 (owner-approv
 |---|---|---|---|
 | (a) network latency: Dante Controller's latency of the device's subscriptions | box fact `STRIH_DANTE_NETWORK_LATENCY_MS` -> TOML `network_latency_ms` | 1 ms | 1 ms |
 | (b) receive buffer: this PC's room for the RX thread's wake + pass | box fact `STRIH_DANTE_RECEIVE_BUFFER_MS` -> TOML `receive_buffer_ms` | 12.041666 ms | 12.041666 ms |
-| P = (a) + (b): the Dante latency (Dante Controller's column) | computed | **13.041666 ms** | **13.041666 ms** |
+| P = (a) + (b): the Dante latency (Dante Controller's column; (d) below is OBS-side, not part of P) | computed | **13.041666 ms** | **13.041666 ms** |
 | (c) app hand-off RX: the 96 -> 48 converter + the OBS hand-off | computed by dlink (`rx_path_ns`) | converter 0.625 ms + the source's timeline | same |
+| (d) RX hand-off margin (issue 1425, obs#96, obs v0.4.61): every RX chunk stamped this much after dlink's play time, so a chunk handed late still makes OBS's FIXED 0 ms mix | box fact `STRIH_DANTE_RX_STAMP_MARGIN_MS` -> TOML `rx_stamp_margin_ms` | **10 ms** | none (0) |
 
 - P is exactly the RX latency both devices ran with before the terms (no latency change). Sizing (b)
   from measurement comes later, from the status line's `wake_delay_*` and the per-flow
   `network_latency_min_us` / `_p99_us` / `_max_us` (verify item 9 NOTEs them, report-only, wherever
   the OBS log carries them: not yet read on a box); any change
   of (a) or (b) is an owner decision.
+- **(d) the RX hand-off margin (issue 1425, design 7107436350):** program audio reaches the strih-snv
+  mix 10 ms LATER (computed, not measured). Evidence (obs#96, 23.11.2026, strih-snv on obs v0.4.61
+  without it, 2 h): `late_to_mix` +60 (~0.58/min, even), min_lead p50 +1.6 ms, worst **-7.0 ms**, 167 of
+  753 windows below 0; a chunk handed after its tick's end is sat out of the FIXED mix = a ~21 ms gap.
+  The worst lead sits inside 10 ms with 3 ms headroom. The A/V compensation is part of the change (the
+  release E2E's A/V residual re-reads the program pin). Not a raise of (b): (b) moves P and the RX
+  deadline, the late chunks were stamp-vs-tick. Graded by verify item 9: the TOML line vs the fact, and
+  obs's start line `dante-input start: every RX chunk is stamped X ms after dlink's play time` (printed
+  only for a non-zero margin) vs the fact; `none` = neither line.
 - **stream-obs's TX (issue 1513):** OBS's program mix (track 1, the YouTube mix, on FLEET) -> the TX
   FIFO = the app buffer **22.667 ms** (OBS's 1024-frame chunk 21.333 ms + one pump block 1.333 ms) ->
   dlink's ASRC player steers OBS's clock onto DANTE MEDIA (<= 300 ppm, <= 5 ppm/s: the one clock
