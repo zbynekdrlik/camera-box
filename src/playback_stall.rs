@@ -54,15 +54,23 @@ pub struct PlaybackObservation {
 /// Why the playback handle must be re-opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StallReason {
-    NotConsuming { consumed: u64, expected: u64 },
-    CardReenumerated { opened: CardIdentity, now: CardIdentity },
+    NotConsuming {
+        consumed: u64,
+        expected: u64,
+    },
+    CardReenumerated {
+        opened: CardIdentity,
+        now: CardIdentity,
+    },
     CardGone,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlaybackVerdict {
     /// Nothing to do. `consumed` = the frames the device drained this window, when measured.
-    Ok { consumed: Option<u64> },
+    Ok {
+        consumed: Option<u64>,
+    },
     Reopen(StallReason),
 }
 
@@ -86,15 +94,66 @@ impl PlaybackStallDetector {
         }
     }
 
-    pub fn observe(&mut self, _obs: &PlaybackObservation) -> PlaybackVerdict {
-        PlaybackVerdict::Ok { consumed: None }
+    pub fn observe(&mut self, obs: &PlaybackObservation) -> PlaybackVerdict {
+        match &obs.identity {
+            IdentityRead::Gone => return PlaybackVerdict::Reopen(StallReason::CardGone),
+            IdentityRead::Present(now) => {
+                if let Some(opened) = &self.opened {
+                    if opened != now {
+                        return PlaybackVerdict::Reopen(StallReason::CardReenumerated {
+                            opened: opened.clone(),
+                            now: now.clone(),
+                        });
+                    }
+                }
+            }
+            IdentityRead::Unknown => {}
+        }
+
+        // A failed delay read loses the baseline: the window neither confirms nor clears.
+        let Some(delay) = obs.delay_frames else {
+            self.prev_delay = None;
+            return PlaybackVerdict::Ok { consumed: None };
+        };
+        let Some(prev) = self.prev_delay.replace(delay) else {
+            return PlaybackVerdict::Ok { consumed: None };
+        };
+
+        let consumed = (obs.frames_written as i64)
+            .saturating_sub(delay.saturating_sub(prev))
+            .max(0) as u64;
+        let expected =
+            (u128::from(obs.elapsed_ns) * u128::from(self.sample_rate) / 1_000_000_000) as u64;
+        if expected == 0 {
+            return PlaybackVerdict::Ok {
+                consumed: Some(consumed),
+            };
+        }
+
+        let low = (consumed as f64) < expected as f64 * STALL_CONSUMED_RATIO;
+        if low && obs.packets_received > 0 {
+            self.low_windows += 1;
+            if self.low_windows >= STALL_CONFIRM_WINDOWS {
+                self.low_windows = 0;
+                return PlaybackVerdict::Reopen(StallReason::NotConsuming { consumed, expected });
+            }
+        } else {
+            self.low_windows = 0;
+        }
+        PlaybackVerdict::Ok {
+            consumed: Some(consumed),
+        }
     }
 }
 
 /// `/proc/asound/HID` is a symlink to `cardN`: the card index, or `None`.
 pub fn card_index_from_link(target: &str) -> Option<i32> {
-    let _ = target;
-    None
+    let name = target.rsplit('/').next()?;
+    let digits = name.strip_prefix("card")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 #[cfg(test)]
