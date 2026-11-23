@@ -220,7 +220,7 @@ terms, and no buffer or latency change without consent. dstack 244 (owner-approv
   release E2E's A/V residual re-reads the program pin). Not a raise of (b): (b) moves P and the RX
   deadline, the late chunks were stamp-vs-tick. Graded by verify item 9: the TOML line vs the fact, and
   obs's start line `dante-input start: every RX chunk is stamped X ms after dlink's play time` (printed
-  only for a non-zero margin) vs the fact; `none` = neither line.
+  only for a non-zero margin) vs the fact; `none` = neither line, `0` = the TOML line and no start line.
 - **stream-obs's TX (issue 1513):** OBS's program mix (track 1, the YouTube mix, on FLEET) -> the TX
   FIFO = the app buffer **22.667 ms** (OBS's 1024-frame chunk 21.333 ms + one pump block 1.333 ms) ->
   dlink's ASRC player steers OBS's clock onto DANTE MEDIA (<= 300 ppm, <= 5 ppm/s: the one clock

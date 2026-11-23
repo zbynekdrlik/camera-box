@@ -77,7 +77,7 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
   `latency terms` row needs the line the fact declares and FAILs one it does not, and `rx stamp margin`
   (`strih_dante_input_margin_grade`) reads obs's start line `every RX chunk is stamped X.XXX ms ...`
   (printed only for a non-zero margin) against the fact: missing or another value = FAIL (restart OBS),
-  a line on a `none` box = FAIL. Term (d) in `audio-clock-map.md`. Tests:
+  a line on a `none` box = FAIL; a fact of `0` expects no line too (obs prints none for a zero margin). Term (d) in `audio-clock-map.md`. Tests:
   `tests/python/test_strih_dante_rx_margin_1425.py`.
 - **PP (issue 1536, 18.11.2026):** strih-pp `strih-obs` + stream-pp `stream-obs` on their VLAN 70 legs (the
   transmitter is dsg, the SoundGrid<->Dante bridge), plus strih-pp's hub device `strih-pp-intercom` (slot 2); each box's site file is placed by the supervisor like SNV's.
