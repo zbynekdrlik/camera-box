@@ -163,6 +163,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_DANTE_RX_STAMP_MARGIN_MS",
     // issue 1502: the rig NIC's stable short name (`<mac>=<name>` | none).
     "STRIH_NIC_RENAME",
+    // issue 1425: the housekeeping CPUs (a cpulist | none).
+    "STRIH_HOUSEKEEPING_CPUS",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -255,6 +257,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_DANTE_RX_STAMP_MARGIN_MS=10",
         // issue 1502: strih-snv's rig NIC keeps its kernel name.
         "STRIH_NIC_RENAME=none",
+        // issue 1425: strih-snv's housekeeping = the complement of the OBS mask 2-15.
+        "STRIH_HOUSEKEEPING_CPUS=0-1",
         "LOADED=strih-snv",
     ] {
         assert!(

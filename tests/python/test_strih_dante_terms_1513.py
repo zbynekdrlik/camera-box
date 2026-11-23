@@ -75,8 +75,8 @@ def _load(tmp_path, box, pairs, base=None):
 def test_the_four_terms_are_required_facts_at_the_end_of_the_key_list():
     r = _bash("strih_box_fact_keys")
     assert r.returncode == 0, r.stderr
-    # issue 1425 appended the RX hand-off margin after them, issue 1502 the rig-NIC rename
-    assert r.stdout.split()[-6:] == list(TERMS) + ["STRIH_DANTE_RX_STAMP_MARGIN_MS", "STRIH_NIC_RENAME"]
+    # issue 1425 appended the RX hand-off margin after them, issue 1502 the rig-NIC rename, issue 1425 the housekeeping CPUs
+    assert r.stdout.split()[-7:] == list(TERMS) + ["STRIH_DANTE_RX_STAMP_MARGIN_MS", "STRIH_NIC_RENAME", "STRIH_HOUSEKEEPING_CPUS"]
 
 
 def test_every_dante_program_box_keeps_todays_latency_explicitly():

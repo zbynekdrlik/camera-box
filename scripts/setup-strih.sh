@@ -621,7 +621,8 @@ obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile co
 # ---------------------------------------------------------------------------------------------
 # Lettered sub-step (TOTAL_STEPS unchanged -- the issue 1352/1353 precedent): the NIC-IRQ placement
 # is the biggest de-jitter win, so it rides alongside the never-sleep/de-jitter masks above.
-step "11b" "NIC xhci IRQ off the OBS cores (issue 1317 item H: NET_RX softirq must not share an OBS core)"
+step "11b" "rig NIC IRQs off the OBS cores (issue 1317 item H: NET_RX softirq must not share an OBS core) + housekeeping on its own CPUs (issue 1425)"
+strih_housekeeping_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1425: housekeeping off the OBS CPUs (above)"   # scripts/lib/strih-housekeeping.sh: the sysctl, the rustdesk + display-watch drop-ins, the launcher's file
 # The USB 2.5GbE NIC's xhci interrupt lands on ONE core (irqbalance is not installed, so the kernel
 # parks it) where ~1.1 Gb/s of NDI NET_RX softirq collides with OBS's ndir:video/libobs threads
 # (issue 1354, 22.9.2026: measured on strih-snv -- moving the IRQ to an idle E-core cut the genlock
@@ -629,7 +630,7 @@ step "11b" "NIC xhci IRQ off the OBS cores (issue 1317 item H: NET_RX softirq mu
 # placement FROM FACTS (iface -> xhci -> IRQ -> last cpu_atom E-core) and writes smp_affinity_list --
 # never a hard-coded IRQ number, so it survives a different IRQ after a kernel/firmware/USB-port
 # change. ENABLE-ONLY: the supervisor applies it live; the unit re-applies it at every boot.
-# issue 1412 (G7): only a USB rig NIC has an xhci IRQ to place (scripts/lib/obs-box-role.sh).
+# issue 1412 (G7): only a USB rig NIC has an xhci IRQ to place; issue 1425: with housekeeping CPUs every rig-NIC IRQ + RSS.
 if WHY="$(obs_box_step_applies 11b)"; then
   install -d -m 755 /usr/local/bin
   strih_nic_irq_affinity_script_text > /usr/local/bin/strih-nic-irq-affinity.sh \

@@ -369,9 +369,10 @@ def _applies(env, step):
     return r.stdout.strip()
 
 
-def test_strih_lx_skips_the_irq_unit_and_runs_the_sampler():
-    # issue 1411: the new strih-snv rig NIC is the 10 GbE Thunderbolt Aquantia (PCIe, not USB).
-    assert _applies(("lx", None), "11b").startswith("SKIP the rig NIC is not a USB device")
+def test_strih_lx_runs_the_irq_unit_and_the_sampler():
+    # issue 1411: the new strih-snv rig NIC is the 10 GbE Thunderbolt Aquantia (PCIe, not USB); issue 1425:
+    # its STRIH_HOUSEKEEPING_CPUS (0-1) runs step 11b anyway, placing every rig-NIC IRQ there.
+    assert _applies(("lx", None), "11b") == "RUN"
     assert _applies(("lx", None), "16e") == "RUN"
     assert _applies(("lx", None), "16c") == "RUN"
 
