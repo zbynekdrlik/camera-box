@@ -27,8 +27,10 @@ up to 83 % of a core). So the ONE fact is split, never a second fact:
   `/etc/strih-housekeeping-cpus.conf` (the launcher's own move), `rig-background.slice`;
 - a one-CPU set gives that CPU to both; `none` gives `none` to both. Pure halves:
   `obs_box_cpulist_last` / `obs_box_cpulist_rest` in `obs-box-background.sh`.
-- **The slice:** `obs_box_background_cpus ONLINE OBS [EXCLUDE]` keeps EXCLUDE out. setup-strih passes
-  `strih_housekeeping_irq_cpus` as `obs_box_background_slice`'s 3rd argument, verify-strih as the
+- **The slice:** `obs_box_background_cpus ONLINE OBS [EXCLUDE]` keeps EXCLUDE out. EXCLUDE =
+  `strih_housekeeping_slice_exclude` = the IRQ CPUs that are not task CPUs (`none` for a one-CPU set, which
+  would otherwise leave the slice no CPU). setup-strih reads it once (`HK_SLICE_EXCL`, fail-loud) and passes
+  it as `obs_box_background_slice`'s 3rd argument; verify-strih (a FAIL row when unreadable) as the
   baseline gather's 5th (`BG_EXCLUDE`, the `bg_exclude` key, `obs_box_background_grade`'s 18th): the
   baseline `background` row then wants exactly the task CPUs. imag passes nothing (unchanged).
 - **The sampler** is not in the slice: it is the operator's `--user` unit with its own `CPUAffinity=`

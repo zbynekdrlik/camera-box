@@ -613,10 +613,11 @@ if [ -e /etc/systemd/logind.conf.d/90-strih-lx.conf ]; then
   rm -f /etc/systemd/logind.conf.d/90-strih-lx.conf || fail "could not remove the retired logind drop-in 90-strih-lx.conf"
   echo "  removed the retired logind drop-in 90-strih-lx.conf (superseded by the baseline never-sleep item)"
 fi
+HK_SLICE_EXCL="$(strih_housekeeping_slice_exclude)" || fail "issue 1425: the rig NIC IRQ CPU (STRIH_HOUSEKEEPING_CPUS) cannot be read"
 # rtprio stays OFF (issue 1357): the retired 11c grant pinned the render tick SCHED_FIFO on cores strih-snv
 # never reserved and the FIFO + affinity leaked to 28 NDI threads (issue comment 5793075833). The shared
 # item removes a leftover grant; the grader's `rtprio` row (verify item 32) FAILs while one exists.
-obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice strih "$DESKTOP_USER" "$(strih_housekeeping_irq_cpus)" ; obs_box_coredump_bound || fail "issue 1441: the coredump bound could not be installed (above)"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice (issue 1425: off the rig NIC IRQ CPU); issue 1441 coredump bound
+obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice strih "$DESKTOP_USER" "$HK_SLICE_EXCL" ; obs_box_coredump_bound || fail "issue 1441: the coredump bound could not be installed (above)"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice (issue 1425: off the rig NIC IRQ CPU); issue 1441 coredump bound
 
 # ---------------------------------------------------------------------------------------------
 # Lettered sub-step (TOTAL_STEPS unchanged -- the issue 1352/1353 precedent): the NIC-IRQ placement

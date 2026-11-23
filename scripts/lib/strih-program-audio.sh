@@ -145,8 +145,8 @@ strih_program_audio_cpus() {
     return 0
   fi
   # issue 1425: with the housekeeping lib loaded (setup-strih / verify-strih), the IRQ CPU stays out.
-  if declare -F strih_housekeeping_irq_cpus >/dev/null; then
-    irq="$(strih_housekeeping_irq_cpus)" || { echo "strih-program-audio: the rig NIC IRQ CPU (STRIH_HOUSEKEEPING_CPUS) cannot be read" >&2; return 1; }
+  if declare -F strih_housekeeping_slice_exclude >/dev/null; then
+    irq="$(strih_housekeeping_slice_exclude)" || { echo "strih-program-audio: the rig NIC IRQ CPU (STRIH_HOUSEKEEPING_CPUS) cannot be read" >&2; return 1; }
   fi
   online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
   obs="$(head -n 1 "${STRIH_PROGRAM_AUDIO_ISOLATED_CONF:-/etc/strih-isolated-cpus.conf}" 2>/dev/null || true)"

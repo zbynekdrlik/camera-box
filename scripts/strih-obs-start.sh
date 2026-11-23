@@ -117,8 +117,9 @@ strih_obs_shutdown_watch() {
 }
 
 # strih_launcher_housekeeping_place FILE PID -> issue 1425: put PID (this launcher, whose shutdown watch
-# above runs stat / tail / grep / sleep every second for OBS's whole run) on the housekeeping CPUs FILE
-# names (/etc/strih-housekeeping-cpus.conf, setup-strih step 11b) at nice 10, off OBS's CPUs. OBS itself
+# above runs stat / tail / grep / sleep every second for OBS's whole run) on the housekeeping TASK CPUs FILE
+# names (/etc/strih-housekeeping-cpus.conf, setup-strih step 11b: the rig NIC IRQ CPU kept out, design
+# 7116063669) at nice 10, off OBS's CPUs. OBS itself
 # was already started with its own mask, so nothing of OBS moves. No file / `none` = nothing (a box with
 # no housekeeping CPUs); a malformed list or a failed taskset / renice is one WARN line. Always rc 0.
 # Test seams: taskset / renice from PATH.

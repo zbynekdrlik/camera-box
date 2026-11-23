@@ -109,6 +109,20 @@ _strih_housekeeping_split() {
   if [ "$hk" = none ]; then printf 'none\n'; else "$fn" "$hk"; fi
 }
 
+# strih_housekeeping_slice_exclude [CPUS] -> the CPUs rig-background.slice and the program-audio sampler keep
+# out: the IRQ CPUs that are not also task CPUs (strih-snv 1). `none` for a `none` box and for a one-CPU set
+# (the IRQs share that CPU with the tasks: nothing else to run on). rc 1 on an unreadable fact.
+strih_housekeeping_slice_exclude() {
+  local irq task c out=""
+  irq="$(strih_housekeeping_irq_cpus "$@")" && task="$(strih_housekeeping_task_cpus "$@")" || return 1
+  [ "$irq" != none ] || { printf 'none\n'; return 0; }
+  task=" $(obs_box_cpulist_expand "$task") "
+  for c in $(obs_box_cpulist_expand "$irq"); do
+    case "$task" in *" $c "*) ;; *) out="${out}${out:+ }${c}" ;; esac
+  done
+  if [ -n "$out" ]; then obs_box_cpulist_compress "$out"; else printf 'none\n'; fi
+}
+
 # strih_housekeeping_dropin_text CPUS -> the [Service] drop-in placing a unit on CPUS at nice 10.
 strih_housekeeping_dropin_text() {
   printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
@@ -288,15 +302,20 @@ _strih_housekeeping_unit_row() {
   fi
 }
 
-# strih_housekeeping_slice_row IRQ -> one `(hk-slice)` row: the AllowedCPUs systemd holds for
-# rig-background.slice (`systemctl show`, space separated ranges) name no IRQ CPU; unread or empty FAILs.
+# strih_housekeeping_slice_row EXCLUDE -> one `(hk-slice)` row: the AllowedCPUs systemd holds for
+# rig-background.slice (`systemctl show`, space separated ranges) name no EXCLUDE CPU
+# (strih_housekeeping_slice_exclude); unread or empty FAILs. EXCLUDE `none` (a one-CPU set) passes.
 strih_housekeeping_slice_row() {
-  local irq="$1" slice allowed exp c
+  local irq="${1:-none}" slice allowed exp c
   slice="$(obs_box_background_slice_name)"
   allowed="$(systemctl show -p AllowedCPUs --value "$slice" 2>/dev/null | head -n 1 | tr -s ' ' ',' || true)"
   allowed="${allowed%,}"; allowed="${allowed#,}"
   if ! exp="$(obs_box_cpulist_expand "$allowed")"; then
     bad "(hk-slice) ${slice}: AllowedCPUs unread or empty ('${allowed}') -- re-run setup-strih.sh step 11"
+    return 0
+  fi
+  if [ "$irq" = none ]; then
+    ok "(hk-slice) ${slice}: AllowedCPUs ${allowed} (one housekeeping CPU: the rig NIC IRQs share it)"
     return 0
   fi
   for c in $(obs_box_cpulist_expand "$irq" 2>/dev/null || true); do
@@ -397,7 +416,7 @@ strih_housekeeping_grade_report() {
     ok "(hk-sysctl) net.core.netdev_budget_usecs = ${live:-unreadable} (left as the kernel runs it: 7.0 at HZ 1000 refuses < 2000)"
   fi
   # (hk-slice) rig-background.slice keeps off the IRQ CPUs (its exact CPUs: the baseline `background` row).
-  strih_housekeeping_slice_row "$irq"
+  strih_housekeeping_slice_row "$(strih_housekeeping_slice_exclude "$hk")"
   # (hk-unit) each placed unit's RUNNING process, and the OBS launcher (its shutdown watch), on the task CPUs.
   _strih_housekeeping_unit_row system rustdesk.service "$user" "$task" "$home" rustdesk.service 1
   _strih_housekeeping_unit_row user strih-display-watch.service "$user" "$task" "$home" strih-display-watch.service 1
