@@ -91,13 +91,13 @@ def test_the_program_sender_and_venue_close_the_fact_list():
     i = keys.index("STRIH_PROGRAM_SENDER")
     assert keys[i:i + 3] == ["STRIH_PROGRAM_SENDER", "STRIH_VENUE", "STRIH_CAMERA_DEV1_NET"]
     # issue 1425 appended the fixed OBS audio buffering, issue 1387 the four JPEG XS link facts, issue 1466 the desktop session,
-    # issues 1510 + 1513 the four Dante latency / TX terms, issue 1502 the rig-NIC rename.
+    # issues 1510 + 1513 the four Dante latency / TX terms, issue 1502 the rig-NIC rename, issue 1425 the housekeeping CPUs.
     assert keys[i + 3:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS",
                             "STRIH_HTTPS_PUBLIC", "STRIH_STREAM_DEV_SCENE", "STRIH_BKSHADING_RELAYS",
                             "STRIH_AUDIO_BUFFERING_MS", "STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS",
                             "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS",
                             "STRIH_DESKTOP", "STRIH_DANTE_NETWORK_LATENCY_MS", "STRIH_DANTE_RECEIVE_BUFFER_MS", "STRIH_DANTE_TX", "STRIH_DANTE_TX_TRACK",
-                            "STRIH_NIC_RENAME"]
+                            "STRIH_NIC_RENAME", "STRIH_HOUSEKEEPING_CPUS"]
 
 
 def test_stream_pp_loads_as_the_stream_role(boxes):
@@ -154,8 +154,9 @@ def test_the_stream_role_skips_the_strih_only_steps(boxes):
 def test_the_strih_role_runs_them(boxes):
     assert _steps(boxes, "strih-pp") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "SKIP", "14": "RUN",
                                         "16": "RUN", "16c": "RUN", "16e": "SKIP", "4b": "RUN"}
-    # issue 1411: strih-snv's rig NIC is PCIe (the 10 GbE Thunderbolt Aquantia), so only 11b skips.
-    assert _steps(boxes, "strih-snv") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "SKIP", "14": "RUN",
+    # issue 1411: strih-snv's rig NIC is PCIe (the 10 GbE Thunderbolt Aquantia); issue 1425: its housekeeping
+    # CPUs run 11b anyway (every rig-NIC IRQ + RSS onto 0-1).
+    assert _steps(boxes, "strih-snv") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "RUN", "14": "RUN",
                                         "16": "RUN", "16c": "RUN", "16e": "RUN", "4b": "RUN"}
 
 
