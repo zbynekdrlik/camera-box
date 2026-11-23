@@ -255,9 +255,10 @@ def test_setup_writes_the_sysctl_the_two_dropins_the_launcher_file_and_restarts_
     r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
     assert r.returncode == 0, r.stderr + r.stdout
     assert (root / "etc" / "strih-housekeeping-cpus.conf").read_text() == "0-1\n"
-    sysctl = (root / "etc" / "sysctl.d" / "60-strih-housekeeping.conf").read_text()
-    assert "net.core.netdev_budget_usecs = 500\n" in sysctl and sysctl.startswith("# camera-box issue 1425")
-    assert (root / "proc" / "sys" / "net" / "core" / "netdev_budget_usecs").read_text().strip() == "500"
+    # strih-snv 23.11.2026: kernel 7.0 at HZ 1000 refuses netdev_budget_usecs below 2000 (EINVAL), so the
+    # step writes no budget drop-in and never touches the running value
+    assert not (root / "etc" / "sysctl.d" / "60-strih-housekeeping.conf").exists()
+    assert (root / "proc" / "sys" / "net" / "core" / "netdev_budget_usecs").read_text().strip() == "2000"
     for d in (root / "etc" / "systemd" / "system" / "rustdesk.service.d",
               home / ".config" / "systemd" / "user" / "strih-display-watch.service.d"):
         t = (d / "50-camera-box-housekeeping.conf").read_text()
@@ -399,11 +400,27 @@ def test_a_fact_that_is_not_the_complement_of_the_obs_mask_fails(tmp_path):
     assert "FAIL (hk-cpus) STRIH_HOUSEKEEPING_CPUS 0-1 is not the complement of the OBS mask 4-15" in r.stdout
 
 
-def test_a_drifted_sysctl_or_live_budget_fails(tmp_path):
+def test_the_budget_row_reports_the_running_value_and_fails_our_leftover_drop_in(tmp_path):
     home, path, env = _grade_env(tmp_path)
-    (pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "proc" / "sys" / "net" / "core" / "netdev_budget_usecs").write_text("2000\n")
     r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
-    assert "FAIL (hk-sysctl) net.core.netdev_budget_usecs reads '2000', not 500" in r.stdout
+    assert "PASS (hk-sysctl) net.core.netdev_budget_usecs = 2000 (left as the kernel runs it" in r.stdout, r.stdout
+    left = pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "sysctl.d" / "60-strih-housekeeping.conf"
+    left.parent.mkdir(parents=True, exist_ok=True)
+    left.write_text("# camera-box issue 1425: housekeeping off the OBS CPUs (scripts/lib/strih-housekeeping.sh) -- do not edit\n"
+                    "net.core.netdev_budget_usecs = 500\n")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    assert "FAIL (hk-sysctl) " + str(left) + " is a leftover" in r.stdout, r.stdout
+
+
+def test_setup_removes_our_leftover_budget_drop_in(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    left = root / "etc" / "sysctl.d" / "60-strih-housekeeping.conf"
+    left.parent.mkdir(parents=True)
+    left.write_text("# camera-box issue 1425: housekeeping off the OBS CPUs (scripts/lib/strih-housekeeping.sh) -- do not edit\n"
+                    "net.core.netdev_budget_usecs = 500\n")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert not left.exists()
 
 
 # --- the OBS launcher places its own shutdown watch -----------------------------------------------------
