@@ -24,6 +24,8 @@ VERIFY = SCRIPTS / "verify-strih.sh"
 LAUNCHER = SCRIPTS / "strih-obs-start.sh"
 BOXES = SCRIPTS / "strih-boxes"
 LEAKY = ("STRIH_LX_IP", "STRIH_NIC_IFACE", "STRIH_BOXES_DIR", "OBS_FLEET", "STRIH_HOUSEKEEPING_CPUS",
+         "STRIH_HOUSEKEEPING_IRQ_CPUS", "OBS_BOX_ONLINE_CPUS", "STRIH_PROGRAM_AUDIO_SYSFS",
+         "STRIH_PROGRAM_AUDIO_ISOLATED_CONF",
          "STRIH_HOUSEKEEPING_ROOT", "STRIH_HOUSEKEEPING_SYS", "STRIH_HOUSEKEEPING_PROC", "ETHTOOL")
 ME = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
 MYGRP = subprocess.run(["id", "-gn"], capture_output=True, text=True, check=True).stdout.strip()
@@ -152,30 +154,31 @@ def _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env):
     return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=full, timeout=60)
 
 
-def test_the_oneshot_cuts_rss_to_two_and_pins_every_rig_nic_irq_to_0_1(tmp_path):
+def test_the_oneshot_cuts_rss_to_the_irq_cpu_count_and_pins_every_rig_nic_irq_to_cpu_1(tmp_path):
+    # design 7116063669: the LAST housekeeping CPU (strih-snv 1) carries the rig NIC IRQs alone
     sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path)
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 0, r.stderr + r.stdout
     calls = (tmp_path / "ethtool.log").read_text().splitlines()
-    assert "-L enp7s0 combined 2" in calls
-    assert "RSS queues 8 -> 2" in r.stdout
+    assert "-L enp7s0 combined 1" in calls
+    assert "RSS queues 8 -> 1" in r.stdout
     assert "carrier_changes ? -> ?" in r.stdout   # no carrier_changes file in the fixture: named, never fatal
-    # the IRQs are read AFTER the channel change: the re-requested vectors 150-152, all on 0-1
-    for n in (150, 151, 152):
-        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "0-1"
-        assert "IRQ %d (msi enp7s0, iface enp7s0) pinned to cpu 0-1" % n in r.stdout
-    assert "done: rig NIC IRQ(s) [150 151 152] pinned to cpu 0-1" in r.stdout
+    # the IRQs are read AFTER the channel change: the re-requested vectors 150-151, all on 1
+    for n in (150, 151):
+        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "1"
+        assert "IRQ %d (msi enp7s0, iface enp7s0) pinned to cpu 1" % n in r.stdout
+    assert "done: rig NIC IRQ(s) [150 151] pinned to cpu 1" in r.stdout
 
 
 def test_a_second_run_changes_no_channel_and_still_pins(tmp_path):
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135, 136))
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=1, irqs=(134, 135, 136))
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 0, r.stderr
     calls = (tmp_path / "ethtool.log").read_text().splitlines()
     assert calls == ["-l enp7s0"], calls   # never a -L (a ring re-init) when the count is right
-    assert "RSS queues already 2 (combined) -- unchanged" in r.stdout
+    assert "RSS queues already 1 (combined) -- unchanged" in r.stdout
     for n in (134, 135, 136):
-        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "0-1"
+        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "1"
 
 
 def test_a_failed_channel_change_fails_the_unit_and_pins_nothing(tmp_path):
@@ -183,7 +186,7 @@ def test_a_failed_channel_change_fails_the_unit_and_pins_nothing(tmp_path):
     env["FAKE_ETHTOOL_FAIL"] = "1"
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 1
-    assert "FATAL: ethtool -L enp7s0 combined 2 failed (was 8)" in r.stderr
+    assert "FATAL: ethtool -L enp7s0 combined 1 failed (was 8)" in r.stderr
     assert (irq_dir / "134" / "smp_affinity_list").read_text().strip() == "0-15"
 
 
@@ -197,36 +200,36 @@ def test_a_driver_without_channel_control_keeps_its_queues_and_still_pins(tmp_pa
     assert "enp7s0: RSS channel count not readable (the driver offers no channel control) -- left alone" in r.stdout
     assert "-L" not in (tmp_path / "ethtool.log").read_text()
     for n in (134, 135, 136):
-        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "0-1"
+        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "1"
 
 
 def test_an_msi_vector_with_no_proc_irq_entry_is_skipped(tmp_path):
     # strih-snv 23.11.2026: msi_irqs lists 143, /proc/irq/143 does not exist (a vector the driver never requested)
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135))
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=1, irqs=(134, 135))
     (sysr / "devices" / "pci0000:00" / "0000:07:00.0" / "msi_irqs" / "143").write_text("msix\n")
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 0, r.stderr + r.stdout
     assert "IRQ 143 of enp7s0 has no /proc/irq entry (not requested) -- skipped" in r.stdout
-    assert "done: rig NIC IRQ(s) [134 135] pinned to cpu 0-1" in r.stdout
+    assert "done: rig NIC IRQ(s) [134 135] pinned to cpu 1" in r.stdout
 
 
 def test_an_irq_the_kernel_refuses_is_named_and_fails_after_trying_every_one(tmp_path):
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135, 136))
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=1, irqs=(134, 135, 136))
     (irq_dir / "135" / "smp_affinity_list").chmod(0o444)
     try:
         r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     finally:
         (irq_dir / "135" / "smp_affinity_list").chmod(0o644)
     assert r.returncode == 1
-    assert "IRQ(s) [135] of enp7s0 could not be pinned to cpu 0-1" in r.stderr
-    assert (irq_dir / "134" / "smp_affinity_list").read_text().strip() == "0-1"
-    assert (irq_dir / "136" / "smp_affinity_list").read_text().strip() == "0-1"
+    assert "IRQ(s) [135] of enp7s0 could not be pinned to cpu 1" in r.stderr
+    assert (irq_dir / "134" / "smp_affinity_list").read_text().strip() == "1"
+    assert (irq_dir / "136" / "smp_affinity_list").read_text().strip() == "1"
 
 
 def test_a_kernel_compressed_read_back_counts_as_the_same_set(tmp_path):
-    # a fact written `0,1` reads back `0-1` from the kernel: a set compare, never text
+    # an IRQ set written `0,1` reads back `0-1` from the kernel: a set compare, never text
     sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134,))
-    env["STRIH_HOUSEKEEPING_CPUS"] = "0,1"
+    env["STRIH_HOUSEKEEPING_IRQ_CPUS"] = "0,1"
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 0, r.stderr
     assert (irq_dir / "134" / "smp_affinity_list").read_text().strip() == "0,1"
@@ -242,7 +245,9 @@ with open(os.environ["FAKE_SYSTEMCTL_LOG"], "a") as f:
 if args[:1] == ["is-active"]:
     unit = args[-1]
     sys.exit(0 if unit in os.environ.get("FAKE_ACTIVE", "").split() else 3)
-if args[:1] == ["show"]:
+if args[:3] == ["show", "-p", "AllowedCPUs"]:
+    print(os.environ.get("FAKE_ALLOWED_CPUS", "0"))
+elif args[:1] == ["show"]:
     unit = args[-1]
     print(os.environ.get("FAKE_PID_" + unit.replace("-", "_").replace(".", "_"), "0"))
 sys.exit(0)
@@ -270,7 +275,8 @@ def test_setup_writes_the_sysctl_the_two_dropins_the_launcher_file_and_restarts_
     root, home, bin_dir, env = _install_env(tmp_path)
     r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
     assert r.returncode == 0, r.stderr + r.stdout
-    assert (root / "etc" / "strih-housekeeping-cpus.conf").read_text() == "0-1\n"
+    # design 7116063669: the launcher's file + the drop-ins carry the TASK CPUs (0), the IRQs keep CPU 1 alone
+    assert (root / "etc" / "strih-housekeeping-cpus.conf").read_text() == "0\n"
     # strih-snv 23.11.2026: kernel 7.0 at HZ 1000 refuses netdev_budget_usecs below 2000 (EINVAL), so the
     # step writes no budget drop-in and never touches the running value
     assert not (root / "etc" / "sysctl.d" / "60-strih-housekeeping.conf").exists()
@@ -278,10 +284,10 @@ def test_setup_writes_the_sysctl_the_two_dropins_the_launcher_file_and_restarts_
     for d in (root / "etc" / "systemd" / "system" / "rustdesk.service.d",
               home / ".config" / "systemd" / "user" / "strih-display-watch.service.d"):
         t = (d / "50-camera-box-housekeeping.conf").read_text()
-        assert t.splitlines()[1:] == ["[Service]", "CPUAffinity=0-1", "Nice=10"]
+        assert t.splitlines()[1:] == ["[Service]", "CPUAffinity=0", "Nice=10"]
     rule = (root / "etc" / "udev" / "rules.d" / "71-strih-housekeeping-rss.rules").read_text().splitlines()
     assert rule[1] == ('ACTION=="add", SUBSYSTEM=="net", DRIVERS=="atlantic", TEST=="device/msi_irqs", '
-                       'RUN+="/usr/sbin/ethtool -L $name combined 2"')
+                       'RUN+="/usr/sbin/ethtool -L $name combined 1"')
     hook = root / "etc" / "NetworkManager" / "dispatcher.d" / "60-strih-housekeeping-irq"
     assert hook.read_text().startswith("#!/bin/sh\n# camera-box issue 1425") and os.access(hook, os.X_OK)
     calls = (tmp_path / "systemctl.log").read_text().splitlines()
@@ -342,7 +348,8 @@ def test_a_none_box_with_nothing_of_ours_is_silent(tmp_path):
 
 # --- verify: item 16's housekeeping rows -----------------------------------------------------------------
 
-def _grade_env(tmp_path, irq_aff="0-1", combined=2, nice=10, cpus="0-1", running=True):
+def _grade_env(tmp_path, irq_aff="1", combined=1, nice=10, cpus="0", running=True):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     sysr, irq_dir, bin_dir, eenv = _pcie_box(tmp_path, combined=combined, irqs=(134, 135, 136))
     for n in (134, 135, 136):
         (irq_dir / str(n) / "smp_affinity_list").write_text(irq_aff + "\n")
@@ -384,7 +391,9 @@ def test_a_placed_box_passes_every_row(tmp_path):
     rows = out.splitlines()
     assert all(r.startswith("PASS") or r.startswith("NOTE (hk-rx)") for r in rows), out
     assert "NOTE (hk-rx) enp7s0: rx_missed_errors +0, rx_dropped +0 over 0 s, total missed 7 (report-only)" in out
-    for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-unit) rustdesk.service",
+    assert "PASS (hk-cpus) housekeeping CPUs 0-1 = online 0-15 minus the OBS mask 2-15: rig NIC IRQs on 1, tasks on 0" in out
+    assert "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ CPUs 1" in out
+    for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-slice)", "(hk-unit) rustdesk.service",
                 "(hk-unit) strih-display-watch.service", "(hk-unit) launcher"):
         assert any(tag in r for r in rows), (tag, out)
 
@@ -397,13 +406,15 @@ def test_verify_notes_a_driver_without_channel_control_and_skips_an_unrequested_
     (msi / "143").write_text("msix\n")
     r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
     assert "NOTE (hk-rss) enp7s0: RSS channel count not readable (the driver offers no channel control): queues left alone" in r.stdout, r.stdout
-    assert "PASS (hk-irq) enp7s0: IRQ(s) 134 135 136 on CPUs 0-1" in r.stdout, r.stdout
+    assert "PASS (hk-irq) enp7s0: IRQ(s) 134 135 136 on CPUs 1" in r.stdout, r.stdout
     assert "FAIL" not in r.stdout, r.stdout
 
 
 def test_an_irq_left_on_obs_cpus_fails(tmp_path):
     out = _grade(tmp_path, irq_aff="0-15")
-    assert "FAIL (hk-irq) enp7s0: IRQ(s) off the housekeeping CPUs 0-1: 134=0-15 135=0-15 136=0-15" in out
+    assert "FAIL (hk-irq) enp7s0: IRQ(s) off the IRQ CPUs 1: 134=0-15 135=0-15 136=0-15" in out
+    # the IRQs still on the whole housekeeping set (the placement before the split) fail too
+    assert "FAIL (hk-irq) enp7s0: IRQ(s) off the IRQ CPUs 1: 134=0-1" in _grade(tmp_path / "b", irq_aff="0-1")
 
 
 def test_eight_rss_queues_fail(tmp_path):
@@ -412,7 +423,9 @@ def test_eight_rss_queues_fail(tmp_path):
 
 def test_a_unit_on_obs_cpus_or_at_nice_0_fails(tmp_path):
     out = _grade(tmp_path, cpus="0-15", nice=0)
-    assert "FAIL (hk-unit) rustdesk.service: pid 4000 runs on CPUs 0-15 at nice 0, want 0-1 at nice 10" in out
+    assert "FAIL (hk-unit) rustdesk.service: pid 4000 runs on CPUs 0-15 at nice 0, want 0 at nice 10" in out
+    # a unit left on the whole housekeeping set (beside the IRQ CPU) fails
+    assert "FAIL (hk-unit) rustdesk.service: pid 4000 runs on CPUs 0-1 at nice 10, want 0" in _grade(tmp_path / "b", cpus="0-1")
     assert "FAIL (hk-unit) launcher:" in out
 
 
@@ -580,3 +593,59 @@ def test_a_file_with_our_header_on_line_2_is_ours_only_after_a_shebang(tmp_path)
         f.write_text(text)
         r = _run('rc=0; strih_housekeeping_ours "$1" || rc=$?; echo "$rc"', str(f))
         assert r.stdout.strip() == want[k], (k, r.stdout, r.stderr)
+
+
+# --- the split (design 7116063669): the IRQ CPU and the task CPUs from the one fact ---------------------
+
+def test_the_irq_cpu_is_the_last_of_the_set_and_the_tasks_get_the_rest():
+    for hk, irq, task in (("0-1", "1", "0"), ("0,1", "1", "0"), ("3", "3", "3"), ("0-1,8", "8", "0-1"),
+                          ("0-3", "3", "0-2"), ("none", "none", "none")):
+        r = _run('strih_housekeeping_irq_cpus "$1"; strih_housekeeping_task_cpus "$1"', hk)
+        assert r.returncode == 0, (hk, r.stderr)
+        assert r.stdout.split() == [irq, task], (hk, r.stdout)
+    r = _run('strih_box_load strih-snv; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
+    assert r.stdout.split() == ["1", "0"], r.stdout
+    r = _run('strih_box_load strih-pp; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
+    assert r.stdout.split() == ["none", "none"], r.stdout
+    for badv in ("a", "1-0", ""):
+        assert _run('strih_housekeeping_irq_cpus "$1"', badv).returncode != 0, badv
+
+
+def test_the_rendered_oneshot_carries_the_irq_cpu_only():
+    r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text')
+    assert r.returncode == 0, r.stderr
+    assert 'IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-1}"' in r.stdout
+    assert "HOUSEKEEPING_CPUS:-0-1" not in r.stdout
+
+
+def test_the_slice_row_fails_an_irq_cpu_in_the_background_slice(tmp_path):
+    for allowed, want in (("0", "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ CPUs 1"),
+                          ("0-1", "FAIL (hk-slice) rig-background.slice: AllowedCPUs 0-1 holds the IRQ CPU 1"),
+                          ("0 12-13", "PASS (hk-slice) rig-background.slice: AllowedCPUs 0,12-13, off the IRQ CPUs 1"),
+                          ("", "FAIL (hk-slice) rig-background.slice: AllowedCPUs unread or empty")):
+        d = tmp_path / ("c%d" % len(list(tmp_path.iterdir())))
+        home, path, env = _grade_env(d)
+        env["FAKE_ALLOWED_CPUS"] = allowed
+        r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+        assert r.returncode == 0, r.stderr
+        assert want in r.stdout, (allowed, r.stdout)
+
+
+def test_the_sampler_runs_on_the_task_cpus_on_an_amd_box(tmp_path):
+    # strih-snv has no cpu_atom: the sampler's CPUAffinity is the background set, now without the IRQ CPU
+    (tmp_path / "online").write_text("0-15\n")
+    (tmp_path / "iso").write_text("2-15\n")
+    env = {"OBS_BOX_ONLINE_CPUS": str(tmp_path / "online"), "STRIH_PROGRAM_AUDIO_ISOLATED_CONF": str(tmp_path / "iso"),
+           "STRIH_PROGRAM_AUDIO_SYSFS": str(tmp_path / "nosys")}
+    r = _run('strih_box_load strih-snv; strih_program_audio_cpus', env=env)
+    assert r.returncode == 0 and r.stdout == "0", (r.stdout, r.stderr)
+    r = _run('strih_box_load strih-pp; strih_program_audio_cpus', env=env)
+    assert r.returncode == 0 and r.stdout == "0-1", (r.stdout, r.stderr)
+
+
+def test_setup_and_verify_keep_the_background_slice_off_the_irq_cpu():
+    s = SETUP.read_text()
+    v = VERIFY.read_text()
+    assert s.count('obs_box_background_slice strih "$DESKTOP_USER" "$(strih_housekeeping_irq_cpus)" ;') == 1
+    assert v.count('obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service '
+                   '"$(strih_box_desktop)" "$(strih_housekeeping_irq_cpus)"') == 1

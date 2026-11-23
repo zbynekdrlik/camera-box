@@ -126,7 +126,7 @@ def test_runner_refuses_root_and_a_missing_caller(tmp_path):
     assert r.returncode == 2
 
 
-def _install(tmp, active="", group="/system.slice/fbagent@main.service", conf="2,3,4,5,6,7", visudo_rc=0):
+def _install(tmp, active="", group="/system.slice/fbagent@main.service", conf="2,3,4,5,6,7", visudo_rc=0, exclude=None):
     """Run the real installer with its host tools stubbed; returns (result, systemctl calls)."""
     root = tmp / "root"
     (root / "etc" / "sudoers.d").mkdir(parents=True, exist_ok=True)
@@ -151,7 +151,8 @@ def _install(tmp, active="", group="/system.slice/fbagent@main.service", conf="2
     owner = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
     group = subprocess.run(["id", "-gn"], capture_output=True, text=True).stdout.strip()
     r = bash(
-        f'fail() {{ echo "FAIL: $*" >&2; exit 9; }}\nYELLOW=; NC=\n. {BASE}\nobs_box_background_slice strih newlevel',
+        f'fail() {{ echo "FAIL: $*" >&2; exit 9; }}\nYELLOW=; NC=\n. {BASE}\nobs_box_background_slice strih newlevel'
+        + ("" if exclude is None else f" '{exclude}'"),
         {
             "PATH": f"{b}:{os.environ['PATH']}",
             "OBS_BOX_BACKGROUND_ROOT": str(root),
@@ -230,6 +231,7 @@ GOOD = {
     "cgroup": "0-1",
     "iosched": "[none] mq-deadline",
     "enabled": "enabled",
+    "exclude": "",
 }
 
 
@@ -285,9 +287,10 @@ def test_grade_fails_closed_on_an_unreadable_fence():
     assert r.returncode == 1 and "FENCE UNREADABLE" in r.stdout
 
 
-def _gather(tmp, procs=""):
+def _gather(tmp, procs="", exclude=None):
     """The real gather, its /etc, /sys and /proc paths moved into TMP; the tools it calls stubbed."""
-    text = bash(f". {VERIFY}\nobs_box_baseline_gather_snippet strih newlevel strih-obs.service").stdout
+    extra = "" if exclude is None else f" openbox '{exclude}'"
+    text = bash(f". {VERIFY}\nobs_box_baseline_gather_snippet strih newlevel strih-obs.service{extra}").stdout
     sysroot = tmp / "sys"
     cpu = sysroot / "devices/system/cpu"
     for c in range(4):
@@ -450,3 +453,62 @@ def test_the_lib_stays_within_the_setup_budgets():
     assert len((REPO / "scripts" / "setup-strih.sh").read_text().splitlines()) <= 1000
     for setup in ("setup-strih.sh", "setup-imag.sh"):
         assert "obs_box_background_slice " in (REPO / "scripts" / setup).read_text()
+
+
+# --- issue 1425 (design 7116063669): the slice keeps off the CPU that carries the rig NIC IRQs alone ------
+
+def test_cpulist_last_and_rest_split_the_housekeeping_set():
+    assert lib("obs_box_cpulist_last 0-1").stdout.strip() == "1"
+    assert lib("obs_box_cpulist_rest 0-1").stdout.strip() == "0"
+    assert lib("obs_box_cpulist_last 0-1,8").stdout.strip() == "8"
+    assert lib("obs_box_cpulist_rest 0-1,8").stdout.strip() == "0-1"
+    assert lib("obs_box_cpulist_last 3").stdout.strip() == "3"
+    assert lib("obs_box_cpulist_rest 3").stdout.strip() == "3", "one CPU: nowhere else to put the tasks"
+    for bad in ("", "a", "1-0"):
+        assert lib(f"obs_box_cpulist_last '{bad}'").returncode == 1, bad
+        assert lib(f"obs_box_cpulist_rest '{bad}'").returncode == 1, bad
+
+
+def test_background_cpus_keep_the_excluded_cpus_out():
+    assert lib("obs_box_background_cpus 0-15 2-15 1").stdout.strip() == "0"
+    assert lib("obs_box_background_cpus 0-15 2-15 none").stdout.strip() == "0-1"
+    assert lib("obs_box_background_cpus 0-15 2-15 ''").stdout.strip() == "0-1"
+    assert lib("obs_box_background_cpus 0-15 2-11 15").stdout.strip() == "0-1,12-14"
+    assert lib("obs_box_background_cpus 0-15 2-15 0-1").returncode == 1, "nothing left"
+    assert lib("obs_box_background_cpus 0-15 2-15 x").returncode == 1, "a malformed exclusion is never ignored"
+
+
+def test_install_with_an_irq_cpu_writes_the_slice_without_it(tmp_path):
+    r, calls, root = _install(tmp_path, exclude="1")
+    assert r.returncode == 0, r.stderr
+    assert "AllowedCPUs=0\n" in (root / "etc/systemd/system/rig-background.slice").read_text()
+    assert "kept out 1" in r.stdout
+    b = tmp_path / "b"
+    b.mkdir()
+    r, calls, root = _install(b, active="fbagent@main.service loaded active running x\\n", exclude="1")
+    assert "set-property --runtime fbagent@main.service AllowedCPUs=0 " in calls
+    c = tmp_path / "c"
+    c.mkdir()
+    r, _, root = _install(c, exclude="0-1")
+    assert r.returncode == 9 and "no CPU left" in r.stderr
+    assert not (root / "etc/systemd/system/rig-background.slice").exists()
+
+
+def test_grade_with_an_irq_cpu_wants_the_slice_without_it():
+    fenced = dict(allowed="0", cgroup="0", procs="restic:9:0", exclude="1")
+    r = grade(**fenced)
+    assert r.returncode == 0, r.stdout
+    assert "CPUs=0 " in r.stdout
+    for name, over in {"slice-AllowedCPUs": {"allowed": "0-1"}, "cgroup-cpus": {"cgroup": "0-1"},
+                       "outside-the-slice": {"procs": "restic:9:0-1"}}.items():
+        r = grade(**{**fenced, **over})
+        assert r.returncode == 1 and name in r.stdout, (name, r.stdout)
+    r = grade(exclude="0-1")
+    assert r.returncode == 1 and "FENCE UNREADABLE" in r.stdout
+
+
+def test_real_gather_carries_the_exclusion_into_the_file_check(tmp_path):
+    f = _gather(tmp_path, exclude="1")
+    assert f["bg_exclude"] == "1"
+    (tmp_path / "x").mkdir()
+    assert _gather(tmp_path / "x")["bg_exclude"] == "none", "imag passes nothing"
