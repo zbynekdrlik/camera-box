@@ -15,11 +15,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::playback_stall::{
-    card_index_from_link, CardIdentity, IdentityRead, PlaybackObservation, PlaybackStallDetector,
-    PlaybackVerdict, StallReason,
-};
+use crate::playback_stall::{PlaybackObservation, PlaybackStallDetector, PlaybackVerdict};
+
+mod playback_heal;
 use crate::vban::{VbanCodec, VbanHeader, MAX_VBAN_PACKET_SIZE, VBAN_HEADER_SIZE, VBAN_PORT};
+use playback_heal::{
+    current_hid_identity, opened_card_identity, stall_reason_text, PlaybackHeal, Reopen,
+};
 
 // ALSA configuration - optimized for low latency
 const ALSA_DEVICE: &str = "hw:CARD=HID,DEV=0";
@@ -405,77 +407,8 @@ fn recover_alsa(pcm: &PCM, err: i32) -> bool {
     }
 }
 
-// Issue 1539: the headset card's identity for the playback stall detector. Cheap /proc reads
-// on the intercom thread, never on the capture/NDI path.
-const HID_CARD_LINK: &str = "/proc/asound/HID";
 /// One stall check window (the detector confirms over `STALL_CONFIRM_WINDOWS` of them).
 const PLAYBACK_CHECK_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
-
-fn read_usbbus(card: i32) -> Option<String> {
-    std::fs::read_to_string(format!("/proc/asound/card{card}/usbbus"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// The identity of the card the playback handle was opened on (`None` = unreadable).
-fn opened_card_identity(pcm: &PCM) -> Option<CardIdentity> {
-    let card = pcm.info().ok()?.get_card();
-    Some(CardIdentity {
-        card,
-        usbbus: read_usbbus(card)?,
-    })
-}
-
-/// The identity of the card named `HID` right now.
-fn current_hid_identity() -> IdentityRead {
-    let target = match std::fs::read_link(HID_CARD_LINK) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return IdentityRead::Gone,
-        Err(_) => return IdentityRead::Unknown,
-    };
-    let Some(card) = target.to_str().and_then(card_index_from_link) else {
-        return IdentityRead::Unknown;
-    };
-    match read_usbbus(card) {
-        Some(usbbus) => IdentityRead::Present(CardIdentity { card, usbbus }),
-        None => IdentityRead::Unknown,
-    }
-}
-
-fn stall_reason_text(reason: &StallReason) -> String {
-    match reason {
-        StallReason::NotConsuming { consumed, expected } => format!(
-            "the device consumed {consumed} of {expected} frames in a window while VBAN audio arrives"
-        ),
-        StallReason::CardReenumerated { opened, now } => format!(
-            "the headset card was re-enumerated (opened card{} usbbus {}, now card{} usbbus {})",
-            opened.card, opened.usbbus, now.card, now.usbbus
-        ),
-        StallReason::CardGone => "the headset card is gone".to_string(),
-    }
-}
-
-/// Close + re-open ONLY the playback PCM (same period/buffer via `open_alsa_playback`), logging
-/// the reason once. Capture and the VBAN receiver keep running. `Err` = the reopen failed, the
-/// caller restarts the whole intercom as before.
-fn reopen_playback(
-    old: PCM,
-    reopens: &mut u64,
-    reason: &str,
-) -> Result<(PCM, Option<CardIdentity>)> {
-    *reopens += 1;
-    tracing::warn!(
-        "#1539 playback self-heal: re-opening hw:CARD=HID playback ({}), reopen #{}",
-        reason,
-        reopens
-    );
-    // hw: devices are exclusive: the old handle closes (snd_pcm_close on drop) before the open.
-    drop(old);
-    let fresh = open_alsa_playback()?;
-    let identity = opened_card_identity(&fresh);
-    Ok((fresh, identity))
-}
 
 // =============================================================================
 // VBAN Receiver
@@ -573,8 +506,8 @@ pub fn run_intercom(
 ) -> Result<()> {
     apply_intercom_priority();
     tracing::info!("🎤 Microphone starts MUTED - press power button to unmute");
-    // Issue 1539: playback re-opens since this process started (survives inner restarts).
-    let mut playback_reopens: u64 = 0;
+    // Issue 1539: the playback self-heal state (reopen count + budget) survives inner restarts.
+    let mut playback_heal = PlaybackHeal::new();
 
     while running.load(Ordering::Relaxed) {
         tracing::info!(
@@ -587,7 +520,7 @@ pub fn run_intercom(
             &config,
             Arc::clone(&running),
             Arc::clone(&muted),
-            &mut playback_reopens,
+            &mut playback_heal,
         ) {
             Ok(()) => {
                 tracing::info!("Intercom stopped normally");
@@ -656,7 +589,7 @@ fn run_intercom_inner(
     config: &IntercomConfig,
     running: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
-    playback_reopens: &mut u64,
+    playback_heal: &mut PlaybackHeal,
 ) -> Result<()> {
     // Open ALSA devices with retry
     let capture = loop {
@@ -896,10 +829,12 @@ fn run_intercom_inner(
             io_play.writei(&playback_buf)
         };
         let mut reopen_reason: Option<String> = None;
+        let mut write_failed = false;
         match write_result {
             Ok(frames) => window_written += frames as u64,
             Err(e) => {
                 if !recover_alsa(&playback, e.errno()) {
+                    write_failed = true;
                     reopen_reason = Some(format!("write error: {e}"));
                 }
             }
@@ -935,13 +870,27 @@ fn run_intercom_inner(
         }
 
         if let Some(reason) = reopen_reason {
-            let (fresh, identity) = reopen_playback(playback, playback_reopens, &reason)?;
-            playback = fresh;
-            stall_detector =
-                PlaybackStallDetector::new(SAMPLE_RATE, PLAYBACK_FULL_RING_FRAMES, identity);
-            window_start = std::time::Instant::now();
-            window_written = 0;
-            window_received_start = frames_received.load(Ordering::Relaxed);
+            match playback_heal.reopen(playback, &reason, open_alsa_playback)? {
+                Reopen::Done(fresh, identity) => {
+                    playback = fresh;
+                    stall_detector = PlaybackStallDetector::new(
+                        SAMPLE_RATE,
+                        PLAYBACK_FULL_RING_FRAMES,
+                        identity,
+                    );
+                    window_start = std::time::Instant::now();
+                    window_written = 0;
+                    window_received_start = frames_received.load(Ordering::Relaxed);
+                }
+                // A failing write with the budget used up: the whole-intercom restart, as before.
+                Reopen::Refused(_) if write_failed => {
+                    return Err(anyhow!(
+                        "ALSA playback error: {} (playback re-open budget used up)",
+                        reason
+                    ));
+                }
+                Reopen::Refused(old) => playback = old,
+            }
         }
 
         // Stats and watchdog
@@ -969,7 +918,7 @@ fn run_intercom_inner(
                 send_rate,
                 capture_rate,
                 playback_rate,
-                playback_reopens
+                playback_heal.reopens()
             );
             report_consumed = 0;
             report_measured_ns = 0;

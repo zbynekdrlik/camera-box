@@ -1,19 +1,26 @@
 //! Issue 1539: the pure "the intercom playback device is not consuming" detector.
 //!
 //! The intercom loop (`intercom::run_intercom_inner`) writes the headset playback with a
-//! BLOCKING `writei`, so a device whose hw_ptr stops advancing does not show up as failed
-//! writes: the writes block and the frames the device CONSUMES per wall second collapse. Once
-//! per check window the loop hands this detector what it can read cheaply -- the elapsed wall
-//! time, the frames it wrote, `snd_pcm_delay`, the VBAN packets that arrived and the headset
-//! card's identity (`/proc/asound/HID` -> `cardN/usbbus`) -- and the detector says whether the
-//! playback handle must be re-opened:
+//! BLOCKING `writei`, so a device that drains slowly does not show up as failed writes: the
+//! writes block, the ring stays full and the frames the device CONSUMES per wall second
+//! collapse. Once per check window the loop hands this detector what it can read cheaply --
+//! the elapsed wall time, the frames it wrote, `snd_pcm_delay`, the VBAN packets that arrived
+//! and the headset card's identity (`/proc/asound/HID` -> `cardN/usbbus`) -- and the detector
+//! says whether the playback handle must be re-opened:
 //!
 //! - consumed = frames written - (delay now - delay at the previous window); a window is LOW
-//!   when consumed < [`STALL_CONSUMED_RATIO`] x the frames the elapsed wall time implies.
+//!   when consumed < [`STALL_CONSUMED_RATIO`] x the frames the elapsed wall time implies AND the
+//!   ring is full (delay >= buffer - period: the device, not our writer, is the bottleneck).
 //!   [`STALL_CONFIRM_WINDOWS`] LOW windows in a row WHILE packets arrive = `NotConsuming`
 //!   (no packets = nobody to hear, never a verdict; one hiccup window never re-opens).
 //! - the card behind the handle was re-enumerated (another card index or USB bus/device
 //!   number than at open) = `CardReenumerated`; no `HID` card at all = `CardGone`.
+//!
+//! What this does NOT see: a device that drains NOTHING blocks `writei` until the kernel's
+//! 10 s timeout returns EIO, which the intercom's write-error path re-opens (no window runs
+//! while it blocks); and a device that drains at the normal rate but makes no sound (the
+//! 18.11.2026 cam6 reading) is invisible to every ALSA-level signal -- only the card identity
+//! checks can catch a re-enumeration behind it. [`ReopenBudget`] caps the re-opens.
 //!
 //! No I/O here: every input is passed in, so the tests run on default features.
 
@@ -77,7 +84,6 @@ pub enum PlaybackVerdict {
 #[derive(Debug)]
 pub struct PlaybackStallDetector {
     sample_rate: u32,
-    #[allow(dead_code)]
     full_ring_frames: i64,
     opened: Option<CardIdentity>,
     prev_delay: Option<i64>,
@@ -114,9 +120,10 @@ impl PlaybackStallDetector {
             IdentityRead::Unknown => {}
         }
 
-        // A failed delay read loses the baseline: the window neither confirms nor clears.
+        // A failed delay read loses the baseline and breaks the LOW run.
         let Some(delay) = obs.delay_frames else {
             self.prev_delay = None;
+            self.low_windows = 0;
             return PlaybackVerdict::Ok { consumed: None };
         };
         let Some(prev) = self.prev_delay.replace(delay) else {
@@ -134,7 +141,9 @@ impl PlaybackStallDetector {
             };
         }
 
-        let low = (consumed as f64) < expected as f64 * STALL_CONSUMED_RATIO;
+        // LOW only while the ring is full: then the device, not our writer, is the bottleneck.
+        let low = (consumed as f64) < expected as f64 * STALL_CONSUMED_RATIO
+            && delay >= self.full_ring_frames;
         if low && obs.packets_received > 0 {
             self.low_windows += 1;
             if self.low_windows >= STALL_CONFIRM_WINDOWS {
@@ -158,19 +167,34 @@ pub const REOPEN_BUDGET_WINDOW_NS: u64 = 60_000_000_000;
 /// a reopen/log storm.
 #[derive(Debug)]
 pub struct ReopenBudget {
-    #[allow(dead_code)]
     max: usize,
-    #[allow(dead_code)]
     window_ns: u64,
+    /// Monotonic times of the granted re-opens still inside the window, oldest first.
+    spent: std::collections::VecDeque<u64>,
 }
 
 impl ReopenBudget {
     pub fn new(max: usize, window_ns: u64) -> Self {
-        Self { max, window_ns }
+        Self {
+            max,
+            window_ns,
+            spent: std::collections::VecDeque::with_capacity(max),
+        }
     }
 
     /// Spend one re-open at monotonic `now_ns`; `false` = the budget is used up (nothing spent).
-    pub fn try_spend(&mut self, _now_ns: u64) -> bool {
+    pub fn try_spend(&mut self, now_ns: u64) -> bool {
+        while self
+            .spent
+            .front()
+            .is_some_and(|&t| now_ns.saturating_sub(t) >= self.window_ns)
+        {
+            self.spent.pop_front();
+        }
+        if self.spent.len() >= self.max {
+            return false;
+        }
+        self.spent.push_back(now_ns);
         true
     }
 }
