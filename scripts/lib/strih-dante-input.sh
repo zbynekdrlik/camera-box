@@ -199,7 +199,8 @@ strih_dante_input_terms_toml_grade() {
 
 # strih_dante_input_margin_grade LOG -> issue 1425 (obs#96): the `(program-dante) rx stamp margin` row. obs v0.4.61 prints
 # `dante-input start: every RX chunk is stamped X.XXX ms after dlink's play time` at start only for a non-zero margin, so
-# a declared margin needs that line with the fact's value (%.3f), and `none` needs no such line. Through ok / bad.
+# a declared non-zero margin needs that line with the fact's value (%.3f), and `none` or 0 needs no such line.
+# Through ok / bad.
 strih_dante_input_margin_grade() {
   local log="$1" mg want line got
   mg="$(strih_box_fact STRIH_DANTE_RX_STAMP_MARGIN_MS)" || { bad "(program-dante) rx stamp margin: the box facts are unreadable"; return 0; }
@@ -210,8 +211,12 @@ strih_dante_input_margin_grade() {
     else bad "(program-dante) rx stamp margin ${got:-?} ms on a device whose facts declare none -- re-run setup-strih.sh step 13, then restart OBS"; fi
     return 0
   fi
+  # awk %.3f and obs's Rust {:.3} both round the exact binary value (ties to even): they can differ only on a
+  # value that is an exact 3-decimal tie (0.0625), which no box declares
   want="$(LC_ALL=C awk -v m="$mg" 'BEGIN { printf "%.3f", m }')"
-  if [ -z "$line" ]; then
+  if [ -z "$line" ] && LC_ALL=C awk -v m="$mg" 'BEGIN { exit !(m + 0 == 0) }'; then
+    ok "(program-dante) rx stamp margin: 0 ms (no start line: obs prints none for a zero margin)"   # review round 1
+  elif [ -z "$line" ]; then
     bad "(program-dante) no 'dante-input start: every RX chunk is stamped' line in ${log}: OBS started without the ${want} ms margin (an obs release before v0.4.61, or the TOML lacked it) -- restart OBS"
   elif [ "$got" = "$want" ]; then
     ok "(program-dante) rx stamp margin ${got} ms (the start line, = the fact; computed, obs#96)"
