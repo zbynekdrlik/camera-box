@@ -75,8 +75,8 @@ def _load(tmp_path, box, pairs, base=None):
 def test_the_four_terms_are_required_facts_at_the_end_of_the_key_list():
     r = _bash("strih_box_fact_keys")
     assert r.returncode == 0, r.stderr
-    # issue 1502 appended the rig-NIC rename after them
-    assert r.stdout.split()[-5:] == list(TERMS) + ["STRIH_NIC_RENAME"]
+    # issue 1425 appended the RX hand-off margin after them, issue 1502 the rig-NIC rename
+    assert r.stdout.split()[-6:] == list(TERMS) + ["STRIH_DANTE_RX_STAMP_MARGIN_MS", "STRIH_NIC_RENAME"]
 
 
 def test_every_dante_program_box_keeps_todays_latency_explicitly():
@@ -241,6 +241,9 @@ DLINK_DEFAULT = ("12:00:00.001: dante-input dlink:  INFO dstack::link: dlink lat
 TXLINE = ("12:00:00.002: dante-input start: TX of OBS track 1 on [\"OBS program L\", \"OBS program R\"]: OBS 48000 Hz into "
           "a FIFO held at 22.667 ms (the app buffer) by dlink's ASRC player, read at 48000 Hz; tx_path_ns=19677083 "
           "obs_to_wire_ns=42343749")
+# obs v0.4.61 (plugins/dante-input/ffi/src/lib.rs): printed at start only for a non-zero margin (issue 1425)
+MARGIN_LINE = ("12:00:00.003: dante-input start: every RX chunk is stamped 10.000 ms after dlink's play time "
+               "(rx_stamp_margin_ms, a hand-off margin for OBS's mix; obs#96)")
 NETLAT = ("12:00:05.000: dante-input dlink:  INFO dstack::rx: flow stats flow=0 network_latency_min_us=120 "
           "network_latency_p99_us=410 network_latency_max_us=980")
 
@@ -259,7 +262,8 @@ def _status(t, f, tx=True, **k):
 
 TOML_STREAM = ('name = "stream-obs"\nnetwork_latency_ms = 1.0\nreceive_buffer_ms = 12.041666\n'
                'tx = ["OBS program L", "OBS program R"]\ntx_track = 1\n[[subscribe]]\n')
-TOML_STRIH = 'name = "strih-obs"\nnetwork_latency_ms = 1.0\nreceive_buffer_ms = 12.041666\n[[subscribe]]\n'
+# issue 1425 (obs#96): strih-snv's facts declare the 10 ms RX hand-off margin
+TOML_STRIH = 'name = "strih-obs"\nnetwork_latency_ms = 1.0\nreceive_buffer_ms = 12.041666\nrx_stamp_margin_ms = 10.0\n[[subscribe]]\n'
 
 
 def _grade(tmp_path, box, log_lines, nxt, toml):
@@ -396,7 +400,7 @@ def test_item9_notes_a_log_without_network_latency_fields(tmp_path):
 
 
 def _strih(tmp_path, l1_kw=None, l2_kw=None, tx=True, toml=TOML_STRIH):
-    lines = [_start("strih-obs", 0), SPLIT, NETLAT, _status("12:00:10.000", 4800, tx=tx, **dict({"tx_track": "0", "tx_played": "0"} if tx else {}, **(l1_kw or {})))]
+    lines = [_start("strih-obs", 0), SPLIT, MARGIN_LINE, NETLAT, _status("12:00:10.000", 4800, tx=tx, **dict({"tx_track": "0", "tx_played": "0"} if tx else {}, **(l1_kw or {})))]
     nxt = _status("12:00:20.000", 484800, tx=tx, **dict({"tx_track": "0", "tx_played": "0"} if tx else {}, **(l2_kw or {})))
     return _grade(tmp_path, "strih-snv", lines, nxt, toml)
 
