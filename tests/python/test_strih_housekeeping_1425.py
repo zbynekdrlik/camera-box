@@ -187,11 +187,27 @@ def test_a_failed_channel_change_fails_the_unit_and_pins_nothing(tmp_path):
     assert (irq_dir / "134" / "smp_affinity_list").read_text().strip() == "0-15"
 
 
-def test_an_unreadable_channel_count_fails_loud(tmp_path):
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path)
-    _exe(bin_dir / "ethtool", "#!/bin/sh\necho 'netlink error: Operation not supported' >&2\nexit 1\n")
+def test_a_driver_without_channel_control_keeps_its_queues_and_still_pins(tmp_path):
+    # strih-snv 23.11.2026: atlantic answers `ethtool -l` with "netlink error: Operation not supported"
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, irqs=(134, 135, 136))
+    _exe(bin_dir / "ethtool", "#!/bin/sh\necho \"$*\" >> \"$FAKE_ETHTOOL_LOG\"\n"
+         "echo 'netlink error: Operation not supported' >&2\nexit 1\n")
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
-    assert r.returncode == 1 and "cannot read the RSS channel count of enp7s0" in r.stderr
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "enp7s0: RSS channel count not readable (the driver offers no channel control) -- left alone" in r.stdout
+    assert "-L" not in (tmp_path / "ethtool.log").read_text()
+    for n in (134, 135, 136):
+        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "0-1"
+
+
+def test_an_msi_vector_with_no_proc_irq_entry_is_skipped(tmp_path):
+    # strih-snv 23.11.2026: msi_irqs lists 143, /proc/irq/143 does not exist (a vector the driver never requested)
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135))
+    (sysr / "devices" / "pci0000:00" / "0000:07:00.0" / "msi_irqs" / "143").write_text("msix\n")
+    r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "IRQ 143 of enp7s0 has no /proc/irq entry (not requested) -- skipped" in r.stdout
+    assert "done: rig NIC IRQ(s) [134 135] pinned to cpu 0-1" in r.stdout
 
 
 def test_an_irq_the_kernel_refuses_is_named_and_fails_after_trying_every_one(tmp_path):
@@ -371,6 +387,18 @@ def test_a_placed_box_passes_every_row(tmp_path):
     for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-unit) rustdesk.service",
                 "(hk-unit) strih-display-watch.service", "(hk-unit) launcher"):
         assert any(tag in r for r in rows), (tag, out)
+
+
+def test_verify_notes_a_driver_without_channel_control_and_skips_an_unrequested_vector(tmp_path):
+    home, path, env = _grade_env(tmp_path)
+    eth = pathlib.Path(path.split(":")[0]) / "ethtool"
+    _exe(eth, "#!/bin/sh\necho 'netlink error: Operation not supported' >&2\nexit 1\n")
+    msi = pathlib.Path(env["STRIH_HOUSEKEEPING_SYS"]) / "devices" / "pci0000:00" / "0000:07:00.0" / "msi_irqs"
+    (msi / "143").write_text("msix\n")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    assert "NOTE (hk-rss) enp7s0: RSS channel count not readable (the driver offers no channel control): queues left alone" in r.stdout, r.stdout
+    assert "PASS (hk-irq) enp7s0: IRQ(s) 134 135 136 on CPUs 0-1" in r.stdout, r.stdout
+    assert "FAIL" not in r.stdout, r.stdout
 
 
 def test_an_irq_left_on_obs_cpus_fails(tmp_path):
