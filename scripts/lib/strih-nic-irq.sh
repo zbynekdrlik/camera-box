@@ -322,8 +322,10 @@ if [ "$HOUSEKEEPING_CPUS" != none ] && [ -d "$msi_dir" ]; then
   want="$(printf '%s\n' $hk | wc -l | tr -d '[:space:]')"
   chan() { "$ETHTOOL" -l "$iface" 2>/dev/null | awk '/^Current hardware settings/ { c = 1 } c && /^Combined:/ { print $2; exit }' || true; }
   cur="$(chan)"
-  case "$cur" in ''|*[!0123456789]*) die "cannot read the RSS channel count of ${iface} (ethtool -l printed '${cur}')" ;; esac
-  if [ "$cur" != "$want" ]; then
+  # issue 1425 (23.11.2026): a driver may offer no channel control (`ethtool -l`: Operation not supported)
+  if [ -z "$cur" ] || [[ "$cur" == *[!0123456789]* ]]; then
+    log "${iface}: RSS channel count not readable (the driver offers no channel control) -- left alone"
+  elif [ "$cur" != "$want" ]; then
     cc0="$(cat "${SYS_ROOT}/class/net/${iface}/carrier_changes" 2>/dev/null || echo '?')"
     "$ETHTOOL" -L "$iface" combined "$want" || die "ethtool -L ${iface} combined ${want} failed (was ${cur})"
     got="$(chan)"
@@ -343,6 +345,7 @@ if [ "$HOUSEKEEPING_CPUS" != none ] && [ -d "$msi_dir" ]; then
   for _f in "$msi_dir"/*; do
     _n="$(basename "$_f")"
     case "$_n" in ''|*[!0123456789]*) continue ;; esac
+    if [ ! -d "${IRQ_DIR}/${_n}" ]; then log "IRQ ${_n} of ${iface} has no /proc/irq entry (not requested) -- skipped"; continue; fi
     irqs="${irqs:+$irqs }$_n"
   done
   [ -n "$irqs" ] || die "no IRQ listed in ${msi_dir}"

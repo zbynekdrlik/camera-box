@@ -20,7 +20,10 @@ FAILs otherwise. The same CPUs carry `rig-background.slice`.
   `_strih_nic_irq_affinity_script_template` in `scripts/lib/strih-nic-irq.sh`), generalised, never a second
   unit. With housekeeping CPUs: `ethtool -L <nic> combined <count>` ONLY when the current count differs,
   then every IRQ in `/sys/class/net/<nic>/device/msi_irqs`, read AFTER the change (the driver re-requests
-  its vectors), pinned and read back as a CPU set; every IRQ tried, then one FATAL naming the failures. A
+  its vectors), pinned and read back as a CPU set; every IRQ tried, then one FATAL naming the failures.
+  **A driver with no channel control** (atlantic on strih-snv, 23.11.2026: `ethtool -l` = `netlink error:
+  Operation not supported`) keeps its queues (logged, `(hk-rss)` a NOTE) and only its IRQs move; an MSI
+  vector listed in msi_irqs with no `/proc/irq/<n>` entry (143 there, never requested) is skipped. A
   USB NIC (no msi_irqs) gets its xhci IRQ pinned and RSS left alone. `none` = the issue-1317 E-core xhci
   placement, unchanged. Step 11b runs on any box with housekeeping CPUs (`obs_box_step_applies 11b`).
 - **`ethtool -L` is a ring re-init = a link drop (the issue-1411 atlantic class).** So a udev rule

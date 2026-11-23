@@ -315,10 +315,11 @@ strih_housekeeping_grade_report() {
   if [ -z "$nic" ]; then
     bad "(hk-irq) cannot resolve the rig NIC (set STRIH_NIC_IFACE)"
   elif [ -d "${sys}/class/net/${nic}/device/msi_irqs" ]; then
-    irqs="$(for f in "${sys}/class/net/${nic}/device/msi_irqs"/*; do n="${f##*/}"; case "$n" in ''|*[!0123456789]*) ;; *) printf '%s\n' "$n" ;; esac; done | sort -n | tr '\n' ' ')"
+    irqs="$(for f in "${sys}/class/net/${nic}/device/msi_irqs"/*; do n="${f##*/}"; case "$n" in ''|*[!0123456789]*) ;; *) [ ! -d "${STRIH_HOUSEKEEPING_PROC:-/proc}/irq/${n}" ] || printf '%s\n' "$n" ;; esac; done | sort -n | tr '\n' ' ')"
     cur="$("${ETHTOOL:-ethtool}" -l "$nic" 2>/dev/null | awk '/^Current hardware settings/ { c = 1 } c && /^Combined:/ { print $2; exit }' || true)"
     n="$(strih_housekeeping_count "$hk" || true)"
-    if [ -n "$n" ] && [ "$cur" = "$n" ]; then ok "(hk-rss) ${nic}: ${cur} RSS queues (combined) = the housekeeping CPU count"
+    if [ -z "$cur" ] || [[ "$cur" == *[!0123456789]* ]]; then note "(hk-rss) ${nic}: RSS channel count not readable (the driver offers no channel control): queues left alone"
+    elif [ -n "$n" ] && [ "$cur" = "$n" ]; then ok "(hk-rss) ${nic}: ${cur} RSS queues (combined) = the housekeeping CPU count"
     else bad "(hk-rss) ${nic}: ${cur:-unreadable} RSS queues (ethtool -l combined), want ${n:-?} -- systemctl restart strih-nic-irq-affinity.service (off-production: a channel change drops the link once)"; fi
   else
     # a USB rig NIC: its xhci controller IRQ
