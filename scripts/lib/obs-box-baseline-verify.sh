@@ -124,7 +124,7 @@ obs_box_holds_generic_kernel() {
     return 1
 }
 
-# obs_box_baseline_gather_snippet BOX DESKTOP_USER OBS_UNIT [SESSION] -> read-only bash text that, run ON the box
+# obs_box_baseline_gather_snippet BOX DESKTOP_USER OBS_UNIT [SESSION] [BG_EXCLUDE] -> read-only bash text that, run ON the box
 # as any user (no root needed), prints one `key=value` fact per line for obs_box_baseline_verdict. The
 # detectors it needs (obs_box_has_discrete_nvidia, obs_box_crash_popup_units) are embedded from THIS lib
 # via `declare -f` -- one source of truth on the provisioning AND the grading side. Every read is `|| true`
@@ -151,13 +151,14 @@ obs_box_eee_state() {
 obs_box_baseline_gather_snippet() {
     # issue 1466: SESSION = the lightdm autologin session the kiosk wrote (openbox, imag's only value; a strih
     # box passes its STRIH_DESKTOP, openbox | xfce).
-    local box="${1-}" user="${2-}" unit="${3-}" session="${4:-openbox}"
+    local box="${1-}" user="${2-}" unit="${3-}" session="${4:-openbox}" bg_exclude="${5:-none}"
+    # issue 1425: BG_EXCLUDE = the CPUs kept out of rig-background.slice (a strih box's rig-NIC IRQ CPU), as at install.
     case "$session" in openbox|xfce) ;; *) echo "obs_box_baseline_gather_snippet: SESSION must be openbox or xfce" >&2; return 1 ;; esac
     if [ -z "$box" ] || [ -z "$user" ] || [ -z "$unit" ]; then
         echo "obs_box_baseline_gather_snippet: BOX DESKTOP_USER OBS_UNIT required" >&2
         return 1
     fi
-    printf 'BOX=%q\nU=%q\nUNIT=%q\nSESSION=%q\n' "$box" "$user" "$unit" "$session"
+    printf 'BOX=%q\nU=%q\nUNIT=%q\nSESSION=%q\nBG_EXCLUDE=%q\n' "$box" "$user" "$unit" "$session" "$bg_exclude"
     declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units \
         obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
         obs_box_cpu_latency_bound_us rig_timezone_read obs_box_amdgpu_ddx_package obs_box_pkg_status \
@@ -245,11 +246,12 @@ echo "obs_rtprio_limit=$(if [ -n "$_op" ]; then awk '/^Max realtime priority/{pr
 # every running restic / fbagent inside the fence, OBS's own live mask outside it, no SMT pair shared.
 _bg_online="$( { first < /sys/devices/system/cpu/online; } 2>/dev/null)"
 _bg_obs="$( { first < "/etc/${BOX}-isolated-cpus.conf"; } 2>/dev/null)"
-_bg_cpus="$(obs_box_background_cpus "$_bg_online" "$_bg_obs" 2>/dev/null)"
+_bg_cpus="$(obs_box_background_cpus "$_bg_online" "$_bg_obs" "$BG_EXCLUDE" 2>/dev/null)"
 _bg_slice="$(obs_box_background_slice_name)"
 _bg_run="$(obs_box_background_run_path)"
 echo "bg_online=${_bg_online}"
 echo "bg_obs_conf=${_bg_obs}"
+echo "bg_exclude=${BG_EXCLUDE}"
 echo "bg_loaded=$(systemctl show -p LoadState --value "$_bg_slice" 2>/dev/null | first)"
 echo "bg_allowed=$(systemctl show -p AllowedCPUs --value "$_bg_slice" 2>/dev/null | first | tr ' ' ',')"
 echo "bg_enabled=$(systemctl is-enabled "$_bg_slice" 2>/dev/null | first)"
@@ -464,7 +466,8 @@ obs_box_baseline_verdict() {
     ok=0; bg_detail="$(obs_box_background_grade "$(_obs_box_f bg_online)" "$(_obs_box_f bg_obs_conf)" "$(_obs_box_f bg_loaded)" \
         "$(_obs_box_f bg_allowed)" "$(_obs_box_f bg_file)" "$(_obs_box_f bg_helper)" "$(_obs_box_f bg_sudo)" "$(_obs_box_f bg_fbagent)" \
         "$(_obs_box_f bg_dropin)" "$(_obs_box_f bg_pgrep)" "$(_obs_box_f bg_procs)" "$(_obs_box_f bg_obs_running)" "$(_obs_box_f bg_obs_mask)" \
-        "$(_obs_box_f bg_smt_shared)" "$(_obs_box_f bg_cgroup_cpus)" "$(_obs_box_f bg_iosched)" "$(_obs_box_f bg_enabled)")" && ok=1
+        "$(_obs_box_f bg_smt_shared)" "$(_obs_box_f bg_cgroup_cpus)" "$(_obs_box_f bg_iosched)" "$(_obs_box_f bg_enabled)" \
+        "$(_obs_box_f bg_exclude)")" && ok=1
     _obs_box_item background "$ok" "$bg_detail"
     # gpu -- a dGPU box renders NVIDIA-primary (PRIME); an iGPU-only box has nothing to select
     if [ "$(_obs_box_f dgpu)" = 1 ]; then

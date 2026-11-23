@@ -2,6 +2,7 @@
 paths:
   - "scripts/lib/strih-housekeeping.sh"
   - "scripts/lib/strih-nic-irq.sh"
+  - "scripts/lib/obs-box-background.sh"
   - "systemd/strih-nic-irq-affinity.service"
   - "scripts/strih-obs-start.sh"
   - "tests/python/test_strih_housekeeping_1425.py"
@@ -12,7 +13,30 @@ paths:
 OBS runs on the CPUs in `/etc/strih-isolated-cpus.conf` (strih-snv 2-15). Everything else that wakes up
 often belongs on the rest: the box fact `STRIH_HOUSEKEEPING_CPUS` (strih-snv `0-1`, every other box `none`
 until measured). It must equal online minus the OBS mask (`obs_box_background_cpus`); verify `(hk-cpus)`
-FAILs otherwise. The same CPUs carry `rig-background.slice`.
+FAILs otherwise.
+
+## The split: the rig NIC IRQs alone on one CPU (design 7116063669, 23.11.2026)
+
+With every housekeeping task and the NIC IRQs on 0-1, dstack read the first rx holes in ~35 h on the
+first OBS run (kernel arrival stamps: the RX softirq waited on 0-1, next to the program-audio sampler at
+up to 83 % of a core). So the ONE fact is split, never a second fact:
+- `strih_housekeeping_irq_cpus [CPUS]` = the LAST CPU of the set (strih-snv `1`): the rig NIC IRQs alone,
+  the oneshot's `@STRIH_HOUSEKEEPING_IRQ_CPUS@` (env override `STRIH_HOUSEKEEPING_IRQ_CPUS`), the RSS
+  count (oneshot + udev rule = 1 on strih-snv; atlantic has no channel control, so a no-op there);
+- `strih_housekeeping_task_cpus [CPUS]` = the rest (strih-snv `0`): rustdesk + the display watch drop-ins,
+  `/etc/strih-housekeeping-cpus.conf` (the launcher's own move), `rig-background.slice`;
+- a one-CPU set gives that CPU to both; `none` gives `none` to both. Pure halves:
+  `obs_box_cpulist_last` / `obs_box_cpulist_rest` in `obs-box-background.sh`.
+- **The slice:** `obs_box_background_cpus ONLINE OBS [EXCLUDE]` keeps EXCLUDE out. setup-strih passes
+  `strih_housekeeping_irq_cpus` as `obs_box_background_slice`'s 3rd argument, verify-strih as the
+  baseline gather's 5th (`BG_EXCLUDE`, the `bg_exclude` key, `obs_box_background_grade`'s 18th): the
+  baseline `background` row then wants exactly the task CPUs. imag passes nothing (unchanged).
+- **The sampler** is not in the slice: it is the operator's `--user` unit with its own `CPUAffinity=`
+  (`strih_program_audio_cpus`); on the AMD strih-snv that is the background set, so it now reads `0`
+  too (the IRQ CPU kept out when the housekeeping lib is loaded, i.e. setup + verify). No `Nice=`: the
+  program-audio-guard rule measured nice 10 costing it audio; it stays at normal priority.
+- Trade-off: all RX queues' softirq on one Zen 5 core (~25 % ksoftirqd measured at the rig rate); the
+  tasks share CPU 0 at nice 10.
 
 ## What moves, and how
 
@@ -50,19 +74,24 @@ FAILs otherwise. The same CPUs carry `rig-background.slice`.
 
 ## Verify item 16 (`strih_housekeeping_grade_report`)
 
-`(hk-cpus)`, `(hk-rss)` (current combined = the count), `(hk-irq)` (every rig-NIC IRQ's
-`smp_affinity_list` as a set), `(hk-hooks)` (the udev rule + the executable hook as rendered), `(hk-rx)`
+`(hk-cpus)` (also the launcher's file = the task CPUs), `(hk-rss)` (current combined = the IRQ CPU
+count), `(hk-irq)` (every rig-NIC IRQ's `smp_affinity_list` as a set = the IRQ CPUs), `(hk-hooks)` (the udev rule + the executable hook as rendered), `(hk-rx)`
 (REPORT-ONLY NOTE: rx_missed_errors / rx_dropped delta over `STRIH_HOUSEKEEPING_SAMPLE_S`), `(hk-sysctl)`
-(our leftover drop-in FAILs, else the running value), `(hk-unit)` for rustdesk, the display watch and the launcher: the RUNNING main process's
-`Cpus_allowed_list` + nice (`/proc/<pid>/stat` field 19, read after the last `) `). A unit not running
+(our leftover drop-in FAILs, else the running value), `(hk-slice)` (`systemctl show -p AllowedCPUs
+rig-background.slice` names no IRQ CPU; empty / unread FAILs), `(hk-unit)` for rustdesk, the display watch
+and the launcher: the RUNNING main process's `Cpus_allowed_list` = the task CPUs + nice (`/proc/<pid>/stat` field 19, read after the last `) `). A unit not running
 FAILs; OBS down is a NOTE for the launcher row.
 
 ## Deploy (supervisor)
 
 Off-production (the -L drops the rig link once on the date master; schedule it like a dantesync change):
 setup-strih (writes everything; enable-only for the oneshot), then `systemctl restart
-strih-nic-irq-affinity.service` once (8 -> 2 queues, IRQs to 0-1), restart OBS for the launcher row, then
-verify-strih item 16. Read before/after: `grep . /proc/irq/*/smp_affinity_list` for the NIC's IRQs, `ethtool
+strih-nic-irq-affinity.service` once (the IRQs to the IRQ CPU 1; atlantic keeps its queues), restart OBS
+for the launcher row, then verify-strih item 16. The split's own deploy: setup-strih rewrites the slice
+(daemon-reload applies its AllowedCPUs to the running slice), the two drop-ins (a running rustdesk / display
+watch is restarted onto 0), the launcher file, the udev rule (count 1) and the oneshot script; the sampler
+unit is rewritten (`CPUAffinity=0`) and try-restarted when it runs; the IRQs move at the oneshot restart (or
+the next NM `up`), the launcher at the next OBS start. Read before/after: `grep . /proc/irq/*/smp_affinity_list` for the NIC's IRQs, `ethtool
 -l <nic>`, `sysctl net.core.netdev_budget_usecs`, `ethtool -S <nic> | grep -i miss`, `carrier_changes`, each
 unit's `Cpus_allowed_list`.
 

@@ -36,7 +36,8 @@ RestartSec=10
 Environment=OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 EnvironmentFile=-%h/.config/camera-box/program-audio-sampler.env
 # Off the OBS cores: the E-cores of a hybrid box, else the background set (online minus
-# /etc/strih-isolated-cpus.conf; the AMD strih-snv has no cpu_atom: 0-1; issue 1485: the sampler on an
+# /etc/strih-isolated-cpus.conf minus the rig NIC IRQ CPU; the AMD strih-snv has no cpu_atom: 0, issue 1425
+# split; issue 1485: the sampler on an
 # OBS core cost the Dante receive a rebootstrap every window); normal priority (no Nice, no CPUWeight):
 # the sampler must never be ahead of OBS on this production box.
 CPUAffinity=@E_CORES@
