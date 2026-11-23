@@ -131,3 +131,27 @@ def test_item9_names_no_margin_row_on_a_box_without_one(tmp_path):
     r = t._stream(tmp_path)
     assert "BAD" not in r.stdout, r.stdout
     assert "OK (program-dante) rx stamp margin: none (no start line, as the facts declare)" in r.stdout, r.stdout
+
+
+# review round 1: a fact of 0 loads and renders `rx_stamp_margin_ms = 0.0`, and obs v0.4.61 prints its start line
+# only for a NON-zero margin, so a 0 box expects no line (never a FAIL that no OBS restart can cure)
+def _zero_margin_grade(tmp_path, monkeypatch, margin_line):
+    d = t._boxes_with(tmp_path, "strih-snv", {KEY: "0"})
+    orig = t._bash
+    monkeypatch.setattr(t, "_bash", lambda body, *a, env=None: orig(body, *a, env=dict(env or {}, STRIH_BOXES_DIR=str(d))))
+    lines = [t._start("strih-obs", 0), t.SPLIT] + ([margin_line] if margin_line else []) + [
+        t.NETLAT, t._status("12:00:10.000", 4800, tx_track="0", tx_played="0")]
+    nxt = t._status("12:00:20.000", 484800, tx_track="0", tx_played="0")
+    toml = t.TOML_STRIH.replace("rx_stamp_margin_ms = 10.0", "rx_stamp_margin_ms = 0.0")
+    return t._grade(tmp_path, "strih-snv", lines, nxt, toml)
+
+
+def test_item9_passes_a_zero_margin_with_no_start_line(tmp_path, monkeypatch):
+    r = _zero_margin_grade(tmp_path, monkeypatch, None)
+    assert "BAD" not in r.stdout, r.stdout
+    assert "OK (program-dante) rx stamp margin: 0 ms (no start line: obs prints none for a zero margin)" in r.stdout, r.stdout
+
+
+def test_item9_fails_a_start_line_on_a_zero_margin_box(tmp_path, monkeypatch):
+    r = _zero_margin_grade(tmp_path, monkeypatch, t.MARGIN_LINE)
+    assert "BAD (program-dante) rx stamp margin 10.000 ms, the facts say 0.000 ms" in r.stdout, r.stdout
