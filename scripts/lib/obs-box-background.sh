@@ -66,14 +66,30 @@ obs_box_cpulist_compress() {
     printf '%s\n' "$out"
 }
 
-# obs_box_background_cpus ONLINE OBS -> the CPUs OBS does not use, compressed. rc 1 when either list is
-# unreadable or nothing is left: a box with no free CPU has no fence to build, never a guessed one.
+# obs_box_cpulist_last LIST -> the highest CPU of a cpulist; obs_box_cpulist_rest LIST -> every other CPU,
+# compressed (a one-CPU list gives that CPU again: nothing else to put work on). rc 1 on a malformed list.
+# issue 1425 split: the rig NIC IRQs on the LAST housekeeping CPU, the housekeeping tasks on the rest.
+obs_box_cpulist_last() {
+    local e
+    e="$(obs_box_cpulist_expand "${1-}")" || return 1
+    printf '%s\n' "${e##* }"
+}
+obs_box_cpulist_rest() {
+    local e
+    e="$(obs_box_cpulist_expand "${1-}")" || return 1
+    case "$e" in *" "*) obs_box_cpulist_compress "${e% *}" ;; *) printf '%s\n' "$e" ;; esac
+}
+
+# obs_box_background_cpus ONLINE OBS [EXCLUDE] -> the CPUs OBS does not use, compressed, minus EXCLUDE
+# (issue 1425: the CPU that carries the rig NIC IRQs alone; empty or `none` = nothing excluded). rc 1 when
+# a list is unreadable or nothing is left: a box with no free CPU has no fence to build, never a guessed one.
 obs_box_background_cpus() {
-    local online obs c out=""
+    local online obs excl="" c out=""
     online="$(obs_box_cpulist_expand "${1-}")" || return 1
     obs="$(obs_box_cpulist_expand "${2-}")" || return 1
+    case "${3-}" in '' | none) ;; *) excl="$(obs_box_cpulist_expand "$3")" || return 1 ;; esac
     for c in $online; do
-        case " $obs " in *" $c "*) ;; *) out="${out}${out:+ }${c}" ;; esac
+        case " $obs $excl " in *" $c "*) ;; *) out="${out}${out:+ }${c}" ;; esac
     done
     [ -n "$out" ] || return 1
     obs_box_cpulist_compress "$out"
@@ -171,7 +187,8 @@ obs_box_background_sudoers_text() {
     printf '%s ALL=(root) NOPASSWD: %s\n' "${1:?obs_box_background_sudoers_text: USER required}" "$(obs_box_background_run_path)"
 }
 
-# obs_box_background_slice BOX DESKTOP_USER -- the baseline item. Compared, rewritten only on a
+# obs_box_background_slice BOX DESKTOP_USER [EXCLUDE] -- the baseline item. EXCLUDE (issue 1425) = CPUs kept
+# out of the slice: a strih box with housekeeping CPUs passes the one carrying the rig NIC IRQs alone. Compared, rewritten only on a
 # difference, daemon-reload only then, so the genlock deploy's setup re-run stays quiet. A running
 # fbagent@ instance takes the limits live through a runtime property (Slice= itself applies at its next
 # start); nothing is ever stopped or restarted, and OBS is not touched. The slice is enabled and started
@@ -181,13 +198,13 @@ obs_box_background_sudoers_text() {
 # OBS_BOX_BACKGROUND_OWNER and OBS_BOX_ONLINE_CPUS are the test seams.
 obs_box_background_slice() {
     local box="${1:?obs_box_background_slice: BOX required}" user="${2:?obs_box_background_slice: DESKTOP_USER required}"
-    local root="${OBS_BOX_BACKGROUND_ROOT:-}" owner="${OBS_BOX_BACKGROUND_OWNER:-root:root}"
+    local exclude="${3:-none}" root="${OBS_BOX_BACKGROUND_ROOT:-}" owner="${OBS_BOX_BACKGROUND_OWNER:-root:root}"
     local online_file="${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}"
     local conf="${root}/etc/${box}-isolated-cpus.conf" online obs bg changed=0 tmp unit
     online="$(head -n1 "$online_file" 2>/dev/null || true)"
     obs="$(head -n1 "$conf" 2>/dev/null || true)"
-    bg="$(obs_box_background_cpus "$online" "$obs")" \
-        || fail "issue 1387: no CPU left for background work (online '${online}', OBS mask '${obs}' from ${conf})"
+    bg="$(obs_box_background_cpus "$online" "$obs" "$exclude")" \
+        || fail "issue 1387: no CPU left for background work (online '${online}', OBS mask '${obs}' from ${conf}, kept out '${exclude}')"
     _bg_put() {  # PATH MODE LABEL RENDERER [ARGS...] (issue 1474: a failed renderer writes nothing)
         local out
         out="$(obs_box_write_if_changed_rendered "$1" "$2" "$owner" "$3" "${@:4}")" || fail "issue 1387: could not write $1"
@@ -222,20 +239,21 @@ obs_box_background_slice() {
             echo -e "  ${YELLOW:-}issue 1387: could not fence the running ${unit}; verify's background row FAILs until it restarts${NC:-}"
         fi
     done < <(systemctl list-units --type=service --state=active,activating --no-legend --plain 'fbagent@*' 2>/dev/null || true)
-    echo "  background slice: $(obs_box_background_slice_name) on CPUs ${bg} (OBS mask ${obs})"
+    echo "  background slice: $(obs_box_background_slice_name) on CPUs ${bg} (OBS mask ${obs}, kept out ${exclude})"
 }
 
 # obs_box_background_grade ONLINE OBS LOADED ALLOWED FILE RUN SUDO FBAGENT DROPIN PGREP PROCS OBS_RUNNING
-#   OBS_MASK SMT CGROUP_CPUS IOSCHED ENABLED -> the `background` row's detail line, rc 0 iff the fence holds.
+#   OBS_MASK SMT CGROUP_CPUS IOSCHED ENABLED [EXCLUDE] -> the `background` row's detail line, rc 0 iff the fence
+#   holds. EXCLUDE = the CPUs kept out of the slice (issue 1425; empty / `none` = none), as at install.
 # Pure over the gather's facts, fail-closed: an unread fact FAILs, never a pass. PROCS = space separated
 # `<comm>:<pid>:<Cpus_allowed_list>` of every running restic / fbagent. IOSCHED is reported, never graded.
 obs_box_background_grade() {
     local online="${1-}" obs="${2-}" loaded="${3-}" allowed="${4-}" file="${5-}" run="${6-}" sudo_ok="${7-}"
     local fbagent="${8-}" dropin="${9-}" pgrep_ok="${10-}" procs="${11-}" obs_running="${12-}" obs_mask="${13-}"
-    local smt="${14-}" cgroup_cpus="${15-}" iosched="${16-}" enabled="${17-}"
+    local smt="${14-}" cgroup_cpus="${15-}" iosched="${16-}" enabled="${17-}" exclude="${18-}"
     local bad="" want want_list p c m name
-    if ! want="$(obs_box_background_cpus "$online" "$obs")"; then
-        printf 'FENCE UNREADABLE: online=[%s] OBS mask=[%s] leave no background CPU\n' "$online" "$obs"
+    if ! want="$(obs_box_background_cpus "$online" "$obs" "$exclude")"; then
+        printf 'FENCE UNREADABLE: online=[%s] OBS mask=[%s] kept out=[%s] leave no background CPU\n' "$online" "$obs" "$exclude"
         return 1
     fi
     want_list="$(obs_box_cpulist_expand "$want")"

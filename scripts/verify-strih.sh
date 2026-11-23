@@ -976,7 +976,7 @@ fi
 #     GNOME purged, the openbox autostart contract, the power envelope, the touchpad InputClass. One
 #     PASS/FAIL line per item; a box missing ANY item FAILS (it supersedes the old never-sleep,
 #     governor and crash-popup items).
-BASELINE_FACTS="$(bash -c "$(obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service "$(strih_box_desktop)")" 2>/dev/null || true)"
+HK_SLICE_EXCL="$(strih_housekeeping_slice_exclude)" || { bad "(housekeeping) the rig NIC IRQ CPU (STRIH_HOUSEKEEPING_CPUS) cannot be read"; HK_SLICE_EXCL=none; }; BASELINE_FACTS="$(bash -c "$(obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service "$(strih_box_desktop)" "$HK_SLICE_EXCL")" 2>/dev/null || true)"
 while IFS='|' read -r _bl_item _bl_state _bl_detail; do
   [ -n "$_bl_item" ] || continue
   if [ "$_bl_state" = OK ]; then

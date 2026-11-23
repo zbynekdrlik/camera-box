@@ -679,7 +679,7 @@ def test_setup_and_verify_wire_the_session_in_one_line_each():
     assert s.find("strih_openbox_autostart_text >") < s.find("obs_box_session_install ")
     v = VERIFY.read_text()
     assert v.count('obs_box_session_grade_report "${HERE}/.." "$USER_HOME"') == 1
-    assert 'strih-obs.service "$(strih_box_desktop)")' in v
+    assert 'strih-obs.service "$(strih_box_desktop)" "$HK_SLICE_EXCL")' in v   # issue 1425: the IRQ CPU kept out = the 5th argument
 
 
 def test_the_baseline_grader_reads_the_autologin_session_the_fact_names(tmp_path):

@@ -132,20 +132,25 @@ strih_program_audio_ecores() {
 # strih_program_audio_cpus [SYSFS_ROOT] -> the sampler's CPU list (issue 1485), never every CPU:
 #   - a hybrid box: its E-cores (strih_program_audio_ecores);
 #   - otherwise (no cpu_atom, as on the AMD strih-snv): the box's BACKGROUND set = online minus the OBS
-#     mask (obs_box_background_cpus, the set rig-background.slice uses; strih-snv 0-1), off OBS's cores.
+#     mask minus the rig NIC IRQ CPU (obs_box_background_cpus, the set rig-background.slice uses; issue 1425
+#     split, design 7116063669: strih-snv 0, CPU 1 carries the NIC IRQs alone), off OBS's cores.
 # rc 1 + nothing + a stderr line when neither set can be derived (no OBS mask yet, an unreadable online
 # list): the install then fails by name instead of writing an every-CPU unit.
 # Seams: OBS_BOX_ONLINE_CPUS, STRIH_PROGRAM_AUDIO_ISOLATED_CONF (/etc/strih-isolated-cpus.conf).
 strih_program_audio_cpus() {
-  local root="${1:-${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}}" ecores online obs bg
+  local root="${1:-${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}}" ecores online obs bg irq=none
   ecores="$(strih_program_audio_ecores "$root")"
   if [ -n "$ecores" ]; then
     printf '%s' "$ecores"
     return 0
   fi
+  # issue 1425: with the housekeeping lib loaded (setup-strih / verify-strih), the IRQ CPU stays out.
+  if declare -F strih_housekeeping_slice_exclude >/dev/null; then
+    irq="$(strih_housekeeping_slice_exclude)" || { echo "strih-program-audio: the rig NIC IRQ CPU (STRIH_HOUSEKEEPING_CPUS) cannot be read" >&2; return 1; }
+  fi
   online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
   obs="$(head -n 1 "${STRIH_PROGRAM_AUDIO_ISOLATED_CONF:-/etc/strih-isolated-cpus.conf}" 2>/dev/null || true)"
-  if bg="$(obs_box_background_cpus "$online" "$obs")" && [ -n "$bg" ]; then
+  if bg="$(obs_box_background_cpus "$online" "$obs" "$irq")" && [ -n "$bg" ]; then
     printf '%s' "$bg"
     return 0
   fi

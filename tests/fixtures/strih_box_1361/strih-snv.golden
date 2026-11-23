@@ -177,9 +177,9 @@ set -euo pipefail
 # scripts/setup-strih.sh, run at boot by strih-nic-irq-affinity.service, on every NetworkManager `up` of the
 # rig NIC by the issue-1425 dispatcher hook (a link reset can re-place the IRQs), and once live by the
 # supervisor. It keeps the rig NIC's NET_RX softirq off the OBS cores. With housekeeping CPUs
-# (box fact STRIH_HOUSEKEEPING_CPUS, issue 1425) it first cuts the NIC's RSS queues to the number of
-# housekeeping CPUs (ethtool -L combined, only when it differs) and pins EVERY IRQ of the rig NIC
-# (/sys/class/net/<nic>/device/msi_irqs; a USB NIC: its xhci interrupt) to them. Without them
+# (box fact STRIH_HOUSEKEEPING_CPUS, issue 1425) it pins EVERY IRQ of the rig NIC alone to the LAST of
+# them, the IRQ CPUs (/sys/class/net/<nic>/device/msi_irqs; a USB NIC: its xhci interrupt), after it set
+# the NIC's RSS queues to the IRQ CPU count (ethtool -L combined, only when it differs). Without them
 # (`none`) it pins the USB NIC's xhci interrupt to the last E-core (issue 1354: cut the genlock
 # "slow output_video" rate ~75%). It resolves the placement FROM FACTS -- never a hard-coded IRQ
 # number -- and FAILS LOUD (exit 1 + a journal line) on any unresolved step or a read-back mismatch.
@@ -193,7 +193,7 @@ IRQ_DIR="${IRQ_DIR:-/proc/irq}"
 ETHTOOL="${ETHTOOL:-ethtool}"
 CARRIER_WAIT_S="${CARRIER_WAIT_S:-5}"
 TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
-HOUSEKEEPING_CPUS="${STRIH_HOUSEKEEPING_CPUS:-0-1}"
+IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-1}"
 
 log() { printf 'strih-nic-irq-affinity: %s\n' "$*"; }
 die() { printf 'strih-nic-irq-affinity: FATAL: %s\n' "$*" >&2; exit 1; }
@@ -240,13 +240,13 @@ fi
 
 irqs=""; src=""
 msi_dir="${SYS_ROOT}/class/net/${iface}/device/msi_irqs"
-if [ "$HOUSEKEEPING_CPUS" != none ]; then
-  hk="$(cpulist_canon "$HOUSEKEEPING_CPUS")"
-  [ -n "$hk" ] || die "STRIH_HOUSEKEEPING_CPUS '${HOUSEKEEPING_CPUS}' is not a cpulist"
+if [ "$IRQ_CPUS" != none ]; then
+  hk="$(cpulist_canon "$IRQ_CPUS")"
+  [ -n "$hk" ] || die "STRIH_HOUSEKEEPING_IRQ_CPUS '${IRQ_CPUS}' is not a cpulist"
 fi
 
-if [ "$HOUSEKEEPING_CPUS" != none ] && [ -d "$msi_dir" ]; then
-  # (2a) issue 1425: RSS queues = the housekeeping CPU count, changed only when it differs (a change
+if [ "$IRQ_CPUS" != none ] && [ -d "$msi_dir" ]; then
+  # (2a) issue 1425: RSS queues = the IRQ CPU count, changed only when it differs (a change
   # re-initialises the NIC's rings: the driver may drop the link for a moment, once). At boot the
   # udev rule of scripts/lib/strih-housekeeping.sh already set it at `add`, before the link came up, so
   # this is a no-op there; the carrier_changes counter around a change shows any link drop it caused.
@@ -283,7 +283,7 @@ if [ "$HOUSEKEEPING_CPUS" != none ] && [ -d "$msi_dir" ]; then
   irqs="$(printf '%s\n' $irqs | sort -n | tr '\n' ' ' | sed 's/ $//')"
   src="msi ${iface}"
 else
-  [ "$HOUSEKEEPING_CPUS" = none ] || log "${iface}: no msi_irqs (not a PCIe NIC) -- RSS left alone, its xhci IRQ goes to the housekeeping CPUs"
+  [ "$IRQ_CPUS" = none ] || log "${iface}: no msi_irqs (not a PCIe NIC) -- RSS left alone, its xhci IRQ goes to the IRQ CPUs"
   # (2) xhci host controller PCI function = walk the device symlink up to the usbN root.
   dev="$(readlink -f "${SYS_ROOT}/class/net/${iface}/device" 2>/dev/null || true)"
   [ -n "$dev" ] || die "no /sys device node for iface ${iface}"
@@ -311,11 +311,11 @@ else
   src="xhci_hcd ${pcifn}"
 fi
 
-# (4) target = the housekeeping CPUs; without them the LAST cpu in cpu_atom (an E-core), fallback the
+# (4) target = the IRQ CPUs; without housekeeping CPUs the LAST cpu in cpu_atom (an E-core), fallback the
 # highest online cpu.
 target=""
-if [ "$HOUSEKEEPING_CPUS" != none ]; then
-  target="$HOUSEKEEPING_CPUS"
+if [ "$IRQ_CPUS" != none ]; then
+  target="$IRQ_CPUS"
 else
   if [ -r "$CPU_ATOM_FILE" ]; then
     target="$(tr ',' '\n' < "$CPU_ATOM_FILE" 2>/dev/null | sed 's/.*-//' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"

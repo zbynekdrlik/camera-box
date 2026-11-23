@@ -12,10 +12,15 @@
 # launcher's shutdown watch (stat / tail / grep / sleep 1/s) all ran on OBS CPUs. Those wake-ups delayed
 # dlink's RX pump and OBS's audio thread (the late_to_mix events of issue 1425).
 #
+# The split (design 7116063669, 23.11.2026: rx holes on the first OBS run with everything on 0-1): the LAST
+# CPU of the set carries the rig NIC IRQs alone (strih_housekeeping_irq_cpus, strih-snv 1); the rest carries
+# the tasks below and rig-background.slice (strih_housekeeping_task_cpus, strih-snv 0). A one-CPU set keeps
+# both on it.
+#
 # What this lib does (setup-strih step 11b, verify-strih item 16):
 #   * the rig NIC's IRQs + RSS: the step-11b boot oneshot (strih_nic_irq_affinity_script_text in
 #     strih-provision.sh, generalised in place) -- not here;
-#   * /etc/strih-housekeeping-cpus.conf: the CPU list, read by strih-obs-start.sh, which puts its own
+#   * /etc/strih-housekeeping-cpus.conf: the TASK CPU list, read by strih-obs-start.sh, which puts its own
 #     shutdown watch (the stat / grep / tail loop) there at nice 10 at the next OBS start;
 #   * NO netdev_budget_usecs change: kernel 7.0 at HZ 1000 refuses anything below 2000 us (EINVAL, read on
 #     strih-snv 23.11.2026), which is what the box runs; a leftover 60-strih-housekeeping.conf of ours is
@@ -92,6 +97,32 @@ strih_housekeeping_dropin_path() {
 
 strih_housekeeping_conf_text() { printf '%s\n' "${1:?cpus required}"; }
 
+# strih_housekeeping_irq_cpus [CPUS] -> the CPU the rig NIC IRQs go to: the LAST CPU of CPUS (default the box
+# fact STRIH_HOUSEKEEPING_CPUS); strih_housekeeping_task_cpus [CPUS] -> the rest (the housekeeping tasks +
+# rig-background.slice), a one-CPU set gives that CPU. Both print `none` for `none`; rc 1 on an unreadable fact
+# or a malformed list.
+strih_housekeeping_irq_cpus() { _strih_housekeeping_split obs_box_cpulist_last "$@"; }
+strih_housekeeping_task_cpus() { _strih_housekeeping_split obs_box_cpulist_rest "$@"; }
+_strih_housekeeping_split() {
+  local fn="$1" hk
+  if [ "$#" -ge 2 ]; then hk="$2"; else hk="$(strih_lx_housekeeping_cpus)" || return 1; fi
+  if [ "$hk" = none ]; then printf 'none\n'; else "$fn" "$hk"; fi
+}
+
+# strih_housekeeping_slice_exclude [CPUS] -> the CPUs rig-background.slice and the program-audio sampler keep
+# out: the IRQ CPUs that are not also task CPUs (strih-snv 1). `none` for a `none` box and for a one-CPU set
+# (the IRQs share that CPU with the tasks: nothing else to run on). rc 1 on an unreadable fact.
+strih_housekeeping_slice_exclude() {
+  local irq task c out=""
+  irq="$(strih_housekeeping_irq_cpus "$@")" && task="$(strih_housekeeping_task_cpus "$@")" || return 1
+  [ "$irq" != none ] || { printf 'none\n'; return 0; }
+  task=" $(obs_box_cpulist_expand "$task") "
+  for c in $(obs_box_cpulist_expand "$irq"); do
+    case "$task" in *" $c "*) ;; *) out="${out}${out:+ }${c}" ;; esac
+  done
+  if [ -n "$out" ]; then obs_box_cpulist_compress "$out"; else printf 'none\n'; fi
+}
+
 # strih_housekeeping_dropin_text CPUS -> the [Service] drop-in placing a unit on CPUS at nice 10.
 strih_housekeeping_dropin_text() {
   printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
@@ -145,18 +176,19 @@ _strih_housekeeping_put() {
 # strih_housekeeping_install USER HOME -> setup-strih step 11b's housekeeping half. rc 1 named on a failure
 # (a unit restart that fails is a WARN: the unit keeps running on its old placement, verify FAILs it).
 strih_housekeeping_install() {
-  local user="${1:?user required}" home="${2:?home required}" hk owner rc entry scope unit dest live proc drv
+  local user="${1:?user required}" home="${2:?home required}" hk irq task owner rc entry scope unit dest live proc drv
   owner="${STRIH_HOUSEKEEPING_OWNER:-root:root}"
   hk="$(strih_lx_housekeeping_cpus)" || { echo "housekeeping: the box fact STRIH_HOUSEKEEPING_CPUS cannot be read" >&2; return 1; }
   if [ "$hk" = none ]; then
     strih_housekeeping_remove "$user" "$home"
     return
   fi
-  strih_housekeeping_count "$hk" >/dev/null || { echo "housekeeping: STRIH_HOUSEKEEPING_CPUS '${hk}' is not a cpulist" >&2; return 1; }
-  echo "  housekeeping CPUs ${hk} (STRIH_HOUSEKEEPING_CPUS): the rig NIC IRQs + RSS (the oneshot below), rustdesk, the display watch, the OBS launcher"
+  irq="$(strih_housekeeping_irq_cpus "$hk")" && task="$(strih_housekeeping_task_cpus "$hk")" \
+    || { echo "housekeeping: STRIH_HOUSEKEEPING_CPUS '${hk}' is not a cpulist" >&2; return 1; }
+  echo "  housekeeping CPUs ${hk} (STRIH_HOUSEKEEPING_CPUS): the rig NIC IRQs + RSS alone on ${irq} (the oneshot below); rustdesk, the display watch, the OBS launcher, rig-background.slice on ${task}"
   dest="$(strih_housekeeping_conf_path)"
   install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
-  rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping strih_housekeeping_conf_text "$hk" || rc=$?
+  rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping strih_housekeeping_conf_text "$task" || rc=$?
   [ "$rc" != 1 ] || return 1
   [ "$rc" != 0 ] || echo "  housekeeping: the OBS launcher's shutdown watch moves at the next OBS start (systemctl --user restart strih-obs.service)"
 
@@ -169,7 +201,7 @@ strih_housekeeping_install() {
   drv="$(strih_lx_nic_driver)" || { echo "housekeeping: the box fact STRIH_NIC_DRIVER cannot be read" >&2; return 1; }
   dest="$(strih_housekeeping_udev_path)"
   install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
-  rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping strih_housekeeping_udev_text "$drv" "$(strih_housekeeping_count "$hk")" || rc=$?
+  rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping strih_housekeeping_udev_text "$drv" "$(strih_housekeeping_count "$irq")" || rc=$?
   [ "$rc" != 1 ] || return 1
   [ "$rc" != 0 ] || udevadm control --reload-rules \
     || echo "  WARN: udevadm control --reload-rules failed -- the RSS rule applies at the next boot"
@@ -183,10 +215,10 @@ strih_housekeeping_install() {
     dest="$(strih_housekeeping_dropin_path "$scope" "$unit" "$home")"
     if [ "$scope" = user ]; then
       strih_user_home_dir "$home" "$user" "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
-      rc=0; _strih_housekeeping_put "$dest" 0644 "${user}:$(id -gn "$user" 2>/dev/null || printf '%s' "$user")" housekeeping strih_housekeeping_dropin_text "$hk" || rc=$?
+      rc=0; _strih_housekeeping_put "$dest" 0644 "${user}:$(id -gn "$user" 2>/dev/null || printf '%s' "$user")" housekeeping strih_housekeeping_dropin_text "$task" || rc=$?
     else
       install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
-      rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping strih_housekeeping_dropin_text "$hk" || rc=$?
+      rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping strih_housekeeping_dropin_text "$task" || rc=$?
     fi
     [ "$rc" != 1 ] || return 1
     [ "$rc" = 0 ] || continue
@@ -195,9 +227,9 @@ strih_housekeeping_install() {
     if ! _strih_housekeeping_systemctl "$scope" "$user" daemon-reload; then
       echo "  WARN: ${unit}: daemon-reload failed -- run it by hand, then restart ${unit}; verify item 16 FAILs it until then"
     elif ! _strih_housekeeping_systemctl "$scope" "$user" is-active -q "$unit"; then
-      echo "  housekeeping: ${unit} drop-in written; ${unit} is not running -- it starts on CPUs ${hk} at nice ${STRIH_HOUSEKEEPING_NICE}"
+      echo "  housekeeping: ${unit} drop-in written; ${unit} is not running -- it starts on CPUs ${task} at nice ${STRIH_HOUSEKEEPING_NICE}"
     elif _strih_housekeeping_systemctl "$scope" "$user" restart "$unit"; then
-      echo "  housekeeping: ${unit} drop-in changed -- restarted onto CPUs ${hk} at nice ${STRIH_HOUSEKEEPING_NICE}"
+      echo "  housekeeping: ${unit} drop-in changed -- restarted onto CPUs ${task} at nice ${STRIH_HOUSEKEEPING_NICE}"
     else
       echo "  WARN: ${unit}: the restart failed -- restart it by hand ($([ "$scope" = user ] && printf 'systemctl --user' || printf 'systemctl') restart ${unit}); verify item 16 FAILs it until then"
     fi
@@ -270,6 +302,28 @@ _strih_housekeeping_unit_row() {
   fi
 }
 
+# strih_housekeeping_slice_row EXCLUDE -> one `(hk-slice)` row: the AllowedCPUs systemd holds for
+# rig-background.slice (`systemctl show`, space separated ranges) name no EXCLUDE CPU
+# (strih_housekeeping_slice_exclude); unread or empty FAILs. EXCLUDE `none` (a one-CPU set) passes.
+strih_housekeeping_slice_row() {
+  local irq="${1:-none}" slice allowed exp c
+  slice="$(obs_box_background_slice_name)"
+  allowed="$(systemctl show -p AllowedCPUs --value "$slice" 2>/dev/null | head -n 1 | tr -s ' ' ',' || true)"
+  allowed="${allowed%,}"; allowed="${allowed#,}"
+  if ! exp="$(obs_box_cpulist_expand "$allowed")"; then
+    bad "(hk-slice) ${slice}: AllowedCPUs unread or empty ('${allowed}') -- re-run setup-strih.sh step 11"
+    return 0
+  fi
+  if [ "$irq" = none ]; then
+    ok "(hk-slice) ${slice}: AllowedCPUs ${allowed} (one housekeeping CPU: the rig NIC IRQs share it)"
+    return 0
+  fi
+  for c in $(obs_box_cpulist_expand "$irq" 2>/dev/null || true); do
+    case " $exp " in *" $c "*) bad "(hk-slice) ${slice}: AllowedCPUs ${allowed} holds the IRQ CPU ${c} -- re-run setup-strih.sh step 11"; return 0 ;; esac
+  done
+  ok "(hk-slice) ${slice}: AllowedCPUs ${allowed}, off the IRQ CPUs ${irq}"
+}
+
 # strih_housekeeping_rx_note SYS NIC -> one REPORT-ONLY `(hk-rx)` NOTE: the NIC's rx_missed_errors +
 # rx_dropped increase over STRIH_HOUSEKEEPING_SAMPLE_S (default 2 s). Never a FAIL: read it before/after
 # the RSS change and after a production. Always rc 0.
@@ -289,13 +343,16 @@ strih_housekeeping_rx_note() {
 }
 
 # strih_housekeeping_grade_report HOME USER -> verify-strih item 16 on a box with housekeeping CPUs: the
-# fact vs the OBS mask, every rig-NIC IRQ, the RSS channel count, the softirq budget, each unit's live
-# placement. rc 0 after printing its rows.
+# fact vs the OBS mask, every rig-NIC IRQ on the IRQ CPUs, the RSS channel count, the softirq budget,
+# rig-background.slice off the IRQ CPUs, each unit's live placement on the task CPUs. rc 0 after printing its rows.
 strih_housekeeping_grade_report() {
-  local home="${1:?home required}" user="${2:?user required}" hk iso online want sys nic irqs n aff badirq="" okirq=""
+  local home="${1:?home required}" user="${2:?user required}" hk irq task iso online want sys nic irqs n aff badirq="" okirq=""
   local cur conf live f
   sys="${STRIH_HOUSEKEEPING_SYS:-/sys}"
   hk="$(strih_lx_housekeeping_cpus)" || { bad "(hk-cpus) the box fact STRIH_HOUSEKEEPING_CPUS cannot be read"; return 0; }
+  if ! irq="$(strih_housekeeping_irq_cpus "$hk")" || ! task="$(strih_housekeeping_task_cpus "$hk")"; then
+    bad "(hk-cpus) STRIH_HOUSEKEEPING_CPUS '${hk}' is not a cpulist -- fix the fact"; return 0
+  fi
   # (hk-cpus) the fact = online CPUs minus the OBS mask, and the launcher's file carries it.
   iso="$(head -n 1 "$(strih_housekeeping_isolated_path)" 2>/dev/null | tr -d '[:space:]' || true)"
   online="$(head -n 1 "$(strih_housekeeping_online_path)" 2>/dev/null | tr -d '[:space:]' || true)"
@@ -305,21 +362,21 @@ strih_housekeeping_grade_report() {
     bad "(hk-cpus) cannot derive the CPUs outside the OBS mask (online '${online}', $(strih_housekeeping_isolated_path) '${iso}')"
   elif ! strih_housekeeping_same_cpus "$hk" "$want"; then
     bad "(hk-cpus) STRIH_HOUSEKEEPING_CPUS ${hk} is not the complement of the OBS mask ${iso} (online ${online}: ${want}) -- fix the fact"
-  elif ! strih_housekeeping_same_cpus "$conf" "$hk"; then
-    bad "(hk-cpus) $(strih_housekeeping_conf_path) reads '${conf}', not ${hk} -- re-run setup-strih.sh step 11b"
+  elif ! strih_housekeeping_same_cpus "$conf" "$task"; then
+    bad "(hk-cpus) $(strih_housekeeping_conf_path) reads '${conf}', not the task CPUs ${task} -- re-run setup-strih.sh step 11b"
   else
-    ok "(hk-cpus) housekeeping CPUs ${hk} = online ${online} minus the OBS mask ${iso}"
+    ok "(hk-cpus) housekeeping CPUs ${hk} = online ${online} minus the OBS mask ${iso}: rig NIC IRQs on ${irq}, tasks on ${task}"
   fi
-  # (hk-irq) + (hk-rss) every IRQ of the rig NIC on the housekeeping CPUs; RSS queues = their count.
+  # (hk-irq) + (hk-rss) every IRQ of the rig NIC on the IRQ CPUs; RSS queues = their count.
   nic="$(strih_lx_rig_nic "$sys" "${STRIH_HOUSEKEEPING_IPADDR-$(ip -o -4 addr show 2>/dev/null || true)}" "$(strih_lx_ip)" 2>/dev/null || true)"
   if [ -z "$nic" ]; then
     bad "(hk-irq) cannot resolve the rig NIC (set STRIH_NIC_IFACE)"
   elif [ -d "${sys}/class/net/${nic}/device/msi_irqs" ]; then
     irqs="$(for f in "${sys}/class/net/${nic}/device/msi_irqs"/*; do n="${f##*/}"; case "$n" in ''|*[!0123456789]*) ;; *) [ ! -d "${STRIH_HOUSEKEEPING_PROC:-/proc}/irq/${n}" ] || printf '%s\n' "$n" ;; esac; done | sort -n | tr '\n' ' ')"
     cur="$("${ETHTOOL:-ethtool}" -l "$nic" 2>/dev/null | awk '/^Current hardware settings/ { c = 1 } c && /^Combined:/ { print $2; exit }' || true)"
-    n="$(strih_housekeeping_count "$hk" || true)"
+    n="$(strih_housekeeping_count "$irq" || true)"
     if [ -z "$cur" ] || [[ "$cur" == *[!0123456789]* ]]; then note "(hk-rss) ${nic}: RSS channel count not readable (the driver offers no channel control): queues left alone"
-    elif [ -n "$n" ] && [ "$cur" = "$n" ]; then ok "(hk-rss) ${nic}: ${cur} RSS queues (combined) = the housekeeping CPU count"
+    elif [ -n "$n" ] && [ "$cur" = "$n" ]; then ok "(hk-rss) ${nic}: ${cur} RSS queues (combined) = the IRQ CPU count"
     else bad "(hk-rss) ${nic}: ${cur:-unreadable} RSS queues (ethtool -l combined), want ${n:-?} -- systemctl restart strih-nic-irq-affinity.service (off-production: a channel change drops the link once)"; fi
   else
     # a USB rig NIC: its xhci controller IRQ
@@ -330,15 +387,15 @@ strih_housekeeping_grade_report() {
   if [ -n "$nic" ]; then
     for n in $irqs; do
       aff="$(tr -d '[:space:]' < "${STRIH_HOUSEKEEPING_PROC:-/proc}/irq/${n}/smp_affinity_list" 2>/dev/null || true)"
-      if strih_housekeeping_same_cpus "$aff" "$hk"; then okirq="${okirq:+$okirq }${n}"; else badirq="${badirq:+$badirq }${n}=${aff:-unreadable}"; fi
+      if strih_housekeeping_same_cpus "$aff" "$irq"; then okirq="${okirq:+$okirq }${n}"; else badirq="${badirq:+$badirq }${n}=${aff:-unreadable}"; fi
     done
     if [ -z "$irqs" ]; then bad "(hk-irq) ${nic}: no IRQ found (msi_irqs / xhci)"
-    elif [ -n "$badirq" ]; then bad "(hk-irq) ${nic}: IRQ(s) off the housekeeping CPUs ${hk}: ${badirq} -- systemctl restart strih-nic-irq-affinity.service (off-production: a channel change drops the link once)"
-    else ok "(hk-irq) ${nic}: IRQ(s) ${okirq} on CPUs ${hk}"; fi
+    elif [ -n "$badirq" ]; then bad "(hk-irq) ${nic}: IRQ(s) off the IRQ CPUs ${irq}: ${badirq} -- systemctl restart strih-nic-irq-affinity.service (off-production: a channel change drops the link once)"
+    else ok "(hk-irq) ${nic}: IRQ(s) ${okirq} on CPUs ${irq}"; fi
   fi
   # (hk-hooks) the udev RSS rule + the NetworkManager re-place hook as rendered.
   f="$(strih_lx_nic_driver 2>/dev/null || true)"
-  n="$(strih_housekeeping_count "$hk" 2>/dev/null || true)"
+  n="$(strih_housekeeping_count "$irq" 2>/dev/null || true)"
   if [ -z "$f" ] || [ -z "$n" ]; then
     bad "(hk-hooks) cannot render the RSS rule (STRIH_NIC_DRIVER '${f}', count '${n}')"
   elif ! cmp -s "$(strih_housekeeping_udev_path)" <(strih_housekeeping_udev_text "$f" "$n"); then
@@ -358,9 +415,11 @@ strih_housekeeping_grade_report() {
   else
     ok "(hk-sysctl) net.core.netdev_budget_usecs = ${live:-unreadable} (left as the kernel runs it: 7.0 at HZ 1000 refuses < 2000)"
   fi
-  # (hk-unit) each placed unit's RUNNING process, and the OBS launcher (its shutdown watch).
-  _strih_housekeeping_unit_row system rustdesk.service "$user" "$hk" "$home" rustdesk.service 1
-  _strih_housekeeping_unit_row user strih-display-watch.service "$user" "$hk" "$home" strih-display-watch.service 1
-  _strih_housekeeping_unit_row user strih-obs.service "$user" "$hk" "$home" launcher 0
+  # (hk-slice) rig-background.slice keeps off the IRQ CPUs (its exact CPUs: the baseline `background` row).
+  strih_housekeeping_slice_row "$(strih_housekeeping_slice_exclude "$hk")"
+  # (hk-unit) each placed unit's RUNNING process, and the OBS launcher (its shutdown watch), on the task CPUs.
+  _strih_housekeeping_unit_row system rustdesk.service "$user" "$task" "$home" rustdesk.service 1
+  _strih_housekeeping_unit_row user strih-display-watch.service "$user" "$task" "$home" strih-display-watch.service 1
+  _strih_housekeeping_unit_row user strih-obs.service "$user" "$task" "$home" launcher 0
   return 0
 }
