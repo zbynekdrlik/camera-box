@@ -31,7 +31,10 @@ FAILs otherwise. The same CPUs carry `rig-background.slice`.
 - **A link reset re-requests the IRQs with the driver's own affinity.** The NetworkManager dispatcher hook
   `60-strih-housekeeping-irq` re-runs the oneshot's script on `up` of a NIC of the fact driver (a VLAN has
   no device/driver link and is skipped).
-- `net.core.netdev_budget_usecs = 500` (`/etc/sysctl.d/60-strih-housekeeping.conf`, set live too).
+- **No `net.core.netdev_budget_usecs` change** (dropped 23.11.2026): kernel 7.0 at HZ 1000 refuses anything
+  below 2000 us with EINVAL (`sysctl -w` 500 / 1001..1999 read on strih-snv 7.0.0-38), and the box already
+  runs 2000. A leftover `/etc/sysctl.d/60-strih-housekeeping.conf` of ours is removed; `(hk-sysctl)` FAILs it
+  and otherwise reports the running value.
 - `CPUAffinity=<cpus>` + `Nice=10` drop-ins: `rustdesk.service` (system) and `strih-display-watch.service`
   (the operator's `--user` unit). A RUNNING unit whose drop-in changed is restarted; a stopped or
   not-yet-installed one (rustdesk is step 16b, the display watch 16d) is never started.
@@ -47,7 +50,7 @@ FAILs otherwise. The same CPUs carry `rig-background.slice`.
 `(hk-cpus)`, `(hk-rss)` (current combined = the count), `(hk-irq)` (every rig-NIC IRQ's
 `smp_affinity_list` as a set), `(hk-hooks)` (the udev rule + the executable hook as rendered), `(hk-rx)`
 (REPORT-ONLY NOTE: rx_missed_errors / rx_dropped delta over `STRIH_HOUSEKEEPING_SAMPLE_S`), `(hk-sysctl)`
-(file + live), `(hk-unit)` for rustdesk, the display watch and the launcher: the RUNNING main process's
+(our leftover drop-in FAILs, else the running value), `(hk-unit)` for rustdesk, the display watch and the launcher: the RUNNING main process's
 `Cpus_allowed_list` + nice (`/proc/<pid>/stat` field 19, read after the last `) `). A unit not running
 FAILs; OBS down is a NOTE for the launcher row.
 

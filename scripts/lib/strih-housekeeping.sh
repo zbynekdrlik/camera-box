@@ -17,8 +17,9 @@
 #     strih-provision.sh, generalised in place) -- not here;
 #   * /etc/strih-housekeeping-cpus.conf: the CPU list, read by strih-obs-start.sh, which puts its own
 #     shutdown watch (the stat / grep / tail loop) there at nice 10 at the next OBS start;
-#   * /etc/sysctl.d/60-strih-housekeeping.conf: net.core.netdev_budget_usecs = 500 (one softirq pass at
-#     most 0.5 ms instead of 2 ms), also set live;
+#   * NO netdev_budget_usecs change: kernel 7.0 at HZ 1000 refuses anything below 2000 us (EINVAL, read on
+#     strih-snv 23.11.2026), which is what the box runs; a leftover 60-strih-housekeeping.conf of ours is
+#     removed and verify reports the running value;
 #   * CPUAffinity= + Nice=10 drop-ins for rustdesk.service (system) and strih-display-watch.service (the
 #     operator's --user unit); a running unit whose drop-in changed is restarted (a stopped one is never
 #     started);
@@ -47,7 +48,6 @@ if ! declare -F obs_box_cpulist_expand >/dev/null; then
 fi
 
 STRIH_HOUSEKEEPING_HEADER="# camera-box issue 1425: housekeeping off the OBS CPUs (scripts/lib/strih-housekeeping.sh) -- do not edit"
-STRIH_HOUSEKEEPING_BUDGET_USECS=500
 STRIH_HOUSEKEEPING_NICE=10
 # The units placed on the housekeeping CPUs: <scope>:<unit>.
 STRIH_HOUSEKEEPING_UNITS=(system:rustdesk.service user:strih-display-watch.service)
@@ -91,13 +91,6 @@ strih_housekeeping_dropin_path() {
 }
 
 strih_housekeeping_conf_text() { printf '%s\n' "${1:?cpus required}"; }
-
-strih_housekeeping_sysctl_text() {
-  printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
-  printf '# One NET_RX softirq pass runs at most this long (the kernel default 2000 us let one pass hold an OBS\n'
-  printf '# CPU for 2 ms). The rig NIC IRQs are on the housekeeping CPUs (strih-nic-irq-affinity.service).\n'
-  printf 'net.core.netdev_budget_usecs = %s\n' "$STRIH_HOUSEKEEPING_BUDGET_USECS"
-}
 
 # strih_housekeeping_dropin_text CPUS -> the [Service] drop-in placing a unit on CPUS at nice 10.
 strih_housekeeping_dropin_text() {
@@ -167,19 +160,11 @@ strih_housekeeping_install() {
   [ "$rc" != 1 ] || return 1
   [ "$rc" != 0 ] || echo "  housekeeping: the OBS launcher's shutdown watch moves at the next OBS start (systemctl --user restart strih-obs.service)"
 
+  # issue 1425 (23.11.2026): no budget change -- kernel 7.0 at HZ 1000 refuses netdev_budget_usecs < 2000
   dest="$(strih_housekeeping_sysctl_path)"
-  install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
-  rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping strih_housekeeping_sysctl_text || rc=$?
-  [ "$rc" != 1 ] || return 1
-  proc="$(strih_housekeeping_budget_proc)"
-  live="$(head -n 1 "$proc" 2>/dev/null | tr -d '[:space:]' || true)"
-  if [ "$live" != "$STRIH_HOUSEKEEPING_BUDGET_USECS" ]; then
-    { printf '%s\n' "$STRIH_HOUSEKEEPING_BUDGET_USECS" > "$proc"; } 2>/dev/null \
-      || { echo "housekeeping: cannot set ${proc} to ${STRIH_HOUSEKEEPING_BUDGET_USECS} (run setup-strih as root)" >&2; return 1; }
-    live="$(head -n 1 "$proc" 2>/dev/null | tr -d '[:space:]' || true)"
-    [ "$live" = "$STRIH_HOUSEKEEPING_BUDGET_USECS" ] \
-      || { echo "housekeeping: ${proc} reads '${live}' after the write, not ${STRIH_HOUSEKEEPING_BUDGET_USECS}" >&2; return 1; }
-    echo "  housekeeping: net.core.netdev_budget_usecs set to ${STRIH_HOUSEKEEPING_BUDGET_USECS} (live)"
+  if [ -e "$dest" ] && strih_housekeeping_ours "$dest"; then
+    rm -f "$dest" || { echo "housekeeping: cannot remove ${dest}" >&2; return 1; }
+    echo "  housekeeping: removed ${dest} (the kernel refuses a netdev_budget_usecs below 2000)"
   fi
   drv="$(strih_lx_nic_driver)" || { echo "housekeeping: the box fact STRIH_NIC_DRIVER cannot be read" >&2; return 1; }
   dest="$(strih_housekeeping_udev_path)"
@@ -364,15 +349,13 @@ strih_housekeeping_grade_report() {
   fi
   # (hk-rx) report-only: what the NIC dropped over a short sample (the 2-queue RSS has to carry the rig load).
   [ -z "$nic" ] || strih_housekeeping_rx_note "$sys" "$nic"
-  # (hk-sysctl) the drop-in as rendered + the running value.
+  # (hk-sysctl) no budget change (kernel 7.0 refuses < 2000 us): our leftover drop-in FAILs, else the running value.
   f="$(strih_housekeeping_sysctl_path)"
   live="$(head -n 1 "$(strih_housekeeping_budget_proc)" 2>/dev/null | tr -d '[:space:]' || true)"
-  if ! [ -f "$f" ] || ! cmp -s "$f" <(strih_housekeeping_sysctl_text); then
-    bad "(hk-sysctl) ${f} missing or drifted -- re-run setup-strih.sh step 11b"
-  elif [ "$live" != "$STRIH_HOUSEKEEPING_BUDGET_USECS" ]; then
-    bad "(hk-sysctl) net.core.netdev_budget_usecs reads '${live:-unreadable}', not ${STRIH_HOUSEKEEPING_BUDGET_USECS} -- re-run setup-strih.sh step 11b"
+  if [ -e "$f" ] && strih_housekeeping_ours "$f"; then
+    bad "(hk-sysctl) ${f} is a leftover of an earlier setup -- re-run setup-strih.sh step 11b"
   else
-    ok "(hk-sysctl) net.core.netdev_budget_usecs = ${live} (${f}, the running value)"
+    ok "(hk-sysctl) net.core.netdev_budget_usecs = ${live:-unreadable} (left as the kernel runs it: 7.0 at HZ 1000 refuses < 2000)"
   fi
   # (hk-unit) each placed unit's RUNNING process, and the OBS launcher (its shutdown watch).
   _strih_housekeeping_unit_row system rustdesk.service "$user" "$hk" "$home" rustdesk.service 1
