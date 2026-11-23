@@ -116,6 +116,29 @@ strih_obs_shutdown_watch() {
   return 0
 }
 
+# strih_launcher_housekeeping_place FILE PID -> issue 1425: put PID (this launcher, whose shutdown watch
+# above runs stat / tail / grep / sleep every second for OBS's whole run) on the housekeeping CPUs FILE
+# names (/etc/strih-housekeeping-cpus.conf, setup-strih step 11b) at nice 10, off OBS's CPUs. OBS itself
+# was already started with its own mask, so nothing of OBS moves. No file / `none` = nothing (a box with
+# no housekeeping CPUs); a malformed list or a failed taskset / renice is one WARN line. Always rc 0.
+# Test seams: taskset / renice from PATH.
+strih_launcher_housekeeping_place() {
+  local file="$1" pid="$2" cpus
+  [ -r "$file" ] || return 0
+  cpus="$(head -n 1 "$file" 2>/dev/null | tr -d '[:space:]' || true)"
+  case "$cpus" in
+    '' | none) return 0 ;;
+    *[!0123456789,-]*) echo "WARN issue 1425: ${file} reads '${cpus}', not a cpulist -- the shutdown watch stays where it is"; return 0 ;;
+  esac
+  if taskset -cp "$cpus" "$pid" >/dev/null 2>&1 \
+     && { renice --priority 10 -p "$pid" >/dev/null 2>&1 || renice -n 10 -p "$pid" >/dev/null 2>&1; }; then
+    echo "issue 1425: the launcher (pid ${pid}, its shutdown watch) runs on the housekeeping CPUs ${cpus} at nice 10"
+  else
+    echo "WARN issue 1425: could not put the launcher (pid ${pid}) on the housekeeping CPUs ${cpus} at nice 10 (taskset / renice failed)"
+  fi
+  return 0
+}
+
 # --- source-guard: when sourced (the unit tests), define funcs only -- never run the launch flow ---
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0 2>/dev/null || true
@@ -282,6 +305,7 @@ fi
 # the close, so after that kill the wrapper exits 0 and Restart=on-failure leaves OBS closed.
 echo "supervising obs (pid $OBS_PID) -- exit propagated to systemd for Restart=on-failure (#882)"
 HANG_DUMP="${HOME}/.camera-box/obs-hang-$(date +%Y%m%d-%H%M%S)"
+strih_launcher_housekeeping_place "${STRIH_HOUSEKEEPING_CPUS_FILE:-/etc/strih-housekeeping-cpus.conf}" "$$"
 strih_obs_shutdown_watch "$OBS_PID" "${HOME}/.config/obs-studio/logs" "$OBS_LAUNCH_EPOCH" \
   "${STRIH_OBS_SHUTDOWN_BOUND_S:-60}" "$HANG_DUMP"
 OBS_EXIT=0

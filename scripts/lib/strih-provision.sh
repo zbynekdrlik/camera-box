@@ -178,6 +178,11 @@ if ! declare -F strih_jxs_verify_row >/dev/null; then
   # shellcheck source=scripts/lib/strih-jxs-verify.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-jxs-verify.sh"
 fi
+# issue 1425: housekeeping off the OBS CPUs (setup step 11b + verify item 16).
+if ! declare -F strih_housekeeping_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-housekeeping.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-housekeeping.sh"
+fi
 # issue 1387: the JPEG XS path from the box facts (setup step 6 + verify item 49's config rows).
 if ! declare -F strih_jxs_provision >/dev/null; then
   # shellcheck source=scripts/lib/strih-jxs-provision.sh
@@ -1927,7 +1932,7 @@ strih_nic_iface_by_driver() {
 strih_nic_irq_affinity_unit_text() {
   cat <<'UNIT'
 [Unit]
-Description=strih-snv: pin the USB-NIC xhci IRQ off the OBS cores (issue 1317 item H)
+Description=strih box: pin the rig-NIC IRQs off the OBS cores (issue 1317 item H, issue 1425)
 Documentation=https://github.com/zbynekdrlik/camera-box
 After=network-online.target
 Wants=network-online.target
@@ -1950,14 +1955,17 @@ UNIT
 # issue 1317 item H.
 strih_nic_irq_affinity_script_text() {
   # issue 1361: the target IP + NIC driver are the loaded box's facts, substituted into the quoted
-  # script body's @STRIH_TARGET_IP@ / @STRIH_NIC_DRIVER@ placeholders (the rest stays literal).
-  local ip drv box body
+  # script body's @STRIH_TARGET_IP@ / @STRIH_NIC_DRIVER@ placeholders (the rest stays literal); issue 1425
+  # adds @STRIH_HOUSEKEEPING_CPUS@.
+  local ip drv box hk body
   ip="$(strih_lx_ip)" || return 1
   drv="$(strih_lx_nic_driver)" || return 1
   box="$(strih_lx_hostname)" || return 1
+  hk="$(strih_lx_housekeeping_cpus)" || return 1
   body="$(_strih_nic_irq_affinity_script_template)" || return 1
   body="${body//@STRIH_TARGET_IP@/"$ip"}"
   body="${body//@STRIH_BOX@/"$box"}"
+  body="${body//@STRIH_HOUSEKEEPING_CPUS@/"$hk"}"
   printf '%s\n' "${body//@STRIH_NIC_DRIVER@/"$drv"}"
 }
 
@@ -1967,26 +1975,48 @@ _strih_nic_irq_affinity_script_template() {
 #!/usr/bin/env bash
 # /usr/local/bin/strih-nic-irq-affinity.sh
 set -euo pipefail
-# @STRIH_BOX@ USB-NIC xhci IRQ placement (issue 1317 item H). Emitted by
+# @STRIH_BOX@ rig-NIC IRQ placement (issue 1317 item H, issue 1425). Emitted by
 # strih_nic_irq_affinity_script_text in scripts/lib/strih-provision.sh, installed by
 # scripts/setup-strih.sh, run at boot by strih-nic-irq-affinity.service (and once live by the
-# supervisor). It pins the USB NIC's xhci interrupt to an idle E-core so its ~1.1 Gb/s NDI NET_RX
-# softirq never shares an OBS core (issue 1354: cut the genlock "slow output_video" rate ~75%). It
-# resolves the placement FROM FACTS -- never a hard-coded IRQ number -- and FAILS LOUD (exit 1 + a
-# journal line) on any unresolved step or a read-back mismatch. Inputs are env-overridable so a
-# test drives fixtures.
+# supervisor). It keeps the rig NIC's NET_RX softirq off the OBS cores. With housekeeping CPUs
+# (box fact STRIH_HOUSEKEEPING_CPUS, issue 1425) it first cuts the NIC's RSS queues to the number of
+# housekeeping CPUs (ethtool -L combined, only when it differs) and pins EVERY IRQ of the rig NIC
+# (/sys/class/net/<nic>/device/msi_irqs; a USB NIC: its xhci interrupt) to them. Without them
+# (`none`) it pins the USB NIC's xhci interrupt to the last E-core (issue 1354: cut the genlock
+# "slow output_video" rate ~75%). It resolves the placement FROM FACTS -- never a hard-coded IRQ
+# number -- and FAILS LOUD (exit 1 + a journal line) on any unresolved step or a read-back mismatch.
+# Inputs are env-overridable so a test drives fixtures.
 
 SYS_ROOT="${SYS_ROOT:-/sys}"
 PROC_INTERRUPTS="${PROC_INTERRUPTS:-/proc/interrupts}"
 CPU_ATOM_FILE="${CPU_ATOM_FILE:-/sys/devices/cpu_atom/cpus}"
 CPU_ONLINE_FILE="${CPU_ONLINE_FILE:-/sys/devices/system/cpu/online}"
 IRQ_DIR="${IRQ_DIR:-/proc/irq}"
+ETHTOOL="${ETHTOOL:-ethtool}"
 TARGET_IP="${STRIH_LX_TARGET_IP:-@STRIH_TARGET_IP@}"
+HOUSEKEEPING_CPUS="${STRIH_HOUSEKEEPING_CPUS:-@STRIH_HOUSEKEEPING_CPUS@}"
 
 log() { printf 'strih-nic-irq-affinity: %s\n' "$*"; }
 die() { printf 'strih-nic-irq-affinity: FATAL: %s\n' "$*" >&2; exit 1; }
 
-# (1) NIC iface -- STRIH_NIC_IFACE override wins; else resolve by DRIVER (the @STRIH_NIC_DRIVER@ USB NIC), which
+# cpulist_canon LIST -> the CPUs of a kernel cpulist, sorted, one space between ("0-1" and "0,1" both
+# read "0 1"); empty on a malformed list. The kernel prints smp_affinity_list compressed, so a read-back
+# compares sets, never text.
+cpulist_canon() {
+  local item a b i out=""
+  case "${1:-}" in ''|*[!0123456789,-]*) return 0 ;; esac
+  for item in ${1//,/ }; do
+    case "$item" in
+      *-*) a="${item%-*}"; b="${item#*-}" ;;
+      *) a="$item"; b="$item" ;;
+    esac
+    case "$a$b" in ''|*[!0123456789]*) return 0 ;; esac
+    for ((i = 10#$a; i <= 10#$b; i++)); do out="$out $i"; done
+  done
+  printf '%s\n' $out | sort -nu | tr '\n' ' ' | sed 's/ $//'
+}
+
+# (1) NIC iface -- STRIH_NIC_IFACE override wins; else resolve by DRIVER (the @STRIH_NIC_DRIVER@ rig NIC), which
 # works at boot BEFORE any address is assigned; else fall back to the address match. Exactly one
 # @STRIH_NIC_DRIVER@ iface is expected -- more than one fails LOUD (set STRIH_NIC_IFACE to disambiguate).
 iface="${STRIH_NIC_IFACE:-}"
@@ -2009,52 +2039,99 @@ if [ -z "$iface" ]; then
 fi
 [ -n "$iface" ] || die "could not resolve the NIC iface (no @STRIH_NIC_DRIVER@, no ${TARGET_IP} address; set STRIH_NIC_IFACE)"
 
-# (2) xhci host controller PCI function = walk the device symlink up to the usbN root.
-dev="$(readlink -f "${SYS_ROOT}/class/net/${iface}/device" 2>/dev/null || true)"
-[ -n "$dev" ] || die "no /sys device node for iface ${iface}"
-pcifn=""; p="$dev"
-while [ -n "$p" ] && [ "$p" != "/" ]; do
-  base="$(basename "$p")"
-  case "$base" in
-    usb[0-9]*)
-      cand="$(basename "$(dirname "$p")")"
-      case "$cand" in [0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*.[0-9]) pcifn="$cand" ;; esac
-      break ;;
-  esac
-  p="$(dirname "$p")"
-done
-[ -n "$pcifn" ] || die "could not find the xhci PCI function above ${dev} (iface ${iface})"
+irqs=""; src=""
+msi_dir="${SYS_ROOT}/class/net/${iface}/device/msi_irqs"
+if [ "$HOUSEKEEPING_CPUS" != none ]; then
+  hk="$(cpulist_canon "$HOUSEKEEPING_CPUS")"
+  [ -n "$hk" ] || die "STRIH_HOUSEKEEPING_CPUS '${HOUSEKEEPING_CPUS}' is not a cpulist"
+fi
 
-# (3) IRQ(s) = /proc/interrupts rows naming BOTH xhci_hcd AND that PCI function.
-irqs=""
-while IFS= read -r line; do
-  case "$line" in *"$pcifn"*xhci_hcd*|*xhci_hcd*"$pcifn"*) : ;; *) continue ;; esac
-  n="${line%%:*}"; n="${n//[[:space:]]/}"
-  case "$n" in ''|*[!0-9]*) continue ;; esac
-  irqs="${irqs:+$irqs }$n"
-done < "$PROC_INTERRUPTS"
-[ -n "$irqs" ] || die "no xhci_hcd IRQ row for ${pcifn} in ${PROC_INTERRUPTS}"
+if [ "$HOUSEKEEPING_CPUS" != none ] && [ -d "$msi_dir" ]; then
+  # (2a) issue 1425: RSS queues = the housekeeping CPU count, changed only when it differs (a change
+  # re-initialises the NIC's rings: the driver may drop the link for a moment, once).
+  want="$(printf '%s\n' $hk | wc -l | tr -d '[:space:]')"
+  chan() { "$ETHTOOL" -l "$iface" 2>/dev/null | awk '/^Current hardware settings/ { c = 1 } c && /^Combined:/ { print $2; exit }' || true; }
+  cur="$(chan)"
+  case "$cur" in ''|*[!0123456789]*) die "cannot read the RSS channel count of ${iface} (ethtool -l printed '${cur}')" ;; esac
+  if [ "$cur" != "$want" ]; then
+    "$ETHTOOL" -L "$iface" combined "$want" || die "ethtool -L ${iface} combined ${want} failed (was ${cur})"
+    got="$(chan)"
+    [ "$got" = "$want" ] || die "read-back mismatch on ${iface}: set combined ${want}, read '${got}'"
+    log "${iface}: RSS queues ${cur} -> ${want} (combined)"
+  else
+    log "${iface}: RSS queues already ${want} (combined) -- unchanged"
+  fi
+  # (3a) every IRQ of the rig NIC, read AFTER the channel change (the driver re-requests its vectors).
+  for _f in "$msi_dir"/*; do
+    _n="$(basename "$_f")"
+    case "$_n" in ''|*[!0123456789]*) continue ;; esac
+    irqs="${irqs:+$irqs }$_n"
+  done
+  [ -n "$irqs" ] || die "no IRQ listed in ${msi_dir}"
+  irqs="$(printf '%s\n' $irqs | sort -n | tr '\n' ' ' | sed 's/ $//')"
+  src="msi ${iface}"
+else
+  [ "$HOUSEKEEPING_CPUS" = none ] || log "${iface}: no msi_irqs (not a PCIe NIC) -- RSS left alone, its xhci IRQ goes to the housekeeping CPUs"
+  # (2) xhci host controller PCI function = walk the device symlink up to the usbN root.
+  dev="$(readlink -f "${SYS_ROOT}/class/net/${iface}/device" 2>/dev/null || true)"
+  [ -n "$dev" ] || die "no /sys device node for iface ${iface}"
+  pcifn=""; p="$dev"
+  while [ -n "$p" ] && [ "$p" != "/" ]; do
+    base="$(basename "$p")"
+    case "$base" in
+      usb[0-9]*)
+        cand="$(basename "$(dirname "$p")")"
+        case "$cand" in [0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*.[0-9]) pcifn="$cand" ;; esac
+        break ;;
+    esac
+    p="$(dirname "$p")"
+  done
+  [ -n "$pcifn" ] || die "could not find the xhci PCI function above ${dev} (iface ${iface})"
 
-# (4) target cpu = the LAST cpu in cpu_atom (an E-core); fallback = highest online cpu.
+  # (3) IRQ(s) = /proc/interrupts rows naming BOTH xhci_hcd AND that PCI function.
+  while IFS= read -r line; do
+    case "$line" in *"$pcifn"*xhci_hcd*|*xhci_hcd*"$pcifn"*) : ;; *) continue ;; esac
+    n="${line%%:*}"; n="${n//[[:space:]]/}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    irqs="${irqs:+$irqs }$n"
+  done < "$PROC_INTERRUPTS"
+  [ -n "$irqs" ] || die "no xhci_hcd IRQ row for ${pcifn} in ${PROC_INTERRUPTS}"
+  src="xhci_hcd ${pcifn}"
+fi
+
+# (4) target = the housekeeping CPUs; without them the LAST cpu in cpu_atom (an E-core), fallback the
+# highest online cpu.
 target=""
-if [ -r "$CPU_ATOM_FILE" ]; then
-  target="$(tr ',' '\n' < "$CPU_ATOM_FILE" 2>/dev/null | sed 's/.*-//' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
+if [ "$HOUSEKEEPING_CPUS" != none ]; then
+  target="$HOUSEKEEPING_CPUS"
+else
+  if [ -r "$CPU_ATOM_FILE" ]; then
+    target="$(tr ',' '\n' < "$CPU_ATOM_FILE" 2>/dev/null | sed 's/.*-//' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
+  fi
+  if [ -z "$target" ] && [ -r "$CPU_ONLINE_FILE" ]; then
+    target="$(tr ',' '\n' < "$CPU_ONLINE_FILE" 2>/dev/null | sed 's/.*-//' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
+  fi
+  [ -n "$target" ] || die "could not determine an E-core / highest-online target cpu"
 fi
-if [ -z "$target" ] && [ -r "$CPU_ONLINE_FILE" ]; then
-  target="$(tr ',' '\n' < "$CPU_ONLINE_FILE" 2>/dev/null | sed 's/.*-//' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
-fi
-[ -n "$target" ] || die "could not determine an E-core / highest-online target cpu"
 
-# (5) write smp_affinity_list + read it back; FAIL on any mismatch.
+# (5) write smp_affinity_list + read it back (as a CPU set); every IRQ is tried, then any failure FAILS.
+failed=""
 for irq in $irqs; do
   aff="${IRQ_DIR}/${irq}/smp_affinity_list"
-  [ -w "$aff" ] || die "cannot write ${aff} (missing or no permission)"
-  printf '%s\n' "$target" > "$aff" || die "write to ${aff} failed"
+  if [ ! -w "$aff" ]; then
+    log "cannot write ${aff} (missing or no permission)"; failed="${failed:+$failed }${irq}"; continue
+  fi
+  if ! printf '%s\n' "$target" > "$aff"; then
+    log "write to ${aff} failed"; failed="${failed:+$failed }${irq}"; continue
+  fi
   got="$(tr -d '[:space:]' < "$aff" 2>/dev/null || true)"
-  [ "$got" = "$target" ] || die "read-back mismatch on IRQ ${irq}: wrote ${target}, read '${got}'"
-  log "IRQ ${irq} (xhci_hcd ${pcifn}, iface ${iface}) pinned to cpu ${target}"
+  if [ "$(cpulist_canon "$got")" != "$(cpulist_canon "$target")" ]; then
+    log "read-back mismatch on IRQ ${irq}: wrote ${target}, read '${got}'"; failed="${failed:+$failed }${irq}"; continue
+  fi
+  log "IRQ ${irq} (${src}, iface ${iface}) pinned to cpu ${target}"
 done
-log "done: xhci NIC IRQ(s) [${irqs}] pinned to cpu ${target}"
+[ -z "$failed" ] || die "IRQ(s) [${failed}] of ${iface} could not be pinned to cpu ${target} (above)"
+log "done: rig NIC IRQ(s) [${irqs}] pinned to cpu ${target}"
 SCRIPT
 }
 
