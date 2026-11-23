@@ -55,6 +55,11 @@ pub mod vban;
 // unit-tests Tier-0; cross-platform (un-gated) like `vban`.
 pub mod intercom_target;
 
+// Issue 1539 — the pure intercom playback stall detector (consumption per check window from
+// written frames + `snd_pcm_delay`, the headset card's re-enumeration). No I/O, so it unit-tests
+// on default features; `intercom` feeds it and re-opens the playback PCM on its verdict.
+pub mod playback_stall;
+
 // #464 — the pure Auto-fallback PRESENTER decision (`resolve_presenter_kind`), extracted out of
 // `probe::presenter::open_presenter`'s hardware I/O. No probe deps, so it unit-tests Tier-0;
 // `probe::presenter` re-exports `PresenterKind` from here so every existing
