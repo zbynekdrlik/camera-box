@@ -330,6 +330,19 @@ with open(os.environ["FAKE_SYSTEMCTL_LOG"], "a") as f:
 if args[:1] == ["is-active"]:
     unit = args[-1]
     sys.exit(0 if unit in os.environ.get("FAKE_ACTIVE", "").split() else 3)
+# enable / disable / is-enabled keep their state in a file, as systemd keeps its wants symlinks
+enabled_file = os.environ.get("FAKE_SYSTEMCTL_ENABLED", "")
+enabled = set(open(enabled_file).read().split()) if enabled_file and os.path.exists(enabled_file) else set()
+if args[:1] in (["enable"], ["disable"]):
+    unit = args[-1]
+    enabled = enabled | {unit} if args[0] == "enable" else enabled - {unit}
+    open(enabled_file, "w").write("\n".join(sorted(enabled)) + "\n")
+    sys.exit(0)
+if args[:1] == ["is-enabled"]:
+    sys.exit(0 if args[-1] in enabled else 1)
+if args[:1] == ["show"] and "ExecMainStartTimestampMonotonic" in args:
+    print(os.environ.get("FAKE_REBALANCE_SHOW", "ExecMainStartTimestampMonotonic=0\nResult=success\nExecMainStatus=0"))
+    sys.exit(0)
 if args[:3] == ["show", "-p", "AllowedCPUs"]:
     print(os.environ.get("FAKE_ALLOWED_CPUS", "0"))
 elif args[:1] == ["show"]:
@@ -352,6 +365,7 @@ def _install_env(tmp_path):
     (tmp_path / "systemctl.log").write_text("")
     env = {"STRIH_HOUSEKEEPING_ROOT": str(root), "STRIH_HOUSEKEEPING_OWNER": "%s:%s" % (ME, MYGRP),
            "STRIH_SESSION_APPS_EUID": "1000", "FAKE_SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"),
+           "FAKE_SYSTEMCTL_ENABLED": str(tmp_path / "systemctl.enabled"),
            "FAKE_ACTIVE": "rustdesk.service strih-display-watch.service"}
     return root, home, bin_dir, env
 
@@ -376,7 +390,10 @@ def test_setup_writes_the_sysctl_the_two_dropins_the_launcher_file_and_restarts_
     hook = root / "etc" / "NetworkManager" / "dispatcher.d" / "60-strih-housekeeping-irq"
     assert hook.read_text().startswith("#!/bin/sh\n# camera-box issue 1425") and os.access(hook, os.X_OK)
     calls = (tmp_path / "systemctl.log").read_text().splitlines()
+    # design 7119686502: the delayed re-balance units, reloaded and the timer enabled, never started
     assert calls == ["udevadm control --reload-rules",
+                     "daemon-reload", "is-enabled -q strih-nic-irq-rebalance.timer",
+                     "enable strih-nic-irq-rebalance.timer",
                      "daemon-reload", "is-active -q rustdesk.service", "restart rustdesk.service",
                      "--user daemon-reload", "--user is-active -q strih-display-watch.service",
                      "--user restart strih-display-watch.service"], calls
@@ -389,7 +406,8 @@ def test_a_second_setup_run_touches_no_unit(tmp_path):
     (tmp_path / "systemctl.log").write_text("")
     r = _run(body, ME, str(home), env=env, path_prefix=bin_dir)
     assert r.returncode == 0, r.stderr
-    assert (tmp_path / "systemctl.log").read_text() == ""
+    # only the read-only enable-state query of the re-balance timer (already enabled: nothing done)
+    assert (tmp_path / "systemctl.log").read_text() == "is-enabled -q strih-nic-irq-rebalance.timer\n"
     assert "written" not in r.stdout
 
 
@@ -420,8 +438,11 @@ def test_a_box_with_none_removes_ours_and_keeps_a_foreign_file(tmp_path):
     assert foreign.exists() and "not ours" in r.stderr
     assert not (root / "etc" / "udev" / "rules.d" / "71-strih-housekeeping-rss.rules").exists()
     assert not (root / "etc" / "NetworkManager" / "dispatcher.d" / "60-strih-housekeeping-irq").exists()
+    assert not (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance.timer").exists()
+    assert not (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance.service").exists()
     calls = (tmp_path / "systemctl.log").read_text().splitlines()
-    assert calls == ["daemon-reload", "--user daemon-reload"], calls
+    assert calls == ["disable --now strih-nic-irq-rebalance.timer", "daemon-reload",
+                     "daemon-reload", "--user daemon-reload"], calls
 
 
 def test_a_none_box_with_nothing_of_ours_is_silent(tmp_path):
@@ -467,8 +488,13 @@ def _grade_env(tmp_path, irq_aff=("1", "0", "1"), combined=2, nice=10, cpus="0",
     (stats / "rx_missed_errors").write_text("7\n")
     (stats / "rx_dropped").write_text("0\n")
     env.update({"STRIH_HOUSEKEEPING_SYS": str(sysr), "STRIH_HOUSEKEEPING_PROC": str(proc), "STRIH_NIC_IFACE": "enp7s0",
-                "STRIH_HOUSEKEEPING_IPADDR": "", "STRIH_HOUSEKEEPING_SAMPLE_S": "0"})
+                "STRIH_HOUSEKEEPING_IPADDR": "", "STRIH_HOUSEKEEPING_SAMPLE_S": "0",
+                "FAKE_REBALANCE_SHOW": REBALANCE_RAN_OK})
     return home, "%s:%s" % (bin_dir, sbin), env
+
+
+# `systemctl show -p ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus` of the re-balance service
+REBALANCE_RAN_OK = "Result=success\nExecMainStartTimestampMonotonic=301204512\nExecMainStatus=0"
 
 
 def _grade(tmp_path, **kw):
@@ -498,7 +524,8 @@ def test_a_placed_box_passes_every_row(tmp_path):
     assert "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ-only CPUs 1" in out
     assert "PASS (hk-unit) sampler: pid 4003 runs on CPUs 2-15 at nice 10" in out
     for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-slice)", "(hk-unit) rustdesk.service",
-                "(hk-unit) strih-display-watch.service", "(hk-unit) launcher", "(hk-softnet)", "(hk-unit) sampler"):
+                "(hk-unit) strih-display-watch.service", "(hk-unit) launcher", "(hk-softnet)", "(hk-unit) sampler",
+                "(hk-rebalance)"):
         assert any(tag in r for r in rows), (tag, out)
 
 
@@ -854,3 +881,122 @@ def test_a_one_cpu_set_keeps_the_slice_and_the_sampler_and_passes_the_slice_row(
     r = _run('strih_box_load strih-snv; strih_housekeeping_slice_row "$(strih_housekeeping_slice_exclude)"',
              env=genv, path_prefix=path)
     assert "PASS (hk-slice) rig-background.slice: AllowedCPUs 0 (one housekeeping CPU: the rig NIC IRQs share it)" in r.stdout, r.stdout
+
+
+# --- the delayed re-balance after boot (design 7119686502) ------------------------------------------------
+
+REBALANCE_SERVICE = REPO / "systemd" / "strih-nic-irq-rebalance.service"
+REBALANCE_TIMER = REPO / "systemd" / "strih-nic-irq-rebalance.timer"
+
+
+def test_the_rebalance_units_are_the_lib_text_byte_for_byte():
+    for fn, committed in (("strih_housekeeping_rebalance_service_text", REBALANCE_SERVICE),
+                          ("strih_housekeeping_rebalance_timer_text", REBALANCE_TIMER)):
+        r = _run(fn)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == committed.read_text(), fn
+
+
+def test_the_rebalance_service_is_a_plain_oneshot_of_the_irq_script_after_the_boot_oneshot():
+    lines = REBALANCE_SERVICE.read_text().splitlines()
+    assert lines[0].startswith("# camera-box issue 1425")
+    assert "Type=oneshot" in lines
+    assert "ExecStart=/usr/local/bin/strih-nic-irq-affinity.sh" in lines
+    assert "After=strih-nic-irq-affinity.service" in lines
+    # once per boot from the timer: no RemainAfterExit (a later start would be a no-op), no [Install]
+    assert not [x for x in lines if x.startswith("RemainAfterExit")]
+    assert "[Install]" not in lines
+    assert "strih-snv" not in REBALANCE_SERVICE.read_text()
+
+
+def test_the_rebalance_timer_fires_once_5_min_after_boot():
+    text = REBALANCE_TIMER.read_text()
+    lines = text.splitlines()
+    assert lines[0].startswith("# camera-box issue 1425")
+    assert "OnBootSec=5min" in lines and "Unit=strih-nic-irq-rebalance.service" in lines
+    assert "WantedBy=timers.target" in lines
+    # no catch-up of a missed run and no periodic re-run: each IRQ move costs a loss burst
+    assert "Persistent" not in text and "OnUnitActiveSec" not in text and "OnCalendar" not in text
+    assert "strih-snv" not in text
+
+
+def test_setup_writes_the_rebalance_units_and_enables_the_timer_without_starting_it(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr + r.stdout
+    unitdir = root / "etc" / "systemd" / "system"
+    assert (unitdir / "strih-nic-irq-rebalance.service").read_text() == REBALANCE_SERVICE.read_text()
+    assert (unitdir / "strih-nic-irq-rebalance.timer").read_text() == REBALANCE_TIMER.read_text()
+    calls = (tmp_path / "systemctl.log").read_text().splitlines()
+    assert "enable strih-nic-irq-rebalance.timer" in calls
+    assert not [c for c in calls if c.startswith("start") or "--now" in c or "rebalance.service" in c], calls
+
+
+def test_a_disabled_timer_is_enabled_again_by_the_next_setup_run(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    body = 'strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"'
+    assert _run(body, ME, str(home), env=env, path_prefix=bin_dir).returncode == 0
+    (tmp_path / "systemctl.enabled").write_text("")
+    (tmp_path / "systemctl.log").write_text("")
+    r = _run(body, ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "systemctl.log").read_text().splitlines() == [
+        "is-enabled -q strih-nic-irq-rebalance.timer", "enable strih-nic-irq-rebalance.timer"]
+
+
+def test_a_foreign_rebalance_unit_is_never_removed_or_disabled(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    unitdir = root / "etc" / "systemd" / "system"
+    unitdir.mkdir(parents=True)
+    (unitdir / "strih-nic-irq-rebalance.timer").write_text("[Timer]\nOnBootSec=1min\n")
+    env.update(_box_with(tmp_path, "none"))
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr
+    assert (unitdir / "strih-nic-irq-rebalance.timer").exists() and "not ours" in r.stderr
+    assert "disable" not in (tmp_path / "systemctl.log").read_text()
+
+
+def _rebalance_rows(tmp_path, **env_over):
+    home, path, env = _grade_env(tmp_path)
+    env.update(env_over)
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    assert r.returncode == 0, r.stderr
+    return [x for x in r.stdout.splitlines() if "(hk-rebalance)" in x], env
+
+
+def test_verify_passes_an_enabled_timer_whose_run_this_boot_succeeded(tmp_path):
+    rows, _ = _rebalance_rows(tmp_path)
+    assert rows == ["PASS (hk-rebalance) strih-nic-irq-rebalance.timer enabled; the re-balance ran this boot: "
+                    "success (exit 0)"], rows
+
+
+def test_verify_notes_a_re_balance_that_has_not_run_yet_this_boot(tmp_path):
+    rows, _ = _rebalance_rows(tmp_path, FAKE_REBALANCE_SHOW="ExecMainStartTimestampMonotonic=0\nResult=success\nExecMainStatus=0")
+    assert len(rows) == 1 and rows[0].startswith("NOTE (hk-rebalance) strih-nic-irq-rebalance.timer enabled; "
+                                                 "the re-balance has not run yet this boot"), rows
+
+
+def test_verify_fails_a_failed_re_balance_run(tmp_path):
+    rows, _ = _rebalance_rows(tmp_path, FAKE_REBALANCE_SHOW="ExecMainStartTimestampMonotonic=301204512\n"
+                                                            "Result=exit-code\nExecMainStatus=1")
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-rebalance) the re-balance ran this boot and failed: "
+                                                 "exit-code (exit 1)"), rows
+    assert "journalctl -b -u strih-nic-irq-rebalance.service" in rows[0]
+
+
+def test_verify_fails_a_disabled_timer(tmp_path):
+    home, path, env = _grade_env(tmp_path)
+    pathlib.Path(env["FAKE_SYSTEMCTL_ENABLED"]).write_text("")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-rebalance)" in x]
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-rebalance) strih-nic-irq-rebalance.timer is not enabled"), rows
+
+
+def test_verify_fails_a_drifted_or_missing_rebalance_unit(tmp_path):
+    for name in ("strih-nic-irq-rebalance.service", "strih-nic-irq-rebalance.timer"):
+        home, path, env = _grade_env(tmp_path / name)
+        f = pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "systemd" / "system" / name
+        f.write_text(f.read_text().replace("5min", "1min").replace("Type=oneshot", "Type=simple"))
+        r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+        rows = [x for x in r.stdout.splitlines() if "(hk-rebalance)" in x]
+        assert len(rows) == 1 and rows[0].startswith("FAIL (hk-rebalance) ") and "drifted" in rows[0], (name, rows)
