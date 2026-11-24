@@ -127,4 +127,8 @@ udev rule did not take effect at add). The rate sample is taken once per run: at
 placement is the round-robin, rebalanced only by the next run (an NM `up`, or the supervisor's restart
 once the rig carries traffic).
 
-Tests: `tests/python/test_strih_housekeeping_1425.py`.
+Tests: `tests/python/test_strih_housekeeping_1425.py`. A sampled read (the oneshot's /proc/interrupts rate,
+the `(hk-softnet)` softnet_stat / InDroppedDma deltas) is tested with a `sleep` stub first on PATH
+(`SWAP_SLEEP`) that copies an "after" fixture over the file being read: the code's own sleep becomes the
+moment the counters move, with no extra env seam and no wall-clock wait. Write greedy expectations from a
+hand-run of the algorithm (ties to the lower CPU decide the light IRQs).
