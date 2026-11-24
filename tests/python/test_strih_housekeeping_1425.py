@@ -1038,3 +1038,31 @@ def test_verify_fails_a_drifted_or_missing_rebalance_unit(tmp_path):
         r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
         rows = [x for x in r.stdout.splitlines() if "(hk-rebalance)" in x]
         assert len(rows) == 1 and rows[0].startswith("FAIL (hk-rebalance) ") and "drifted" in rows[0], (name, rows)
+
+
+def test_an_inactive_timer_installed_before_this_boot_fails(tmp_path):
+    # review round 2: a timer whose file predates the boot should have started with timers.target
+    home, path, env = _grade_env(tmp_path)
+    f = pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance.timer"
+    os.utime(f, (1_000_000_000, 1_000_000_000))
+    (pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"]) / "stat").write_text("cpu  1 2 3\nbtime 1700000000\nprocesses 9\n")
+    env.update(FAKE_REBALANCE_SHOW=NOT_RUN, FAKE_REBALANCE_TIMER_SHOW="ActiveState=inactive\nSubState=dead")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-rebalance)" in x]
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-rebalance) strih-nic-irq-rebalance.timer is enabled but "
+                                                 "inactive, installed before this boot"), rows
+
+
+def test_none_never_reset_fails_a_foreign_service_beside_our_timer(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    assert _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env,
+                path_prefix=bin_dir).returncode == 0
+    svc = root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance.service"
+    svc.write_text("[Service]\nExecStart=/bin/true\n")
+    env.update(_box_with(tmp_path, "none"))
+    (tmp_path / "systemctl.log").write_text("")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr
+    assert svc.exists() and "not ours" in r.stderr
+    log = (tmp_path / "systemctl.log").read_text()
+    assert "disable --now strih-nic-irq-rebalance.timer" in log and "reset-failed" not in log
