@@ -4,6 +4,7 @@ paths:
   - "scripts/lib/strih-nic-irq.sh"
   - "scripts/lib/obs-box-background.sh"
   - "systemd/strih-nic-irq-affinity.service"
+  - "systemd/strih-nic-irq-rebalance.*"
   - "scripts/strih-obs-start.sh"
   - "tests/python/test_strih_housekeeping_1425.py"
 ---
@@ -35,7 +36,18 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   traffic) = round-robin in IRQ order. An IRQ with no `/proc/interrupts` row counts as rate 0 (logged). It
   logs each IRQ's rate and CPU and the assigned load per CPU, and writes an affinity ONLY when it differs
   (every move costs a short loss burst, measured 24.11.2026). The placement holds until the next run (boot,
-  NM `up`); a later traffic change can unbalance it, the `(hk-softnet)` NOTE shows that.
+  NM `up`, the re-balance below); a later traffic change can unbalance it, the `(hk-softnet)` NOTE shows that.
+- **The delayed re-balance (design 7119686502):** at boot no traffic flows, so the oneshot's sample reads
+  every rate 0 and places round-robin. `strih-nic-irq-rebalance.timer` (`OnBootSec=5min`, no `Persistent`,
+  `WantedBy=timers.target`) starts `strih-nic-irq-rebalance.service` (`Type=oneshot`, NO RemainAfterExit,
+  no `[Install]`, the same script, `After=strih-nic-irq-affinity.service`) ONCE per boot, when the strih
+  OBS pulls the cameras + the program. Their text is `strih_housekeeping_rebalance_{service,timer}_text`
+  in the housekeeping lib, byte-identical to the committed `systemd/` files (parity test), carrying our
+  header line. `strih_housekeeping_install` writes them if changed (daemon-reload then) and ENABLES the
+  timer when it is not (never started: it fires at the next boot); `none` disables + stops our timer and
+  removes both (header-checked). Rejected: a periodic re-balance (each move is a loss burst, no hysteresis
+  data); delaying the boot oneshot (it must take the IRQs off the OBS CPUs at boot). Trade-off: a boot whose
+  rig carries no traffic 5 min later keeps the round-robin until the next NM `up` or a hand restart.
 - **Rejected:** irqbalance with the OBS CPUs banned (it rebalances every ~10 s, and each move measured
   rx_loss +144 / ~29 JXS lost_slices per camera); CPU 1 alone with RPS/GRO tuning (unmeasured on atlantic, no
   headroom at 86 %).
@@ -103,7 +115,15 @@ the NIC's `InDroppedDma` increase from `ethtool -S`, named "not exposed" when th
 rig-background.slice` names no IRQ-only CPU; empty / unread FAILs), `(hk-unit)` for rustdesk, the display watch
 and the launcher: the RUNNING main process's `Cpus_allowed_list` = the task CPUs + nice (`/proc/<pid>/stat` field 19, read after the last `) `). A unit not running
 FAILs; OBS down is a NOTE for the launcher row. `(hk-unit) sampler`: the running program-audio sampler on
-the OBS mask at nice 10; not running (EVENT mode) is a NOTE.
+the OBS mask at nice 10; not running (EVENT mode) is a NOTE. `(hk-rebalance)`: both re-balance units as rendered
+(drift FAILs), the timer enabled (FAILs otherwise), and the service's run this boot from `systemctl show -p
+ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus` (systemd keeps it per boot): success + exit 0 =
+PASS, a failed run FAILs naming `journalctl -b -u strih-nic-irq-rebalance.service`; not run yet (0) is
+graded by the timer's `ActiveState/SubState`: `active/waiting` a NOTE (it runs at 5 min), `inactive/*` a
+NOTE when the timer file is newer than the boot (`btime` of `/proc/stat`: setup enables without starting, so
+the boot it was installed in never runs it), a FAIL when it predates the boot, anything else
+(`active/elapsed`, unreadable) FAILs: the timer fired and the service never ran. `none` also
+`reset-failed`s a removed service.
 
 ## Deploy (supervisor)
 
@@ -117,15 +137,18 @@ unit is rewritten (`CPUAffinity=2-15` + `Nice=10`, design 7119179275) and try-re
 the next NM `up`), the launcher at the next OBS start. Read before/after: `grep . /proc/irq/*/smp_affinity_list` for the NIC's IRQs, `ethtool
 -l <nic>`, `sysctl net.core.netdev_budget_usecs`, `ethtool -S <nic> | grep -iE 'miss|InDroppedDma'`, `carrier_changes`, each
 unit's `Cpus_allowed_list`, the oneshot's journal (`journalctl -u strih-nic-irq-affinity` = each IRQ's rate + CPU),
-`mpstat -P 0,1 10 1` (%soft per CPU) and `/proc/net/softnet_stat` column 3 (or verify's `(hk-softnet)` NOTE).
+`mpstat -P 0,1 10 1` (%soft per CPU) and `/proc/net/softnet_stat` column 3 (or verify's `(hk-softnet)` NOTE). The re-balance deploy: setup-strih writes the two units and enables the
+timer (nothing starts, nothing moves); it first runs at the next boot (`journalctl -b -u
+strih-nic-irq-rebalance.service` = each IRQ's rate + CPU then; `systemctl list-timers strih-nic-irq-rebalance.timer`
+before), `(hk-rebalance)` reads a NOTE until then.
 
 ## Known limit
 
 Not read on the box from this lane: whether atlantic reapplies an affinity hint on a later open, and the
 journal of the oneshot / hook at the first boot with the rule (an `RSS queues N -> 2` line there = the
-udev rule did not take effect at add). The rate sample is taken once per run: at boot (no traffic) the
-placement is the round-robin, rebalanced only by the next run (an NM `up`, or the supervisor's restart
-once the rig carries traffic).
+udev rule did not take effect at add). No lock serialises the placement script: an NM `up` around the 5-min
+re-balance (or the boot oneshot) can run two placements at once, both writing `smp_affinity` (each writes
+only an IRQ whose target differs; the last run wins).
 
 Tests: `tests/python/test_strih_housekeeping_1425.py`. A sampled read (the oneshot's /proc/interrupts rate,
 the `(hk-softnet)` softnet_stat / InDroppedDma deltas) is tested with a `sleep` stub first on PATH

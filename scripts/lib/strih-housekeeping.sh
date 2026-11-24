@@ -33,6 +33,9 @@
 #     `ethtool -L` (a ring re-init = a link drop) never runs after network-online (review round 1);
 #   * a NetworkManager dispatcher hook that re-runs the oneshot's script on the rig NIC's `up`: a link
 #     reset re-requests the IRQs with the driver's own affinity.
+#   * strih-nic-irq-rebalance.timer + .service (design 7119686502): the same script once, 5 min after boot,
+#     when the rig carries traffic (the boot oneshot's sample reads every rate 0); the timer enabled, never
+#     started.
 # `none` removes our files (header-checked: a file without our first line is never touched).
 #
 # Seams (tests): STRIH_HOUSEKEEPING_ROOT (prefix of /etc and /proc/sys), STRIH_HOUSEKEEPING_OWNER (the
@@ -84,6 +87,124 @@ strih_housekeeping_hook_text() {
   printf '[ "$2" = up ] || exit 0\n[ -x %s ] || exit 0\n' "$STRIH_HOUSEKEEPING_IRQ_SCRIPT"
   printf 'drv="$(readlink -f "/sys/class/net/$1/device/driver" 2>/dev/null || true)"\n'
   printf '[ "${drv##*/}" = %s ] || exit 0\nexec %s\n' "$1" "$STRIH_HOUSEKEEPING_IRQ_SCRIPT"
+}
+
+# The delayed re-balance (design 7119686502): the boot oneshot samples the IRQ rates before traffic flows
+# (every rate 0 = the round-robin fallback), so a timer runs the same script once, 5 min after boot, when
+# the strih OBS pulls the cameras + the program. Once per boot only: every IRQ move costs a loss burst.
+STRIH_HOUSEKEEPING_REBALANCE=strih-nic-irq-rebalance
+strih_housekeeping_rebalance_path() { printf '%s/etc/systemd/system/%s.%s\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE" "${1:?service|timer required}"; }
+
+# strih_housekeeping_rebalance_service_text -> systemd/strih-nic-irq-rebalance.service (byte-parity test):
+# a plain oneshot (no RemainAfterExit, no [Install]: only the timer starts it).
+strih_housekeeping_rebalance_service_text() {
+  printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
+  printf '[Unit]\nDescription=strih box: re-balance the rig-NIC IRQs by their measured rate once the rig carries traffic (issue 1425)\n'
+  printf 'Documentation=https://github.com/zbynekdrlik/camera-box\nAfter=strih-nic-irq-affinity.service\n\n'
+  printf '[Service]\nType=oneshot\nExecStart=%s\n' "$STRIH_HOUSEKEEPING_IRQ_SCRIPT"
+}
+
+# strih_housekeeping_rebalance_timer_text -> systemd/strih-nic-irq-rebalance.timer (byte-parity test):
+# once, 5 min after boot; no Persistent (a missed boot run is not caught up).
+strih_housekeeping_rebalance_timer_text() {
+  printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
+  printf '[Unit]\nDescription=strih box: re-balance the rig-NIC IRQs 5 min after boot (issue 1425)\n'
+  printf 'Documentation=https://github.com/zbynekdrlik/camera-box\n\n'
+  printf '[Timer]\nOnBootSec=5min\nUnit=%s.service\n\n[Install]\nWantedBy=timers.target\n' "$STRIH_HOUSEKEEPING_REBALANCE"
+}
+
+# strih_housekeeping_rebalance_install OWNER -> both units written if changed (daemon-reload then), the timer
+# enabled when it is not; never started (it fires at the next boot). rc 1 on a write failure; a failed
+# reload / enable is a WARN (verify item 16 FAILs it).
+strih_housekeeping_rebalance_install() {
+  local owner="$1" kind dest rc changed=0 timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
+  for kind in service timer; do
+    dest="$(strih_housekeeping_rebalance_path "$kind")"
+    install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
+    rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping "strih_housekeeping_rebalance_${kind}_text" || rc=$?
+    [ "$rc" != 1 ] || return 1
+    [ "$rc" != 0 ] || changed=1
+  done
+  if [ "$changed" = 1 ] && ! systemctl daemon-reload; then
+    echo "  WARN: daemon-reload failed -- run it, then systemctl enable ${timer}; verify item 16 FAILs it until then"
+  elif ! systemctl is-enabled -q "$timer"; then
+    if systemctl enable "$timer"; then
+      echo "  housekeeping: ${timer} enabled -- the IRQs are re-balanced by their measured rate 5 min after each boot"
+    else
+      echo "  WARN: systemctl enable ${timer} failed -- enable it by hand; verify item 16 FAILs it until then"
+    fi
+  fi
+  return 0
+}
+
+# strih_housekeeping_rebalance_remove -> a `none` box: our two units go (header-checked; the timer disabled
+# and stopped first, so no wants link dangles), then one daemon-reload.
+strih_housekeeping_rebalance_remove() {
+  local kind f gone=0 timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
+  for kind in timer service; do
+    f="$(strih_housekeeping_rebalance_path "$kind")"
+    [ -e "$f" ] || continue
+    if ! strih_housekeeping_ours "$f"; then echo "  WARNING: ${f} is not ours (no camera-box header) -- left alone" >&2; continue; fi
+    if [ "$kind" = timer ] && ! systemctl disable --now "$timer"; then
+      echo "  WARN: systemctl disable --now ${timer} failed -- disable it by hand"
+    fi
+    rm -f "$f" || return 1
+    echo "  housekeeping: removed ${f}"
+    gone=1
+  done
+  [ "$gone" = 0 ] || systemctl daemon-reload || echo "  WARN: daemon-reload failed after removing the re-balance units -- run it by hand"
+  # a service that failed this boot would stay listed as `not-found failed` (review round 1)
+  [ -e "$(strih_housekeeping_rebalance_path service)" ] || [ "$gone" = 0 ] \
+    || systemctl reset-failed "${STRIH_HOUSEKEEPING_REBALANCE}.service" 2>/dev/null || true
+  return 0
+}
+
+# strih_housekeeping_rebalance_row -> the `(hk-rebalance)` row: both units as rendered, the timer enabled,
+# and the service's run this boot (systemd's state is per boot: a start monotonic of 0 = not run yet).
+strih_housekeeping_rebalance_row() {
+  local kind f show line state btime mtime mono="" result="" status="" timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
+  for kind in service timer; do
+    f="$(strih_housekeeping_rebalance_path "$kind")"
+    if ! cmp -s "$f" <("strih_housekeeping_rebalance_${kind}_text"); then
+      bad "(hk-rebalance) ${f} missing or drifted -- re-run setup-strih.sh step 11b"; return 0
+    fi
+  done
+  if ! systemctl is-enabled -q "$timer"; then
+    bad "(hk-rebalance) ${timer} is not enabled -- systemctl enable ${timer} (or re-run setup-strih.sh step 11b)"; return 0
+  fi
+  show="$(systemctl show -p ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus "${STRIH_HOUSEKEEPING_REBALANCE}.service" 2>/dev/null || true)"
+  while IFS= read -r line; do
+    case "$line" in
+      ExecMainStartTimestampMonotonic=*) mono="${line#*=}" ;;
+      Result=*) result="${line#*=}" ;;
+      ExecMainStatus=*) status="${line#*=}" ;;
+    esac
+  done <<<"$show"
+  case "$mono" in
+    '' | *[!0123456789]*) bad "(hk-rebalance) ${timer} enabled; the service's state is unreadable (ExecMainStartTimestampMonotonic '${mono}')" ;;
+    0) # not run this boot: the timer's own state says why (review round 1)
+       show="$(systemctl show -p ActiveState -p SubState "$timer" 2>/dev/null || true)"
+       state="$(printf '%s\n' "$show" | sed -n 's/^ActiveState=//p')/$(printf '%s\n' "$show" | sed -n 's/^SubState=//p')"
+       case "$state" in
+         active/waiting) note "(hk-rebalance) ${timer} enabled and waiting; the re-balance has not run yet this boot (it runs 5 min after boot)" ;;
+         inactive/*)
+           # an enabled timer starts with timers.target: inactive is only honest for one written after boot
+           btime="$(sed -n 's/^btime //p' "${STRIH_HOUSEKEEPING_PROC:-/proc}/stat" 2>/dev/null || true)"
+           mtime="$(stat -c %Y "$(strih_housekeeping_rebalance_path timer)" 2>/dev/null || true)"
+           if [[ "$btime" =~ ^[0123456789]+$ ]] && [[ "$mtime" =~ ^[0123456789]+$ ]] && [ "$mtime" -lt "$btime" ]; then
+             bad "(hk-rebalance) ${timer} is enabled but inactive, installed before this boot -- it should have started with timers.target (journalctl -b -u ${timer})"
+           else
+             note "(hk-rebalance) ${timer} enabled but not started this boot (installed after boot): the first re-balance runs 5 min after the next boot"
+           fi ;;
+         *) bad "(hk-rebalance) ${timer} is ${state} but the re-balance never ran this boot -- journalctl -b -u ${timer} -u ${STRIH_HOUSEKEEPING_REBALANCE}.service" ;;
+       esac ;;
+    *) if [ "$result" = success ] && [ "$status" = 0 ]; then
+         ok "(hk-rebalance) ${timer} enabled; the re-balance ran this boot: success (exit 0)"
+       else
+         bad "(hk-rebalance) the re-balance ran this boot and failed: ${result:-unread} (exit ${status:-unread}) -- journalctl -b -u ${STRIH_HOUSEKEEPING_REBALANCE}.service"
+       fi ;;
+  esac
+  return 0
 }
 
 # strih_housekeeping_dropin_path SCOPE UNIT HOME -> the drop-in file of UNIT (system: /etc/systemd/system,
@@ -210,6 +331,7 @@ strih_housekeeping_install() {
   install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
   rc=0; _strih_housekeeping_put "$dest" 0755 "$owner" housekeeping strih_housekeeping_hook_text "$drv" || rc=$?
   [ "$rc" != 1 ] || return 1
+  strih_housekeeping_rebalance_install "$owner" || return 1
 
   for entry in "${STRIH_HOUSEKEEPING_UNITS[@]}"; do
     scope="${entry%%:*}"; unit="${entry#*:}"
@@ -249,6 +371,7 @@ strih_housekeeping_remove() {
     if strih_housekeeping_ours "$f"; then rm -f "$f" && echo "  housekeeping: removed ${f}" || return 1
     else echo "  WARNING: ${f} is not ours (no camera-box header) -- left alone" >&2; fi
   done
+  strih_housekeeping_rebalance_remove || return 1
   for entry in "${STRIH_HOUSEKEEPING_UNITS[@]}"; do
     scope="${entry%%:*}"; unit="${entry#*:}"
     f="$(strih_housekeeping_dropin_path "$scope" "$unit" "$home")"
@@ -485,5 +608,7 @@ strih_housekeeping_grade_report() {
   _strih_housekeeping_unit_row user strih-display-watch.service "$user" "$task" "$home" strih-display-watch.service 1
   _strih_housekeeping_unit_row user strih-obs.service "$user" "$task" "$home" launcher 0
   _strih_housekeeping_unit_row user "${STRIH_PROGRAM_AUDIO_UNIT:-program-audio-sampler.service}" "$user" "${iso:-unread}" "$home" sampler 0
+  # (hk-rebalance) the delayed re-balance after boot: units as rendered, timer enabled, this boot's run.
+  strih_housekeeping_rebalance_row
   return 0
 }
