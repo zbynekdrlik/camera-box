@@ -460,18 +460,17 @@ def test_the_lib_stays_within_the_setup_budgets():
         assert "obs_box_background_slice " in (REPO / "scripts" / setup).read_text()
 
 
-# --- issue 1425 (design 7116063669): the slice keeps off the CPU that carries the rig NIC IRQs alone ------
+# --- issue 1425 (design 7119179275): the rig NIC IRQs on every housekeeping CPU, the tasks on the first -------
 
-def test_cpulist_last_and_rest_split_the_housekeeping_set():
-    assert lib("obs_box_cpulist_last 0-1").stdout.strip() == "1"
-    assert lib("obs_box_cpulist_rest 0-1").stdout.strip() == "0"
-    assert lib("obs_box_cpulist_last 0-1,8").stdout.strip() == "8"
-    assert lib("obs_box_cpulist_rest 0-1,8").stdout.strip() == "0-1"
-    assert lib("obs_box_cpulist_last 3").stdout.strip() == "3"
-    assert lib("obs_box_cpulist_rest 3").stdout.strip() == "3", "one CPU: nowhere else to put the tasks"
+def test_cpulist_first_and_canon_split_the_housekeeping_set():
+    assert lib("obs_box_cpulist_first 0-1").stdout.strip() == "0"
+    assert lib("obs_box_cpulist_first 8,0-1").stdout.strip() == "0"
+    assert lib("obs_box_cpulist_first 3").stdout.strip() == "3"
+    assert lib("obs_box_cpulist_canon 1,0").stdout.strip() == "0-1"
+    assert lib("obs_box_cpulist_canon 0-1,8").stdout.strip() == "0-1,8"
     for bad in ("", "a", "1-0"):
-        assert lib(f"obs_box_cpulist_last '{bad}'").returncode == 1, bad
-        assert lib(f"obs_box_cpulist_rest '{bad}'").returncode == 1, bad
+        assert lib(f"obs_box_cpulist_first '{bad}'").returncode == 1, bad
+        assert lib(f"obs_box_cpulist_canon '{bad}'").returncode == 1, bad
 
 
 def test_background_cpus_keep_the_excluded_cpus_out():

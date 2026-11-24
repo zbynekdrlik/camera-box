@@ -229,6 +229,20 @@ def test_the_render_fills_the_affinity_line_and_never_drops_it(tmp_path):
     assert r.returncode == 1 and r.stdout == ""
 
 
+def test_the_render_adds_a_nice_line_only_when_one_is_given(tmp_path):
+    # issue 1425 (design 7119179275): on the OBS mask the sampler runs at nice 10, right under its affinity
+    box = Box(tmp_path)
+    t = TEMPLATE.read_text(encoding="utf-8")
+    r = box.run("strih_program_audio_unit_text", str(_ROOT), "2-15", "10")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == t.replace("CPUAffinity=@E_CORES@", "CPUAffinity=2-15\nNice=10")
+    r = box.run("strih_program_audio_unit_text", str(_ROOT), "12-15", "")
+    assert r.returncode == 0 and r.stdout == t.replace("CPUAffinity=@E_CORES@", "CPUAffinity=12-15")
+    for bad in ("-5", "x", "20", "1 0"):
+        r = box.run("strih_program_audio_unit_text", str(_ROOT), "2-15", bad)
+        assert r.returncode == 1 and r.stdout == "" and "nice" in r.stderr, bad
+
+
 def test_a_broken_template_refuses(tmp_path):
     repo = tmp_path / "repo"
     (repo / "systemd").mkdir(parents=True)
