@@ -119,9 +119,13 @@ cg_chain_readback_poll_ms() {
   printf '%s' "$ms"
 }
 
-# The wall clock in ms. Pure (reads the clock).
+# A MONOTONIC clock in ms (the kernel's uptime, centisecond resolution). The poll budgets are
+# elapsed time: the wall clock steps (a dsync date step, a runner's NTP) and a stopped or stepped-back
+# wall clock kept a poll going past its budget. Pure (reads the clock).
 _cg_chain_now_ms() {
-  date +%s%3N
+  local up rest
+  read -r up rest </proc/uptime
+  printf '%s' "$((10#${up%.*} * 1000 + 10#${up#*.} * 10))"
 }
 
 # One more poll round fits the budget: returns 0 after sleeping the interval when the next read,
