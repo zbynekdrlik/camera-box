@@ -120,7 +120,8 @@ the OBS mask at nice 10; not running (EVENT mode) is a NOTE. `(hk-rebalance)`: b
 ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus` (systemd keeps it per boot): success + exit 0 =
 PASS, a failed run FAILs naming `journalctl -b -u strih-nic-irq-rebalance.service`; not run yet (0) is
 graded by the timer's `ActiveState/SubState`: `active/waiting` a NOTE (it runs at 5 min), `inactive/*` a
-NOTE (setup enables without starting, so the boot it was installed in never runs it), anything else
+NOTE when the timer file is newer than the boot (`btime` of `/proc/stat`: setup enables without starting, so
+the boot it was installed in never runs it), a FAIL when it predates the boot, anything else
 (`active/elapsed`, unreadable) FAILs: the timer fired and the service never ran. `none` also
 `reset-failed`s a removed service.
 

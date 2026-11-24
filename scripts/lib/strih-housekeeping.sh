@@ -162,7 +162,7 @@ strih_housekeeping_rebalance_remove() {
 # strih_housekeeping_rebalance_row -> the `(hk-rebalance)` row: both units as rendered, the timer enabled,
 # and the service's run this boot (systemd's state is per boot: a start monotonic of 0 = not run yet).
 strih_housekeeping_rebalance_row() {
-  local kind f show line state mono="" result="" status="" timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
+  local kind f show line state btime mtime mono="" result="" status="" timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
   for kind in service timer; do
     f="$(strih_housekeeping_rebalance_path "$kind")"
     if ! cmp -s "$f" <("strih_housekeeping_rebalance_${kind}_text"); then
@@ -187,7 +187,15 @@ strih_housekeeping_rebalance_row() {
        state="$(printf '%s\n' "$show" | sed -n 's/^ActiveState=//p')/$(printf '%s\n' "$show" | sed -n 's/^SubState=//p')"
        case "$state" in
          active/waiting) note "(hk-rebalance) ${timer} enabled and waiting; the re-balance has not run yet this boot (it runs 5 min after boot)" ;;
-         inactive/*) note "(hk-rebalance) ${timer} enabled but not started this boot (installed after boot): the first re-balance runs 5 min after the next boot" ;;
+         inactive/*)
+           # an enabled timer starts with timers.target: inactive is only honest for one written after boot
+           btime="$(sed -n 's/^btime //p' "${STRIH_HOUSEKEEPING_PROC:-/proc}/stat" 2>/dev/null || true)"
+           mtime="$(stat -c %Y "$(strih_housekeeping_rebalance_path timer)" 2>/dev/null || true)"
+           if [[ "$btime" =~ ^[0123456789]+$ ]] && [[ "$mtime" =~ ^[0123456789]+$ ]] && [ "$mtime" -lt "$btime" ]; then
+             bad "(hk-rebalance) ${timer} is enabled but inactive, installed before this boot -- it should have started with timers.target (journalctl -b -u ${timer})"
+           else
+             note "(hk-rebalance) ${timer} enabled but not started this boot (installed after boot): the first re-balance runs 5 min after the next boot"
+           fi ;;
          *) bad "(hk-rebalance) ${timer} is ${state} but the re-balance never ran this boot -- journalctl -b -u ${timer} -u ${STRIH_HOUSEKEEPING_REBALANCE}.service" ;;
        esac ;;
     *) if [ "$result" = success ] && [ "$status" = 0 ]; then
