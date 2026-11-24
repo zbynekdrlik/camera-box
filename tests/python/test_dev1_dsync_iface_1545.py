@@ -85,6 +85,11 @@ def _calls(log):
     return log.read_text().splitlines() if log.exists() else []
 
 
+def _writes(calls):
+    """The calls that change anything (sudo / systemctl); a curl /status read is not one."""
+    return [c for c in calls if c.startswith(("sudo", "systemctl"))]
+
+
 # --- the fleet fact ------------------------------------------------------------------------------
 def test_dev1_declares_enp38s0_in_the_fleet_facts():
     r = _bash('. "$1"\ndantesync_fleet_ptp_nic dev1', str(FLEET_LIB))
@@ -190,7 +195,8 @@ def test_an_identical_dropin_is_never_rewritten_nor_restarted(tmp_path):
     r, dropin, calls = _install(tmp_path, pre=DROPIN)
     assert r.returncode == 0, r.stderr
     assert dropin.read_text() == DROPIN
-    assert calls == [], calls
+    # an UNCHANGED install only READS /status (curl); nothing written, nothing restarted
+    assert _writes(calls) == [], calls
     assert "UNCHANGED" in r.stdout and r.stdout.endswith("AFTER\n")
 
 
@@ -239,7 +245,7 @@ def test_an_unchanged_file_whose_dsync_joined_elsewhere_is_not_restarted(tmp_pat
     joined = {"is_locked": False, "ptp_interface_configured": "enp38s0", "ptp_interface": "enp39s0"}
     r, _dropin, calls = _install(tmp_path, pre=DROPIN, status=joined)
     assert r.returncode == 0, r.stderr
-    assert calls == [] or not any(c.startswith("systemctl") for c in calls), calls
+    assert _writes(calls) == [], calls
 
 
 def test_a_failed_write_never_restarts_dsync(tmp_path):
@@ -344,7 +350,7 @@ def test_the_cli_apply_installs_the_declared_nic(tmp_path):
 def test_the_cli_apply_is_idempotent(tmp_path):
     r, dropin, calls = _cli(tmp_path, "--apply", pre=DROPIN)
     assert r.returncode == 0, r.stderr
-    assert calls == [] and "UNCHANGED" in r.stdout
+    assert _writes(calls) == [] and "UNCHANGED" in r.stdout
 
 
 def test_the_cli_refuses_a_node_with_no_declared_nic(tmp_path):
