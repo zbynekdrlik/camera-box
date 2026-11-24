@@ -66,22 +66,22 @@ obs_box_cpulist_compress() {
     printf '%s\n' "$out"
 }
 
-# obs_box_cpulist_last LIST -> the highest CPU of a cpulist; obs_box_cpulist_rest LIST -> every other CPU,
-# compressed (a one-CPU list gives that CPU again: nothing else to put work on). rc 1 on a malformed list.
-# issue 1425 split: the rig NIC IRQs on the LAST housekeeping CPU, the housekeeping tasks on the rest.
-obs_box_cpulist_last() {
+# obs_box_cpulist_first LIST -> the lowest CPU of a cpulist; obs_box_cpulist_canon LIST -> the list sorted and
+# compressed ("1,0" -> "0-1"). rc 1 on a malformed list. issue 1425 (design 7119179275): the rig NIC IRQs on
+# every housekeeping CPU, the housekeeping tasks on the first.
+obs_box_cpulist_first() {
     local e
     e="$(obs_box_cpulist_expand "${1-}")" || return 1
-    printf '%s\n' "${e##* }"
+    printf '%s\n' "${e%% *}"
 }
-obs_box_cpulist_rest() {
+obs_box_cpulist_canon() {
     local e
     e="$(obs_box_cpulist_expand "${1-}")" || return 1
-    case "$e" in *" "*) obs_box_cpulist_compress "${e% *}" ;; *) printf '%s\n' "$e" ;; esac
+    obs_box_cpulist_compress "$e"
 }
 
 # obs_box_background_cpus ONLINE OBS [EXCLUDE] -> the CPUs OBS does not use, compressed, minus EXCLUDE
-# (issue 1425: the CPU that carries the rig NIC IRQs alone; empty or `none` = nothing excluded). rc 1 when
+# (issue 1425: the housekeeping CPUs that carry only rig NIC IRQs; empty or `none` = nothing excluded). rc 1 when
 # a list is unreadable or nothing is left: a box with no free CPU has no fence to build, never a guessed one.
 obs_box_background_cpus() {
     local online obs excl="" c out=""

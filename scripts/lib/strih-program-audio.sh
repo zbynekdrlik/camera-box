@@ -28,9 +28,10 @@
 #       ~/.local/lib/camera-box/libqpsk-guard-shim.so, only when it is missing or was built from other
 #       sources (never loaded as root: the library lives in the operator's home);
 #     - the unit rendered from systemd/program-audio-sampler.strih-snv.service: CPUAffinity= =
-#       strih_program_audio_cpus (issue 1485): the box's own /sys/devices/cpu_atom/cpus (the E-cores,
-#       read the way strih_lx_lowprio_prefix reads them), else the background set (online minus the OBS
-#       mask, strih-snv 0-1), never every CPU (no set = the step fails), written to
+#       strih_program_audio_cpus (issue 1485): on a box with housekeeping CPUs the OBS mask at nice 10
+#       (issue 1425, design 7119179275: never beside the rig NIC's RX softirq), else the box's own
+#       /sys/devices/cpu_atom/cpus (the E-cores, read the way strih_lx_lowprio_prefix reads them), else the
+#       background set (online minus the OBS mask), never every CPU (no set = the step fails), written to
 #       ~/.config/systemd/user only when it differs;
 #     - `systemctl --user enable` + a daemon-reload when the unit file changed + a `try-restart` when
 #       anything changed. A stopped sampler is NEVER started here (enable-only): rig-mode.sh test starts
@@ -129,50 +130,79 @@ strih_program_audio_ecores() {
   esac
 }
 
+# _strih_program_audio_housekeeping -> rc 0 when the box has housekeeping CPUs (the housekeeping lib loaded,
+# i.e. setup + verify, and STRIH_HOUSEKEEPING_CPUS is not `none`); rc 1 without; rc 2 on an unreadable fact.
+_strih_program_audio_housekeeping() {
+  local hk
+  declare -F strih_lx_housekeeping_cpus >/dev/null && declare -F strih_housekeeping_irq_cpus >/dev/null || return 1
+  hk="$(strih_lx_housekeeping_cpus)" || { echo "strih-program-audio: the box fact STRIH_HOUSEKEEPING_CPUS cannot be read" >&2; return 2; }
+  [ "$hk" != none ]
+}
+
 # strih_program_audio_cpus [SYSFS_ROOT] -> the sampler's CPU list (issue 1485), never every CPU:
+#   - a box with housekeeping CPUs (issue 1425, design 7119179275): the OBS mask
+#     (/etc/strih-isolated-cpus.conf, strih-snv 2-15: 14 CPUs with ~9 idle), at nice 10
+#     (strih_program_audio_nice): the rig NIC IRQs are spread over every housekeeping CPU, and the sampler
+#     (up to 83 % of a core) must never share one with the RX softirq again;
 #   - a hybrid box: its E-cores (strih_program_audio_ecores);
-#   - otherwise (no cpu_atom, as on the AMD strih-snv): the box's BACKGROUND set = online minus the OBS
-#     mask minus the rig NIC IRQ CPU (obs_box_background_cpus, the set rig-background.slice uses; issue 1425
-#     split, design 7116063669: strih-snv 0, CPU 1 carries the NIC IRQs alone), off OBS's cores.
-# rc 1 + nothing + a stderr line when neither set can be derived (no OBS mask yet, an unreadable online
-# list): the install then fails by name instead of writing an every-CPU unit.
+#   - otherwise: the box's BACKGROUND set = online minus the OBS mask (obs_box_background_cpus, the set
+#     rig-background.slice uses), off OBS's cores.
+# rc 1 + nothing + a stderr line when no set can be derived (no OBS mask yet, an unreadable online list):
+# the install then fails by name instead of writing an every-CPU unit.
 # Seams: OBS_BOX_ONLINE_CPUS, STRIH_PROGRAM_AUDIO_ISOLATED_CONF (/etc/strih-isolated-cpus.conf).
 strih_program_audio_cpus() {
-  local root="${1:-${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}}" ecores online obs bg irq=none
+  local root="${1:-${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}}" ecores online obs bg rc=0
+  local conf="${STRIH_PROGRAM_AUDIO_ISOLATED_CONF:-/etc/strih-isolated-cpus.conf}"
+  obs="$(head -n 1 "$conf" 2>/dev/null | tr -d '[:space:]' || true)"
+  _strih_program_audio_housekeeping || rc=$?
+  [ "$rc" != 2 ] || return 1
+  if [ "$rc" = 0 ]; then
+    if obs="$(obs_box_cpulist_canon "$obs" 2>/dev/null)"; then printf '%s' "$obs"; return 0; fi
+    echo "strih-program-audio: no OBS mask for the sampler in ${conf} -- setup-strih step 11 writes the mask" >&2
+    return 1
+  fi
   ecores="$(strih_program_audio_ecores "$root")"
   if [ -n "$ecores" ]; then
     printf '%s' "$ecores"
     return 0
   fi
-  # issue 1425: with the housekeeping lib loaded (setup-strih / verify-strih), the IRQ CPU stays out.
-  if declare -F strih_housekeeping_slice_exclude >/dev/null; then
-    irq="$(strih_housekeeping_slice_exclude)" || { echo "strih-program-audio: the rig NIC IRQ CPU (STRIH_HOUSEKEEPING_CPUS) cannot be read" >&2; return 1; }
-  fi
   online="$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)"
-  obs="$(head -n 1 "${STRIH_PROGRAM_AUDIO_ISOLATED_CONF:-/etc/strih-isolated-cpus.conf}" 2>/dev/null || true)"
-  if bg="$(obs_box_background_cpus "$online" "$obs" "$irq")" && [ -n "$bg" ]; then
+  if bg="$(obs_box_background_cpus "$online" "$obs")" && [ -n "$bg" ]; then
     printf '%s' "$bg"
     return 0
   fi
-  echo "strih-program-audio: no CPU set for the sampler (no E-cores; online '${online}', OBS mask '${obs}' from ${STRIH_PROGRAM_AUDIO_ISOLATED_CONF:-/etc/strih-isolated-cpus.conf}) -- setup-strih step 11 writes the mask" >&2
+  echo "strih-program-audio: no CPU set for the sampler (no E-cores; online '${online}', OBS mask '${obs}' from ${conf}) -- setup-strih step 11 writes the mask" >&2
   return 1
 }
 
-# strih_program_audio_unit_text REPO CPUS -> the unit as installed: the template with its ONE
-# `CPUAffinity=@E_CORES@` line filled in with CPUS (strih_program_audio_cpus). rc 1 + a stderr line when
-# CPUS is not a cpu list (never a unit without an affinity, issue 1485), or the template is missing or
-# does not hold exactly one such line.
+# strih_program_audio_nice -> the sampler's Nice= value: 10 on a box with housekeeping CPUs (it shares the OBS
+# mask, so it yields to OBS there), else nothing (normal priority: the program-audio-guard rule measured nice 10
+# costing it audio on dev1, a loaded box whose CPUs other projects' CI shared). rc 1 on an unreadable fact.
+strih_program_audio_nice() {
+  local rc=0
+  _strih_program_audio_housekeeping || rc=$?
+  [ "$rc" != 2 ] || return 1
+  [ "$rc" != 0 ] || printf '10'
+  return 0
+}
+
+# strih_program_audio_unit_text REPO CPUS [NICE] -> the unit as installed: the template with its ONE
+# `CPUAffinity=@E_CORES@` line filled in with CPUS (strih_program_audio_cpus), followed by `Nice=NICE` when
+# NICE is given (strih_program_audio_nice, 0-19). rc 1 + a stderr line when CPUS is not a cpu list (never a
+# unit without an affinity, issue 1485), NICE is not 0-19, or the template is missing or does not hold
+# exactly one such line.
 strih_program_audio_unit_text() {
-  local repo="${1:?repo root required}" cpus="${2-}" tpl n
+  local repo="${1:?repo root required}" cpus="${2-}" nice="${3-}" tpl n
   case "$cpus" in
     ''|*[!0123456789,-]*|[,-]*|*[,-]) echo "strih-program-audio: '${cpus}' is not a CPU list for the sampler unit" >&2; return 1 ;;
   esac
+  [ -z "$nice" ] || [[ $nice =~ ^(1?[0123456789])$ ]] || { echo "strih-program-audio: '${nice}' is not a nice value 0-19 for the sampler unit" >&2; return 1; }
   tpl="${repo}/systemd/${STRIH_PROGRAM_AUDIO_UNIT_TEMPLATE}"
   [ -f "$tpl" ] || { echo "strih-program-audio: ${tpl} not found" >&2; return 1; }
   n="$(grep -c '^CPUAffinity=@E_CORES@$' "$tpl" || true)"
   [ "$n" = 1 ] || { echo "strih-program-audio: ${tpl} must hold exactly one CPUAffinity=@E_CORES@ line (found ${n})" >&2; return 1; }
-  awk -v cpus="$cpus" '
-    $0 == "CPUAffinity=@E_CORES@" { print "CPUAffinity=" cpus; next }
+  awk -v cpus="$cpus" -v nice="$nice" '
+    $0 == "CPUAffinity=@E_CORES@" { print "CPUAffinity=" cpus; if (nice != "") print "Nice=" nice; next }
     { print }
   ' "$tpl"
 }
@@ -228,7 +258,7 @@ strih_program_audio_missing_packages() {
 # or a shim that will not build; a `systemctl --user` call that cannot reach the user bus only WARNs.
 strih_program_audio_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local prefix unitdir rel w missing cpus tmp err shim pa_changed=0 unit_written=0
+  local prefix unitdir rel w missing cpus nice tmp err shim pa_changed=0 unit_written=0
   prefix="$(strih_program_audio_prefix)"
   unitdir="${home}/.config/systemd/user"
   for rel in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
@@ -270,10 +300,10 @@ strih_program_audio_install() {
     echo "  decoder shim current (built from the installed sources)"
   fi
 
-  cpus="$(strih_program_audio_cpus "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}")" || return 1
+  cpus="$(strih_program_audio_cpus "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}")" && nice="$(strih_program_audio_nice)" || return 1
   strih_user_home_dir "$home" "$user" "$unitdir" || { echo "strih-program-audio: cannot create ${unitdir}" >&2; return 1; }   # issue 1412: every level the user's
   tmp="$(mktemp)" || { echo "strih-program-audio: mktemp failed" >&2; return 1; }
-  if ! strih_program_audio_unit_text "$repo" "$cpus" > "$tmp"; then
+  if ! strih_program_audio_unit_text "$repo" "$cpus" "$nice" > "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
@@ -283,7 +313,7 @@ strih_program_audio_install() {
     unit_written=1
     pa_changed=1
   fi
-  echo "  ${STRIH_PROGRAM_AUDIO_UNIT} ${w} (CPUAffinity=${cpus}: the E-cores, else the background set; normal priority)"
+  echo "  ${STRIH_PROGRAM_AUDIO_UNIT} ${w} (CPUAffinity=${cpus}${nice:+ Nice=${nice}}: the OBS mask on a housekeeping box, else the E-cores, else the background set)"
   chown -R "${user}:${user}" "$unitdir" 2>/dev/null || echo "  WARN: could not chown ${unitdir} to ${user}"
 
   if ! err="$(strih_session_apps_user_systemctl "$user" enable "$STRIH_PROGRAM_AUDIO_UNIT" 2>&1)"; then
@@ -370,7 +400,7 @@ strih_program_audio_state() {
 # or `FAIL|text` (strih_program_audio_row_count of them). Always rc 0.
 strih_program_audio_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local prefix unitdir rel st bad_files="" tmp ustate enabled shim active endpoint host port answer marker i cpus
+  local prefix unitdir rel st bad_files="" tmp ustate enabled shim active endpoint host port answer marker i cpus nice
   prefix="$(strih_program_audio_prefix)"
   unitdir="${home}/.config/systemd/user"
   for rel in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
@@ -378,9 +408,10 @@ strih_program_audio_grade_rows() {
     [ "$st" = ok ] || bad_files="${bad_files} ${rel}=${st}"
   done
   tmp="$(mktemp)"
-  if ! cpus="$(strih_program_audio_cpus "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}" 2>/dev/null)"; then
+  if ! cpus="$(strih_program_audio_cpus "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}" 2>/dev/null)" \
+    || ! nice="$(strih_program_audio_nice 2>/dev/null)"; then
     ustate=no-cpu-set
-  elif strih_program_audio_unit_text "$repo" "$cpus" > "$tmp" 2>/dev/null; then
+  elif strih_program_audio_unit_text "$repo" "$cpus" "$nice" > "$tmp" 2>/dev/null; then
     ustate="$(strih_session_app_file_state "${unitdir}/${STRIH_PROGRAM_AUDIO_UNIT}" "$tmp")"
   else
     ustate=template-broken

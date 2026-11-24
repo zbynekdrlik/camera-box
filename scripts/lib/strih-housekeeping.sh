@@ -12,10 +12,11 @@
 # launcher's shutdown watch (stat / tail / grep / sleep 1/s) all ran on OBS CPUs. Those wake-ups delayed
 # dlink's RX pump and OBS's audio thread (the late_to_mix events of issue 1425).
 #
-# The split (design 7116063669, 23.11.2026: rx holes on the first OBS run with everything on 0-1): the LAST
-# CPU of the set carries the rig NIC IRQs alone (strih_housekeeping_irq_cpus, strih-snv 1); the rest carries
-# the tasks below and rig-background.slice (strih_housekeeping_task_cpus, strih-snv 0). A one-CPU set keeps
-# both on it.
+# The spread (design 7119179275, 24.11.2026, superseding the CPU-1-alone split of 7116063669): one CPU could
+# not carry the RX softirq (CPU 1 ~86 % softirq, time_squeeze, InDroppedDma). EVERY CPU of the set carries rig
+# NIC IRQs (strih_housekeeping_irq_cpus, strih-snv 0-1), each IRQ on ONE of them, balanced by its measured rate
+# by the oneshot; the FIRST CPU also carries the tasks below and rig-background.slice
+# (strih_housekeeping_task_cpus, strih-snv 0). The program-audio sampler leaves the set for the OBS mask.
 #
 # What this lib does (setup-strih step 11b, verify-strih item 16):
 #   * the rig NIC's IRQs + RSS: the step-11b boot oneshot (strih_nic_irq_affinity_script_text in
@@ -36,8 +37,8 @@
 #
 # Seams (tests): STRIH_HOUSEKEEPING_ROOT (prefix of /etc and /proc/sys), STRIH_HOUSEKEEPING_OWNER (the
 # root files' owner), STRIH_HOUSEKEEPING_SYS (/sys), STRIH_HOUSEKEEPING_PROC (/proc for pids),
-# STRIH_HOUSEKEEPING_IPADDR (the `ip -o -4 addr show` text), STRIH_HOUSEKEEPING_SAMPLE_S (the (hk-rx)
-# sample, default 2 s), ETHTOOL. systemctl / udevadm from PATH.
+# STRIH_HOUSEKEEPING_IPADDR (the `ip -o -4 addr show` text), STRIH_HOUSEKEEPING_SAMPLE_S (the (hk-rx) +
+# (hk-softnet) sample, default 2 s), ETHTOOL. systemctl / udevadm / sleep from PATH.
 # Needs scripts/lib/obs-box-write.sh + obs-box-background.sh (sourced here when absent) and, for the
 # grade, the caller's ok / bad / note.
 
@@ -97,21 +98,21 @@ strih_housekeeping_dropin_path() {
 
 strih_housekeeping_conf_text() { printf '%s\n' "${1:?cpus required}"; }
 
-# strih_housekeeping_irq_cpus [CPUS] -> the CPU the rig NIC IRQs go to: the LAST CPU of CPUS (default the box
-# fact STRIH_HOUSEKEEPING_CPUS); strih_housekeeping_task_cpus [CPUS] -> the rest (the housekeeping tasks +
-# rig-background.slice), a one-CPU set gives that CPU. Both print `none` for `none`; rc 1 on an unreadable fact
-# or a malformed list.
-strih_housekeeping_irq_cpus() { _strih_housekeeping_split obs_box_cpulist_last "$@"; }
-strih_housekeeping_task_cpus() { _strih_housekeeping_split obs_box_cpulist_rest "$@"; }
+# strih_housekeeping_irq_cpus [CPUS] -> the CPUs the rig NIC IRQs are spread over: all of CPUS, canonical
+# (default the box fact STRIH_HOUSEKEEPING_CPUS); strih_housekeeping_task_cpus [CPUS] -> its FIRST CPU (the
+# housekeeping tasks + rig-background.slice). Both print `none` for `none`; rc 1 on an unreadable fact or a
+# malformed list.
+strih_housekeeping_irq_cpus() { _strih_housekeeping_split obs_box_cpulist_canon "$@"; }
+strih_housekeeping_task_cpus() { _strih_housekeeping_split obs_box_cpulist_first "$@"; }
 _strih_housekeeping_split() {
   local fn="$1" hk
   if [ "$#" -ge 2 ]; then hk="$2"; else hk="$(strih_lx_housekeeping_cpus)" || return 1; fi
   if [ "$hk" = none ]; then printf 'none\n'; else "$fn" "$hk"; fi
 }
 
-# strih_housekeeping_slice_exclude [CPUS] -> the CPUs rig-background.slice and the program-audio sampler keep
-# out: the IRQ CPUs that are not also task CPUs (strih-snv 1). `none` for a `none` box and for a one-CPU set
-# (the IRQs share that CPU with the tasks: nothing else to run on). rc 1 on an unreadable fact.
+# strih_housekeeping_slice_exclude [CPUS] -> the CPUs rig-background.slice keeps out: the IRQ CPUs that are
+# not also task CPUs (strih-snv 1). `none` for a `none` box and for a one-CPU set (the IRQs share that CPU
+# with the tasks: nothing else to run on). rc 1 on an unreadable fact.
 strih_housekeeping_slice_exclude() {
   local irq task c out=""
   irq="$(strih_housekeeping_irq_cpus "$@")" && task="$(strih_housekeeping_task_cpus "$@")" || return 1
@@ -185,7 +186,7 @@ strih_housekeeping_install() {
   fi
   irq="$(strih_housekeeping_irq_cpus "$hk")" && task="$(strih_housekeeping_task_cpus "$hk")" \
     || { echo "housekeeping: STRIH_HOUSEKEEPING_CPUS '${hk}' is not a cpulist" >&2; return 1; }
-  echo "  housekeeping CPUs ${hk} (STRIH_HOUSEKEEPING_CPUS): the rig NIC IRQs + RSS alone on ${irq} (the oneshot below); rustdesk, the display watch, the OBS launcher, rig-background.slice on ${task}"
+  echo "  housekeeping CPUs ${hk} (STRIH_HOUSEKEEPING_CPUS): the rig NIC IRQs + RSS spread over ${irq} by load (the oneshot below); rustdesk, the display watch, the OBS launcher, rig-background.slice on ${task}"
   dest="$(strih_housekeeping_conf_path)"
   install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
   rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping strih_housekeeping_conf_text "$task" || rc=$?
@@ -277,11 +278,12 @@ strih_housekeeping_proc_placement() {
 }
 
 # _strih_housekeeping_unit_row SCOPE UNIT USER HK HOME LABEL REQUIRED -> one `(hk-unit)` row: the drop-in
-# as rendered (skipped for the launcher, which has none) and the RUNNING main process on HK at nice 10.
+# as rendered (skipped for the launcher and the sampler, which have none) and the RUNNING main process on HK
+# at nice 10.
 # REQUIRED=1: a unit that is not running FAILs; 0: a NOTE.
 _strih_housekeeping_unit_row() {
   local scope="$1" unit="$2" user="$3" hk="$4" home="$5" label="$6" required="$7" dest pid pl cpus nice
-  if [ "$label" != launcher ]; then
+  if [ "$label" != launcher ] && [ "$label" != sampler ]; then
     dest="$(strih_housekeeping_dropin_path "$scope" "$unit" "$home")"
     if ! [ -f "$dest" ] || ! cmp -s "$dest" <(strih_housekeeping_dropin_text "$hk"); then
       bad "(hk-unit) ${unit}: ${dest} missing or drifted -- re-run setup-strih.sh step 11b"
@@ -303,8 +305,8 @@ _strih_housekeeping_unit_row() {
 }
 
 # strih_housekeeping_slice_row EXCLUDE -> one `(hk-slice)` row: the AllowedCPUs systemd holds for
-# rig-background.slice (`systemctl show`, space separated ranges) name no EXCLUDE CPU
-# (strih_housekeeping_slice_exclude); unread or empty FAILs. EXCLUDE `none` (a one-CPU set) passes.
+# rig-background.slice (`systemctl show`, space separated ranges) name no EXCLUDE CPU (the IRQ-only CPUs,
+# strih_housekeeping_slice_exclude); unread or empty FAILs. EXCLUDE `none` (a one-CPU set) passes.
 strih_housekeeping_slice_row() {
   local irq="${1:-none}" slice allowed exp c
   slice="$(obs_box_background_slice_name)"
@@ -319,32 +321,86 @@ strih_housekeeping_slice_row() {
     return 0
   fi
   for c in $(obs_box_cpulist_expand "$irq" 2>/dev/null || true); do
-    case " $exp " in *" $c "*) bad "(hk-slice) ${slice}: AllowedCPUs ${allowed} holds the IRQ CPU ${c} -- re-run setup-strih.sh step 11"; return 0 ;; esac
+    case " $exp " in *" $c "*) bad "(hk-slice) ${slice}: AllowedCPUs ${allowed} holds the IRQ-only CPU ${c} -- re-run setup-strih.sh step 11"; return 0 ;; esac
   done
-  ok "(hk-slice) ${slice}: AllowedCPUs ${allowed}, off the IRQ CPUs ${irq}"
+  ok "(hk-slice) ${slice}: AllowedCPUs ${allowed}, off the IRQ-only CPUs ${irq}"
 }
 
-# strih_housekeeping_rx_note SYS NIC -> one REPORT-ONLY `(hk-rx)` NOTE: the NIC's rx_missed_errors +
-# rx_dropped increase over STRIH_HOUSEKEEPING_SAMPLE_S (default 2 s). Never a FAIL: read it before/after
-# the RSS change and after a production. Always rc 0.
+# strih_housekeeping_softnet_squeeze FILE CPUS -> `cpu<n>:<time_squeeze>` per CPU of CPUS (space separated)
+# from /proc/net/softnet_stat: one row per online CPU, column 3 = time_squeeze (hex), column 13 = the CPU id
+# when the kernel prints it (else the row index). rc 1 when the file is unreadable or a CPU has no row.
+strih_housekeeping_softnet_squeeze() {
+  local file="$1" cpus="$2" line c i=0 id out="" hex='^[0123456789abcdefABCDEF]+$'
+  local -a f=()
+  local -A sq=()
+  [ -r "$file" ] || return 1
+  while IFS= read -r line; do
+    read -ra f <<<"$line"
+    [ "${#f[@]}" -ge 3 ] && [[ ${f[2]} =~ $hex ]] || return 1
+    id="$i"
+    if [ "${#f[@]}" -ge 13 ]; then [[ ${f[12]} =~ $hex ]] || return 1; id="$((16#${f[12]}))"; fi
+    sq[$id]="$((16#${f[2]}))"
+    i=$((i + 1))
+  done < "$file"
+  for c in $(obs_box_cpulist_expand "$cpus" 2>/dev/null || true); do
+    [ -n "${sq[$c]+x}" ] || return 1
+    out="${out}${out:+ }cpu${c}:${sq[$c]}"
+  done
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# strih_housekeeping_dma_drops NIC -> the NIC's `InDroppedDma` counter from `ethtool -S` (atlantic: the NIC's
+# RX ring overflowed, design 7119179275); rc 1 when the driver does not expose it.
+strih_housekeeping_dma_drops() {
+  local v
+  v="$("${ETHTOOL:-ethtool}" -S "$1" 2>/dev/null | awk '$1 == "InDroppedDma:" { print $2; exit }' || true)"
+  case "$v" in '' | *[!0123456789]*) return 1 ;; esac
+  printf '%s\n' "$v"
+}
+
+# strih_housekeeping_rx_note SYS NIC CPUS -> two REPORT-ONLY NOTEs over ONE sample of STRIH_HOUSEKEEPING_SAMPLE_S
+# (default 2 s): `(hk-rx)` = the NIC's rx_missed_errors + rx_dropped increase; `(hk-softnet)` = the
+# time_squeeze increase of each housekeeping CPU (the RX softirq ran out of budget) and the NIC's InDroppedDma
+# increase. Never a FAIL: the load is traffic-dependent; read them after a production. Always rc 0.
 strih_housekeeping_rx_note() {
-  local sys="$1" nic="$2" s="${STRIH_HOUSEKEEPING_SAMPLE_S:-2}" m0 d0 m1 d1
+  local sys="$1" nic="$2" cpus="$3" s="${STRIH_HOUSEKEEPING_SAMPLE_S:-2}" m0 d0 m1 d1 q0 q1 x0 x1 sq="" e a b
+  local softnet="${STRIH_HOUSEKEEPING_PROC:-/proc}/net/softnet_stat"
   case "$s" in ''|*[!0123456789]*) s=2 ;; esac
   m0="$(cat "${sys}/class/net/${nic}/statistics/rx_missed_errors" 2>/dev/null || true)"
   d0="$(cat "${sys}/class/net/${nic}/statistics/rx_dropped" 2>/dev/null || true)"
+  q0="$(strih_housekeeping_softnet_squeeze "$softnet" "$cpus" || true)"
+  x0="$(strih_housekeeping_dma_drops "$nic" || true)"
   sleep "$s"
   m1="$(cat "${sys}/class/net/${nic}/statistics/rx_missed_errors" 2>/dev/null || true)"
   d1="$(cat "${sys}/class/net/${nic}/statistics/rx_dropped" 2>/dev/null || true)"
+  q1="$(strih_housekeeping_softnet_squeeze "$softnet" "$cpus" || true)"
+  x1="$(strih_housekeeping_dma_drops "$nic" || true)"
   case "$m0$m1$d0$d1" in
     *[!0123456789]* | '') note "(hk-rx) ${nic}: rx_missed_errors / rx_dropped unreadable (report-only)" ;;
     *) note "(hk-rx) ${nic}: rx_missed_errors +$((m1 - m0)), rx_dropped +$((d1 - d0)) over ${s} s, total missed ${m1} (report-only)" ;;
   esac
+  if [ -n "$q0" ] && [ -n "$q1" ]; then
+    for e in $q1; do
+      a=" $q0 "; a="${a#* "${e%%:*}":}"; a="${a%% *}"; b="${e#*:}"
+      sq="${sq}${sq:+, }${e%%:*} +$((b - a))"
+    done
+    sq="time_squeeze ${sq}"
+  else
+    sq="time_squeeze unreadable"
+  fi
+  if [ -n "$x0" ] && [ -n "$x1" ]; then
+    note "(hk-softnet) over ${s} s: ${sq}; ${nic} InDroppedDma +$((x1 - x0)) (total ${x1}) (report-only)"
+  else
+    note "(hk-softnet) over ${s} s: ${sq}; ${nic} InDroppedDma not exposed by ethtool -S (report-only)"
+  fi
   return 0
 }
 
 # strih_housekeeping_grade_report HOME USER -> verify-strih item 16 on a box with housekeeping CPUs: the
-# fact vs the OBS mask, every rig-NIC IRQ on the IRQ CPUs, the RSS channel count, the softirq budget,
-# rig-background.slice off the IRQ CPUs, each unit's live placement on the task CPUs. rc 0 after printing its rows.
+# fact vs the OBS mask, every rig-NIC IRQ on exactly one housekeeping CPU (placement only: the balance is the
+# oneshot's, traffic-dependent), the RSS channel count, the softirq budget, rig-background.slice off the IRQ-only
+# CPUs, each unit's live placement on the task CPU, the sampler on the OBS mask. rc 0 after printing its rows.
 strih_housekeeping_grade_report() {
   local home="${1:?home required}" user="${2:?user required}" hk irq task iso online want sys nic irqs n aff badirq="" okirq=""
   local cur conf live f
@@ -367,7 +423,7 @@ strih_housekeeping_grade_report() {
   else
     ok "(hk-cpus) housekeeping CPUs ${hk} = online ${online} minus the OBS mask ${iso}: rig NIC IRQs on ${irq}, tasks on ${task}"
   fi
-  # (hk-irq) + (hk-rss) every IRQ of the rig NIC on the IRQ CPUs; RSS queues = their count.
+  # (hk-irq) + (hk-rss) every IRQ of the rig NIC on ONE of the IRQ CPUs; RSS queues = their count.
   nic="$(strih_lx_rig_nic "$sys" "${STRIH_HOUSEKEEPING_IPADDR-$(ip -o -4 addr show 2>/dev/null || true)}" "$(strih_lx_ip)" 2>/dev/null || true)"
   if [ -z "$nic" ]; then
     bad "(hk-irq) cannot resolve the rig NIC (set STRIH_NIC_IFACE)"
@@ -387,11 +443,17 @@ strih_housekeeping_grade_report() {
   if [ -n "$nic" ]; then
     for n in $irqs; do
       aff="$(tr -d '[:space:]' < "${STRIH_HOUSEKEEPING_PROC:-/proc}/irq/${n}/smp_affinity_list" 2>/dev/null || true)"
-      if strih_housekeeping_same_cpus "$aff" "$irq"; then okirq="${okirq:+$okirq }${n}"; else badirq="${badirq:+$badirq }${n}=${aff:-unreadable}"; fi
+      case "$aff" in
+        '' | *[!0123456789]*) badirq="${badirq:+$badirq }${n}=${aff:-unreadable}" ;;
+        *) case " $(obs_box_cpulist_expand "$irq") " in
+             *" $((10#$aff)) "*) okirq="${okirq:+$okirq }${n}->${aff}" ;;
+             *) badirq="${badirq:+$badirq }${n}=${aff}" ;;
+           esac ;;
+      esac
     done
     if [ -z "$irqs" ]; then bad "(hk-irq) ${nic}: no IRQ found (msi_irqs / xhci)"
-    elif [ -n "$badirq" ]; then bad "(hk-irq) ${nic}: IRQ(s) off the IRQ CPUs ${irq}: ${badirq} -- systemctl restart strih-nic-irq-affinity.service (off-production: a channel change drops the link once)"
-    else ok "(hk-irq) ${nic}: IRQ(s) ${okirq} on CPUs ${irq}"; fi
+    elif [ -n "$badirq" ]; then bad "(hk-irq) ${nic}: IRQ(s) not on exactly one housekeeping CPU of ${irq}: ${badirq} -- systemctl restart strih-nic-irq-affinity.service (off-production: a channel change drops the link once)"
+    else ok "(hk-irq) ${nic}: every IRQ on one housekeeping CPU of ${irq}: ${okirq}"; fi
   fi
   # (hk-hooks) the udev RSS rule + the NetworkManager re-place hook as rendered.
   f="$(strih_lx_nic_driver 2>/dev/null || true)"
@@ -405,8 +467,8 @@ strih_housekeeping_grade_report() {
   else
     ok "(hk-hooks) the udev RSS rule (${n} channels at add) and the NetworkManager re-place hook are installed"
   fi
-  # (hk-rx) report-only: what the NIC dropped over a short sample (the 2-queue RSS has to carry the rig load).
-  [ -z "$nic" ] || strih_housekeeping_rx_note "$sys" "$nic"
+  # (hk-rx) + (hk-softnet) report-only: what the NIC and the RX softirq dropped over one short sample.
+  [ -z "$nic" ] || strih_housekeeping_rx_note "$sys" "$nic" "$irq"
   # (hk-sysctl) no budget change (kernel 7.0 refuses < 2000 us): our leftover drop-in FAILs, else the running value.
   f="$(strih_housekeeping_sysctl_path)"
   live="$(head -n 1 "$(strih_housekeeping_budget_proc)" 2>/dev/null | tr -d '[:space:]' || true)"
@@ -417,9 +479,11 @@ strih_housekeeping_grade_report() {
   fi
   # (hk-slice) rig-background.slice keeps off the IRQ CPUs (its exact CPUs: the baseline `background` row).
   strih_housekeeping_slice_row "$(strih_housekeeping_slice_exclude "$hk")"
-  # (hk-unit) each placed unit's RUNNING process, and the OBS launcher (its shutdown watch), on the task CPUs.
+  # (hk-unit) each placed unit's RUNNING process, and the OBS launcher (its shutdown watch), on the task CPU;
+  # the program-audio sampler (TEST mode only: down is a NOTE) on the OBS mask, off every IRQ CPU.
   _strih_housekeeping_unit_row system rustdesk.service "$user" "$task" "$home" rustdesk.service 1
   _strih_housekeeping_unit_row user strih-display-watch.service "$user" "$task" "$home" strih-display-watch.service 1
   _strih_housekeeping_unit_row user strih-obs.service "$user" "$task" "$home" launcher 0
+  _strih_housekeeping_unit_row user "${STRIH_PROGRAM_AUDIO_UNIT:-program-audio-sampler.service}" "$user" "${iso:-unread}" "$home" sampler 0
   return 0
 }
