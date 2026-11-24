@@ -209,10 +209,17 @@ def classify_dsync_nic(text, rc):
     if rc == 0 and verdict.startswith("ok:"):
         return {"status": OK,
                 "message": "dsync na dev1 je na deklarovanej PTP sieťovke (%s)" % verdict[3:]}
-    if rc == 1:
+    # rc 1 counts only WITH a wrong-NIC verdict: a bare rc 1 is also an errexit abort of the probe
+    if rc == 1 and verdict.startswith("joined-elsewhere:"):
+        declared = verdict.rsplit(":", 1)[-1]
+        return {"status": SUPERVISOR,
+                "message": "dsync na dev1 má v unite deklarovanú sieťovku %s, ale pripojil sa inde (%s) "
+                           "-- supervisor: over linku %s (ip link show %s) alebo počkaj ~95 s po "
+                           "reštarte dsync" % (declared, verdict, declared, declared)}
+    if rc == 1 and (verdict == "not-configured" or verdict.startswith("configured-elsewhere:")):
         return {"status": SUPERVISOR,
                 "message": "dsync na dev1 nie je na deklarovanej PTP sieťovke (%s) -- supervisor: "
-                           "spusti scripts/dev1-dsync-iface.sh --apply" % (verdict or "bez verdiktu")}
+                           "spusti scripts/dev1-dsync-iface.sh --apply" % verdict}
     return {"status": UNKNOWN,
             "message": "PTP sieťovku dsync na dev1 sa nepodarilo overiť (%s)"
                        % (verdict or "rc %s" % rc)}

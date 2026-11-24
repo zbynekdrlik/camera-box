@@ -104,8 +104,13 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up. Sinc
   `scripts/dev1-dsync-iface.sh --apply` renders + installs the drop-in
   `/etc/systemd/system/dsync.service.d/zz-camera-box-interface.conf` (`ExecStart=` reset +
   `--interface <nic>`) from the fact, compare-then-write, `daemon-reload` + `restart dsync` ONLY when
-  the file changed (`scripts/lib/dsync-local-iface.sh`, sudo -n); `--check` (read-only) grades
-  `/status` through `dsync_iface_grade` and is the handover's `dsync_nic` item. A reinstall of dev1
+  the effective lines changed (`scripts/lib/dsync-local-iface.sh`, sudo -n): a comment-only
+  difference (the 20.11 hand file) is rewritten with a daemon-reload and no restart, and an
+  UNCHANGED file still restarts a dsync whose `/status` shows it is not running it (a restart that
+  failed last time, a dead dsync), never one that joined elsewhere (that is the link: the check names
+  `ip link show <nic>`, not `--apply`). `--check` (read-only) grades `/status` through
+  `dsync_iface_grade` and is the handover's `dsync_nic` item (SUPERVISOR only with a wrong-NIC
+  verdict; a bare rc 1 is UNKNOWN). A reinstall of dev1
   = run `--apply` once. The clock watchdog is unchanged (it still pages the resulting NO_CLOCK).
   Test: `tests/python/test_dev1_dsync_iface_1545.py`.
 - **The Poprad (PP) venue rows (issue 1412).** `strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|`
