@@ -157,8 +157,11 @@ def test_the_render_refuses_a_bad_nic(bad):
 
 
 # --- the install ---------------------------------------------------------------------------------
-def _install(tmp_path, nic="enp38s0", pre=None, extra=None):
-    bindir, log = _stubs(tmp_path)
+def _install(tmp_path, nic="enp38s0", pre=None, extra=None, status="locked"):
+    # the live dsync reads LOCKED on the declared NIC unless a test says otherwise: an UNCHANGED
+    # install re-checks /status and restarts only a dsync that is not running the file (review 1)
+    bindir, log = _stubs(tmp_path, status=LOCKED_OK if status == "locked" else status,
+                         curl_fails=status is None)
     dropin = tmp_path / "etc" / "dsync.service.d" / "zz-camera-box-interface.conf"
     if pre is not None:
         dropin.parent.mkdir(parents=True)
@@ -199,6 +202,44 @@ def test_a_differing_dropin_is_replaced_and_dsync_restarted_once(tmp_path):
     assert [c for c in calls if c.startswith("systemctl ")] == ["systemctl daemon-reload",
                                                                "systemctl restart dsync"]
     assert not list(dropin.parent.glob("*.new")), "no temp file left beside the drop-in"
+
+
+def test_a_comment_only_difference_is_rewritten_without_a_restart(tmp_path):
+    # the 20.11 hand drop-in carries other comment text than the rendered one; the first --apply on
+    # dev1 must not cost dsync's ~95 s cold lock for a comment
+    hand = ("[Service]\n# camera-box 20.11.2026: bind PTP to the rig NIC (hand fix)\nExecStart=\n"
+            "ExecStart=/usr/local/bin/dsync --interface enp38s0\n")
+    r, dropin, calls = _install(tmp_path, pre=hand)
+    assert r.returncode == 0, r.stderr
+    assert dropin.read_text() == DROPIN
+    sysctl = [c for c in calls if c.startswith("systemctl ")]
+    assert sysctl == ["systemctl daemon-reload"], calls
+    assert "not restarted" in r.stdout
+
+
+def test_a_restart_that_failed_last_time_is_retried_on_the_next_apply(tmp_path):
+    # run 1 wrote the file but the restart failed; dsync still runs WITHOUT --interface. Run 2 finds
+    # the file identical and must still restart, because /status shows dsync is not on it.
+    stale = {"is_locked": False, "ptp_interface_configured": None, "ptp_interface": "enp39s0"}
+    r, dropin, calls = _install(tmp_path, pre=DROPIN, status=stale)
+    assert r.returncode == 0, r.stderr
+    assert [c for c in calls if c.startswith("systemctl ")] == ["systemctl daemon-reload",
+                                                               "systemctl restart dsync"], calls
+    assert "UNCHANGED" in r.stdout and "restarted" in r.stdout
+
+
+def test_an_unchanged_file_with_a_dead_dsync_is_restarted(tmp_path):
+    r, _dropin, calls = _install(tmp_path, pre=DROPIN, status=None)
+    assert r.returncode == 0, r.stderr
+    assert "systemctl restart dsync" in calls, calls
+
+
+def test_an_unchanged_file_whose_dsync_joined_elsewhere_is_not_restarted(tmp_path):
+    # the unit IS on the declared NIC; a restart cannot fix a link that is down
+    joined = {"is_locked": False, "ptp_interface_configured": "enp38s0", "ptp_interface": "enp39s0"}
+    r, _dropin, calls = _install(tmp_path, pre=DROPIN, status=joined)
+    assert r.returncode == 0, r.stderr
+    assert calls == [] or not any(c.startswith("systemctl") for c in calls), calls
 
 
 def test_a_failed_write_never_restarts_dsync(tmp_path):
@@ -247,7 +288,10 @@ def test_the_check_grades_status_through_the_one_verdict(tmp_path, status, curl_
               str(IFACE_LIB), str(LOCAL_LIB), "enp38s0", env=env)
     assert f"RC={rc}" in r.stdout, (r.stdout, r.stderr)
     assert f"node=dev1 declared=enp38s0 verdict={verdict}" in r.stdout, r.stdout
-    if rc == 1:
+    if verdict.startswith("joined-elsewhere"):
+        # the unit is right: the fix is the link (or the lock time), never --apply
+        assert "--apply" not in r.stdout and "link" in r.stdout
+    elif rc == 1:
         assert "scripts/dev1-dsync-iface.sh --apply" in r.stdout
     # read-only: the check never writes or restarts anything
     assert not any(c.startswith(("sudo", "systemctl")) for c in _calls(log)), _calls(log)
@@ -307,6 +351,14 @@ def test_the_cli_refuses_a_node_with_no_declared_nic(tmp_path):
     r, dropin, calls = _cli(tmp_path, "--apply", extra={"DANTESYNC_FLEET_PTP_NICS": "strih-snv=enp5s0"})
     assert r.returncode == 2
     assert "dev1" in r.stderr and "DANTESYNC_FLEET_PTP_NICS" in r.stderr
+    assert not dropin.exists() and calls == []
+
+
+def test_the_cli_refuses_two_local_rows(tmp_path):
+    table = "dev1|local|linux|video|local|-|\ndev9|local|linux|video|local|-|"
+    r, dropin, calls = _cli(tmp_path, "--apply", extra={"DANTESYNC_FLEET": table})
+    assert r.returncode == 2
+    assert "exactly one" in r.stderr and "dev1 dev9" in r.stderr
     assert not dropin.exists() and calls == []
 
 

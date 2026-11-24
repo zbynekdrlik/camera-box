@@ -51,9 +51,19 @@ def test_exit_1_is_a_supervisor_problem_naming_the_fix_and_the_verdict():
     assert "zabudol si" not in summary
 
 
+def test_joined_elsewhere_names_the_link_not_apply():
+    text = "dsync-iface: node=dev1 declared=enp38s0 verdict=joined-elsewhere:enp39s0:enp38s0\n"
+    e = _item().decide({"dsync_nic": (text, 1)})
+    assert e["status"] == d.SUPERVISOR
+    assert "--apply" not in e["message"] and "enp38s0" in e["message"]
+
+
 def test_anything_else_is_unknown_never_ok():
     for text, rc in (("dsync-iface: node=dev1 declared=enp38s0 verdict=unreadable\n", 2),
-                     ("", 124), ("MISSING: x\n", d.RC_MISSING), (OK_LINE, 3)):
+                     ("", 124), ("MISSING: x\n", d.RC_MISSING), (OK_LINE, 3),
+                     # rc 1 without a wrong-NIC verdict is a crashed probe (an errexit abort), never
+                     # a supervisor action (review 1)
+                     ("", 1), (OK_LINE, 1), ("verdict=unreadable\n", 1)):
         assert _item().decide({"dsync_nic": (text, rc)})["status"] == d.UNKNOWN, (text, rc)
     assert _item().decide({})["status"] == d.UNKNOWN
 
