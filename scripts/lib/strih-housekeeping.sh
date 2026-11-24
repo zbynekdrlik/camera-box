@@ -484,23 +484,6 @@ strih_housekeeping_dma_drops() {
   printf '%s\n' "$v"
 }
 
-# strih_housekeeping_ring_row NIC -> the (hk-ring) row: PASS when the RX ring is the driver's pre-set maximum
-# (`ethtool -g`), FAIL otherwise, NOTE when the driver exposes no ring. Always rc 0.
-strih_housekeeping_ring_row() {
-  local nic="$1" g max cur
-  g="$("${ETHTOOL:-ethtool}" -g "$nic" 2>/dev/null || true)"
-  max="$(printf '%s\n' "$g" | awk '/^Pre-set maximums/ { s = 1 } /^Current hardware settings/ { s = 2 } s == 1 && /^RX:/ { print $2; exit }' || true)"
-  cur="$(printf '%s\n' "$g" | awk '/^Current hardware settings/ { s = 1 } s == 1 && /^RX:/ { print $2; exit }' || true)"
-  if [ -z "$max" ] || [ -z "$cur" ] || [[ "$max$cur" == *[!0123456789]* ]]; then
-    note "(hk-ring) ${nic}: RX ring not readable (the driver offers no ring control)"
-  elif [ "$cur" = "$max" ]; then
-    ok "(hk-ring) ${nic}: RX ring ${cur} = the driver's pre-set maximum"
-  else
-    bad "(hk-ring) ${nic}: RX ring ${cur}, the driver's pre-set maximum is ${max} -- systemctl restart strih-nic-irq-affinity.service (off-production: a ring change drops the link once)"
-  fi
-  return 0
-}
-
 # strih_housekeeping_rx_note SYS NIC CPUS -> two REPORT-ONLY NOTEs over ONE sample of STRIH_HOUSEKEEPING_SAMPLE_S
 # (default 2 s): `(hk-rx)` = the NIC's rx_missed_errors + rx_dropped increase; `(hk-softnet)` = the
 # time_squeeze increase of each housekeeping CPU (the RX softirq ran out of budget) and the NIC's InDroppedDma
@@ -609,8 +592,6 @@ strih_housekeeping_grade_report() {
   else
     ok "(hk-hooks) the udev RSS rule (${n} channels at add) and the NetworkManager re-place hook are installed"
   fi
-  # (hk-ring) the rig NIC's RX ring at the driver's pre-set maximum (the boot oneshot's step 2b).
-  [ -z "$nic" ] || strih_housekeeping_ring_row "$nic"
   # (hk-rx) + (hk-softnet) report-only: what the NIC and the RX softirq dropped over one short sample.
   [ -z "$nic" ] || strih_housekeeping_rx_note "$sys" "$nic" "$irq"
   # (hk-sysctl) no budget change (kernel 7.0 refuses < 2000 us): our leftover drop-in FAILs, else the running value.

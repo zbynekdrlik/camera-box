@@ -100,20 +100,6 @@ cur = int(open(state).read().strip())
 if sys.argv[1] == "-l":
     print("Channel parameters for %s:\nPre-set maximums:\nRX:\t\tn/a\nTX:\t\tn/a\nOther:\t\t1\nCombined:\t8\n"
           "Current hardware settings:\nRX:\t\tn/a\nTX:\t\tn/a\nOther:\t\t1\nCombined:\t%d" % (sys.argv[2], cur))
-elif sys.argv[1] == "-g":
-    ring = os.environ.get("FAKE_ETHTOOL_RING")
-    if not ring or not os.path.exists(ring):
-        print("netlink error: Operation not supported", file=sys.stderr)
-        sys.exit(1)
-    rx, mx = open(ring).read().split()
-    print("Ring parameters for %s:\nPre-set maximums:\nRX:\t\t\t%s\nRX Mini:\t\tn/a\nTX:\t\t\t8184\n"
-          "Current hardware settings:\nRX:\t\t\t%s\nRX Mini:\t\tn/a\nTX:\t\t\t2048" % (sys.argv[2], mx, rx))
-elif sys.argv[1] == "-G":
-    if os.environ.get("FAKE_ETHTOOL_RING_FAIL"):
-        sys.exit(1)
-    ring = os.environ["FAKE_ETHTOOL_RING"]
-    mx = open(ring).read().split()[1]
-    open(ring, "w").write("%s %s\n" % (sys.argv[4], mx))
 elif sys.argv[1] == "-S":
     stats = os.environ.get("FAKE_ETHTOOL_STATS")
     if not stats:
@@ -137,7 +123,7 @@ elif sys.argv[1] == "-L":
 '''
 
 
-def _pcie_box(tmp_path, combined=8, irqs=range(134, 143), ring=8184):
+def _pcie_box(tmp_path, combined=8, irqs=range(134, 143)):
     sysr = tmp_path / "sys"
     dev = sysr / "devices" / "pci0000:00" / "0000:07:00.0"
     (dev / "msi_irqs").mkdir(parents=True)
@@ -156,9 +142,7 @@ def _pcie_box(tmp_path, combined=8, irqs=range(134, 143), ring=8184):
     bin_dir.mkdir()
     _exe(bin_dir / "ethtool", FAKE_ETHTOOL)
     (tmp_path / "state").write_text("%d\n" % combined)
-    (tmp_path / "ring").write_text("%d 8184\n" % ring)
     env = {"FAKE_ETHTOOL_STATE": str(tmp_path / "state"), "FAKE_ETHTOOL_LOG": str(tmp_path / "ethtool.log"),
-           "FAKE_ETHTOOL_RING": str(tmp_path / "ring"),
            "FAKE_MSI_DIR": str(dev / "msi_irqs"), "FAKE_IRQ_DIR": str(irq_dir)}
     (tmp_path / "ethtool.log").write_text("")
     return sysr, irq_dir, bin_dir, env
@@ -203,8 +187,7 @@ def test_a_second_run_changes_no_channel_and_still_places(tmp_path):
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 0, r.stderr
     calls = (tmp_path / "ethtool.log").read_text().splitlines()
-    # never a -L / -G (a ring re-init) when the count and the ring are right; the ring is only read
-    assert calls == ["-l enp7s0", "-g enp7s0"], calls
+    assert calls == ["-l enp7s0"], calls   # never a -L (a ring re-init) when the count is right
     assert "RSS queues already 2 (combined) -- unchanged" in r.stdout
     assert _aff(irq_dir, (134, 135, 136)) == ["0", "1", "0"]
 
@@ -481,9 +464,9 @@ def test_a_none_box_with_nothing_of_ours_is_silent(tmp_path):
 # --- verify: item 16's housekeeping rows -----------------------------------------------------------------
 
 def _grade_env(tmp_path, irq_aff=("1", "0", "1"), combined=2, nice=10, cpus="0", running=True,
-               sampler_cpus="2-15", sampler_nice=10, ring=8184):
+               sampler_cpus="2-15", sampler_nice=10):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    sysr, irq_dir, bin_dir, eenv = _pcie_box(tmp_path, combined=combined, irqs=(134, 135, 136), ring=ring)
+    sysr, irq_dir, bin_dir, eenv = _pcie_box(tmp_path, combined=combined, irqs=(134, 135, 136))
     if isinstance(irq_aff, str):
         irq_aff = (irq_aff,) * 3
     for n, a in zip((134, 135, 136), irq_aff):
@@ -551,7 +534,7 @@ def test_a_placed_box_passes_every_row(tmp_path):
     assert "PASS (hk-unit) sampler: pid 4003 runs on CPUs 2-15 at nice 10" in out
     for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-slice)", "(hk-unit) rustdesk.service",
                 "(hk-unit) strih-display-watch.service", "(hk-unit) launcher", "(hk-softnet)", "(hk-unit) sampler",
-                "(hk-rebalance)", "(hk-ring)"):
+                "(hk-rebalance)"):
         assert any(tag in r for r in rows), (tag, out)
 
 
@@ -1091,56 +1074,3 @@ def test_none_never_reset_fails_a_foreign_service_beside_our_timer(tmp_path):
     assert svc.exists() and "not ours" in r.stderr
     log = (tmp_path / "systemctl.log").read_text()
     assert "disable --now strih-nic-irq-rebalance.timer" in log and "reset-failed" not in log
-
-
-# --- the RX ring at the driver's pre-set maximum (24.11.2026: InDroppedDma 3272 -> 30178 under E2E load) ------
-
-def test_the_oneshot_raises_the_rx_ring_to_the_driver_maximum_and_reads_it_back(tmp_path):
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135), ring=2048)
-    r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
-    assert r.returncode == 0, r.stderr + r.stdout
-    calls = (tmp_path / "ethtool.log").read_text().splitlines()
-    assert "-G enp7s0 rx 8184" in calls, calls
-    assert (tmp_path / "ring").read_text().split()[0] == "8184"
-    assert "enp7s0: RX ring 2048 -> 8184 (the driver's pre-set maximum)" in r.stdout, r.stdout
-    assert "done: rig NIC IRQ(s) [134 135] placed" in r.stdout
-
-
-def test_a_ring_already_at_the_maximum_is_left_alone(tmp_path):
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135))
-    r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
-    assert r.returncode == 0, r.stderr
-    assert "enp7s0: RX ring already 8184 (the driver's pre-set maximum) -- unchanged" in r.stdout, r.stdout
-    assert "-G" not in (tmp_path / "ethtool.log").read_text()
-
-
-def test_a_failed_ring_change_fails_the_unit(tmp_path):
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135), ring=2048)
-    env["FAKE_ETHTOOL_RING_FAIL"] = "1"
-    r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
-    assert r.returncode == 1
-    assert "FATAL: ethtool -G enp7s0 rx 8184 failed (was 2048)" in r.stderr, r.stderr
-
-
-def test_a_driver_without_ring_control_keeps_its_ring_and_still_pins(tmp_path):
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135))
-    (tmp_path / "ring").unlink()
-    r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
-    assert r.returncode == 0, r.stderr + r.stdout
-    assert "enp7s0: RX ring not readable (the driver offers no ring control) -- left alone" in r.stdout, r.stdout
-    assert "done: rig NIC IRQ(s) [134 135] placed" in r.stdout
-
-
-def test_verify_passes_a_ring_at_the_maximum_and_fails_a_smaller_one(tmp_path):
-    assert "PASS (hk-ring) enp7s0: RX ring 8184 = the driver's pre-set maximum" in _grade(tmp_path)
-    out = _grade(tmp_path / "b", ring=2048)
-    assert ("FAIL (hk-ring) enp7s0: RX ring 2048, the driver's pre-set maximum is 8184 -- systemctl restart "
-            "strih-nic-irq-affinity.service (off-production: a ring change drops the link once)") in out, out
-
-
-def test_verify_notes_a_driver_without_ring_control(tmp_path):
-    home, path, env = _grade_env(tmp_path)
-    (tmp_path / "ring").unlink()
-    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
-    assert "NOTE (hk-ring) enp7s0: RX ring not readable (the driver offers no ring control)" in r.stdout, r.stdout
-    assert "FAIL" not in r.stdout, r.stdout
