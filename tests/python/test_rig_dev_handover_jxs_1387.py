@@ -290,7 +290,7 @@ def _orchestrate(tmp_path, seeder, live_lib, extra=None):
            "RDH_IMAG_RETIRED": "1", "STRIH_HOST": SNV_STRIH, "STREAM_HOST": SNV_STREAM,
            "RDH_JXS_PROBE": str(seeder), "RDH_JXS_LIVE_LIB": str(live_lib)}
     for item in ("MIC", "MIC_GUARD", "PAINTER", "CLOCK", "OBS", "NET", "AUDIOLAG", "GENLOCK", "BURN", "MAPPING",
-                 "PINS", "DANTESYNC", "CAMBOX", "AVLATENCY", "EXPOSURE", "RIGMODE_LIB", "WATCHDOG_ROSTER",
+                 "PINS", "DANTESYNC", "CAMBOX", "AVLATENCY", "EXPOSURE", "DSYNC_NIC", "RIGMODE_LIB", "WATCHDOG_ROSTER",
                  "CAMSET_LIB"):
         key = f"RDH_{item}" if item.endswith("_LIB") or item == "WATCHDOG_ROSTER" else f"RDH_{item}_PROBE"
         env[key] = missing

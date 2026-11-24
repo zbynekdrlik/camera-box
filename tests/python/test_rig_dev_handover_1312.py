@@ -405,6 +405,8 @@ def test_evaluate_over_a_work_dir(tmp_path):
         "watchdogs": (WATCHDOGS_OK, 0),
         # issue 1371: no production-exposure snapshot pending for the test camera
         "exposure": ("exposure state=none\n", 0),
+        # issue 1545: dev1's dsync on its declared PTP NIC
+        "dsync_nic": ("dsync-iface: node=dev1 declared=enp38s0 verdict=ok:enp38s0\n", 0),
         # issue 1387: the JPEG XS inputs on their box facts, every link delivering frames
         "jxs_strih": ("PASS (jxs-inputs) 'JXS cam5 src': UDP 7000, camera 5, pin 36 ms\n", 0),
         "jxs_stream": ("PASS (jxs-inputs) 'JXS PGM src': UDP 7100, camera 100, pin 1054 ms\n", 0),
