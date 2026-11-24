@@ -100,6 +100,12 @@ cur = int(open(state).read().strip())
 if sys.argv[1] == "-l":
     print("Channel parameters for %s:\nPre-set maximums:\nRX:\t\tn/a\nTX:\t\tn/a\nOther:\t\t1\nCombined:\t8\n"
           "Current hardware settings:\nRX:\t\tn/a\nTX:\t\tn/a\nOther:\t\t1\nCombined:\t%d" % (sys.argv[2], cur))
+elif sys.argv[1] == "-S":
+    stats = os.environ.get("FAKE_ETHTOOL_STATS")
+    if not stats:
+        sys.exit(1)
+    print("NIC statistics:")
+    print(open(stats).read(), end="")
 elif sys.argv[1] == "-L":
     if os.environ.get("FAKE_ETHTOOL_FAIL"):
         sys.exit(1)
@@ -150,35 +156,40 @@ def _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env):
     full.update(env)
     full.update({"SYS_ROOT": str(sysr), "IRQ_DIR": str(irq_dir), "PATH": "%s:%s" % (bin_dir, full["PATH"]),
                  "CARRIER_WAIT_S": env.get("CARRIER_WAIT_S", "0"),
-                 "PROC_INTERRUPTS": str(tmp_path / "no-interrupts")})
+                 "IRQ_RATE_SAMPLE_S": env.get("IRQ_RATE_SAMPLE_S", "0"),
+                 "PROC_INTERRUPTS": env.get("PROC_INTERRUPTS", str(tmp_path / "no-interrupts"))})
     return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=full, timeout=60)
 
 
-def test_the_oneshot_cuts_rss_to_the_irq_cpu_count_and_pins_every_rig_nic_irq_to_cpu_1(tmp_path):
-    # design 7116063669: the LAST housekeeping CPU (strih-snv 1) carries the rig NIC IRQs alone
+def _aff(irq_dir, irqs):
+    return [(irq_dir / str(n) / "smp_affinity_list").read_text().strip() for n in irqs]
+
+
+def test_the_oneshot_cuts_rss_to_the_irq_cpu_count_and_spreads_the_rig_nic_irqs_over_both_cpus(tmp_path):
+    # design 7119179275: EVERY housekeeping CPU (strih-snv 0-1) carries rig NIC IRQs, one CPU per IRQ; with
+    # no measured traffic (no /proc/interrupts here) they go round-robin in IRQ order
     sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path)
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 0, r.stderr + r.stdout
     calls = (tmp_path / "ethtool.log").read_text().splitlines()
-    assert "-L enp7s0 combined 1" in calls
-    assert "RSS queues 8 -> 1" in r.stdout
+    assert "-L enp7s0 combined 2" in calls
+    assert "RSS queues 8 -> 2" in r.stdout
     assert "carrier_changes ? -> ?" in r.stdout   # no carrier_changes file in the fixture: named, never fatal
-    # the IRQs are read AFTER the channel change: the re-requested vectors 150-151, all on 1
-    for n in (150, 151):
-        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "1"
-        assert "IRQ %d (msi enp7s0, iface enp7s0) pinned to cpu 1" % n in r.stdout
-    assert "done: rig NIC IRQ(s) [150 151] pinned to cpu 1" in r.stdout
+    # the IRQs are read AFTER the channel change: the re-requested vectors 150-152
+    assert _aff(irq_dir, (150, 151, 152)) == ["0", "1", "0"]
+    assert "no IRQ traffic measured (rates all 0) -- round-robin in IRQ order over cpus 0 1" in r.stdout
+    assert "IRQ 151 (msi enp7s0, iface enp7s0): 0/s -> cpu 1 (was 0-15)" in r.stdout
+    assert "done: rig NIC IRQ(s) [150 151 152] placed: 150->0 151->1 152->0" in r.stdout
 
 
-def test_a_second_run_changes_no_channel_and_still_pins(tmp_path):
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=1, irqs=(134, 135, 136))
+def test_a_second_run_changes_no_channel_and_still_places(tmp_path):
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135, 136))
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 0, r.stderr
     calls = (tmp_path / "ethtool.log").read_text().splitlines()
     assert calls == ["-l enp7s0"], calls   # never a -L (a ring re-init) when the count is right
-    assert "RSS queues already 1 (combined) -- unchanged" in r.stdout
-    for n in (134, 135, 136):
-        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "1"
+    assert "RSS queues already 2 (combined) -- unchanged" in r.stdout
+    assert _aff(irq_dir, (134, 135, 136)) == ["0", "1", "0"]
 
 
 def test_a_failed_channel_change_fails_the_unit_and_pins_nothing(tmp_path):
@@ -186,7 +197,7 @@ def test_a_failed_channel_change_fails_the_unit_and_pins_nothing(tmp_path):
     env["FAKE_ETHTOOL_FAIL"] = "1"
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 1
-    assert "FATAL: ethtool -L enp7s0 combined 1 failed (was 8)" in r.stderr
+    assert "FATAL: ethtool -L enp7s0 combined 2 failed (was 8)" in r.stderr
     assert (irq_dir / "134" / "smp_affinity_list").read_text().strip() == "0-15"
 
 
@@ -199,40 +210,114 @@ def test_a_driver_without_channel_control_keeps_its_queues_and_still_pins(tmp_pa
     assert r.returncode == 0, r.stderr + r.stdout
     assert "enp7s0: RSS channel count not readable (the driver offers no channel control) -- left alone" in r.stdout
     assert "-L" not in (tmp_path / "ethtool.log").read_text()
-    for n in (134, 135, 136):
-        assert (irq_dir / str(n) / "smp_affinity_list").read_text().strip() == "1"
+    assert _aff(irq_dir, (134, 135, 136)) == ["0", "1", "0"]
 
 
 def test_an_msi_vector_with_no_proc_irq_entry_is_skipped(tmp_path):
     # strih-snv 23.11.2026: msi_irqs lists 143, /proc/irq/143 does not exist (a vector the driver never requested)
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=1, irqs=(134, 135))
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135))
     (sysr / "devices" / "pci0000:00" / "0000:07:00.0" / "msi_irqs" / "143").write_text("msix\n")
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 0, r.stderr + r.stdout
     assert "IRQ 143 of enp7s0 has no /proc/irq entry (not requested) -- skipped" in r.stdout
-    assert "done: rig NIC IRQ(s) [134 135] pinned to cpu 1" in r.stdout
+    assert "done: rig NIC IRQ(s) [134 135] placed: 134->0 135->1" in r.stdout
 
 
 def test_an_irq_the_kernel_refuses_is_named_and_fails_after_trying_every_one(tmp_path):
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=1, irqs=(134, 135, 136))
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135, 136))
     (irq_dir / "135" / "smp_affinity_list").chmod(0o444)
     try:
         r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     finally:
         (irq_dir / "135" / "smp_affinity_list").chmod(0o644)
     assert r.returncode == 1
-    assert "IRQ(s) [135] of enp7s0 could not be pinned to cpu 1" in r.stderr
-    assert (irq_dir / "134" / "smp_affinity_list").read_text().strip() == "1"
-    assert (irq_dir / "136" / "smp_affinity_list").read_text().strip() == "1"
+    assert "IRQ(s) [135] of enp7s0 could not be placed on the housekeeping CPUs 0-1 (above)" in r.stderr
+    assert _aff(irq_dir, (134, 136)) == ["0", "0"]
 
 
-def test_a_kernel_compressed_read_back_counts_as_the_same_set(tmp_path):
-    # an IRQ set written `0,1` reads back `0-1` from the kernel: a set compare, never text
-    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134,))
-    env["STRIH_HOUSEKEEPING_IRQ_CPUS"] = "0,1"
+def test_an_irq_already_on_its_cpu_is_never_written(tmp_path):
+    # design 7119179275: every move costs a short loss burst, so an IRQ whose affinity already is its target
+    # is left alone (the read-only file would fail a write)
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134, 135))
+    (irq_dir / "134" / "smp_affinity_list").write_text("0\n")
+    (irq_dir / "134" / "smp_affinity_list").chmod(0o444)
+    try:
+        r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
+    finally:
+        (irq_dir / "134" / "smp_affinity_list").chmod(0o644)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "IRQ 134 (msi enp7s0, iface enp7s0): 0/s -> cpu 0 (already there, unchanged)" in r.stdout
+    assert _aff(irq_dir, (134, 135)) == ["0", "1"]
+
+
+# the 24.11.2026 strih-snv read (design 7119179275): per-IRQ rates with all 9 IRQs on CPU 1
+LIVE_RATES = {136: 17000, 140: 9500, 137: 7200, 138: 4000, 134: 3900, 135: 300, 139: 200, 141: 100, 142: 50}
+
+
+def _interrupts(rates, scale):
+    lines = ["            CPU0       CPU1"]
+    for n in sorted(rates):
+        lines.append("%4d:  %10d  %10d  IR-PCI-MSI-0000:07:00.0  %d-edge  enp7s0-pci-%d" %
+                     (n, 11, rates[n] * scale, n, n))
+    lines.append(" NMI:          0          0   Non-maskable interrupts")
+    return "\n".join(lines) + "\n"
+
+
+SWAP_SLEEP = r'''#!/usr/bin/env python3
+import os, shutil, sys
+with open(os.environ["FAKE_SLEEP_LOG"], "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+for pair in os.environ.get("FAKE_SLEEP_SWAP", "").split():
+    src, dst = pair.split(":")
+    shutil.copyfile(src, dst)
+'''
+
+
+def _sampled(tmp_path, rates, sample_s="2", irqs=None):
+    irqs = sorted(rates) if irqs is None else irqs
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=irqs)
+    (tmp_path / "interrupts").write_text(_interrupts(rates, 1))
+    (tmp_path / "interrupts.after").write_text(_interrupts(rates, 1 + int(sample_s)))
+    _exe(bin_dir / "sleep", SWAP_SLEEP)
+    (tmp_path / "sleep.log").write_text("")
+    env.update({"PROC_INTERRUPTS": str(tmp_path / "interrupts"), "IRQ_RATE_SAMPLE_S": sample_s,
+                "FAKE_SLEEP_LOG": str(tmp_path / "sleep.log"),
+                "FAKE_SLEEP_SWAP": "%s:%s" % (tmp_path / "interrupts.after", tmp_path / "interrupts")})
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
-    assert r.returncode == 0, r.stderr
-    assert (irq_dir / "134" / "smp_affinity_list").read_text().strip() == "0,1"
+    return r, irq_dir
+
+
+def test_the_irqs_are_balanced_greedily_by_the_measured_rate(tmp_path):
+    # heaviest first to the least-loaded CPU, ties to the lower CPU (142 meets 21100 on both)
+    r, irq_dir = _sampled(tmp_path, LIVE_RATES)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert (tmp_path / "sleep.log").read_text().splitlines() == ["2"]
+    want = {136: "0", 140: "1", 137: "1", 138: "1", 134: "0", 135: "1", 139: "0", 141: "1", 142: "0"}
+    assert dict(zip(sorted(want), _aff(irq_dir, sorted(want)))) == want
+    assert "IRQ 136 (msi enp7s0, iface enp7s0): 17000/s -> cpu 0 (was 0-15)" in r.stdout
+    assert "IRQ 140 (msi enp7s0, iface enp7s0): 9500/s -> cpu 1 (was 0-15)" in r.stdout
+    assert "rig NIC IRQ rates measured over 2 s, assigned load: cpu 0 21150/s, cpu 1 21100/s" in r.stdout
+
+
+def test_equal_rates_go_to_the_lower_cpu_first_in_irq_order(tmp_path):
+    r, irq_dir = _sampled(tmp_path, {134: 100, 135: 100, 136: 100, 137: 100})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert _aff(irq_dir, (134, 135, 136, 137)) == ["0", "1", "0", "1"]
+
+
+def test_an_irq_missing_from_proc_interrupts_counts_as_no_traffic(tmp_path):
+    r, irq_dir = _sampled(tmp_path, {134: 500}, irqs=(134, 135))
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "IRQ 135: no /proc/interrupts row -- rate 0" in r.stdout
+    assert _aff(irq_dir, (134, 135)) == ["0", "1"]
+
+
+def test_a_garbage_sample_time_is_refused(tmp_path):
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134,))
+    env["IRQ_RATE_SAMPLE_S"] = "2s"
+    r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
+    assert r.returncode == 1
+    assert "FATAL: IRQ_RATE_SAMPLE_S '2s' is not a whole number of seconds" in r.stderr
 
 
 # --- setup: the housekeeping install ---------------------------------------------------------------------
@@ -275,7 +360,7 @@ def test_setup_writes_the_sysctl_the_two_dropins_the_launcher_file_and_restarts_
     root, home, bin_dir, env = _install_env(tmp_path)
     r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
     assert r.returncode == 0, r.stderr + r.stdout
-    # design 7116063669: the launcher's file + the drop-ins carry the TASK CPUs (0), the IRQs keep CPU 1 alone
+    # design 7119179275: the launcher's file + the drop-ins carry the TASK CPU (the first, 0)
     assert (root / "etc" / "strih-housekeeping-cpus.conf").read_text() == "0\n"
     # strih-snv 23.11.2026: kernel 7.0 at HZ 1000 refuses netdev_budget_usecs below 2000 (EINVAL), so the
     # step writes no budget drop-in and never touches the running value
@@ -287,7 +372,7 @@ def test_setup_writes_the_sysctl_the_two_dropins_the_launcher_file_and_restarts_
         assert t.splitlines()[1:] == ["[Service]", "CPUAffinity=0", "Nice=10"]
     rule = (root / "etc" / "udev" / "rules.d" / "71-strih-housekeeping-rss.rules").read_text().splitlines()
     assert rule[1] == ('ACTION=="add", SUBSYSTEM=="net", DRIVERS=="atlantic", TEST=="device/msi_irqs", '
-                       'RUN+="/usr/sbin/ethtool -L $name combined 1"')
+                       'RUN+="/usr/sbin/ethtool -L $name combined 2"')
     hook = root / "etc" / "NetworkManager" / "dispatcher.d" / "60-strih-housekeeping-irq"
     assert hook.read_text().startswith("#!/bin/sh\n# camera-box issue 1425") and os.access(hook, os.X_OK)
     calls = (tmp_path / "systemctl.log").read_text().splitlines()
@@ -348,11 +433,14 @@ def test_a_none_box_with_nothing_of_ours_is_silent(tmp_path):
 
 # --- verify: item 16's housekeeping rows -----------------------------------------------------------------
 
-def _grade_env(tmp_path, irq_aff="1", combined=1, nice=10, cpus="0", running=True):
+def _grade_env(tmp_path, irq_aff=("1", "0", "1"), combined=2, nice=10, cpus="0", running=True,
+               sampler_cpus="2-15", sampler_nice=10):
     tmp_path.mkdir(parents=True, exist_ok=True)
     sysr, irq_dir, bin_dir, eenv = _pcie_box(tmp_path, combined=combined, irqs=(134, 135, 136))
-    for n in (134, 135, 136):
-        (irq_dir / str(n) / "smp_affinity_list").write_text(irq_aff + "\n")
+    if isinstance(irq_aff, str):
+        irq_aff = (irq_aff,) * 3
+    for n, a in zip((134, 135, 136), irq_aff):
+        (irq_dir / str(n) / "smp_affinity_list").write_text(a + "\n")
     root, home, sbin, env = _install_env(tmp_path)
     env.update(eenv)
     assert _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env,
@@ -363,13 +451,17 @@ def _grade_env(tmp_path, irq_aff="1", combined=1, nice=10, cpus="0", running=Tru
     proc = tmp_path / "proc"
     proc.mkdir()
     (proc / "irq").symlink_to(irq_dir)
-    for i, unit in enumerate(("rustdesk.service", "strih-display-watch.service", "strih-obs.service")):
+    for i, unit in enumerate(("rustdesk.service", "strih-display-watch.service", "strih-obs.service",
+                              "program-audio-sampler.service")):
         pid = str(4000 + i)
+        sampler = unit.startswith("program-audio")
         env["FAKE_PID_" + unit.replace("-", "_").replace(".", "_")] = pid if running else "0"
         (proc / pid).mkdir()
-        (proc / pid / "status").write_text("Name:\tx\nCpus_allowed_list:\t%s\n" % cpus)
-        fields = ["S"] + ["0"] * 15 + [str(nice)] + ["1"] * 30
+        (proc / pid / "status").write_text("Name:\tx\nCpus_allowed_list:\t%s\n" % (sampler_cpus if sampler else cpus))
+        fields = ["S"] + ["0"] * 15 + [str(sampler_nice if sampler else nice)] + ["1"] * 30
         (proc / pid / "stat").write_text("%s (a b) %s\n" % (pid, " ".join(fields)))
+    (proc / "net").mkdir()
+    (proc / "net" / "softnet_stat").write_text(SOFTNET_BEFORE)
     stats = sysr / "class" / "net" / "enp7s0" / "statistics"
     stats.mkdir()
     (stats / "rx_missed_errors").write_text("7\n")
@@ -386,16 +478,75 @@ def _grade(tmp_path, **kw):
     return r.stdout
 
 
+# /proc/net/softnet_stat: one row per CPU, the 3rd column time_squeeze (hex), the 13th the CPU id
+SOFTNET_BEFORE = ("0000aa00 00000000 00000010 " + "00000000 " * 9 + "00000000\n"
+                  "0000bb00 00000000 000003e8 " + "00000000 " * 9 + "00000001\n"
+                  "0000cc00 00000000 00000005 " + "00000000 " * 9 + "00000002\n")
+SOFTNET_AFTER = ("0000aa10 00000000 00000012 " + "00000000 " * 9 + "00000000\n"
+                 "0000bb20 00000000 000004b0 " + "00000000 " * 9 + "00000001\n"
+                 "0000cc30 00000000 00000005 " + "00000000 " * 9 + "00000002\n")
+
+
 def test_a_placed_box_passes_every_row(tmp_path):
     out = _grade(tmp_path)
     rows = out.splitlines()
-    assert all(r.startswith("PASS") or r.startswith("NOTE (hk-rx)") for r in rows), out
+    assert all(r.startswith("PASS") or r.startswith("NOTE (hk-rx)") or r.startswith("NOTE (hk-softnet)")
+               for r in rows), out
     assert "NOTE (hk-rx) enp7s0: rx_missed_errors +0, rx_dropped +0 over 0 s, total missed 7 (report-only)" in out
-    assert "PASS (hk-cpus) housekeeping CPUs 0-1 = online 0-15 minus the OBS mask 2-15: rig NIC IRQs on 1, tasks on 0" in out
-    assert "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ CPUs 1" in out
+    assert "PASS (hk-cpus) housekeeping CPUs 0-1 = online 0-15 minus the OBS mask 2-15: rig NIC IRQs on 0-1, tasks on 0" in out
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->0 136->1" in out
+    assert "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ-only CPUs 1" in out
+    assert "PASS (hk-unit) sampler: pid 4003 runs on CPUs 2-15 at nice 10" in out
     for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-slice)", "(hk-unit) rustdesk.service",
-                "(hk-unit) strih-display-watch.service", "(hk-unit) launcher"):
+                "(hk-unit) strih-display-watch.service", "(hk-unit) launcher", "(hk-softnet)", "(hk-unit) sampler"):
         assert any(tag in r for r in rows), (tag, out)
+
+
+def test_the_softnet_note_reads_the_time_squeeze_and_the_dma_drops_over_the_sample(tmp_path):
+    home, path, env = _grade_env(tmp_path)
+    proc = pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"])
+    (tmp_path / "softnet.after").write_text(SOFTNET_AFTER)
+    (tmp_path / "stats").write_text("     InPackets: 9\n     InDroppedDma: 3146\n     Queue[0] InPackets: 1\n")
+    (tmp_path / "stats.after").write_text("     InPackets: 9\n     InDroppedDma: 3150\n     Queue[0] InPackets: 1\n")
+    sleep_dir = tmp_path / "sleepbin"
+    sleep_dir.mkdir()
+    _exe(sleep_dir / "sleep", SWAP_SLEEP)
+    (tmp_path / "sleep.log").write_text("")
+    env.update({"STRIH_HOUSEKEEPING_SAMPLE_S": "2", "FAKE_ETHTOOL_STATS": str(tmp_path / "stats"),
+                "FAKE_SLEEP_LOG": str(tmp_path / "sleep.log"),
+                "FAKE_SLEEP_SWAP": "%s:%s %s:%s" % (tmp_path / "softnet.after", proc / "net" / "softnet_stat",
+                                                    tmp_path / "stats.after", tmp_path / "stats")})
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env,
+             path_prefix="%s:%s" % (sleep_dir, path))
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "sleep.log").read_text().splitlines() == ["2"], "one sample serves (hk-rx) and (hk-softnet)"
+    assert ("NOTE (hk-softnet) over 2 s: time_squeeze cpu0 +2, cpu1 +200; enp7s0 InDroppedDma +4 (total 3150) "
+            "(report-only)") in r.stdout, r.stdout
+    assert "FAIL" not in r.stdout, r.stdout
+
+
+def test_a_wrapped_time_squeeze_counter_reads_wrapped_never_a_negative_count(tmp_path):
+    home, path, env = _grade_env(tmp_path)
+    proc = pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"])
+    (proc / "net" / "softnet_stat").write_text(SOFTNET_AFTER)
+    (tmp_path / "softnet.after").write_text(SOFTNET_BEFORE)
+    sleep_dir = tmp_path / "sleepbin"
+    sleep_dir.mkdir()
+    _exe(sleep_dir / "sleep", SWAP_SLEEP)
+    (tmp_path / "sleep.log").write_text("")
+    env.update({"FAKE_SLEEP_LOG": str(tmp_path / "sleep.log"),
+                "FAKE_SLEEP_SWAP": "%s:%s" % (tmp_path / "softnet.after", proc / "net" / "softnet_stat")})
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env,
+             path_prefix="%s:%s" % (sleep_dir, path))
+    assert "NOTE (hk-softnet) over 0 s: time_squeeze cpu0 wrapped, cpu1 wrapped;" in r.stdout, r.stdout
+
+
+def test_the_softnet_note_names_a_nic_without_indroppeddma_and_an_unreadable_stat(tmp_path):
+    home, path, env = _grade_env(tmp_path)
+    (pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"]) / "net" / "softnet_stat").unlink()
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    assert ("NOTE (hk-softnet) over 0 s: time_squeeze unreadable; enp7s0 InDroppedDma not exposed by ethtool -S "
+            "(report-only)") in r.stdout, r.stdout
 
 
 def test_verify_notes_a_driver_without_channel_control_and_skips_an_unrequested_vector(tmp_path):
@@ -406,19 +557,29 @@ def test_verify_notes_a_driver_without_channel_control_and_skips_an_unrequested_
     (msi / "143").write_text("msix\n")
     r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
     assert "NOTE (hk-rss) enp7s0: RSS channel count not readable (the driver offers no channel control): queues left alone" in r.stdout, r.stdout
-    assert "PASS (hk-irq) enp7s0: IRQ(s) 134 135 136 on CPUs 1" in r.stdout, r.stdout
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->0 136->1" in r.stdout, r.stdout
     assert "FAIL" not in r.stdout, r.stdout
 
 
 def test_an_irq_left_on_obs_cpus_fails(tmp_path):
     out = _grade(tmp_path, irq_aff="0-15")
-    assert "FAIL (hk-irq) enp7s0: IRQ(s) off the IRQ CPUs 1: 134=0-15 135=0-15 136=0-15" in out
-    # the IRQs still on the whole housekeeping set (the placement before the split) fail too
-    assert "FAIL (hk-irq) enp7s0: IRQ(s) off the IRQ CPUs 1: 134=0-1" in _grade(tmp_path / "b", irq_aff="0-1")
+    assert "FAIL (hk-irq) enp7s0: IRQ(s) not on exactly one housekeeping CPU of 0-1: 134=0-15 135=0-15 136=0-15" in out
+    # an IRQ on the whole housekeeping set (two CPUs) fails: the kernel then picks, and drifts
+    assert ("FAIL (hk-irq) enp7s0: IRQ(s) not on exactly one housekeeping CPU of 0-1: 135=0-1"
+            in _grade(tmp_path / "b", irq_aff=("1", "0-1", "0")))
+    assert "FAIL (hk-irq) enp7s0: IRQ(s) not on exactly one housekeeping CPU of 0-1: 136=4" in _grade(
+        tmp_path / "c", irq_aff=("1", "0", "4"))
 
 
 def test_eight_rss_queues_fail(tmp_path):
     assert "FAIL (hk-rss) enp7s0: 8 RSS queues" in _grade(tmp_path, combined=8)
+
+
+def test_the_sampler_off_the_obs_mask_or_at_nice_0_fails_and_down_is_a_note(tmp_path):
+    out = _grade(tmp_path, sampler_cpus="0", sampler_nice=0)
+    assert "FAIL (hk-unit) sampler: pid 4003 runs on CPUs 0 at nice 0, want 2-15 at nice 10" in out
+    out = _grade(tmp_path / "b", running=False)
+    assert "NOTE (hk-unit) sampler: program-audio-sampler.service is not running" in out
 
 
 def test_a_unit_on_obs_cpus_or_at_nice_0_fails(tmp_path):
@@ -597,31 +758,32 @@ def test_a_file_with_our_header_on_line_2_is_ours_only_after_a_shebang(tmp_path)
 
 # --- the split (design 7116063669): the IRQ CPU and the task CPUs from the one fact ---------------------
 
-def test_the_irq_cpu_is_the_last_of_the_set_and_the_tasks_get_the_rest():
-    for hk, irq, task in (("0-1", "1", "0"), ("0,1", "1", "0"), ("3", "3", "3"), ("0-1,8", "8", "0-1"),
-                          ("0-3", "3", "0-2"), ("none", "none", "none")):
+def test_the_irqs_get_the_whole_set_and_the_tasks_its_first_cpu():
+    # design 7119179275 (supersedes the CPU-1-alone split of 7116063669)
+    for hk, irq, task in (("0-1", "0-1", "0"), ("0,1", "0-1", "0"), ("3", "3", "3"), ("0-1,8", "0-1,8", "0"),
+                          ("0-3", "0-3", "0"), ("none", "none", "none")):
         r = _run('strih_housekeeping_irq_cpus "$1"; strih_housekeeping_task_cpus "$1"', hk)
         assert r.returncode == 0, (hk, r.stderr)
         assert r.stdout.split() == [irq, task], (hk, r.stdout)
     r = _run('strih_box_load strih-snv; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
-    assert r.stdout.split() == ["1", "0"], r.stdout
+    assert r.stdout.split() == ["0-1", "0"], r.stdout
     r = _run('strih_box_load strih-pp; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
     assert r.stdout.split() == ["none", "none"], r.stdout
     for badv in ("a", "1-0", ""):
         assert _run('strih_housekeeping_irq_cpus "$1"', badv).returncode != 0, badv
 
 
-def test_the_rendered_oneshot_carries_the_irq_cpu_only():
+def test_the_rendered_oneshot_carries_every_housekeeping_cpu_and_a_2_s_sample():
     r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text')
     assert r.returncode == 0, r.stderr
-    assert 'IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-1}"' in r.stdout
-    assert "HOUSEKEEPING_CPUS:-0-1" not in r.stdout
+    assert 'IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-0-1}"' in r.stdout
+    assert 'IRQ_RATE_SAMPLE_S="${IRQ_RATE_SAMPLE_S:-2}"' in r.stdout
 
 
 def test_the_slice_row_fails_an_irq_cpu_in_the_background_slice(tmp_path):
-    for allowed, want in (("0", "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ CPUs 1"),
-                          ("0-1", "FAIL (hk-slice) rig-background.slice: AllowedCPUs 0-1 holds the IRQ CPU 1"),
-                          ("0 12-13", "PASS (hk-slice) rig-background.slice: AllowedCPUs 0,12-13, off the IRQ CPUs 1"),
+    for allowed, want in (("0", "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ-only CPUs 1"),
+                          ("0-1", "FAIL (hk-slice) rig-background.slice: AllowedCPUs 0-1 holds the IRQ-only CPU 1"),
+                          ("0 12-13", "PASS (hk-slice) rig-background.slice: AllowedCPUs 0,12-13, off the IRQ-only CPUs 1"),
                           ("", "FAIL (hk-slice) rig-background.slice: AllowedCPUs unread or empty")):
         d = tmp_path / ("c%d" % len(list(tmp_path.iterdir())))
         home, path, env = _grade_env(d)
@@ -631,16 +793,27 @@ def test_the_slice_row_fails_an_irq_cpu_in_the_background_slice(tmp_path):
         assert want in r.stdout, (allowed, r.stdout)
 
 
-def test_the_sampler_runs_on_the_task_cpus_on_an_amd_box(tmp_path):
-    # strih-snv has no cpu_atom: the sampler's CPUAffinity is the background set, now without the IRQ CPU
+def test_the_sampler_runs_on_the_obs_mask_at_nice_10_on_a_housekeeping_box(tmp_path):
+    # design 7119179275: the sampler never shares a CPU with the rig NIC's RX softirq again: with housekeeping
+    # CPUs it runs on the OBS mask (14 CPUs, ~9 idle) at nice 10; a `none` box keeps the background set
     (tmp_path / "online").write_text("0-15\n")
     (tmp_path / "iso").write_text("2-15\n")
     env = {"OBS_BOX_ONLINE_CPUS": str(tmp_path / "online"), "STRIH_PROGRAM_AUDIO_ISOLATED_CONF": str(tmp_path / "iso"),
            "STRIH_PROGRAM_AUDIO_SYSFS": str(tmp_path / "nosys")}
+    r = _run('strih_box_load strih-snv; strih_program_audio_cpus; echo; strih_program_audio_nice', env=env)
+    assert r.returncode == 0 and r.stdout.split() == ["2-15", "10"], (r.stdout, r.stderr)
+    r = _run('strih_box_load strih-pp; strih_program_audio_cpus; echo; strih_program_audio_nice; echo END', env=env)
+    assert r.returncode == 0 and r.stdout.split() == ["0-1", "END"], (r.stdout, r.stderr)
+    r = _run('strih_box_load strih-snv; strih_program_audio_unit_text "$1" "$(strih_program_audio_cpus)" '
+             '"$(strih_program_audio_nice)"', str(REPO), env=env)
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.splitlines()
+    i = lines.index("CPUAffinity=2-15")
+    assert lines[i + 1] == "Nice=10" and r.stdout.count("\nNice=") == 1
+    # no OBS mask yet: refused by name, never an every-CPU unit
+    env["STRIH_PROGRAM_AUDIO_ISOLATED_CONF"] = str(tmp_path / "absent")
     r = _run('strih_box_load strih-snv; strih_program_audio_cpus', env=env)
-    assert r.returncode == 0 and r.stdout == "0", (r.stdout, r.stderr)
-    r = _run('strih_box_load strih-pp; strih_program_audio_cpus', env=env)
-    assert r.returncode == 0 and r.stdout == "0-1", (r.stdout, r.stderr)
+    assert r.returncode == 1 and r.stdout == "" and "OBS mask" in r.stderr, (r.stdout, r.stderr)
 
 
 def test_setup_and_verify_keep_the_background_slice_off_the_irq_cpu():
@@ -656,7 +829,7 @@ def test_setup_and_verify_keep_the_background_slice_off_the_irq_cpu():
 
 
 def test_the_slice_exclusion_is_the_irq_cpu_unless_it_is_the_only_one():
-    for hk, want in (("0-1", "1"), ("0,1", "1"), ("0-3", "3"), ("3", "none"), ("none", "none")):
+    for hk, want in (("0-1", "1"), ("0,1", "1"), ("0-3", "1-3"), ("3", "none"), ("none", "none")):
         r = _run('strih_housekeeping_slice_exclude "$1"', hk)
         assert r.returncode == 0 and r.stdout.strip() == want, (hk, r.stdout, r.stderr)
     r = _run('strih_box_load strih-snv; strih_housekeeping_slice_exclude')
@@ -674,7 +847,7 @@ def test_a_one_cpu_set_keeps_the_slice_and_the_sampler_and_passes_the_slice_row(
     r = _run('strih_box_load strih-snv; strih_housekeeping_slice_exclude; strih_program_audio_cpus; echo; '
              'obs_box_background_cpus 0-15 1-15 "$(strih_housekeeping_slice_exclude)"', env=env)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == ["none", "0", "0"], r.stdout
+    assert r.stdout.split() == ["none", "1-15", "0"], r.stdout
     home, path, genv = _grade_env(tmp_path / "g")
     genv.update(box)
     genv["FAKE_ALLOWED_CPUS"] = "0"

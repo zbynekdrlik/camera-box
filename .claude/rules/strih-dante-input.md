@@ -158,8 +158,9 @@ Dante device `strih-obs` that the obs release's `dante-input.so` runs (dstack's 
     `jxs_cores_derived` record to `""` and always drops the record (an operator's value is kept);
     verify item 49's `(jxs-cores)` FAILs a record left in the file. The running output takes it at its
     next Stop/StartOutput.
-  - **The program-audio sampler** keeps its own set: the E-cores, else the background set (online minus
-    the OBS mask, strih-snv 0-1), `strih_program_audio_cpus`.
+  - **The program-audio sampler** keeps its own set, `strih_program_audio_cpus`: on a box with
+    housekeeping CPUs the OBS mask at nice 10 (strih-snv 2-15, issue 1425 design 7119179275; read the Dante
+    receive after that deploy), else the E-cores, else the background set (online minus the OBS mask).
   - Tests: `tests/python/test_strih_dante_cpu_leftovers_1485.py` (the remove against a temp root with a
     logging `systemctl` / `timeout`, every branch; step 13 on a Dante and a non-Dante box; the grade; the
     removed machinery; the TOML; the JPEG XS render and row).

@@ -866,6 +866,13 @@ shim + numpy next to restreamer's broadcast encoder).
 - **The unit** `systemd/program-audio-sampler.strih-snv.service` (a TEMPLATE) is installed as the
   operator's `--user` `program-audio-sampler.service`:
   - `CPUAffinity=` = `strih_program_audio_cpus` (issue 1485), never every CPU and never empty:
+    - a box with housekeeping CPUs (`STRIH_HOUSEKEEPING_CPUS` not `none`, strih-snv; issue 1425 design
+      7119179275): the OBS mask `/etc/strih-isolated-cpus.conf` (2-15) plus a `Nice=10` line
+      (`strih_program_audio_nice`, rendered right under `CPUAffinity=`). The rig NIC IRQs now spread over
+      every housekeeping CPU, and the sampler must never share one with the RX softirq again
+      (`strih-housekeeping.md`). Read after the deploy: the Dante receive (dstack rx_holes / rebootstraps,
+      the 1485 A/V finding below was the sampler at NORMAL priority on CPU 15) and the sampler's own
+      `queue_drops` / `sender_stalls`; its start line now carries the positive-nice WARNING by design;
     - a hybrid box: its own `/sys/devices/cpu_atom/cpus`, read the way `strih_lx_lowprio_prefix`
       reads it;
     - no cpu_atom (the AMD strih-snv): the BACKGROUND set, `obs_box_background_cpus` = online minus
@@ -876,7 +883,9 @@ shim + numpy next to restreamer's broadcast encoder).
       the CG receivers + correlation, ~11-20 % CPU) ran on 0-15. On CPU 15 it cost the dstack engine
       a rebootstrap in every 10-15 min window; moved live to 0-1 a 15.5-min window was clean (A/B
       3.11.2026, `strih-dante-input.md`).
-    - Normal priority (no Nice/CPUWeight: never ahead of OBS).
+    - Otherwise normal priority (no Nice/CPUWeight: never ahead of OBS). The "nice 10 costs it audio"
+      finding below was measured on dev1, whose CPUs other projects' CI loaded; on the mostly idle OBS
+      mask nice 10 only makes it yield to OBS.
   - `ExecCondition=/usr/bin/test -e %h/.config/camera-box/program-audio-sampler.test-mode`: an OPT-IN
     TEST marker (review round 3). Without it every start is skipped, so the sampler is DOWN by default:
     a fresh provisioning, and a reboot during a production (strih-snv lingers the user manager,
