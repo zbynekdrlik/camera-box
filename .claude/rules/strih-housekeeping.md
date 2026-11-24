@@ -102,6 +102,24 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
 - `none` removes ours (header-checked: our header on line 1, or line 2 after `#!/bin/sh`); a foreign file of
   the name is named and left; the live budget stays until the next boot.
 
+## The RX ring at the driver's pre-set maximum (24.11.2026, design 7124419590)
+
+Under E2E load the AQC113 (`atlantic`, ring 2048 of 8184, rx-usecs 112) dropped at DMA level while
+CPU 0's NET_RX ran out of budget: InDroppedDma 3272 -> 30178. The strih Dante input lost 8544 packets
+that never reached its socket (dstack read: all on the one flow 10.77.7.104:61444, socket_drops 0),
+and the issue-1534 whole-session gate failed the E2E on it.
+- The boot oneshot's step 2b (`scripts/lib/strih-nic-irq.sh`) reads `ethtool -g` once. It sets RX to
+  the PRE-SET MAXIMUM (never a typed number) only when it differs, reads it back, and fails loud. A
+  driver with no ring control is logged and left alone. The NM up hook re-runs the script, and after the
+  first change the ring is already at the maximum, so there is no flap loop. That loop is the issue-1411
+  trap, and it came from an NM `ethtool.ring-rx` profile key that NM re-applied on every up. Never put
+  the ring in the NM profile.
+- It is a fixed, bounded queue: no added latency in steady state, and a burst waits a few hundred us
+  instead of dropping (the owner's 21.11.2026 rule).
+- A ring change resets the link once. On a live box, apply it off-production with
+  `systemctl restart strih-nic-irq-affinity.service`.
+- verify item 16 `(hk-ring)`: PASS = the maximum, FAIL names the restart, NOTE = no ring control.
+
 ## Verify item 16 (`strih_housekeeping_grade_report`)
 
 `(hk-cpus)` (also the launcher's file = the task CPUs), `(hk-rss)` (current combined = the IRQ CPU

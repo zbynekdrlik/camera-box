@@ -277,6 +277,22 @@ if [ "$IRQ_CPUS" != none ] && [ -d "$msi_dir" ]; then
   else
     log "${iface}: RSS queues already ${want} (combined) -- unchanged"
   fi
+  # (2b) issue 1425 (24.11.2026): the RX ring at the driver's pre-set maximum. A 2048 ring overflowed at DMA
+  # level under E2E load (InDroppedDma 3272 -> 30178, the strih Dante input lost packets that never reached
+  # its socket). A fixed bounded queue: no added latency in steady state, a burst waits instead of dropping.
+  # Changed only when it differs (a ring change re-initialises the NIC, the link drops once), read back.
+  ring() { "$ETHTOOL" -g "$iface" 2>/dev/null | awk '/^Pre-set maximums/ { s = "max" } /^Current hardware settings/ { s = "cur" } /^RX:/ && s != "" { v[s] = $2 } END { print v["max"] " " v["cur"] }' || true; }
+  read -r rmax rcur <<<"$(ring)" || true
+  if [ -z "$rmax" ] || [ -z "$rcur" ] || [[ "$rmax$rcur" == *[!0123456789]* ]]; then
+    log "${iface}: RX ring not readable (the driver offers no ring control) -- left alone"
+  elif [ "$rcur" != "$rmax" ]; then
+    "$ETHTOOL" -G "$iface" rx "$rmax" || die "ethtool -G ${iface} rx ${rmax} failed (was ${rcur})"
+    got="$(ring)"; got="${got#* }"
+    [ "$got" = "$rmax" ] || die "read-back mismatch on ${iface}: set RX ring ${rmax}, read '${got}'"
+    log "${iface}: RX ring ${rcur} -> ${rmax} (the driver's pre-set maximum)"
+  else
+    log "${iface}: RX ring already ${rmax} (the driver's pre-set maximum) -- unchanged"
+  fi
   # (3a) every IRQ of the rig NIC, read AFTER the channel change (the driver re-requests its vectors).
   for _f in "$msi_dir"/*; do
     _n="$(basename "$_f")"
