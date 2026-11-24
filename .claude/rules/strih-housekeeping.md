@@ -117,8 +117,12 @@ and the launcher: the RUNNING main process's `Cpus_allowed_list` = the task CPUs
 FAILs; OBS down is a NOTE for the launcher row. `(hk-unit) sampler`: the running program-audio sampler on
 the OBS mask at nice 10; not running (EVENT mode) is a NOTE. `(hk-rebalance)`: both re-balance units as rendered
 (drift FAILs), the timer enabled (FAILs otherwise), and the service's run this boot from `systemctl show -p
-ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus` (0 = not run yet: a NOTE; success + exit 0 =
-PASS; anything else FAILs naming `journalctl -b -u strih-nic-irq-rebalance.service`).
+ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus` (systemd keeps it per boot): success + exit 0 =
+PASS, a failed run FAILs naming `journalctl -b -u strih-nic-irq-rebalance.service`; not run yet (0) is
+graded by the timer's `ActiveState/SubState`: `active/waiting` a NOTE (it runs at 5 min), `inactive/*` a
+NOTE (setup enables without starting, so the boot it was installed in never runs it), anything else
+(`active/elapsed`, unreadable) FAILs: the timer fired and the service never ran. `none` also
+`reset-failed`s a removed service.
 
 ## Deploy (supervisor)
 
@@ -141,7 +145,9 @@ before), `(hk-rebalance)` reads a NOTE until then.
 
 Not read on the box from this lane: whether atlantic reapplies an affinity hint on a later open, and the
 journal of the oneshot / hook at the first boot with the rule (an `RSS queues N -> 2` line there = the
-udev rule did not take effect at add).
+udev rule did not take effect at add). No lock serialises the placement script: an NM `up` around the 5-min
+re-balance (or the boot oneshot) can run two placements at once, both writing `smp_affinity` (each writes
+only an IRQ whose target differs; the last run wins).
 
 Tests: `tests/python/test_strih_housekeeping_1425.py`. A sampled read (the oneshot's /proc/interrupts rate,
 the `(hk-softnet)` softnet_stat / InDroppedDma deltas) is tested with a `sleep` stub first on PATH

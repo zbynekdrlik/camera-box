@@ -153,13 +153,16 @@ strih_housekeeping_rebalance_remove() {
     gone=1
   done
   [ "$gone" = 0 ] || systemctl daemon-reload || echo "  WARN: daemon-reload failed after removing the re-balance units -- run it by hand"
+  # a service that failed this boot would stay listed as `not-found failed` (review round 1)
+  [ -e "$(strih_housekeeping_rebalance_path service)" ] || [ "$gone" = 0 ] \
+    || systemctl reset-failed "${STRIH_HOUSEKEEPING_REBALANCE}.service" 2>/dev/null || true
   return 0
 }
 
 # strih_housekeeping_rebalance_row -> the `(hk-rebalance)` row: both units as rendered, the timer enabled,
 # and the service's run this boot (systemd's state is per boot: a start monotonic of 0 = not run yet).
 strih_housekeeping_rebalance_row() {
-  local kind f show line mono="" result="" status="" timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
+  local kind f show line state mono="" result="" status="" timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
   for kind in service timer; do
     f="$(strih_housekeeping_rebalance_path "$kind")"
     if ! cmp -s "$f" <("strih_housekeeping_rebalance_${kind}_text"); then
@@ -179,7 +182,14 @@ strih_housekeeping_rebalance_row() {
   done <<<"$show"
   case "$mono" in
     '' | *[!0123456789]*) bad "(hk-rebalance) ${timer} enabled; the service's state is unreadable (ExecMainStartTimestampMonotonic '${mono}')" ;;
-    0) note "(hk-rebalance) ${timer} enabled; the re-balance has not run yet this boot (it runs 5 min after boot)" ;;
+    0) # not run this boot: the timer's own state says why (review round 1)
+       show="$(systemctl show -p ActiveState -p SubState "$timer" 2>/dev/null || true)"
+       state="$(printf '%s\n' "$show" | sed -n 's/^ActiveState=//p')/$(printf '%s\n' "$show" | sed -n 's/^SubState=//p')"
+       case "$state" in
+         active/waiting) note "(hk-rebalance) ${timer} enabled and waiting; the re-balance has not run yet this boot (it runs 5 min after boot)" ;;
+         inactive/*) note "(hk-rebalance) ${timer} enabled but not started this boot (installed after boot): the first re-balance runs 5 min after the next boot" ;;
+         *) bad "(hk-rebalance) ${timer} is ${state} but the re-balance never ran this boot -- journalctl -b -u ${timer} -u ${STRIH_HOUSEKEEPING_REBALANCE}.service" ;;
+       esac ;;
     *) if [ "$result" = success ] && [ "$status" = 0 ]; then
          ok "(hk-rebalance) ${timer} enabled; the re-balance ran this boot: success (exit 0)"
        else
