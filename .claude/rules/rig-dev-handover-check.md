@@ -44,6 +44,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 | mapping | `set-ndi-mapping.py --verify-only` (strih) | exit 0 | exit 1 | exit 2 |
 | pins | `latency_pins_verify.py` (strih/stream/imag) | exit 0 | exit 1 | exit 2 |
 | clock | `dantesync-clock-alert-watchdog.sh --dry-run` | `verdict=OK` | NO_CLOCK/NO_DANTESYNC/MGMT_DEAD | SKIP/UNKNOWN |
+| dsync_nic (issue 1545) | `dev1-dsync-iface.sh --check` (one loopback read of dev1's `:8898/status` through `dsync_iface_grade`, against `DANTESYNC_FLEET_PTP_NICS`) | exit 0 (`verdict=ok:<nic>`) | exit 1 (not-configured / configured-elsewhere / joined-elsewhere) → **SUPERVISOR** (`scripts/dev1-dsync-iface.sh --apply`, never `zabudol si`) | exit 2 / timeout / missing |
 | obs | `obs-liveness-watchdog.sh --dry-run` | `verdict=HEALTHY` | FPS-ZERO/WEDGED-.../WS-DEAD/... | no verdict |
 | net | `network-reach-alert-watchdog.sh --dry-run` | `-> REACHABLE` | `-> UNREACHABLE` | no line |
 | audiolag | `audio-lag-alert-watchdog.sh --dry-run` | `verdict=HEALTHY` | LAGGING/STALE/DRIFTING | SKIP/UNKNOWN |

@@ -195,6 +195,29 @@ def classify_watchdogs(text, imag_retired=False, max_age_s=WD_MAX_AGE_S):
 _EXPOSURE_LINE_RE = re.compile(r"^exposure\s+state=(none|pending|restored|invalid)\b(.*)$")
 
 
+def classify_dsync_nic(text, rc):
+    """Decide the `dsync_nic` item (issue 1545) from `scripts/dev1-dsync-iface.sh --check`:
+      exit 0 -> OK  (dev1's dsync joined the NIC the fleet declares)
+      exit 1 -> SUPERVISOR  (configured elsewhere / no --interface / joined elsewhere: the drop-in is
+                the supervisor's to install, never the owner's fault; the line names the fix)
+      else   -> UNKNOWN  (2 = /status unreadable or no declared NIC, a timeout, a missing probe)
+    The probe's own `verdict=` token rides along in the message. Returns {status, message}."""
+    verdict = ""
+    for line in (text or "").splitlines():
+        if "verdict=" in line:
+            verdict = (line.split("verdict=", 1)[1].split() or [""])[0]
+    if rc == 0 and verdict.startswith("ok:"):
+        return {"status": OK,
+                "message": "dsync na dev1 je na deklarovanej PTP sieťovke (%s)" % verdict[3:]}
+    if rc == 1:
+        return {"status": SUPERVISOR,
+                "message": "dsync na dev1 nie je na deklarovanej PTP sieťovke (%s) -- supervisor: "
+                           "spusti scripts/dev1-dsync-iface.sh --apply" % (verdict or "bez verdiktu")}
+    return {"status": UNKNOWN,
+            "message": "PTP sieťovku dsync na dev1 sa nepodarilo overiť (%s)"
+                       % (verdict or "rc %s" % rc)}
+
+
 def classify_exposure(text, mode_text=""):
     """Decide the `exposure` item from the snapshot-state line.
       none / restored            -> OK
@@ -420,6 +443,11 @@ class Item(object):
             r = classify_exposure(text, mode_text)
             return {"key": self.key, "label": self.label, "status": r["status"],
                     "message": r["message"]}
+        if self.kind == "dsync_nic":
+            text, rc = captures_data.get(self.captures[0], ("", RC_MISSING))
+            r = classify_dsync_nic(text, rc)
+            return {"key": self.key, "label": self.label, "status": r["status"],
+                    "message": r["message"]}
         if self.kind == "jxs":
             texts = [captures_data.get(n, ("", RC_MISSING))[0] for n in self.captures]
             r = classify_jxs(*texts)
@@ -538,6 +566,12 @@ ITEMS = [
          forgot_msg="niektorý uzol stratil clock LOCK (NO_CLOCK/NO_DANTESYNC/MGMT_DEAD)",
          unknown_msg="clock stav sa nepodarilo prečítať (uzly nedostupné)",
          good={"OK"}, forgot={"NO_CLOCK", "NO_DANTESYNC", "MGMT_DEAD"}),
+    # issue 1545: dev1's dsync on the PTP NIC the dantesync fleet declares (DANTESYNC_FLEET_PTP_NICS).
+    # 20.11.2026 it had joined the down enp39s0 and the clock item saw only the lost LOCK. A wrong NIC
+    # is a SUPERVISOR problem (a unit drop-in), never the owner's; the messages come from
+    # classify_dsync_nic.
+    Item("dsync_nic", "dev1 dsync PTP sieťovka", ["dsync_nic"], "dsync_nic",
+         ok_msg="", forgot_msg="", unknown_msg=""),
     Item("obs", "OBS liveness (strih+stream)", ["obs"], "verdict",
          ok_msg="oba broadcast OBS renderujú živo",
          forgot_msg="OBS je zaseknutý/mŕtvy na niektorom boxe (FPS-ZERO/WEDGED/WS-DEAD/...)",

@@ -95,6 +95,19 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up. Sinc
     the dev1-local `~/.config/camera-box/dantesync-fleet.env` (0600, `KEY=VALUE`, PARSED not sourced,
     only row-named keys read). A missing value = that node reads UNKNOWN / is skipped — never dialled
     with an empty or a foreign password.
+- **The declared PTP NIC (issue 1545): `DANTESYNC_FLEET_PTP_NICS`** (`dev1=enp38s0`, space-separated
+  `name=nic`, env-overridable), BESIDE the table, never an 8th column. `dantesync_fleet_ptp_nic NAME`
+  / python `ptp_nic(name)` / CLI `dantesync_fleet.py ptp-nic NAME` (no entry = rc 1 / None; a
+  malformed entry fails naming the variable, whichever node was asked; the NIC is one Linux interface
+  name, the character sets spelled out). Why: 20.11.2026 dev1's dsync (unit without `--interface`,
+  written at the 1.8.0 install) joined the link-DOWN enp39s0 after the 1.35.16 roll and ran NTP-only.
+  `scripts/dev1-dsync-iface.sh --apply` renders + installs the drop-in
+  `/etc/systemd/system/dsync.service.d/zz-camera-box-interface.conf` (`ExecStart=` reset +
+  `--interface <nic>`) from the fact, compare-then-write, `daemon-reload` + `restart dsync` ONLY when
+  the file changed (`scripts/lib/dsync-local-iface.sh`, sudo -n); `--check` (read-only) grades
+  `/status` through `dsync_iface_grade` and is the handover's `dsync_nic` item. A reinstall of dev1
+  = run `--apply` once. The clock watchdog is unchanged (it still pages the resulting NO_CLOCK).
+  Test: `tests/python/test_dev1_dsync_iface_1545.py`.
 - **The Poprad (PP) venue rows (issue 1412).** `strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|`
   (the PP NTP master) and `stream-pp|obs:stream-pp|linux|video-pp|reach|-|`. Owner (11.10.2026): "a
   tiez tam nie je dantesync tam nie je updatnuty cize potrebujes zaradit tento pc do updatovania".

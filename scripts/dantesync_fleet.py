@@ -32,6 +32,7 @@ scripts/dantesync-canonical-config.json is valid here (ROLES).
 CLI:
   dantesync_fleet.py rows
   dantesync_fleet.py gm-host ROLE
+  dantesync_fleet.py ptp-nic NAME     (issue 1545: the node's declared PTP NIC; exit 1 = none)
   dantesync_fleet.py template --role ROLE
   dantesync_fleet.py drift --role ROLE [--name NAME] [--templates PATH] CONFIG_FILE
 Exit (drift): 0 = matches its template, 20 = DRIFT, 11 = UNKNOWN, 2 = usage.
@@ -166,6 +167,23 @@ def rows() -> list:
             addr = row[1]
         out.append("|".join([name, addr, os_, role, homegate, user, credvar]))
     return out
+
+
+_UPPER = _LETTERS.upper()
+_NIC = re.compile(f"[{_LETTERS}{_UPPER}{_DIGITS}][{_LETTERS}{_UPPER}{_DIGITS}_.\\-]{{0,14}}")
+
+
+def ptp_nic(name: str):
+    """The PTP NIC `DANTESYNC_FLEET_PTP_NICS` declares for NAME (issue 1545), else None (the bash
+    dantesync_fleet_ptp_nic). A malformed table raises RuntimeError naming the variable."""
+    found = None
+    for entry in _bash_default("DANTESYNC_FLEET_PTP_NICS", FLEET_SH).split():
+        key, sep, nic = entry.partition("=")
+        if not sep or not key or not _NIC.fullmatch(nic):
+            raise RuntimeError(f"dantesync_fleet: malformed DANTESYNC_FLEET_PTP_NICS entry {entry!r} (expected name=nic)")
+        if key == name and found is None:
+            found = nic
+    return found
 
 
 def role_venue(role: str):
@@ -645,6 +663,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="dantesync_fleet.py", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("rows", help="print every dantesync node row")
+    n = sub.add_parser("ptp-nic", help="the PTP NIC the fleet declares for a node (exit 1 = none)")
+    n.add_argument("name")
     g = sub.add_parser("gm-host", help="the grandmaster host a role must lock to")
     g.add_argument("role", choices=ROLES)
     t = sub.add_parser("template", help="print a role's canonical config (tokens resolved)")
@@ -658,6 +678,12 @@ def main(argv=None) -> int:
     ns = ap.parse_args(argv)
     if ns.cmd == "rows":
         print("\n".join(rows()))
+        return 0
+    if ns.cmd == "ptp-nic":
+        nic = ptp_nic(ns.name)
+        if nic is None:
+            return 1
+        print(nic)
         return 0
     if ns.cmd == "gm-host":
         print(role_gm_host(ns.role))

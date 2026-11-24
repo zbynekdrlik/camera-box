@@ -115,6 +115,14 @@ strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|
 stream-pp|obs:stream-pp|linux|video-pp|reach|-|
 alex-nb|10.77.7.109|windows|audio|reach|alexnb|}"
 
+# issue 1545: the PTP NIC a node's dsync must join, declared beside the table (never an 8th column):
+# space-separated `name=nic`. dsync without `--interface` picks a NIC by itself; on 20.11.2026 dev1's
+# joined the link-DOWN enp39s0 instead of the rig NIC enp38s0 and ran NTP-only. dev1 has no
+# provisioning script, so its drop-in is rendered + installed from this fact by
+# scripts/dev1-dsync-iface.sh --apply and graded by its --check (the handover's dsync_nic item).
+# Read by dantesync_fleet_ptp_nic NAME; python twin dantesync_fleet.ptp_nic.
+DANTESYNC_FLEET_PTP_NICS="${DANTESYNC_FLEET_PTP_NICS:-dev1=enp38s0}"
+
 # issue 1487: the nodes dsync GRADES itself (dsync#179: a dev1 user timer reads their :8898 every 60 s
 # and pages through airuleset notify). camera-box keeps their UPGRADE path (the fleet upgrader and the
 # version gate still read them) until dsync can log in there (airuleset#1311), but drops them from every
@@ -437,6 +445,30 @@ dantesync_fleet_present() {
       ;;
   esac
   return 0
+}
+
+# dantesync_fleet_ptp_nic NAME -> the PTP NIC DANTESYNC_FLEET_PTP_NICS declares for NAME (issue 1545),
+# rc 0. No entry for NAME = rc 1, silent. A malformed table (an entry without `=`, an empty name, a NIC
+# that is not a Linux interface name: 1-15 of [A-Za-z0-9_.-], first an ASCII letter or digit) = rc 1 +
+# a stderr line naming the variable, whichever node was asked: a typo is never read as "no NIC".
+# The character sets are spelled out (no bracket range follows the locale, issue 1302).
+dantesync_fleet_ptp_nic() {
+  local want="${1:-}" entry name nic found="" LC_ALL=C
+  local lower='abcdefghijklmnopqrstuvwxyz' upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ' digit='0123456789'
+  local first="${lower}${upper}${digit}" rest="${lower}${upper}${digit}_.-"
+  local -
+  set -f  # the table is split on whitespace only, never globbed
+  for entry in $DANTESYNC_FLEET_PTP_NICS; do
+    name="${entry%%=*}"
+    nic="${entry#*=}"
+    if [ "$entry" = "$name" ] || [ -z "$name" ] || ! [[ $nic =~ ^[${first}][${rest}]{0,14}$ ]]; then
+      echo "dantesync-fleet: malformed DANTESYNC_FLEET_PTP_NICS entry '$entry' (expected name=nic)" >&2
+      return 1
+    fi
+    [ "$name" = "$want" ] && [ -z "$found" ] && found="$nic"
+  done
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
 }
 
 # dantesync_fleet_dsync_graded NAME -> 0 iff dsync grades NAME itself (issue 1487, DSYNC_GRADED_NODES).

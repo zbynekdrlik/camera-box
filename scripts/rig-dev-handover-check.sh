@@ -106,6 +106,8 @@ MIC_PROBE="${RDH_MIC_PROBE:-$HERE/measurement-audio-alert-watchdog.sh}"
 MIC_GUARD_PROBE="${RDH_MIC_GUARD_PROBE:-$HERE/program_audio_guard.py}"
 PAINTER_PROBE="${RDH_PAINTER_PROBE:-$HERE/optical-chain-alert-watchdog.sh}"
 CLOCK_PROBE="${RDH_CLOCK_PROBE:-$HERE/dantesync-clock-alert-watchdog.sh}"
+# issue 1545: dev1's dsync NIC vs the fleet fact (read-only: one loopback read of :8898/status)
+DSYNC_NIC_PROBE="${RDH_DSYNC_NIC_PROBE:-$HERE/dev1-dsync-iface.sh}"
 OBS_PROBE="${RDH_OBS_PROBE:-$HERE/obs-liveness-watchdog.sh}"
 NET_PROBE="${RDH_NET_PROBE:-$HERE/network-reach-alert-watchdog.sh}"
 AUDIOLAG_PROBE="${RDH_AUDIOLAG_PROBE:-$HERE/audio-lag-alert-watchdog.sh}"
@@ -220,6 +222,9 @@ fi
 
 # --- item 7: clock (dantesync-clock --dry-run) --------------------------------------------------
 run_probe clock bash "$CLOCK_PROBE" --dry-run
+# issue 1545: the dsync_nic item -- dev1's dsync joined the NIC DANTESYNC_FLEET_PTP_NICS declares
+# (exit 0), else the wrong-NIC verdict (exit 1, the supervisor's drop-in) or unreadable (exit 2).
+run_probe dsync_nic bash "$DSYNC_NIC_PROBE" --check
 
 # --- item 8: obs liveness (obs-liveness --dry-run) ----------------------------------------------
 run_probe obs bash "$OBS_PROBE" --dry-run
