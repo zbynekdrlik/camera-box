@@ -181,7 +181,9 @@ strih_housekeeping_rebalance_row() {
     esac
   done <<<"$show"
   case "$mono" in
-    '' | *[!0123456789]*) bad "(hk-rebalance) ${timer} enabled; the service's state is unreadable (ExecMainStartTimestampMonotonic '${mono}')" ;;
+    # two arms, no alternation: the verify subshell sweep reads a ` | ` before a grader as a pipe
+    '') bad "(hk-rebalance) ${timer} enabled; the service's state is unreadable (ExecMainStartTimestampMonotonic '')" ;;
+    *[!0123456789]*) bad "(hk-rebalance) ${timer} enabled; the service's state is unreadable (ExecMainStartTimestampMonotonic '${mono}')" ;;
     0) # not run this boot: the timer's own state says why (review round 1)
        show="$(systemctl show -p ActiveState -p SubState "$timer" 2>/dev/null || true)"
        state="$(printf '%s\n' "$show" | sed -n 's/^ActiveState=//p')/$(printf '%s\n' "$show" | sed -n 's/^SubState=//p')"

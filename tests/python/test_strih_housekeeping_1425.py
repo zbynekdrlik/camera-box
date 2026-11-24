@@ -1022,6 +1022,14 @@ def test_verify_fails_a_failed_re_balance_run(tmp_path):
     assert "journalctl -b -u strih-nic-irq-rebalance.service" in rows[0]
 
 
+def test_verify_fails_an_unreadable_re_balance_state_empty_or_garbage(tmp_path):
+    for i, mono in enumerate(("", "12x4")):
+        rows, _ = _rebalance_rows(tmp_path / str(i), FAKE_REBALANCE_SHOW=f"ExecMainStartTimestampMonotonic={mono}\n"
+                                                                         "Result=success\nExecMainStatus=0")
+        assert rows == ["FAIL (hk-rebalance) strih-nic-irq-rebalance.timer enabled; the service's state is "
+                        f"unreadable (ExecMainStartTimestampMonotonic '{mono}')"], rows
+
+
 def test_verify_fails_a_disabled_timer(tmp_path):
     home, path, env = _grade_env(tmp_path)
     pathlib.Path(env["FAKE_SYSTEMCTL_ENABLED"]).write_text("")
