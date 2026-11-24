@@ -609,6 +609,24 @@ async fn run_capture_loop(
     // one receiver. Unset = `None`, nothing created.
     let jxs_sender = camera_box::jxs_send::JxsSender::start_from_env(&resolved_hostname);
 
+    // Issue 1540 slice 2 -- the cumulative video counters for dcontroller, served read-only on
+    // `:8896/video.json` by their own SCHED_OTHER thread. The capture loop folds each finished
+    // 5-s window in (atomics, never per frame) and polls the JPEG XS window once a second.
+    let video_counters = Arc::new(camera_box::cambox_video_stats::CamboxVideoCounters::default());
+    camera_box::cambox_video_http::start_from_env(
+        camera_box::cambox_video_stats::NodeMeta {
+            node: resolved_hostname.to_lowercase(),
+            ndi_name: ndi_name.to_string(),
+            jxs_target: std::env::var("CAMERA_BOX_JXS_TARGET")
+                .ok()
+                .filter(|t| !t.trim().is_empty()),
+            run_start_unix_ms: camera_box::cambox_video_stats::now_unix_ms(),
+            run_id: camera_box::cambox_video_stats::read_run_id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        Arc::clone(&video_counters),
+    );
+
     // #174 cam1-capture render-time QR burn — TEST MODE ONLY. Gated behind
     // CAMERA_BOX_BURN_RUN_ID (mirrors the strih/stream DistroAV burn run_id env): when
     // UNSET the burn is OFF and the live NDI feed stays completely CLEAN (zero-copy send
@@ -795,6 +813,8 @@ async fn run_capture_loop(
         let mut frame_count: u64 = 0; // frames captured this report window
         let mut emit_count: u64 = 0; // frames actually sent to NDI this window
         let mut last_report = std::time::Instant::now();
+        // Issue 1540 -- the last JPEG XS window poll (once a second, below).
+        let mut last_jxs_poll = std::time::Instant::now();
         // #1200 — capture-side byte-identical dupe fraction for the latch-halving detector. Counted
         // per 5s report window (reusing the SAME #889 content_hash, no change to the decimation
         // gate) and fed to the tracker in the report block; reset with frame_count. prev_capture_hash
@@ -1678,6 +1698,10 @@ async fn run_capture_loop(
                         // it, so it stays 0 → the over-rate trigger's churn band never confirms,
                         // which is correct (no decimation gate → no dupe-victim sheds).
                         let mut window_dupe_shed: u64 = 0;
+                        // Issue 1540 -- this window's output repeats + blind sheds for the
+                        // cumulative video counters (0 without the decimation gate).
+                        let mut window_repeats: u64 = 0;
+                        let mut window_blind_shed: u64 = 0;
                         if out_interval_ns > 0 {
                             let emit_fps = emit_count as f64 / secs;
                             tracing::info!(
@@ -1711,6 +1735,8 @@ async fn run_capture_loop(
                             // (#1167 v4) the starvation last-frame-repeat count is drained SEPARATELY
                             // (the 6-tuple above is byte-frozen) and appended to the summary segment.
                             let starvation_repeats = decimation_gate.take_starvation_repeats();
+                            window_repeats = starvation_repeats;
+                            window_blind_shed = blind_shed;
                             tracing::info!(
                                 "{}",
                                 camera_box::dupe_decimation::dupe_shed_summary(
@@ -1788,6 +1814,17 @@ async fn run_capture_loop(
                                 corrupted
                             );
                         }
+                        // Issue 1540 -- fold this finished window into the served totals.
+                        video_counters.note_capture_window(
+                            &camera_box::cambox_video_stats::CaptureWindow {
+                                captured: frame_count,
+                                sent: emit_count,
+                                capture_dropped_total: dropped,
+                                corrupted_total: corrupted,
+                                starvation_repeats: window_repeats,
+                                blind_shed: window_blind_shed,
+                            },
+                        );
                         // #707 B1 — print the per-second emit/capture ring alongside the 5s
                         // average so a sub-5s emit pause (the #707 freeze) is visible in the log
                         // even when it averaged out of the fps line above. Buckets are oldest-first,
@@ -2187,6 +2224,25 @@ async fn run_capture_loop(
                     if let Some(s) = capture_sender.as_mut() {
                         if let Err(e) = s.maybe_reannounce() {
                             tracing::warn!("#297 NDI sender re-announce check failed: {}", e);
+                        }
+                    }
+
+                    // Issue 1540 -- read the JPEG XS sender's newest published window at most once
+                    // a second (it publishes every 5 s and holds that mutex only for a copy), so no
+                    // window is replaced unread; the sequence number counts any that were.
+                    if last_jxs_poll.elapsed() >= std::time::Duration::from_secs(1) {
+                        last_jxs_poll = std::time::Instant::now();
+                        if let Some(h) = jxs_sender.as_ref().and_then(|l| l.handoff()) {
+                            video_counters
+                                .note_jxs_connected(camera_box::cambox_video_stats::now_unix_ms());
+                            if let Some((seq, w)) = h.take_window() {
+                                video_counters.note_jxs_window(
+                                    seq,
+                                    &camera_box::cambox_video_stats::JxsWindow::from_send_window(
+                                        &w,
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
