@@ -34,13 +34,37 @@ fn every_report_window_is_folded_once_inside_the_five_second_block() {
 }
 
 #[test]
+fn the_window_counts_go_into_the_right_fields() {
+    let s = main_rs();
+    for line in [
+        "window_repeats = starvation_repeats;",
+        "window_blind_shed = blind_shed;",
+        "captured: frame_count,",
+        "sent: emit_count,",
+        "capture_dropped_total: dropped,",
+        "corrupted_total: corrupted,",
+        "starvation_repeats: window_repeats,",
+        "blind_shed: window_blind_shed,",
+    ] {
+        assert_eq!(s.matches(line).count(), 1, "{line}");
+    }
+}
+
+#[test]
 fn the_jxs_window_is_polled_at_most_once_a_second() {
     let s = main_rs();
-    assert_eq!(s.matches("video_counters.note_jxs_window(").count(), 1);
+    assert_eq!(
+        s.matches("video_counters.note_jxs_poll(h.take_window());")
+            .count(),
+        1
+    );
     let poll = s
-        .find("if last_jxs_poll.elapsed() >= std::time::Duration::from_secs(1) {")
+        .find("if camera_box::cambox_video_stats::poll_due(")
         .expect("the 1-s poll gate");
-    let take = s.find("h.take_window()").expect("take_window");
-    let fold = s.find("video_counters.note_jxs_window(").unwrap();
-    assert!(poll < take && take < fold);
+    let take = s
+        .find("video_counters.note_jxs_poll(h.take_window());")
+        .unwrap();
+    assert!(poll < take);
+    // the link's target is listed only when the sender was started
+    assert!(s.contains("jxs_sender.is_some(),"));
 }

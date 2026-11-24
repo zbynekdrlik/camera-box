@@ -614,16 +614,11 @@ async fn run_capture_loop(
     // 5-s window in (atomics, never per frame) and polls the JPEG XS window once a second.
     let video_counters = Arc::new(camera_box::cambox_video_stats::CamboxVideoCounters::default());
     camera_box::cambox_video_http::start_from_env(
-        camera_box::cambox_video_stats::NodeMeta {
-            node: resolved_hostname.to_lowercase(),
-            ndi_name: ndi_name.to_string(),
-            jxs_target: std::env::var("CAMERA_BOX_JXS_TARGET")
-                .ok()
-                .filter(|t| !t.trim().is_empty()),
-            run_start_unix_ms: camera_box::cambox_video_stats::now_unix_ms(),
-            run_id: camera_box::cambox_video_stats::read_run_id(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        },
+        camera_box::cambox_video_stats::NodeMeta::from_env(
+            &resolved_hostname,
+            ndi_name,
+            jxs_sender.is_some(),
+        ),
         Arc::clone(&video_counters),
     );
 
@@ -2230,19 +2225,12 @@ async fn run_capture_loop(
                     // Issue 1540 -- read the JPEG XS sender's newest published window at most once
                     // a second (it publishes every 5 s and holds that mutex only for a copy), so no
                     // window is replaced unread; the sequence number counts any that were.
-                    if last_jxs_poll.elapsed() >= std::time::Duration::from_secs(1) {
-                        last_jxs_poll = std::time::Instant::now();
+                    if camera_box::cambox_video_stats::poll_due(
+                        &mut last_jxs_poll,
+                        std::time::Instant::now(),
+                    ) {
                         if let Some(h) = jxs_sender.as_ref().and_then(|l| l.handoff()) {
-                            video_counters
-                                .note_jxs_connected(camera_box::cambox_video_stats::now_unix_ms());
-                            if let Some((seq, w)) = h.take_window() {
-                                video_counters.note_jxs_window(
-                                    seq,
-                                    &camera_box::cambox_video_stats::JxsWindow::from_send_window(
-                                        &w,
-                                    ),
-                                );
-                            }
+                            video_counters.note_jxs_poll(h.take_window());
                         }
                     }
                 }

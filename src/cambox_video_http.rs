@@ -3,21 +3,25 @@
 //!
 //! A plain std `TcpListener` on its own thread: the endpoint is one read-only GET every 5-10 s
 //! from dcontroller, so no HTTP framework or async runtime enters the appliance process. One
-//! connection is served at a time; a request has [`READ_TIMEOUT`] to arrive and at most
-//! [`MAX_REQUEST_BYTES`] of request line + headers (a body is never read). GET (or HEAD) of
-//! [`crate::cambox_video_stats::PATH`] = 200 `application/json`; another path = 404; another
-//! method = 405; an oversize, timed-out or unparsable request = 400. The thread runs at
-//! SCHED_OTHER and only reads atomics, so the capture path never waits on it.
+//! connection is served at a time, so each one has ONE deadline of [`CONNECTION_DEADLINE`] for its
+//! whole request and the drain after the answer (a client trickling a byte at a time cannot hold
+//! the server past it), and at most [`MAX_REQUEST_BYTES`] of request line + headers (a body is
+//! never read). GET (or HEAD) of [`crate::cambox_video_stats::PATH`] = 200 `application/json`;
+//! another path = 404; another method = 405; an oversize, timed-out or unparsable request = 400.
+//! The thread runs at SCHED_OTHER and only reads atomics, so the capture path never waits on it.
+//!
+//! It listens on every interface without authentication: the rig LAN is the only network a
+//! cambox is on, and the document is read-only counters plus the version and the boot id.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The longest request line + headers a request may send.
 pub const MAX_REQUEST_BYTES: usize = 4096;
 
-/// How long a client has to send its request (and to take the answer).
-pub const READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long one connection may take: its request, the answer and the drain after it.
+pub const CONNECTION_DEADLINE: Duration = Duration::from_secs(2);
 
 /// The answer to one request: status code, reason, body (empty body = none).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,29 +78,41 @@ pub fn respond(head: Option<&str>, render: impl FnOnce() -> String) -> (Response
     )
 }
 
-/// Read the request head (up to the blank line) within [`MAX_REQUEST_BYTES`]; `None` when it is
-/// longer, times out, or the client closes before the blank line.
-fn read_head(stream: &mut TcpStream) -> Option<String> {
+/// One read that ends by `deadline`: `None` once the deadline has passed, the read failed or
+/// timed out, or the peer closed.
+fn read_by(stream: &mut TcpStream, buf: &mut [u8], deadline: Instant) -> Option<usize> {
+    let left = deadline.checked_duration_since(Instant::now())?;
+    if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+        return None;
+    }
+    match stream.read(buf) {
+        Ok(0) | Err(_) => None,
+        Ok(n) => Some(n),
+    }
+}
+
+/// Read the request head (up to the blank line, CRLF or bare LF) by `deadline`; `None` when it
+/// grows past [`MAX_REQUEST_BYTES`], misses the deadline, or the client closes before the blank
+/// line.
+fn read_head(stream: &mut TcpStream, deadline: Instant) -> Option<String> {
     let mut buf = Vec::with_capacity(512);
     let mut chunk = [0u8; 512];
     loop {
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.windows(2).any(|w| w == b"\n\n") {
-            return String::from_utf8(buf).ok();
-        }
         if buf.len() > MAX_REQUEST_BYTES {
             return None;
         }
-        match stream.read(&mut chunk) {
-            Ok(0) | Err(_) => return None,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.windows(2).any(|w| w == b"\n\n") {
+            return String::from_utf8(buf).ok();
         }
+        let n = read_by(stream, &mut chunk, deadline)?;
+        buf.extend_from_slice(&chunk[..n]);
     }
 }
 
 fn serve_one(mut stream: TcpStream, render: &dyn Fn() -> String) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(READ_TIMEOUT))?;
-    stream.set_write_timeout(Some(READ_TIMEOUT))?;
-    let head = read_head(&mut stream);
+    let deadline = Instant::now() + CONNECTION_DEADLINE;
+    stream.set_write_timeout(Some(CONNECTION_DEADLINE))?;
+    let head = read_head(&mut stream, deadline);
     let (r, head_only) = respond(head.as_deref(), render);
     let content_type = if r.status == 200 {
         "application/json"
@@ -115,21 +131,12 @@ fn serve_one(mut stream: TcpStream, render: &dyn Fn() -> String) -> std::io::Res
     stream.write_all(out.as_bytes())?;
     stream.flush()?;
     // Close politely: a client still sending (an oversize request) would otherwise get a TCP
-    // reset instead of the answer. Drain at most DRAIN_LIMIT bytes, bounded by the read timeout.
+    // reset instead of the answer. The drain ends with the connection's deadline.
     stream.shutdown(std::net::Shutdown::Write)?;
     let mut sink = [0u8; 1024];
-    let mut drained = 0usize;
-    while drained < DRAIN_LIMIT {
-        match stream.read(&mut sink) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => drained += n,
-        }
-    }
+    while read_by(&mut stream, &mut sink, deadline).is_some() {}
     Ok(())
 }
-
-/// The most request bytes read and dropped after an answer before the connection closes.
-const DRAIN_LIMIT: usize = 64 * 1024;
 
 /// Serve `listener` forever, one connection at a time, `render` building each 200 body. A failed
 /// accept or a broken client is logged at debug level and the loop goes on.

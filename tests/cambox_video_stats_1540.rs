@@ -4,11 +4,12 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::time::{Duration, Instant};
 
 use camera_box::cambox_video_http;
 use camera_box::cambox_video_stats::{
-    port_from_env, render_json, rfc3339_utc, run_id, CamboxVideoCounters, CaptureWindow,
-    CounterSnapshot, JxsWindow, NodeMeta, DEFAULT_PORT, PATH, SCHEMA,
+    jxs_target, poll_due, port_from_env, render_json, rfc3339_utc, run_id, CamboxVideoCounters,
+    CaptureWindow, CounterSnapshot, JxsWindow, NodeMeta, DEFAULT_PORT, PATH, SCHEMA,
 };
 use serde_json::Value;
 
@@ -262,6 +263,9 @@ fn without_a_jxs_target_only_the_ndi_output_is_listed_and_a_link_not_up_reads_un
 
 fn request(port: u16, raw: &[u8]) -> String {
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    // a server regression fails the test instead of hanging the suite
+    s.set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
     s.write_all(raw).expect("write");
     let mut out = String::new();
     s.read_to_string(&mut out).expect("read");
@@ -323,6 +327,155 @@ fn the_endpoint_answers_get_with_the_document_and_refuses_the_rest() {
     assert!(refused.starts_with("HTTP/1.1 400 "), "{refused}");
 
     // still serving after the refusals
+    let again = request(port, format!("GET {PATH} HTTP/1.1\r\n\r\n").as_bytes());
+    assert!(again.starts_with("HTTP/1.1 200 OK\r\n"), "{again}");
+}
+
+#[test]
+fn windows_replaced_before_the_first_read_are_counted_unread() {
+    let c = CamboxVideoCounters::default();
+    c.note_jxs_window(
+        3,
+        &JxsWindow {
+            frames: 5,
+            ..JxsWindow::default()
+        },
+    );
+    let s = c.snapshot();
+    assert_eq!(s.jxs_windows, 1);
+    assert_eq!(s.jxs_windows_unread, 2);
+    // the next window in order adds none
+    c.note_jxs_window(4, &JxsWindow::default());
+    assert_eq!(c.snapshot().jxs_windows_unread, 2);
+}
+
+#[test]
+fn a_poll_marks_the_link_up_and_folds_a_published_window() {
+    let c = CamboxVideoCounters::default();
+    c.note_jxs_poll(None);
+    let s = c.snapshot();
+    assert!(s.jxs_connected_at_ms.is_some());
+    assert_eq!(s.jxs_windows, 0);
+    let w = camera_box::jxs_link::SendWindow {
+        frames: 150,
+        slices: 2400,
+        dropped_busy: 1,
+        encode_ms_sum: 300.0,
+        bpp: 3,
+        ..Default::default()
+    };
+    c.note_jxs_poll(Some((1, w)));
+    let s = c.snapshot();
+    assert_eq!(s.jxs_windows, 1);
+    assert_eq!(s.jxs_frames, 150);
+    assert_eq!(s.jxs_slices, 2400);
+    assert_eq!(s.jxs_dropped_busy, 1);
+    assert_eq!(s.jxs_bpp, Some(3));
+    assert_eq!(s.jxs_latency_us, Some(2000));
+}
+
+#[test]
+fn the_jxs_target_is_listed_only_when_the_link_was_started() {
+    assert_eq!(
+        jxs_target(true, Some(" 10.77.9.202:5004 ")).as_deref(),
+        Some("10.77.9.202:5004")
+    );
+    assert_eq!(jxs_target(false, Some("10.77.9.202:5004")), None);
+    assert_eq!(jxs_target(true, Some("  ")), None);
+    assert_eq!(jxs_target(true, None), None);
+}
+
+#[test]
+fn the_poll_is_due_once_a_second() {
+    let t0 = Instant::now();
+    let mut last = t0;
+    assert!(!poll_due(&mut last, t0 + Duration::from_millis(999)));
+    assert_eq!(last, t0);
+    assert!(poll_due(&mut last, t0 + Duration::from_millis(1000)));
+    assert_eq!(last, t0 + Duration::from_millis(1000));
+    assert!(!poll_due(&mut last, t0 + Duration::from_millis(1500)));
+}
+
+#[test]
+fn every_connection_kind_has_the_same_keys_for_its_identity() {
+    let v = render_json(
+        &meta(Some("strih-snv:5004")),
+        &CounterSnapshot::default(),
+        0,
+    );
+    for c in v["connections"].as_array().expect("connections") {
+        for key in [
+            "id",
+            "source",
+            "sink",
+            "sink_input",
+            "stream_name",
+            "kind",
+            "direction",
+        ] {
+            assert!(c.get(key).is_some(), "{key} missing in {c}");
+        }
+    }
+}
+
+#[test]
+fn a_malformed_request_line_is_a_bad_request() {
+    for head in ["", "GET", "\r\n\r\n"] {
+        let (r, head_only) = cambox_video_http::respond(Some(head), || "x".into());
+        assert_eq!(r.status, 400, "{head:?}");
+        assert!(r.body.is_empty());
+        assert!(!head_only);
+    }
+    let (r, _) = cambox_video_http::respond(None, || "x".into());
+    assert_eq!(r.status, 400);
+    // the body is rendered only for a 200
+    let (r, _) = cambox_video_http::respond(Some("GET /nope HTTP/1.1\r\n\r\n"), || {
+        panic!("rendered for a 404")
+    });
+    assert_eq!(r.status, 404);
+}
+
+#[test]
+fn a_bare_lf_request_is_served() {
+    let port = serve_on_a_free_port();
+    let ok = request(port, format!("GET {PATH} HTTP/1.0\n\n").as_bytes());
+    assert!(ok.starts_with("HTTP/1.1 200 OK\r\n"), "{ok}");
+}
+
+#[test]
+fn a_silent_or_trickling_client_is_cut_off_at_the_deadline_and_others_are_served() {
+    let port = serve_on_a_free_port();
+    // a client that connects and sends nothing gets a 400 at the deadline
+    let mut silent = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    silent
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
+    let t0 = Instant::now();
+    let mut out = String::new();
+    silent.read_to_string(&mut out).expect("read");
+    let took = t0.elapsed();
+    assert!(out.starts_with("HTTP/1.1 400 "), "{out}");
+    assert!(
+        took >= Duration::from_millis(1500) && took < Duration::from_secs(5),
+        "cut off at the 2 s deadline, took {took:?}"
+    );
+
+    // one byte every 300 ms never finishes a head: the server closes it at the deadline (a
+    // per-read timeout alone would wait for it as long as it keeps trickling)
+    let mut slow = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let t0 = Instant::now();
+    let mut cut_at = None;
+    while t0.elapsed() < Duration::from_secs(8) {
+        if slow.write_all(b"a").is_err() {
+            cut_at = Some(t0.elapsed());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let cut_at = cut_at.expect("the trickling client was never cut off");
+    assert!(cut_at < Duration::from_secs(5), "cut off at {cut_at:?}");
+
+    // and the server still answers the next client
     let again = request(port, format!("GET {PATH} HTTP/1.1\r\n\r\n").as_bytes());
     assert!(again.starts_with("HTTP/1.1 200 OK\r\n"), "{again}");
 }

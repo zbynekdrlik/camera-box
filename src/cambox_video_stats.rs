@@ -214,11 +214,12 @@ impl CamboxVideoCounters {
     }
 
     /// Fold the JPEG XS window published as sequence `seq` (vstack `take_window`, once per
-    /// window). A sequence that jumps past the next one means a window was published and replaced
-    /// before it was read: each such window is counted in `windows_unread`, never guessed.
+    /// window, numbered from 1). A sequence that jumps past the next one means a window was
+    /// published and replaced before it was read: each such window (the first ones too) is counted
+    /// in `windows_unread`, never guessed.
     pub fn note_jxs_window(&self, seq: u64, w: &JxsWindow) {
         let last = self.jxs_last_seq.swap(seq, Ordering::Relaxed);
-        if last > 0 && seq > last + 1 {
+        if seq > last + 1 {
             add(&self.jxs_windows_unread, seq - last - 1);
         }
         add(&self.jxs_windows, 1);
@@ -236,6 +237,15 @@ impl CamboxVideoCounters {
             .store(u64::from(w.pace_mbps), Ordering::Relaxed);
         if let Some(us) = w.latency_us() {
             self.jxs_latency_us.store(us, Ordering::Relaxed);
+        }
+    }
+
+    /// One poll of the JPEG XS link while it is up: the link counts as connected from now, and a
+    /// window not yet read (vstack `take_window`: `(sequence, window)`) is folded in.
+    pub fn note_jxs_poll(&self, window: Option<(u64, crate::jxs_link::SendWindow)>) {
+        self.note_jxs_connected(now_unix_ms());
+        if let Some((seq, w)) = window {
+            self.note_jxs_window(seq, &JxsWindow::from_send_window(&w));
         }
     }
 
@@ -304,12 +314,49 @@ pub struct NodeMeta {
     pub ndi_name: String,
     /// `CAMERA_BOX_JXS_TARGET` (`host:port`), `None` = the JPEG XS link is off.
     pub jxs_target: Option<String>,
-    /// The process start, unix milliseconds.
+    /// When the capture loop started (the counters' origin), unix milliseconds.
     pub run_start_unix_ms: u64,
     /// `<boot id>:<process start ticks>` ([`run_id`]), `None` when unreadable.
     pub run_id: Option<String>,
     /// The camera-box version.
     pub version: String,
+}
+
+impl NodeMeta {
+    /// This node now: the lower-case hostname, its NDI name, the JPEG XS target from
+    /// `CAMERA_BOX_JXS_TARGET` only when the link was started (`jxs_on`), the run id from `/proc`.
+    pub fn from_env(hostname: &str, ndi_name: &str, jxs_on: bool) -> Self {
+        Self {
+            node: hostname.to_lowercase(),
+            ndi_name: ndi_name.to_string(),
+            jxs_target: jxs_target(
+                jxs_on,
+                std::env::var("CAMERA_BOX_JXS_TARGET").ok().as_deref(),
+            ),
+            run_start_unix_ms: now_unix_ms(),
+            run_id: read_run_id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
+/// The listed JPEG XS target: the trimmed env value, only when the link was started (a target
+/// the sender refused never shows as a connection that can never come up).
+pub fn jxs_target(jxs_on: bool, env_value: Option<&str>) -> Option<String> {
+    env_value
+        .map(str::trim)
+        .filter(|t| jxs_on && !t.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether a once-a-second poll is due; `last` moves to `now` when it is.
+pub fn poll_due(last: &mut std::time::Instant, now: std::time::Instant) -> bool {
+    if now.duration_since(*last) >= std::time::Duration::from_secs(1) {
+        *last = now;
+        true
+    } else {
+        false
+    }
 }
 
 /// `<boot id>:<process start ticks>` from `/proc/sys/kernel/random/boot_id` and
@@ -391,6 +438,7 @@ pub fn render_json(meta: &NodeMeta, s: &CounterSnapshot, read_at_unix_ms: u64) -
             "source": meta.node,
             "sink": target,
             "sink_input": Value::Null,
+            "stream_name": Value::Null,
             "kind": "jxs",
             "direction": "out",
             "connected": s.jxs_connected_at_ms.is_some(),
