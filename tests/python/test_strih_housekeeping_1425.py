@@ -525,6 +525,22 @@ def test_the_softnet_note_reads_the_time_squeeze_and_the_dma_drops_over_the_samp
     assert "FAIL" not in r.stdout, r.stdout
 
 
+def test_a_wrapped_time_squeeze_counter_reads_wrapped_never_a_negative_count(tmp_path):
+    home, path, env = _grade_env(tmp_path)
+    proc = pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"])
+    (proc / "net" / "softnet_stat").write_text(SOFTNET_AFTER)
+    (tmp_path / "softnet.after").write_text(SOFTNET_BEFORE)
+    sleep_dir = tmp_path / "sleepbin"
+    sleep_dir.mkdir()
+    _exe(sleep_dir / "sleep", SWAP_SLEEP)
+    (tmp_path / "sleep.log").write_text("")
+    env.update({"FAKE_SLEEP_LOG": str(tmp_path / "sleep.log"),
+                "FAKE_SLEEP_SWAP": "%s:%s" % (tmp_path / "softnet.after", proc / "net" / "softnet_stat")})
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env,
+             path_prefix="%s:%s" % (sleep_dir, path))
+    assert "NOTE (hk-softnet) over 0 s: time_squeeze cpu0 wrapped, cpu1 wrapped;" in r.stdout, r.stdout
+
+
 def test_the_softnet_note_names_a_nic_without_indroppeddma_and_an_unreadable_stat(tmp_path):
     home, path, env = _grade_env(tmp_path)
     (pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"]) / "net" / "softnet_stat").unlink()

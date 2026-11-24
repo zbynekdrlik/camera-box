@@ -383,7 +383,7 @@ strih_housekeeping_rx_note() {
   if [ -n "$q0" ] && [ -n "$q1" ]; then
     for e in $q1; do
       a=" $q0 "; a="${a#* "${e%%:*}":}"; a="${a%% *}"; b="${e#*:}"
-      sq="${sq}${sq:+, }${e%%:*} +$((b - a))"
+      if [ "$b" -ge "$a" ]; then sq="${sq}${sq:+, }${e%%:*} +$((b - a))"; else sq="${sq}${sq:+, }${e%%:*} wrapped"; fi
     done
     sq="time_squeeze ${sq}"
   else
