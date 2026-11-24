@@ -327,6 +327,8 @@ import os, sys
 args = [a for a in sys.argv[1:] if a != "--user"]
 with open(os.environ["FAKE_SYSTEMCTL_LOG"], "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\n")
+if args[:1] and args[0] in os.environ.get("FAKE_SYSTEMCTL_FAIL", "").split():
+    sys.exit(1)
 if args[:1] == ["is-active"]:
     unit = args[-1]
     sys.exit(0 if unit in os.environ.get("FAKE_ACTIVE", "").split() else 3)
@@ -340,8 +342,14 @@ if args[:1] in (["enable"], ["disable"]):
     sys.exit(0)
 if args[:1] == ["is-enabled"]:
     sys.exit(0 if args[-1] in enabled else 1)
+# the re-balance pair answers only for its own unit names (a wrong name reads nothing, like an unknown unit)
 if args[:1] == ["show"] and "ExecMainStartTimestampMonotonic" in args:
-    print(os.environ.get("FAKE_REBALANCE_SHOW", "ExecMainStartTimestampMonotonic=0\nResult=success\nExecMainStatus=0"))
+    if args[-1] == "strih-nic-irq-rebalance.service":
+        print(os.environ.get("FAKE_REBALANCE_SHOW", "ExecMainStartTimestampMonotonic=0\nResult=success\nExecMainStatus=0"))
+    sys.exit(0)
+if args[:1] == ["show"] and "SubState" in args:
+    if args[-1] == "strih-nic-irq-rebalance.timer":
+        print(os.environ.get("FAKE_REBALANCE_TIMER_SHOW", "ActiveState=active\nSubState=waiting"))
     sys.exit(0)
 if args[:3] == ["show", "-p", "AllowedCPUs"]:
     print(os.environ.get("FAKE_ALLOWED_CPUS", "0"))
@@ -442,6 +450,7 @@ def test_a_box_with_none_removes_ours_and_keeps_a_foreign_file(tmp_path):
     assert not (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance.service").exists()
     calls = (tmp_path / "systemctl.log").read_text().splitlines()
     assert calls == ["disable --now strih-nic-irq-rebalance.timer", "daemon-reload",
+                     "reset-failed strih-nic-irq-rebalance.service",
                      "daemon-reload", "--user daemon-reload"], calls
 
 
@@ -970,10 +979,39 @@ def test_verify_passes_an_enabled_timer_whose_run_this_boot_succeeded(tmp_path):
                     "success (exit 0)"], rows
 
 
+NOT_RUN = "ExecMainStartTimestampMonotonic=0\nResult=success\nExecMainStatus=0"
+
+
 def test_verify_notes_a_re_balance_that_has_not_run_yet_this_boot(tmp_path):
-    rows, _ = _rebalance_rows(tmp_path, FAKE_REBALANCE_SHOW="ExecMainStartTimestampMonotonic=0\nResult=success\nExecMainStatus=0")
-    assert len(rows) == 1 and rows[0].startswith("NOTE (hk-rebalance) strih-nic-irq-rebalance.timer enabled; "
-                                                 "the re-balance has not run yet this boot"), rows
+    rows, _ = _rebalance_rows(tmp_path, FAKE_REBALANCE_SHOW=NOT_RUN)
+    assert rows == ["NOTE (hk-rebalance) strih-nic-irq-rebalance.timer enabled and waiting; the re-balance has "
+                    "not run yet this boot (it runs 5 min after boot)"], rows
+
+
+def test_verify_notes_a_timer_enabled_but_not_started_this_boot(tmp_path):
+    # review finding: setup enables the timer without starting it, so the boot it was installed in never runs it
+    rows, _ = _rebalance_rows(tmp_path, FAKE_REBALANCE_SHOW=NOT_RUN,
+                              FAKE_REBALANCE_TIMER_SHOW="ActiveState=inactive\nSubState=dead")
+    assert rows == ["NOTE (hk-rebalance) strih-nic-irq-rebalance.timer enabled but not started this boot "
+                    "(installed after boot): the first re-balance runs 5 min after the next boot"], rows
+
+
+def test_verify_fails_a_timer_that_fired_without_running_the_re_balance(tmp_path):
+    # review finding: an elapsed timer with no service run must never read as a NOTE forever
+    rows, _ = _rebalance_rows(tmp_path, FAKE_REBALANCE_SHOW=NOT_RUN,
+                              FAKE_REBALANCE_TIMER_SHOW="ActiveState=active\nSubState=elapsed")
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-rebalance) strih-nic-irq-rebalance.timer is active/elapsed "
+                                                 "but the re-balance never ran this boot"), rows
+
+
+def test_a_failed_daemon_reload_warns_and_enables_nothing(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    env["FAKE_SYSTEMCTL_FAIL"] = "daemon-reload"
+    env["FAKE_ACTIVE"] = ""
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr
+    assert "WARN: daemon-reload failed -- run it, then systemctl enable strih-nic-irq-rebalance.timer" in r.stdout
+    assert "enable strih-nic-irq-rebalance.timer" not in (tmp_path / "systemctl.log").read_text()
 
 
 def test_verify_fails_a_failed_re_balance_run(tmp_path):
