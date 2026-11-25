@@ -70,6 +70,15 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up. Sinc
       connect, and a PP box that answers :22 but hangs (a dying stick, fork exhaustion) would
       otherwise stall the home E2E while it holds the rig lease. Each away camera costs up to ~4 s
       reach probe plus the read, serially. The frame-probe align stays home-rig only.
+    - **The report loop reads its rows on fd 3** (issue 1553): the per-camera version read runs ssh, which
+      reads stdin, so rows on a here-string on stdin left every camera after the first unread (25.11.2026:
+      the gate showed cam1 only while all four PP cameras ran an old build). Any `while read` loop that
+      calls ssh/sshpass in its body reads from another fd (`read -u 3 ... done 3<<<"$rows"`); a test fake
+      that does not read stdin cannot catch it (`test_version_gate_other_venues_stdin_1553.py`'s fake does).
+    - **A venue that was off while a pin moved stays behind until someone deploys it** (25.11.2026: PP on
+      obs v0.4.59 / intercom 1.9.32 after the pins moved 23-25.11). When an away venue comes back, run
+      `camera-box-version-gate.sh --other-venues` and `deploy-genlock-fleet.sh --boxes strih-pp,stream-pp`
+      before any event there.
     - Test: `tests/python/test_cambox_deploy_venues_1413.py` (the issue-1407 fake box behind a
       host-logging sshpass, `OBS_FLEET_HOME` deciding reach; run it under `unshare -n`).
   - **The glob must survive a caller's `set -f`:** the version gate builds its `--fleet` specs under
