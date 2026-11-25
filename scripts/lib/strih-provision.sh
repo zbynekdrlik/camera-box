@@ -1747,6 +1747,11 @@ if ! declare -F strih_nic_irq_affinity_script_text >/dev/null; then
   # shellcheck source=scripts/lib/strih-nic-irq.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-nic-irq.sh"
 fi
+# --- issue 1553: the rig NIC sender egress pacing (setup step 11b + verify item 36's line) ---------------
+if ! declare -F strih_egress_pacing_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-egress-pacing.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-egress-pacing.sh"
+fi
 
 # --- issue 1357: strih-snv as the OBS-box appliance (the shared baseline's per-box facts) ------------
 # setup-strih.sh now runs the SAME appliance baseline as imag (scripts/lib/obs-box-baseline.sh: plain

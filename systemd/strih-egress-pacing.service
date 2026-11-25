@@ -1,0 +1,24 @@
+[Unit]
+# camera-box: pace the rig NIC's sender egress at boot (issue 1553). The strih / stream box sends NDI and
+# JPEG XS bursts at line rate to receivers on slower switch ports, whose egress queue tail-drops them; an
+# fq per tx queue with a per-flow maxrate spreads each burst. ExecStart runs the script setup-strih.sh
+# GENERATES from scripts/lib/strih-egress-pacing.sh (the rig NIC + the box fact STRIH_EGRESS_PACING_RATE).
+# Installed + enabled by setup-strih step 11b; verify-strih item 16 grades the live tree.
+Description=camera-box: pace the rig NIC egress (fq maxrate per tx queue, issue 1553)
+Documentation=https://github.com/zbynekdrlik/camera-box/issues/1553
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/strih-egress-pacing
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=30
+# A failed tc step (exit 2) fails the same way on every retry: never loop on it.
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=multi-user.target
