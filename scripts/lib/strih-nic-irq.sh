@@ -219,6 +219,20 @@ UNIT
 # /sys + /proc input is env-overridable (SYS_ROOT / PROC_INTERRUPTS / CPU_ATOM_FILE / IRQ_DIR /
 # STRIH_NIC_IFACE) so a test can run the emitted script over fixtures shaped like the real box.
 # issue 1317 item H.
+# strih_nic_irq_affinity_script_install DEST -> writes the script ATOMICALLY (issue 1425): a sibling temp
+# file, chmod 0755, then rename over DEST, so the boot oneshot or the re-balance timer never execs a
+# half-written file (strih-snv 24.11.2026: Exec format error, 203/EXEC, while step 11b rewrote it in place).
+# rc 0 written, rc 1 any step failed (the temp file removed).
+strih_nic_irq_affinity_script_install() {
+  local dest="${1:?strih_nic_irq_affinity_script_install: DEST}" tmp
+  tmp="$(mktemp "${dest%/*}/.${dest##*/}.XXXXXX")" || return 1
+  if strih_nic_irq_affinity_script_text >"$tmp" && chmod 0755 "$tmp" && mv -f -- "$tmp" "$dest"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
 strih_nic_irq_affinity_script_text() {
   # issue 1361: the target IP + NIC driver are the loaded box's facts, substituted into the quoted
   # script body's @STRIH_TARGET_IP@ / @STRIH_NIC_DRIVER@ placeholders (the rest stays literal); issue 1425

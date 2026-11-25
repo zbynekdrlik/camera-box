@@ -634,9 +634,8 @@ strih_housekeeping_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1425: hou
 # issue 1412 (G7): only a USB rig NIC has an xhci IRQ to place; issue 1425: with housekeeping CPUs every rig-NIC IRQ + RSS.
 if WHY="$(obs_box_step_applies 11b)"; then
   install -d -m 755 /usr/local/bin
-  strih_nic_irq_affinity_script_text > /usr/local/bin/strih-nic-irq-affinity.sh \
-    || fail "could not write /usr/local/bin/strih-nic-irq-affinity.sh"
-  chmod 0755 /usr/local/bin/strih-nic-irq-affinity.sh
+  strih_nic_irq_affinity_script_install /usr/local/bin/strih-nic-irq-affinity.sh \
+    || fail "could not write /usr/local/bin/strih-nic-irq-affinity.sh (atomic install, issue 1425)"
   [ -f "${HERE}/../systemd/strih-nic-irq-affinity.service" ] || fail "systemd/strih-nic-irq-affinity.service not found next to this script"
   install -m 0644 "${HERE}/../systemd/strih-nic-irq-affinity.service" /etc/systemd/system/strih-nic-irq-affinity.service
   systemctl daemon-reload 2>/dev/null || true
