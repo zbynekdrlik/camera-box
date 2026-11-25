@@ -859,6 +859,17 @@ class ServerModelRemoved(unittest.TestCase):
         self.assertNotRegex(code, r'net\["discovery"\]\s*=', "the merger must not SET networks.discovery")
 
 
+def _moved_router_entry():
+    """The rule's full router description. Issue 1552 moved it verbatim out of CLAUDE.md (which
+    keeps a one-line pointer) into the rule's own `## Router entry` section."""
+    text = _read(RULE)
+    head = "## Router entry (moved from CLAUDE.md, issue 1552)"
+    assert head in text, "the rule carries its moved router entry"
+    entries = [l for l in text.split(head, 1)[1].splitlines() if ".claude/rules/ndi-discovery.md" in l]
+    assert len(entries) == 1, entries
+    return entries[0]
+
+
 class Rule(unittest.TestCase):
     def test_rule_paths_and_router_line(self):
         text = _read(RULE)
@@ -868,10 +879,11 @@ class Rule(unittest.TestCase):
                   "scripts/camera-set.sh", "scripts/lib/obs-fleet.sh", "scripts/verify-strih.sh"):
             self.assertIn(p, front)
         self.assertNotIn("ndi-discovery-server", front)
-        router = [l for l in _read(CLAUDE_MD).splitlines() if ".claude/rules/ndi-discovery.md" in l]
+        router = [l for l in _read(CLAUDE_MD).splitlines() if "ndi-discovery.md" in l]
         self.assertEqual(len(router), 1)
-        self.assertIn("networks.ips", router[0])
-        self.assertNotIn("NDI_DISCOVERY_ENABLED", router[0])
+        entry = _moved_router_entry()
+        self.assertIn("networks.ips", entry)
+        self.assertNotIn("NDI_DISCOVERY_ENABLED", entry)
 
     def test_rule_states_the_sdk_contract_and_the_supervisor_steps(self):
         text = _read(RULE)
@@ -886,7 +898,7 @@ class Rule(unittest.TestCase):
                        "ROZHODNUTÉ 5879261962", "A cambox carries NO `networks.ips`"):
             self.assertIn(needle, text)
         self.assertNotIn("Open question", text, "the outbound question is decided (ROZHODNUTÉ 5879261962)")
-        router = [l for l in _read(CLAUDE_MD).splitlines() if ".claude/rules/ndi-discovery.md" in l][0]
+        router = _moved_router_entry()
         self.assertIn("1389", router)
         self.assertIn("never a cambox", router)
         self.assertIn("carry no `networks.ips`", router)
