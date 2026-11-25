@@ -165,6 +165,7 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_NIC_RENAME",
     // issue 1425: the housekeeping CPUs (a cpulist | none).
     "STRIH_HOUSEKEEPING_CPUS",
+    "STRIH_DANTE_GM_ADDR", // issue 1553: the address dev1 grades the venue against
 ];
 
 // ---------------------------------------------------------------------------------------------

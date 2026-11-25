@@ -97,7 +97,7 @@ def test_the_program_sender_and_venue_close_the_fact_list():
                             "STRIH_AUDIO_BUFFERING_MS", "STRIH_JXS_CAMERAS", "STRIH_JXS_CAMERA_PIN_MS",
                             "STRIH_JXS_PROGRAM_PORT", "STRIH_JXS_PROGRAM_PIN_MS",
                             "STRIH_DESKTOP", "STRIH_DANTE_NETWORK_LATENCY_MS", "STRIH_DANTE_RECEIVE_BUFFER_MS", "STRIH_DANTE_TX", "STRIH_DANTE_TX_TRACK", "STRIH_DANTE_RX_STAMP_MARGIN_MS",
-                            "STRIH_NIC_RENAME", "STRIH_HOUSEKEEPING_CPUS"]
+                            "STRIH_NIC_RENAME", "STRIH_HOUSEKEEPING_CPUS", "STRIH_DANTE_GM_ADDR"]
 
 
 def test_stream_pp_loads_as_the_stream_role(boxes):

@@ -98,7 +98,7 @@ def test_the_pp_fact_files_are_the_snv_shape(box, addr, device):
     f = _facts(box)
     assert f["STRIH_PROGRAM_VBAN_LEG"] == "vlan:70"
     assert f["STRIH_PROGRAM_VBAN_LEG_ADDR"] == addr
-    assert f["STRIH_DANTE_GM"] == "10.77.7.200"
+    assert f["STRIH_DANTE_GM"] == "video-clock.lan" and f["STRIH_DANTE_GM_ADDR"] == "10.77.7.200"  # issue 1553
     assert f["STRIH_DANTE_DEVICES"] == device
     for k in ("STRIH_PROGRAM_VBAN_STREAMS", "STRIH_PROGRAM_VBAN_PORT", "STRIH_PROGRAM_VBAN_RESERVE_MS",
               "STRIH_PROGRAM_VBAN_SENDER", "STRIH_DANTE_TX", "STRIH_DANTE_TX_TRACK"):

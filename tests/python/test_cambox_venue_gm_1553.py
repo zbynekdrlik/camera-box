@@ -35,7 +35,7 @@ def test_a_pp_camera_gets_the_pp_grandmaster():
     for cam in ("cam1", "cam4", "cam6", "cam7"):
         r = _bash(f"dantesync_fleet_camera_gm_host {cam}")
         assert r.returncode == 0, r.stderr
-        assert r.stdout.strip() == _fact("strih-pp", "STRIH_DANTE_GM") == "10.77.7.200"
+        assert r.stdout.strip() == _fact("strih-pp", "STRIH_DANTE_GM") == "video-clock.lan"  # ROZHODNUTÉ 7163831021
 
 
 def test_an_snv_camera_gets_the_snv_grandmaster():

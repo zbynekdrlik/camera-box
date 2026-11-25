@@ -46,6 +46,8 @@ sys.modules["dantesync_fleet_pp"] = df
 _spec.loader.exec_module(df)
 
 PP_GM = re.search(r"^STRIH_DANTE_GM=(.+)$", _STRIH_PP_ENV.read_text(), re.MULTILINE).group(1)
+# issue 1553: the address dev1 grades PP against (dev1 resolves video-clock.lan to the SNV clock)
+PP_GM_IP = re.search(r"^STRIH_DANTE_GM_ADDR=(.+)$", _STRIH_PP_ENV.read_text(), re.MULTILINE).group(1)
 PP_HOME = "strih-snv stream-snv resolume-snv strih-pp stream-pp resolume-pp"
 _CLEAN_PREFIXES = ("DANTESYNC_", "OBS_FLEET", "RIG_GRANDMASTER", "CAMBOX_OFFLINE_ACK", "WIN_SSH_USER",
                    "DANTE_CLOCK_")
@@ -120,11 +122,12 @@ def test_strih_pp_and_stream_pp_read_their_address_from_obs_fleet(tmp_path):
 # ---------------------------------------------------------------------------------------------
 
 def test_the_pp_grandmaster_comes_from_the_strih_pp_fact_file(tmp_path, monkeypatch):
-    assert PP_GM == "10.77.7.200"  # issue 1536: the Dante GM on VLAN 70, the LAN GM 10.77.8.110 is gone
+    # issue 1536: the Dante GM on VLAN 70 (the LAN GM 10.77.8.110 is gone); issue 1553: allowed by the name
+    assert PP_GM == "video-clock.lan" and PP_GM_IP == "10.77.7.200"
     r = _bash(tmp_path, 'echo "V=$(dantesync_fleet_role_gm_host video-pp)"; echo "M=$(dantesync_fleet_role_gm_host ntp-master-pp)";'
                         ' echo "I=$(dantesync_fleet_role_gm_ip video-pp)"; echo "S=$(dantesync_fleet_role_gm_host video)"')
     assert r.returncode == 0, r.stderr
-    assert f"V={PP_GM}" in r.stdout and f"M={PP_GM}" in r.stdout and f"I={PP_GM}" in r.stdout
+    assert f"V={PP_GM}" in r.stdout and f"M={PP_GM}" in r.stdout and f"I={PP_GM_IP}" in r.stdout
     assert "S=video-clock.lan" in r.stdout  # the SNV video roles keep the rig grandmaster
     _with_env(monkeypatch)
     assert df.role_gm_host("video-pp") == PP_GM
@@ -134,14 +137,14 @@ def test_the_pp_grandmaster_comes_from_the_strih_pp_fact_file(tmp_path, monkeypa
 
 def test_the_pp_grandmaster_is_never_a_second_literal():
     for path in (_LIB, _PY):
-        assert PP_GM not in path.read_text(), path
-    assert PP_GM not in (_ROOT / "scripts" / "dantesync-canonical-config.json").read_text()
+        assert PP_GM_IP not in path.read_text(), path
+    assert PP_GM_IP not in (_ROOT / "scripts" / "dantesync-canonical-config.json").read_text()
 
 
 def test_the_rig_grandmaster_override_never_moves_a_venue_grandmaster(tmp_path, monkeypatch):
     r = _bash(tmp_path, 'echo "I=$(dantesync_fleet_role_gm_ip video-pp)"', RIG_GRANDMASTER_IP="10.77.9.230",
               RIG_GRANDMASTER_HOST="clock2.lan")
-    assert f"I={PP_GM}" in r.stdout, r.stdout + r.stderr
+    assert f"I={PP_GM_IP}" in r.stdout, r.stdout + r.stderr
     _with_env(monkeypatch, RIG_GRANDMASTER_HOST="clock2.lan")
     assert df.role_gm_host("video-pp") == PP_GM
 
@@ -194,10 +197,11 @@ def test_the_pp_template_allows_only_the_pp_grandmaster(monkeypatch):
     assert df.template_for("ntp-master-pp")["system"]["gm_allowlist"] == [PP_GM]
     assert df.template_for("ntp-master-pp")["ntp_server_mode"]["enabled"] is True
     assert df.template_for("video-pp")["ntp_server_mode"]["enabled"] is False
-    # an SNV-shaped config (gm video-clock.lan) is drift on a PP node
-    verdict, diffs = df.drift((_FIX / "cam1.json").read_bytes(), "video-pp")
+    # issue 1553: both venues allow the same name, so a PP node still carrying the literal address drifts
+    cfg = (_FIX / "cam1.json").read_text().replace('"video-clock.lan"', f'"{PP_GM_IP}"')
+    verdict, diffs = df.drift(cfg.encode(), "video-pp")
     assert verdict == df.DRIFT
-    assert f'system.gm_allowlist: ["video-clock.lan"] (canonical ["{PP_GM}"])' in diffs
+    assert f'system.gm_allowlist: ["{PP_GM_IP}"] (canonical ["{PP_GM}"])' in diffs
 
 
 # ---------------------------------------------------------------------------------------------
@@ -338,8 +342,8 @@ def test_upgrade_verifies_a_pp_node_against_the_pp_grandmaster(tmp_path):
     r = _source_upgrade(tmp_path, 'echo "S=[$(dantesync_gate_env_for stream-pp)]";'
                                   ' echo "M=[$(dantesync_gate_env_for strih-pp)]"; echo "V=[$(dantesync_gate_env_for cam3)]";'
                                   ' echo "A=[$(dantesync_gate_env_for alex-nb)]"')
-    assert f"S=[RIG_GRANDMASTER_IP={PP_GM}]" in r.stdout, r.stdout + r.stderr
-    assert f"M=[RIG_GRANDMASTER_IP={PP_GM}]" in r.stdout
+    assert f"S=[RIG_GRANDMASTER_IP={PP_GM_IP}]" in r.stdout, r.stdout + r.stderr
+    assert f"M=[RIG_GRANDMASTER_IP={PP_GM_IP}]" in r.stdout
     assert "V=[]" in r.stdout and "A=[RIG_GRANDMASTER_IP=10.77.7.104]" in r.stdout
 
 
@@ -411,7 +415,7 @@ def test_watchdog_reach_roster_default_is_the_pp_fleet():
 
 
 def test_watchdog_grades_the_pp_nodes_against_the_pp_grandmaster(tmp_path):
-    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM, "stream-pp.lan": PP_GM}, PP_HOME)
+    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM_IP, "stream-pp.lan": PP_GM_IP}, PP_HOME)
     assert "reach='cam1 cam4 cam6 cam7 strih-pp stream-pp'" in err, err  # issue 1413 + issue 1487
     for name in ("strih-pp", "stream-pp"):
         assert f"{name} ({name}.lan): reachable=1 verdict=OK" in err, err
@@ -423,7 +427,7 @@ def test_watchdog_grades_alex_nb_again_once_dsync_no_longer_does(tmp_path):
     """issue 1487: an empty DSYNC_GRADED_NODES puts the dsync-graded rows back on the reach roster;
     resolume-pp is no row at all since 15.11.2026, so it never comes back."""
     audio_gm = "10.77.7.104"
-    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM, "stream-pp.lan": PP_GM, "10.77.7.109": audio_gm},
+    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM_IP, "stream-pp.lan": PP_GM_IP, "10.77.7.109": audio_gm},
                     PP_HOME + " alex-nb", DSYNC_GRADED_NODES="", DANTESYNC_AUDIO_GM_HOST=audio_gm)
     assert "reach='cam1 cam4 cam6 cam7 strih-pp stream-pp alex-nb'" in err, err
     assert "alex-nb (10.77.7.109): reachable=1 verdict=OK" in err, err
@@ -431,14 +435,14 @@ def test_watchdog_grades_alex_nb_again_once_dsync_no_longer_does(tmp_path):
 
 
 def test_watchdog_pages_a_pp_node_locked_to_a_foreign_grandmaster_with_the_pp_remedy(tmp_path):
-    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM, "stream-pp.lan": "10.77.9.230"}, PP_HOME)
+    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM_IP, "stream-pp.lan": "10.77.9.230"}, PP_HOME)
     assert "stream-pp (stream-pp.lan): reachable=1 verdict=NO_CLOCK reason=wrong_gm" in err, err
     assert "WOULD alert" in err and "dante-clock-stream-pp-" in err
-    assert f"grandmaster miesta pp ({PP_GM})" in err, err
+    assert f"grandmaster miesta pp ({PP_GM_IP})" in err, err
 
 
 def test_watchdog_skips_an_unreachable_pp_node_without_a_fetch(tmp_path):
-    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM}, "strih-pp")
+    err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM_IP}, "strih-pp")
     assert "strih-pp (strih-pp.lan): reachable=1 verdict=OK" in err, err
     assert "stream-pp away (unreachable" in err, err
     assert "stream-pp (stream-pp.lan): " not in err
