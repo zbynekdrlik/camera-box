@@ -198,7 +198,7 @@ The real run: job start 17:13:08Z, StopStream 17:32:59Z (+20 min), VOD done 17:4
 | fetch-back + stage cleanup | ~10 s |
 | **the verdict tool, total** | **~1190 s of the 1500 s bound** (margin ~5 min) |
 
-So the block is folded ~20 min after `done`: ~52 min into that job, against the 105 min job timeout.
+So the block is folded ~20 min after `done`: ~52 min into that job, against the then 105 min job timeout (115 since issue 1551).
 The margin to the tool bound is load dependent. Each A/V slot ran ~277 s per window at load ~30, and
 the A/V step is the largest term.
 
