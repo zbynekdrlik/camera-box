@@ -346,8 +346,9 @@ fn setup_device_dantesync_gm_allowlist_is_the_hostname_1066() {
     );
     // The resolve is kept only as a loud precondition (fail closed) -- still sources the resolver.
     assert!(
-        on_noncomment_line(&body, r#"_RG_GM_IP="$(rig_grandmaster_ip)""#),
-        "rig_grandmaster_ip must remain as the loud resolve precondition (#1066)"
+        on_noncomment_line(&body, r#"_RG_GM_IP="$(rig_grandmaster_resolve "$_RG_GM_HOST")""#)
+            && body.contains(r#"[ -n "$_RG_GM_IP" ] || fail "cannot resolve the PTP grandmaster host"#),
+        "a grandmaster host name must still resolve as a loud, fail-closed precondition (#1066, issue 1553)"
     );
     assert!(
         on_noncomment_line(&body, ". \"$HERE/lib/rig-grandmaster.sh\""),
