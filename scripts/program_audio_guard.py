@@ -89,8 +89,8 @@ def _line(verdict, rms, outside, age, reason=None, markers=None, chain=None, not
 
 
 def advisory_note(payload: dict) -> str | None:
-    """issue 1553: the CG arm's advisory state as the sampler wrote it (`cg.advisory`), shown on the
-    line while it applies -- `cg advisory (mbc proof: hand1 sync only, program tree: mbc only)` and,
+    """issue 1553: the CG arm's advisory state as the sampler wrote it (`cg.advisory`), shown on a
+    fresh passing line while it applies -- `cg advisory (mbc proof: hand1 sync only, program tree: mbc only)` and,
     when the strict arm would have acted, `-- strict would be <V>: <reason>`. Display only: the
     verdict the sampler wrote already is the advisory one."""
     cg = payload.get("cg")
@@ -108,8 +108,7 @@ def decide(payload: dict, max_age_s: float, latch_s: float = DEFAULT_LATCH_S) ->
     """(exit code, the one output line) for a fetched payload."""
     verdict = payload.get("verdict")
     rms, outside, age = payload.get("rms_dbfs"), payload.get("outside_band_pct"), _num(payload.get("age_s"))
-    counts = {"markers": payload.get("markers_decoded"), "chain": payload.get("marker_chain"),
-              "note": advisory_note(payload)}
+    counts = {"markers": payload.get("markers_decoded"), "chain": payload.get("marker_chain")}
     stale = age is None or age > max_age_s or age < -NEGATIVE_AGE_TOLERANCE_S
     if age is None:
         stale_why = "stale (no age)"
@@ -135,7 +134,8 @@ def decide(payload: dict, max_age_s: float, latch_s: float = DEFAULT_LATCH_S) ->
             return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age,
                                        "MEASUREMENT without a marker chain (a sampler older than the "
                                        "marker requirement -- restart program-audio-sampler)", **counts)
-        return EXIT_OK, _line(verdict, rms, outside, age, **counts)
+        # issue 1553: the advisory note only on a fresh passing line, never on a stale/refusing one
+        return EXIT_OK, _line(verdict, rms, outside, age, note=advisory_note(payload), **counts)
     if verdict == "UNKNOWN":
         return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, payload.get("reason") or "sampler UNKNOWN",
                                    **counts)

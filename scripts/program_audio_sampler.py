@@ -361,7 +361,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     bad_rate_logged = False
     loops = 0
 
-    advisory_log = {"applies": None, "suppressed": False}
+    advisory_log = pcg.AdvisoryLog()
 
     def with_cg(verdict, reason):
         """The window's (verdict, reason, CG state, suppressed) after the CG arm (issue 1404, the
@@ -373,19 +373,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         st = cg.state(program=program_ring)
         verdict2, reason2 = pcg.overlay(verdict, reason, st)
         sup = pcg.suppressed(verdict, reason, st)
-        adv = st.advisory
-        if adv is not None:
-            if adv.applies != advisory_log["applies"]:
-                log(f"program-audio sampler: {adv.text}" if adv.applies
-                    else f"program-audio sampler: CG arm strict: {adv.text}")
-                advisory_log["applies"] = adv.applies
-            if not adv.applies:
-                advisory_log["suppressed"] = False  # the strict arm acts itself; its verdict logs
-            elif (sup is not None) != advisory_log["suppressed"]:
-                log(f"program-audio sampler: {adv.text} -- "
-                    + (f"the strict arm would read {sup} (advisory, not applied)" if sup is not None
-                       else "the strict arm has nothing to say any more"))
-                advisory_log["suppressed"] = sup is not None
+        advisory_log(st, sup, log)
         return verdict2, reason2, st, sup
 
     def restart_span(why: str) -> None:

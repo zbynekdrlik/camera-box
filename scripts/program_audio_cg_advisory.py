@@ -9,11 +9,13 @@ payload, never FOREIGN/UNKNOWN, never latched) while BOTH hold:
 
   (a) the stream OBS program tree carries no audible input other than the program-audio input
       (STRIH_PROGRAM_AUDIO_INPUT of the stream box's fact file, `mbc` on stream-snv, never a literal):
-      read over OBS-WS, read-only, through the obs_phase2 client -- the current program scene, its
-      ENABLED items descending nested scenes and groups, plus the global audio devices
-      (GetSpecialInputs, they mix into every output); an input is audible when it has an audio track
-      on (GetInputAudioTracks, mixers != 0) and is not muted (GetInputMute); an input without audio
-      answers request code 604 and is not audible;
+      read over OBS-WS, read-only, through the obs_phase2 client over ONE session kept open -- the
+      current program scene, its ENABLED items descending nested scenes and groups, plus the global
+      audio devices (GetSpecialInputs, they mix into every output) and a scene transition whose kind
+      may carry audio (a stinger); an input is audible when it has an audio track on
+      (GetInputAudioTracks, mixers != 0) and is not muted (GetInputMute); an input without audio
+      answers request code 604 and is not audible. Known limit: during a cut, the OUTGOING scene's
+      inputs stay in the mix for the transition's length; the tree is re-read every 15 s;
   (b) fohmixer's mbc proof (fohmixer issue 267, `GET /api/mbc/stream-proof` on the FOH hub, LAN only)
       reads `ok` true AND `hand1_sync_only` true.
 
@@ -152,6 +154,13 @@ def _number(v) -> float | None:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
 
 
+def _clean(v, limit: int = 120) -> str:
+    """fohmixer text for our log and payload: control characters and whitespace runs collapsed,
+    cut to `limit` characters."""
+    text = " ".join("".join(c if c.isprintable() else " " for c in str(v)).split())
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
 def mbc_proof_verdict(payload) -> Reading:
     """fohmixer's answer -> Reading: ok AND hand1_sync_only true = True; ok false (its reason) =
     unreadable; hand1_sync_only false = False (the open tracks named); `extra_age_s` = its age_ms."""
@@ -159,18 +168,18 @@ def mbc_proof_verdict(payload) -> Reading:
         return Reading(None, "the mbc proof is not a JSON object")
     if payload.get("ok") is not True:
         reason = payload.get("reason")
-        return Reading(None, "the mbc proof reads ok=false" + (f" ({reason})" if reason else ""))
+        return Reading(None, "the mbc proof reads ok=false" + (f" ({_clean(reason)})" if reason else ""))
     age_ms = _number(payload.get("age_ms"))
     if age_ms is None or age_ms < 0:
-        return Reading(None, f"the mbc proof has no valid age_ms ({payload.get('age_ms')!r})")
+        return Reading(None, f"the mbc proof has no valid age_ms ({_clean(repr(payload.get('age_ms')))})")
     h1 = payload.get("hand1_sync_only")
     if h1 is True:
         return Reading(True, "hand1 sync only", extra_age_s=age_ms / 1000.0)
     if h1 is False:
         opened = payload.get("open")
-        return Reading(False, "not hand1 sync only" + (f" (open {opened})" if opened else ""),
+        return Reading(False, "not hand1 sync only" + (f" (open {_clean(opened)})" if opened else ""),
                        extra_age_s=age_ms / 1000.0)
-    return Reading(None, f"the mbc proof has no hand1_sync_only ({h1!r})")
+    return Reading(None, f"the mbc proof has no hand1_sync_only ({_clean(repr(h1))})")
 
 
 # ------------------------------------------------------------------ the decision, pure
@@ -213,7 +222,7 @@ def program_input_for(box: str, boxes_dir: Path | None = None) -> str:
     """STRIH_PROGRAM_AUDIO_INPUT of the box's fact file. Raises ValueError when absent or `none`."""
     path = (boxes_dir or STRIH_BOXES_DIR) / f"{box}.env"
     try:
-        facts = dsf._fact_file(path)
+        facts = dsf.fact_file(path)
     except OSError as exc:
         raise ValueError(f"the stream box fact file {path} is unreadable: {exc}") from exc
     name = facts.get(PROGRAM_INPUT_FACT, "")
@@ -225,49 +234,106 @@ def program_input_for(box: str, boxes_dir: Path | None = None) -> str:
 _CODE_RE = re.compile(r"'code':\s*(\d+)")
 
 
-def read_program_tree(host: str, password: str = "") -> list[str]:
-    """The audible inputs of the stream OBS program tree, read-only over obs_phase2's client (every
-    request through its `_rpc`, never a scene selection). Raises on any failure."""
-    try:
-        import obs_phase2  # lazy: websocket-client only here, so the pure parts import without it
-    except (SystemExit, ImportError) as exc:  # obs_phase2 exits on a missing websocket-client: strict
-        raise Unreadable(f"the OBS-WS client cannot load ({exc})") from None
+# Scene transitions that carry no audio (OBS's built-in kinds); any other (a stinger, a plugin) may mix
+# its own media into the program during a cut, so it reads as another audible input.
+SILENT_TRANSITION_KINDS = frozenset({"cut_transition", "fade_transition", "swipe_transition",
+                                     "slide_transition", "fade_to_color_transition", "wipe_transition"})
 
-    def rpc(ws, rtype, data=None):
-        return obs_phase2._rpc(ws, rtype, data, timeout_s=OBS_REQUEST_TIMEOUT_S) or {}
 
-    ws = obs_phase2._conn(host, password)
-    try:
-        ws.settimeout(OBS_REQUEST_TIMEOUT_S)
-        scene = rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
-        if not scene:
-            raise Unreadable("no current program scene")
+def transition_audio(transition: dict) -> str | None:
+    """The current scene transition as an audible 'input' when its kind may carry audio, else None."""
+    kind = transition.get("transitionKind")
+    if not isinstance(kind, str) or not kind:
+        raise Unreadable("GetCurrentSceneTransition answered no transitionKind")
+    if kind in SILENT_TRANSITION_KINDS:
+        return None
+    return f"transition {transition.get('transitionName')!r} ({kind})"
 
-        def fetch(name, is_group):
-            req = "GetGroupSceneItemList" if is_group else "GetSceneItemList"
-            return rpc(ws, req, {"sceneName": name}).get("sceneItems", [])
 
-        names = visible_inputs(fetch, scene)
-        for special in (rpc(ws, "GetSpecialInputs") or {}).values():
-            if isinstance(special, str) and special and special not in names:
-                names.append(special)
+def read_program_tree_over(ws, rpc) -> list[str]:
+    """The audible inputs of the program tree over one open session (`rpc(ws, type, data)`): the
+    program scene's enabled items through nested scenes and groups, the global audio devices, and a
+    transition that may carry audio. Raises on any failure."""
+    scene = rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
+    if not scene:
+        raise Unreadable("no current program scene")
 
-        def audio_state(name):
+    def fetch(name, is_group):
+        req = "GetGroupSceneItemList" if is_group else "GetSceneItemList"
+        return rpc(ws, req, {"sceneName": name}).get("sceneItems", [])
+
+    names = visible_inputs(fetch, scene)
+    for special in (rpc(ws, "GetSpecialInputs") or {}).values():
+        if isinstance(special, str) and special and special not in names:
+            names.append(special)
+
+    def audio_state(name):
+        try:
+            tracks = rpc(ws, "GetInputAudioTracks", {"inputName": name}).get("inputAudioTracks") or {}
+        except RuntimeError as exc:
+            m = _CODE_RE.search(str(exc))
+            if m and int(m.group(1)) == NO_AUDIO_CODE:
+                return None
+            raise
+        muted = rpc(ws, "GetInputMute", {"inputName": name}).get("inputMuted")
+        if not isinstance(muted, bool):
+            raise Unreadable(f"GetInputMute of {name!r} answered no inputMuted")
+        return any(bool(v) for v in tracks.values()), muted
+
+    audible = audible_inputs(names, audio_state)
+    trans = transition_audio(rpc(ws, "GetCurrentSceneTransition") or {})
+    return audible + ([trans] if trans else [])
+
+
+class ProgramTreeReader:
+    """Reads the tree over ONE obs-websocket session kept open between reads (review: a session per
+    read would put ~5,800 connect/close pairs a day into the stream OBS log). Any failure closes it;
+    the next read reconnects. Read-only: every request goes through obs_phase2's `_rpc` (its
+    production-scene guard), the session subscribes to no events (obs_phase2._conn)."""
+
+    def __init__(self, host: str, password: str = ""):
+        self.host = host
+        self.password = password
+        self._ws = None
+
+    def _client(self):
+        try:
+            import obs_phase2  # lazy: websocket-client only here, so the pure parts import without it
+        except (SystemExit, ImportError) as exc:  # obs_phase2 exits on a missing websocket-client: strict
+            raise Unreadable(f"the OBS-WS client cannot load ({exc})") from None
+        return obs_phase2
+
+    def __call__(self) -> list[str]:
+        client = self._client()
+
+        def rpc(ws, rtype, data=None):
+            return client._rpc(ws, rtype, data, timeout_s=OBS_REQUEST_TIMEOUT_S) or {}
+
+        try:
+            if self._ws is None:
+                self._ws = client._conn(self.host, self.password)
+                self._ws.settimeout(OBS_REQUEST_TIMEOUT_S)
+            return read_program_tree_over(self._ws, rpc)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        ws, self._ws = self._ws, None
+        if ws is not None:
             try:
-                tracks = rpc(ws, "GetInputAudioTracks", {"inputName": name}).get("inputAudioTracks") or {}
-            except RuntimeError as exc:
-                m = _CODE_RE.search(str(exc))
-                if m and int(m.group(1)) == NO_AUDIO_CODE:
-                    return None
-                raise
-            muted = rpc(ws, "GetInputMute", {"inputName": name}).get("inputMuted")
-            if not isinstance(muted, bool):
-                raise Unreadable(f"GetInputMute of {name!r} answered no inputMuted")
-            return any(bool(v) for v in tracks.values()), muted
+                ws.close()
+            except Exception:  # noqa: BLE001 -- a dead session is dropped either way
+                pass
 
-        return audible_inputs(names, audio_state)
+
+def read_program_tree(host: str, password: str = "") -> list[str]:
+    """One read over a fresh session (ops, tests); the probe keeps a ProgramTreeReader instead."""
+    reader = ProgramTreeReader(host, password)
+    try:
+        return reader()
     finally:
-        ws.close()
+        reader.close()
 
 
 def read_token(path: str) -> str:
@@ -329,19 +395,19 @@ class AdvisoryProbe:
         now = self._mono()
         if self._tree_try is None or now - self._tree_try >= TREE_INTERVAL_S:
             self._tree_try = now
-            try:
-                r = tree_verdict(list(self._read_tree()), self.program_input)._replace(at=self._mono())
-            except Exception as exc:  # noqa: BLE001 -- unreadable = strict
-                r = Reading(None, "unreadable: " + _why(exc), self._mono())
+            try:  # the answer is as old as the read's START (a slow read never looks fresh)
+                r = tree_verdict(list(self._read_tree()), self.program_input)._replace(at=now)
+            except BaseException as exc:  # noqa: BLE001 -- unreadable = strict, never a dead thread
+                r = Reading(None, "unreadable: " + _why(exc), now)
             with self._lock:
                 self.tree = r
         now = self._mono()
         if self._mbc_try is None or now - self._mbc_try >= MBC_PROOF_INTERVAL_S:
             self._mbc_try = now
             try:
-                r = mbc_proof_verdict(self._read_mbc())._replace(at=self._mono())
-            except Exception as exc:  # noqa: BLE001 -- unreadable = strict
-                r = Reading(None, _why(exc), self._mono())
+                r = mbc_proof_verdict(self._read_mbc())._replace(at=now)
+            except BaseException as exc:  # noqa: BLE001 -- unreadable = strict, never a dead thread
+                r = Reading(None, _why(exc), now)
             with self._lock:
                 self.mbc = r
 
@@ -349,6 +415,8 @@ class AdvisoryProbe:
         now = self._mono() if now is None else now
         with self._lock:
             tree, mbc = self.tree, self.mbc
+        if self._thread is not None and not self._thread.is_alive() and not self._stop.is_set():
+            return Advisory(False, "cg strict (the advisory probe thread stopped)")
         return decide(tree, mbc, now, self.program_input)
 
     def _run(self) -> None:
@@ -362,6 +430,9 @@ class AdvisoryProbe:
 
     def stop(self) -> None:
         self._stop.set()
+        close = getattr(self._read_tree, "close", None)
+        if close is not None:
+            close()
 
 
 def from_env(env=None, *, boxes_dir: Path | None = None) -> AdvisoryProbe | None:
@@ -378,7 +449,7 @@ def from_env(env=None, *, boxes_dir: Path | None = None) -> AdvisoryProbe | None
         raise ValueError(f"the stream box {box!r} is not in the OBS fleet table")
     program_input = program_input_for(box, boxes_dir)
     password = env.get(STREAM_PASSWORD_ENV, "")
-    return AdvisoryProbe(program_input, lambda: read_program_tree(host, password),
+    return AdvisoryProbe(program_input, ProgramTreeReader(host, password),
                          lambda: fetch_mbc_proof(url, token_file))
 
 

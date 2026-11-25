@@ -359,13 +359,18 @@ program tree (`Development` = `PRO` nested + `JXS PGM src`) has ONE audio input,
 reach the stream only through the mbc mix, and fohmixer can prove that mix carries HAND 1 sync only.
 Goal: SongPlayer no longer needs blanking for YouTube/FB tests. `scripts/program_audio_cg_advisory.py`:
 - **(a) the program tree**, over OBS-WS read-only through `obs_phase2._conn` / `_rpc` (its
-  production-scene guard): GetCurrentProgramScene, GetSceneItemList / GetGroupSceneItemList descending
+  production-scene guard) over ONE session kept open between reads (`ProgramTreeReader`; a failure
+  closes it, the next read reconnects; a session per read would log ~5,800 connect/close pairs a day
+  on the broadcast box): GetCurrentProgramScene, GetSceneItemList / GetGroupSceneItemList descending
   nested scenes and groups, ENABLED items only, plus GetSpecialInputs (the global audio devices mix into
-  every output). An input is audible when GetInputAudioTracks has a track on (mixers != 0) and
+  every output) and GetCurrentSceneTransition (a kind outside OBS's built-in silent ones, a stinger,
+  reads as another audible input). Known limit: during a cut the OUTGOING scene's inputs stay in the
+  mix for the transition's length. An input is audible when GetInputAudioTracks has a track on (mixers != 0) and
   GetInputMute is false; an input without audio answers request code 604 (not audible); any other error
   = unreadable. Holds when no audible input but the program-audio input = STRIH_PROGRAM_AUDIO_INPUT of
   the stream box's fact file (`PROGRAM_AUDIO_STREAM_BOX`, default stream-snv -> `mbc`), never a literal.
-  Read every 15 s, valid 45 s (`TREE_INTERVAL_S` / `TREE_MAX_AGE_S`).
+  Read every 15 s, valid 45 s (`TREE_INTERVAL_S` / `TREE_MAX_AGE_S`). An answer is as old as its
+  read's START (a slow read never looks fresh).
 - **(b) the mbc proof**: fohmixer's `GET /api/mbc/stream-proof` on the FOH hub (fohmixer issue 267,
   LAN only, `Authorization: Bearer <the hub's automation token>`, JSON `{ok, ts, open, hand1_sync_only,
   outputs, age_ms}`, `ok:false` + `reason` when it cannot read). Holds on `ok` true AND `hand1_sync_only`
@@ -382,19 +387,26 @@ Goal: SongPlayer no longer needs blanking for YouTube/FB tests. `scripts/program
   both hold -> `program_audio_cg.overlay` returns the window's OWN verdict and reason (no FOREIGN, no
   UNKNOWN, no latch); `pcg.suppressed` names what the strict arm would have made of it. A stream-side
   spectral FOREIGN / UNKNOWN is never touched. Either proof unreadable, stale or false -> the strict arm,
-  byte for byte. A failed read REPLACES the last good one (strict at once).
+  byte for byte. A failed read REPLACES the last good one (strict at once). Any exception in a read
+  (a `SystemExit` from obs_phase2 included) is an unreadable reading, and a probe thread that died reads
+  strict (`cg strict (the advisory probe thread stopped)`). fohmixer's `reason` / `open` text is cleaned
+  of control characters and cut to 120 characters before our log and payload.
 - **Visible:** the payload's `cg.advisory` = `{applies, text, suppressed, tree_age_s, mbc_proof_age_s}`
   (only with a probe configured); the sampler logs each change (advisory on, strict with why, a
   suppression starting / ending), never per window; the guard line appends
   `cg advisory (mbc proof: hand1 sync only, program tree: mbc only)` and
-  `-- strict would be <V>: <reason>` when the arm would have acted. The note is display only.
+  `-- strict would be <V>: <reason>` when the arm would have acted, on a fresh PASSING line only (never
+  a stale or refusing one). The note is display only.
 - **Install:** setup-strih step 16e adds `python3-websocket`, the probe, `dantesync_fleet.py` (the fact
-  parser), `obs_phase2.py` with its lazy imports and `scripts/strih-boxes/stream-snv.env` (DATA). A
+  parser, `fact_file`), `obs_phase2.py` with its lazy imports and every stream-role fact file (DATA:
+  `PROGRAM_AUDIO_STREAM_BOX` picks one; the closure test derives them from STRIH_ROLE=stream). A
   missing websocket-client reads unreadable (strict), never a dead thread.
 - **Tests:** `tests/python/test_program_audio_cg_advisory_1553.py`, fakes only (an in-process
   `obs_phase2` module, a patched `urlopen`), green under `unshare -n`.
 - **After deploy:** set the two env values once fohmixer's endpoint exists, try-restart the sampler,
-  read the start line and the endpoint's `cg.advisory` (`applies` true with SongPlayer playing).
+  read the start line and the endpoint's `cg.advisory` (`applies` true with SongPlayer playing). Not
+  yet read live: that stream-snv's tree reads `mbc` only to this probe (`NDI 2ME PGM` nested in `PRO`
+  is hidden + muted per the 25.11 collection read; if it ever reads audible the arm just stays strict).
 
 ## Each sampler receiver is pinned to an on-link address (SP-program connections 0, 3.11.2026)
 

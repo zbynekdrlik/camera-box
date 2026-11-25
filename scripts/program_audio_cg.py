@@ -205,6 +205,31 @@ def suppressed(verdict: str, reason: str | None, state: CgState | None) -> str |
     return f"{v2}: {r2}" if r2 else v2
 
 
+class AdvisoryLog:
+    """issue 1553: logs the advisory state's CHANGES (advisory on, strict with why, a suppression
+    starting / ending), never per window."""
+
+    def __init__(self):
+        self.applies = None
+        self.suppressing = False
+
+    def __call__(self, state: CgState | None, suppressed_text: str | None, log: Callable[[str], None]) -> None:
+        adv = None if state is None else state.advisory
+        if adv is None:
+            return
+        if adv.applies != self.applies:
+            log(f"program-audio sampler: {adv.text}" if adv.applies
+                else f"program-audio sampler: CG arm strict: {adv.text}")
+            self.applies = adv.applies
+        if not adv.applies:
+            self.suppressing = False  # the strict arm acts itself; its verdict change is logged
+        elif (suppressed_text is not None) != self.suppressing:
+            log(f"program-audio sampler: {adv.text} -- "
+                + (f"the strict arm would read {suppressed_text} (advisory, not applied)"
+                   if suppressed_text is not None else "the strict arm has nothing to say any more"))
+            self.suppressing = suppressed_text is not None
+
+
 def strict_overlay(verdict: str, reason: str | None, state: CgState | None) -> tuple[str, str | None]:
     """The strict CG arm (the rules in the module doc, unchanged since issue 1404)."""
     if state is None:
