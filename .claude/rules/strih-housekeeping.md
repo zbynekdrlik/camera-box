@@ -102,6 +102,17 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
 - `none` removes ours (header-checked: our header on line 1, or line 2 after `#!/bin/sh`); a foreign file of
   the name is named and left; the live budget stays until the next boot.
 
+## GOTCHA: a live `ethtool -G` on the atlantic rig NIC took strih-snv off the network (24.11.2026)
+
+Under E2E load the AQC113 (`atlantic`, RX ring 2048 of 8184, rx-usecs 112) dropped at DMA level:
+InDroppedDma went from 3272 to 30178, and the strih Dante input lost packets that never reached its
+socket. dstack confirmed the cause in the NIC, not in the Dante RX path. A boot-oneshot step that
+raised the ring to the pre-set maximum was written and applied live (09:38 local). After
+`ethtool -G enp7s0 rx 8184` the NIC did not come back (ARP INCOMPLETE for 8+ minutes). It was
+reverted before any deploy. Never change the atlantic ring on a live rig NIC again until the failure
+is understood on the box's console. Keep the ring out of the NM profile too (the issue-1411 flap
+loop). The drop finding stays open on issue 1425.
+
 ## Verify item 16 (`strih_housekeeping_grade_report`)
 
 `(hk-cpus)` (also the launcher's file = the task CPUs), `(hk-rss)` (current combined = the IRQ CPU
