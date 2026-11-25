@@ -10,7 +10,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 Every rule below lives in `.claude/rules/` and auto-loads on its `paths:`; its full router description is moved verbatim to its `## Router entry` section.
 
 - Rig ops (DanteSync clock, device deploy, recovery) → load `.claude/skills/ops`
-- bkshading = a pinned release of … → `docs/CONTRACT.md` + shading-pinned-release.md
+- bkshading = a pinned release of `zbynekdrlik/shading` → shading-pinned-release.md
 - bkshading deploy + operation here → bkshading.md
 - Fleet upgrade = camera-box AND the pinned … → fleet-relay-upgrade.md
 - bkshading handheld SBC → bkshading-sbc.md
@@ -249,7 +249,7 @@ Pointers; the rule file holds the incidents and the full recipe.
 - one failing test binary makes `cargo test` skip the rest — re-run the suite after every fix → `cargo-test-full-suite.md`
 - a new `.sh` file puts `set -euo pipefail` within its first 15 lines; a `_cmd` helper embedded via `$(...)` ends its last statement with `;` → `shell-script-gotchas.md`
 - `gh pr merge` / `gh pr edit` misbehave here — use the REST `gh api .../pulls/<N>/merge` / PATCH (never `--admin`) → `gh-cli-gotchas.md`
-- design / validated / review comments go through a standalone `gh issue comment <N> --body-file`, never `gh api`, then check the marker → `gh-cli-gotchas.md`
+- design / validated / review comments go through a standalone `gh issue comment <N> --body-file`, never `gh api`, then check the marker; a design needs `Triage:`, `Approach 1/2/3`, a trade-off and `Architektúra:` (structure + framework word), a validation an action verb → `gh-cli-gotchas.md`
 - a fresh REAL E2E verdict on a pushed commit = `gh run rerun <pull_request run id>`, NEVER `gh workflow run` (plan-only green) → `e2e-rerun-not-workflow-dispatch.md`
 - every version is a clean `X.Y.Z` in the root `Cargo.toml`; dev = main + 1 patch, bumped first after each dev->main merge; every merge to main is a tagged release → `release-versions.md`
 
