@@ -52,8 +52,9 @@ def _exe(path, text):
 
 # --- the fact ------------------------------------------------------------------------------------------
 
-def test_every_box_declares_the_fact_strih_snv_0_1_the_others_none():
-    want = {"strih-snv": "0-1", "strih-pp": "none", "stream-pp": "none", "stream-snv": "none"}
+def test_every_box_declares_its_housekeeping_cpus():
+    # issue 1553 (SNV/PP parity): every box measured = online minus its OBS mask (read 25.11.2026)
+    want = {"strih-snv": "0-1", "strih-pp": "0,8", "stream-pp": "0-1", "stream-snv": "0-1,12-19"}
     for box, v in want.items():
         r = _run('strih_box_load "$1"; strih_lx_housekeeping_cpus', box)
         assert r.returncode == 0, r.stderr
@@ -83,7 +84,9 @@ def test_step_11b_runs_on_a_housekeeping_box_and_skips_a_pcie_box_without_one(tm
     body = 'strih_box_load "$1"; if WHY="$(obs_box_step_applies 11b)"; then echo RUN; else echo "SKIP $WHY"; fi'
     srcs = (FACTS, ROLE)
     assert _run(body, "strih-snv", sources=srcs).stdout.strip() == "RUN"
-    out = _run(body, "strih-pp", sources=srcs).stdout.strip()
+    assert _run(body, "strih-pp", sources=srcs).stdout.strip() == "RUN"   # PCIe, housekeeping 0,8
+    # a PCIe box without housekeeping CPUs (no deployed box has that since issue 1553: strih-snv set to none)
+    out = _run(body, "strih-snv", sources=srcs, env=_box_with(tmp_path, "none")).stdout.strip()
     assert out.startswith("SKIP the rig NIC is not a USB device") and "STRIH_HOUSEKEEPING_CPUS=none" in out
     assert _run(body, "stream-snv", sources=srcs).stdout.strip() == "RUN"   # a USB rig NIC, no housekeeping
 
@@ -456,7 +459,8 @@ def test_a_box_with_none_removes_ours_and_keeps_a_foreign_file(tmp_path):
 
 def test_a_none_box_with_nothing_of_ours_is_silent(tmp_path):
     root, home, bin_dir, env = _install_env(tmp_path)
-    r = _run('strih_box_load strih-pp; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    env.update(_box_with(tmp_path, "none"))   # issue 1553: no deployed box is none any more
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
     assert r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.stdout, r.stderr)
     assert (tmp_path / "systemctl.log").read_text() == ""
 
@@ -794,7 +798,7 @@ def test_a_file_with_our_header_on_line_2_is_ours_only_after_a_shebang(tmp_path)
 
 # --- the split (design 7116063669): the IRQ CPU and the task CPUs from the one fact ---------------------
 
-def test_the_irqs_get_the_whole_set_and_the_tasks_its_first_cpu():
+def test_the_irqs_get_the_whole_set_and_the_tasks_its_first_cpu(tmp_path):
     # design 7119179275 (supersedes the CPU-1-alone split of 7116063669)
     for hk, irq, task in (("0-1", "0-1", "0"), ("0,1", "0-1", "0"), ("3", "3", "3"), ("0-1,8", "0-1,8", "0"),
                           ("0-3", "0-3", "0"), ("none", "none", "none")):
@@ -804,6 +808,9 @@ def test_the_irqs_get_the_whole_set_and_the_tasks_its_first_cpu():
     r = _run('strih_box_load strih-snv; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
     assert r.stdout.split() == ["0-1", "0"], r.stdout
     r = _run('strih_box_load strih-pp; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
+    assert r.stdout.split() == ["0,8", "0"], r.stdout
+    r = _run('strih_box_load strih-snv; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus',
+             env=_box_with(tmp_path, "none"))
     assert r.stdout.split() == ["none", "none"], r.stdout
     for badv in ("a", "1-0", ""):
         assert _run('strih_housekeeping_irq_cpus "$1"', badv).returncode != 0, badv
@@ -838,7 +845,8 @@ def test_the_sampler_runs_on_the_obs_mask_at_nice_10_on_a_housekeeping_box(tmp_p
            "STRIH_PROGRAM_AUDIO_SYSFS": str(tmp_path / "nosys")}
     r = _run('strih_box_load strih-snv; strih_program_audio_cpus; echo; strih_program_audio_nice', env=env)
     assert r.returncode == 0 and r.stdout.split() == ["2-15", "10"], (r.stdout, r.stderr)
-    r = _run('strih_box_load strih-pp; strih_program_audio_cpus; echo; strih_program_audio_nice; echo END', env=env)
+    r = _run('strih_box_load strih-snv; strih_program_audio_cpus; echo; strih_program_audio_nice; echo END',
+             env=dict(env, **_box_with(tmp_path, "none")))
     assert r.returncode == 0 and r.stdout.split() == ["0-1", "END"], (r.stdout, r.stderr)
     r = _run('strih_box_load strih-snv; strih_program_audio_unit_text "$1" "$(strih_program_audio_cpus)" '
              '"$(strih_program_audio_nice)"', str(REPO), env=env)
