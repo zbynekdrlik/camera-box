@@ -101,6 +101,9 @@ class _FakeObs:
             "transitionName": "Fade", "transitionKind": "fade_transition"}
         self.fail_next = None
         self.sessions = 0
+        self.override = None
+        self.transition_list = [{"transitionName": "Fade", "transitionKind": "fade_transition"},
+                                {"transitionName": "Song stinger", "transitionKind": "obs_stinger_transition"}]
         self.tracks = tracks if tracks is not None else {"mbc": {"1": True, "2": False}}
         self.muted = muted if muted is not None else {"mbc": False}
         self.special = special if special is not None else {"desktop1": None, "mic1": None}
@@ -132,6 +135,11 @@ class _FakeObs:
                 raise TimeoutError(f"obs-websocket request {rtype!r} got no response")
             if rtype == "GetCurrentSceneTransition":
                 return fake.transition
+            if rtype == "GetSceneSceneTransitionOverride":
+                assert d["sceneName"] == fake.program
+                return {"transitionName": fake.override, "transitionDuration": None}
+            if rtype == "GetSceneTransitionList":
+                return {"transitions": fake.transition_list}
             if rtype == "GetCurrentProgramScene":
                 return {"currentProgramSceneName": fake.program}
             if rtype in ("GetSceneItemList", "GetGroupSceneItemList"):
@@ -160,7 +168,8 @@ def test_the_live_tree_read_is_read_only_and_counts_604_as_no_audio(monkeypatch)
     assert adv.read_program_tree("10.77.9.204") == ["mbc"]
     kinds = {k for k, *_ in obs.log}
     assert kinds <= {"conn", "GetCurrentProgramScene", "GetSceneItemList", "GetGroupSceneItemList",
-                     "GetSpecialInputs", "GetInputAudioTracks", "GetInputMute", "GetCurrentSceneTransition"}
+                     "GetSpecialInputs", "GetInputAudioTracks", "GetInputMute", "GetCurrentSceneTransition",
+                     "GetSceneSceneTransitionOverride", "GetSceneTransitionList"}
     assert not any(k.startswith("Set") or k.startswith("Trigger") for k in kinds)
     assert obs.closed
 
@@ -179,6 +188,32 @@ def test_a_transition_that_may_carry_audio_counts_as_an_audible_input(monkeypatc
     monkeypatch.setitem(sys.modules, "obs_phase2", obs.module())
     got = adv.read_program_tree("h")
     assert got == (["mbc", f"transition 'T' ({kind})"] if audible else ["mbc"])
+
+
+def test_the_program_scenes_own_transition_override_is_read_too(monkeypatch):
+    obs = _FakeObs(no_audio=("Browser", "JXS PGM src"))
+    obs.override = "Song stinger"
+    monkeypatch.setitem(sys.modules, "obs_phase2", obs.module())
+    assert adv.read_program_tree("h") == ["mbc", "transition 'Song stinger' (obs_stinger_transition)"]
+    obs.override = "Fade"
+    assert adv.read_program_tree("h") == ["mbc"]
+    obs.override = "Gone"
+    with pytest.raises(adv.Unreadable, match="not in the transition list"):
+        adv.read_program_tree("h")
+
+
+def test_a_stopped_probe_never_reconnects(monkeypatch):
+    obs = _FakeObs(no_audio=("Browser", "JXS PGM src"))
+    monkeypatch.setitem(sys.modules, "obs_phase2", obs.module())
+    reader = adv.ProgramTreeReader("h")
+    probe = adv.AdvisoryProbe("mbc", reader, lambda: PROOF, mono=_Clock())
+    probe.poll_once()
+    assert obs.sessions == 1 and probe.state().applies
+    probe.stop()
+    assert obs.closed
+    with pytest.raises(adv.Unreadable, match="shut down"):
+        reader()
+    assert obs.sessions == 1
 
 
 def test_a_transition_without_a_kind_is_unreadable(monkeypatch):
