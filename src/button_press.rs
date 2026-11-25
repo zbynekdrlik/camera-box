@@ -77,9 +77,69 @@ impl PressClassifier {
     }
 }
 
+/// Issue 1539: a press from ANOTHER device this close after the last accepted press is the same
+/// physical press, reported twice (a cambox lists several KEY_POWER devices: two ACPI "Power
+/// Button" devices and "Intel HID events"). A real double press is one button, ~100 ms or more apart.
+pub const CROSS_DEVICE_ECHO_MS: u64 = 60;
+
+/// Drops the second report of one physical press that two input devices both delivered.
+#[derive(Debug, Clone, Default)]
+pub struct PressEcho {
+    last: Option<(u64, usize)>,
+}
+
+impl PressEcho {
+    /// A press from `device` (the caller's device index) at `now_ms`: `true` = a press of its own,
+    /// `false` = the echo of the last accepted press on another device (ignore it). The same device
+    /// twice is always two presses.
+    pub fn accept(&mut self, now_ms: u64, device: usize) -> bool {
+        if let Some((t, d)) = self.last {
+            if d != device && now_ms.saturating_sub(t) < CROSS_DEVICE_ECHO_MS {
+                return false;
+            }
+        }
+        self.last = Some((now_ms, device));
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_press_echoed_by_another_device_inside_the_echo_window_is_dropped_1539() {
+        let mut e = PressEcho::default();
+        assert!(e.accept(1000, 0));
+        assert!(!e.accept(1000, 2), "same instant, other device = the echo");
+        assert!(!e.accept(1059, 1), "still inside 60 ms");
+        assert!(e.accept(1060, 1), "the window edge is a press of its own");
+    }
+
+    #[test]
+    fn the_same_device_twice_is_always_two_presses_1539() {
+        let mut e = PressEcho::default();
+        assert!(e.accept(1000, 0));
+        assert!(e.accept(1001, 0));
+    }
+
+    #[test]
+    fn an_echo_never_moves_the_window_1539() {
+        let mut e = PressEcho::default();
+        assert!(e.accept(1000, 0));
+        assert!(!e.accept(1040, 1));
+        assert!(
+            e.accept(1070, 1),
+            "measured from the ACCEPTED press, not the dropped echo"
+        );
+    }
+
+    #[test]
+    fn a_backwards_clock_reads_as_inside_the_window_1539() {
+        let mut e = PressEcho::default();
+        assert!(e.accept(1000, 0));
+        assert!(!e.accept(900, 1));
+    }
 
     #[test]
     fn a_single_press_fires_only_when_its_window_ends() {
