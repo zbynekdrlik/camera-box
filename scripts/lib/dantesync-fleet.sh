@@ -594,6 +594,30 @@ dantesync_fleet_venue_gm_host() {
   printf '%s\n' "$gm"
 }
 
+# dantesync_fleet_venue_gm_addr <venue> -> STRIH_DANTE_GM_ADDR of the venue's NTP-master fact file (issue
+# 1553): `none` (resolve the name on dev1) or the IPv4 dev1 grades the venue against. rc 1 + stderr when the
+# venue's file is missing or lacks the key.
+dantesync_fleet_venue_gm_addr() {
+  local venue="${1:-}" f line v r a found=""
+  local -
+  set +f
+  for f in "$DANTESYNC_FLEET_STRIH_BOXES_DIR"/*.env; do
+    [ -f "$f" ] || continue
+    v="" r="" a=""
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        STRIH_VENUE=*) v="${line#*=}" ;;
+        STRIH_DANTESYNC_ROLE=*) r="${line#*=}" ;;
+        STRIH_DANTE_GM_ADDR=*) a="${line#*=}" ;;
+      esac
+    done <"$f"
+    { [ "$v" = "$venue" ] && [ "$r" = server ]; } || continue
+    found="$a"
+  done
+  [ -n "$found" ] || { echo "dantesync-fleet: venue '$venue' has no STRIH_DANTE_GM_ADDR in its NTP-master fact file" >&2; return 1; }
+  printf '%s\n' "$found"
+}
+
 # dantesync_fleet_camera_gm_host camN -> the PTP grandmaster camN's dsync must allow (issue 1553): the
 # grandmaster of the venue whose strih fact file lists the camera (remote_log_camera_venue, the same
 # camera -> venue lookup the log sink and the JPEG XS target use). A PP camera gets the PP grandmaster,
@@ -669,6 +693,10 @@ dantesync_fleet_role_gm_ip() {
         return 1
       fi
       host="$(dantesync_fleet_role_gm_host "$1")" || return 1
+      # issue 1553: a venue whose clock name dev1 cannot resolve (its DNS is the SNV one) names the address
+      local addr
+      addr="$(dantesync_fleet_venue_gm_addr "$(dantesync_fleet_role_venue "$1")")" || return 1
+      if [ "$addr" != none ]; then printf '%s\n' "$addr"; return 0; fi
       ;;
   esac
   if [[ "$host" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+\.[0123456789]+$ ]]; then
