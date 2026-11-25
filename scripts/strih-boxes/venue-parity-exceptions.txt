@@ -1,0 +1,2 @@
+# issue 1553: a fact that may differ between SNV and PP, one line each: role|KEY|reason.
+# Every hardening fact NOT listed here must be identical at both venues (tests/python/test_venue_parity_1553.py).
