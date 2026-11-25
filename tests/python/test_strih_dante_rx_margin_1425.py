@@ -31,9 +31,11 @@ def test_the_margin_follows_the_dante_terms_in_the_key_list():
     assert keys[keys.index("STRIH_DANTE_TX_TRACK") + 1] == KEY
 
 
-def test_only_strih_snv_declares_the_10_ms_margin():
-    assert t._facts("strih-snv")[KEY] == "10"
-    for box in ("stream-snv", "strih-pp", "stream-pp"):
+def test_both_strih_boxes_declare_the_10_ms_margin():
+    # issue 1553 (SNV/PP parity): strih-pp runs the same strih-obs program device as strih-snv.
+    for box in ("strih-snv", "strih-pp"):
+        assert t._facts(box)[KEY] == "10", box
+    for box in ("stream-snv", "stream-pp"):
         assert t._facts(box)[KEY] == "none", box
 
 

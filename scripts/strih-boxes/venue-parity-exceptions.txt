@@ -1,2 +1,12 @@
 # issue 1553: a fact that may differ between SNV and PP, one line each: role|KEY|reason.
 # Every hardening fact NOT listed here must be identical at both venues (tests/python/test_venue_parity_1553.py).
+strih|STRIH_NIC_DRIVER|venue hardware: strih-snv's rig NIC is the Aquantia AQC113 10 GbE Thunderbolt adapter (atlantic), strih-pp's the Intel X520-2 SFP+ card (ixgbe, issue 1535)
+strih|STRIH_HDMI_OUTPUTS|venue hardware: strih-snv is a notebook with one HDMI port (auto = the first connected HDMI), strih-pp a desktop driving two fixed outputs, the BenQ multiview and the vestibule program over HDMI-to-SDI (issue 1424 part 2)
+strih|STRIH_PROGRAM_AUDIO_SAMPLER|the YouTube-guard sampler (issue 1404) reads the SNV stream output STREAM-SNV (stream) for the SNV E2E YouTube leg; PP runs no E2E measurement, so there is nothing for a PP sampler to guard
+strih|STRIH_HOUSEKEEPING_CPUS|value not yet read off strih-pp, align on site: the fact must equal the online CPUs minus /etc/strih-isolated-cpus.conf (verify item 16 hk-cpus), and the Ryzen 7 5800X SMT sibling numbering (0,8 or 0-1) is not in the committed data
+stream|STRIH_HOUSEKEEPING_CPUS|value not yet read off stream-snv, align on site: the fact must equal the online CPUs minus /etc/strih-isolated-cpus.conf (verify item 16 hk-cpus); the i7-12700H is hybrid (P-core pairs + E-cores) and its topology is not in the committed data
+stream|STRIH_DANTE_TX|stream-snv sends its program mix to mbc Live RX 5/6 (issue 1513); PP has no mbc and no Dante receiver for a program TX (issue 1536)
+stream|STRIH_DANTE_TX_TRACK|follows STRIH_DANTE_TX: the track is set only where a program TX exists (stream-snv)
+stream|STRIH_JXS_PROGRAM_PIN_MS|a per-venue measured A/V pin: stream-snv 1019 = the SNV E2E A/V compensation (issue 1536), stream-pp 3 = PP's minimum, PP aligns A/V by a faster picture, never a delayed sound (the vestibule rule)
+stream|STRIH_PROGRAM_AUDIO_INPUT|the input name of each venue's collection: the SNV stream tooling keys on mbc (measurement-audio watchdog, av-sync dock, rig-mode MBC_INPUT_NAME), the ported PP collection names it Zvuk z mixu (issue 1462)
+stream|STRIH_STREAM_DEV_SCENE|SNV's Development nests PRO, whose mbc carries the cam2 measurement marker the SNV E2E reads (issue 1380); PP has no E2E rig and uses the YouTube-safe measurement clip (ROZHODNUTE 13.10.2026, issue 1462)
