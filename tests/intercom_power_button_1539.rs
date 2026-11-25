@@ -205,3 +205,27 @@ fn a_press_behind_a_queue_of_other_events_toggles_promptly_1539() {
         "60 queued events must not delay the press past the double-press window + a pass"
     );
 }
+
+/// A genuine double press on hardware that echoes EVERY press on a second device is still a double
+/// press: the preview flips and the mic stays MUTED.
+#[test]
+fn a_double_press_whose_presses_are_all_echoed_is_still_a_double_1539() {
+    let rig = Rig::start(3);
+    rig.press(0);
+    rig.press(2);
+    std::thread::sleep(Duration::from_millis(150));
+    rig.press(0);
+    rig.press(2);
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(1000) && rig.preview.source() == PreviewSource::Strih
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        rig.preview.source(),
+        PreviewSource::Local,
+        "echoed double = preview switch"
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(rig.muted(), "and never a mic toggle");
+}
