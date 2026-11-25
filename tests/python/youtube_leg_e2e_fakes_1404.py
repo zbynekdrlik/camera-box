@@ -141,6 +141,9 @@ class Fakes:
         self.env = dict(os.environ)
         self.marker = self.d / "youtube-leg-live.json"  # never the real dev1 marker
         self.env["YOUTUBE_LEG_MARKER"] = str(self.marker)
+        # issue 1551: the stage holds a live broadcast for a pre-roll before it returns; the fakes
+        # take none unless a test sets one
+        self.env["YOUTUBE_LEG_PREROLL_S"] = "0"
         for kind in ("session", "obs", "guard", "tap"):  # tap: issue 1387's restreamer-input capture
             exe = self.d / kind
             exe.write_text(FAKE.format(py=sys.executable, kind=kind, d=str(self.d)))
