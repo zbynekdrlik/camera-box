@@ -94,8 +94,13 @@ def test_the_tree_verdict_names_every_other_audible_input():
 class _FakeObs:
     """obs_phase2's two primitives over a scripted collection; requests are logged."""
 
-    def __init__(self, program="Development", tracks=None, muted=None, special=None, no_audio=()):
+    def __init__(self, program="Development", tracks=None, muted=None, special=None, no_audio=(),
+                 transition=None):
         self.program, self.log = program, []
+        self.transition = transition if transition is not None else {
+            "transitionName": "Fade", "transitionKind": "fade_transition"}
+        self.fail_next = None
+        self.sessions = 0
         self.tracks = tracks if tracks is not None else {"mbc": {"1": True, "2": False}}
         self.muted = muted if muted is not None else {"mbc": False}
         self.special = special if special is not None else {"desktop1": None, "mic1": None}
@@ -113,11 +118,20 @@ class _FakeObs:
             def close(self):
                 fake.closed = True
 
-        m._conn = lambda host, password="", port=None: (fake.log.append(("conn", host, password)), _Ws())[1]
+        def _conn(host, password="", port=None):
+            fake.log.append(("conn", host, password))
+            fake.sessions += 1
+            return _Ws()
+        m._conn = _conn
 
         def _rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
             fake.log.append((rtype, (rdata or {}).get("sceneName") or (rdata or {}).get("inputName")))
             d = rdata or {}
+            if fake.fail_next == rtype:
+                fake.fail_next = None
+                raise TimeoutError(f"obs-websocket request {rtype!r} got no response")
+            if rtype == "GetCurrentSceneTransition":
+                return fake.transition
             if rtype == "GetCurrentProgramScene":
                 return {"currentProgramSceneName": fake.program}
             if rtype in ("GetSceneItemList", "GetGroupSceneItemList"):
@@ -146,7 +160,7 @@ def test_the_live_tree_read_is_read_only_and_counts_604_as_no_audio(monkeypatch)
     assert adv.read_program_tree("10.77.9.204") == ["mbc"]
     kinds = {k for k, *_ in obs.log}
     assert kinds <= {"conn", "GetCurrentProgramScene", "GetSceneItemList", "GetGroupSceneItemList",
-                     "GetSpecialInputs", "GetInputAudioTracks", "GetInputMute"}
+                     "GetSpecialInputs", "GetInputAudioTracks", "GetInputMute", "GetCurrentSceneTransition"}
     assert not any(k.startswith("Set") or k.startswith("Trigger") for k in kinds)
     assert obs.closed
 
@@ -156,6 +170,36 @@ def test_a_global_audio_device_counts_as_another_audible_input(monkeypatch):
                    special={"mic1": "Mic/Aux"}, no_audio=("Browser", "JXS PGM src"))
     monkeypatch.setitem(sys.modules, "obs_phase2", obs.module())
     assert adv.read_program_tree("h") == ["mbc", "Mic/Aux"]
+
+
+@pytest.mark.parametrize("kind,audible", [("fade_transition", False), ("cut_transition", False),
+                                           ("obs_stinger_transition", True), ("some_plugin_transition", True)])
+def test_a_transition_that_may_carry_audio_counts_as_an_audible_input(monkeypatch, kind, audible):
+    obs = _FakeObs(no_audio=("Browser", "JXS PGM src"), transition={"transitionName": "T", "transitionKind": kind})
+    monkeypatch.setitem(sys.modules, "obs_phase2", obs.module())
+    got = adv.read_program_tree("h")
+    assert got == (["mbc", f"transition 'T' ({kind})"] if audible else ["mbc"])
+
+
+def test_a_transition_without_a_kind_is_unreadable(monkeypatch):
+    obs = _FakeObs(no_audio=("Browser", "JXS PGM src"), transition={"transitionName": "T"})
+    monkeypatch.setitem(sys.modules, "obs_phase2", obs.module())
+    with pytest.raises(adv.Unreadable, match="transitionKind"):
+        adv.read_program_tree("h")
+
+
+def test_the_reader_keeps_one_session_and_reconnects_after_a_failure(monkeypatch):
+    obs = _FakeObs(no_audio=("Browser", "JXS PGM src"))
+    monkeypatch.setitem(sys.modules, "obs_phase2", obs.module())
+    reader = adv.ProgramTreeReader("10.77.9.204")
+    assert reader() == ["mbc"] and reader() == ["mbc"]
+    assert obs.sessions == 1 and not obs.closed
+    obs.fail_next = "GetSceneItemList"
+    with pytest.raises(TimeoutError):
+        reader()
+    assert obs.closed  # a failed session is dropped
+    assert reader() == ["mbc"] and obs.sessions == 2
+    reader.close()
 
 
 def test_any_other_request_error_is_unreadable_not_no_audio(monkeypatch):
@@ -188,6 +232,11 @@ def test_the_proof_needs_ok_and_hand1_sync_only_true():
     assert r.ok is None and "MBC Live not running" in r.why
     assert adv.mbc_proof_verdict(dict(PROOF, ok="yes")).ok is None
     assert adv.mbc_proof_verdict([PROOF]).ok is None
+
+
+def test_fohmixer_text_is_cleaned_and_cut():
+    r = adv.mbc_proof_verdict({"ok": False, "reason": "line1\nline2\x1b[31m" + "x" * 300})
+    assert "\n" not in r.why and "\x1b" not in r.why and len(r.why) < 160 and r.why.endswith("...)")
 
 
 @pytest.mark.parametrize("age_ms", [None, -1, "4000", float("nan"), True])
@@ -350,6 +399,46 @@ def test_a_failed_attempt_counts_against_the_rate_and_replaces_the_good_answer()
     assert n["mbc"] == 3 and probe.state().applies
 
 
+def test_an_answer_is_as_old_as_its_read_start():
+    clock = _Clock()
+
+    def slow_tree():
+        clock.t += 40.0  # a read that took 40 s
+        return ["mbc"]
+
+    probe = adv.AdvisoryProbe("mbc", slow_tree, lambda: PROOF, mono=clock)
+    probe.poll_once()
+    assert probe.tree.at == 1000.0
+    clock.t = 1000.0 + adv.TREE_MAX_AGE_S + 1
+    assert not probe.state().applies
+
+
+def test_a_system_exit_inside_a_read_is_strict_and_the_thread_keeps_reading():
+    calls = {"n": 0}
+
+    def tree():
+        calls["n"] += 1
+        raise SystemExit("missing dep: pip install websocket-client")
+
+    probe = adv.AdvisoryProbe("mbc", tree, lambda: PROOF, mono=_Clock())
+    probe.poll_once()
+    assert probe.tree.ok is None and "missing dep" in probe.tree.why and not probe.state().applies
+
+
+def test_a_dead_probe_thread_is_strict():
+    probe = adv.AdvisoryProbe("mbc", lambda: ["mbc"], lambda: PROOF, mono=_Clock())
+    probe.poll_once()
+    assert probe.state().applies
+
+    class _Dead:
+        def is_alive(self):
+            return False
+
+    probe._thread = _Dead()
+    st = probe.state()
+    assert not st.applies and "thread stopped" in st.text
+
+
 def test_a_tree_with_another_audible_input_is_strict():
     probe = adv.AdvisoryProbe("mbc", lambda: ["mbc", "SP audio"], lambda: PROOF, mono=_Clock())
     probe.poll_once()
@@ -384,6 +473,8 @@ def test_the_program_input_comes_from_the_stream_box_fact_file(tmp_path):
     # the real fact files: no literal anywhere
     assert adv.program_input_for("stream-snv") == "mbc"
     assert adv.program_input_for("stream-pp") == "Zvuk z mixu"
+    pp = adv.from_env({adv.URL_ENV: "http://h/p", adv.TOKEN_FILE_ENV: "/t", adv.STREAM_BOX_ENV: "stream-pp"})
+    assert pp.program_input == "Zvuk z mixu" and isinstance(pp._read_tree, adv.ProgramTreeReader)
 
 
 def test_an_unknown_stream_box_or_a_missing_fact_fails_loud(tmp_path):
@@ -542,4 +633,6 @@ def test_the_guard_note_is_display_only():
     code, line = guard.decide(payload, 10.0)
     assert code == 0 and line.endswith(" " + TEXT)
     code, line = guard.decide(dict(payload, verdict="FOREIGN"), 10.0)
-    assert code == 1  # a FOREIGN the sampler wrote is never downgraded by the note
+    assert code == 1 and "cg advisory" not in line  # never downgraded, never named on a refusal
+    code, line = guard.decide(dict(payload, age_s=30.0), 10.0)
+    assert code == 2 and "cg advisory" not in line  # a stale reading never shows it

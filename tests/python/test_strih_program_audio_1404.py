@@ -567,9 +567,13 @@ def test_the_installed_files_are_the_import_closure_plus_the_shim_sources():
     import obs_fleet_table as oft
     want.add(str(oft.OBS_FLEET_SH.relative_to(_ROOT)))
     assert "scripts/obs_fleet_table.py" in want and "scripts/program_audio_cg.py" in want
-    # issue 1553 (the CG arm's advisory probe): the stream box's fact file is read at run time
+    # issue 1553 (the CG arm's advisory probe): a stream box's fact file is read at run time, so every
+    # stream-role fact file ships (PROGRAM_AUDIO_STREAM_BOX picks one)
     import program_audio_cg_advisory as pcga
-    want.add(str((pcga.STRIH_BOXES_DIR / f"{pcga.STREAM_BOX_DEFAULT}.env").relative_to(_ROOT)))
+    for f in sorted(pcga.STRIH_BOXES_DIR.glob("*.env")):
+        if "STRIH_ROLE=stream" in f.read_text().splitlines():
+            want.add(str(f.relative_to(_ROOT)))
+    assert "scripts/strih-boxes/stream-pp.env" in want and "scripts/strih-boxes/stream-snv.env" in want
     assert {"scripts/program_audio_cg_advisory.py", "scripts/obs_phase2.py"} <= want
     assert set(_lib_value("STRIH_PROGRAM_AUDIO_FILES").split()) == want
 
