@@ -227,5 +227,10 @@ fn a_double_press_whose_presses_are_all_echoed_is_still_a_double_1539() {
         "echoed double = preview switch"
     );
     std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(
+        rig.preview.source(),
+        PreviewSource::Local,
+        "one double, never two (an un-deduplicated echo pair flips it back)"
+    );
     assert!(rig.muted(), "and never a mic toggle");
 }
