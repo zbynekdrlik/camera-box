@@ -93,9 +93,12 @@ obs_box_step_applies() {
   local step="${1:?step required}" v
   case "$step" in
     11b)
+      # issue 1425: a box with housekeeping CPUs places every rig-NIC IRQ there, whatever its bus.
+      v="$(strih_lx_housekeeping_cpus)" || return 0
+      [ "$v" = none ] || return 0
       v="$(strih_lx_nic_min_usb_mbps)" || return 0
       if [ "$v" = none ]; then
-        printf 'the rig NIC is not a USB device (STRIH_NIC_MIN_USB_MBPS=none) -- no xhci IRQ to place'
+        printf 'the rig NIC is not a USB device (STRIH_NIC_MIN_USB_MBPS=none) and STRIH_HOUSEKEEPING_CPUS=none -- no xhci IRQ to place'
         return 1
       fi ;;
     16e)

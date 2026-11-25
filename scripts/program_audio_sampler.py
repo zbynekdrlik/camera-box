@@ -798,10 +798,11 @@ def scheduling_state(cgroup_file: str = "/proc/self/cgroup",
 
 
 def scheduling_line(nice: int, cpus: str, weight: int | None) -> str:
-    """The one start line about where and how the sampler runs: its nice, its cpus (strih-snv pins the
-    E-cores through the unit's CPUAffinity=) and its cgroup's cpu.weight. Both units run it at normal
-    priority (no Nice=, no CPUWeight=); a positive nice is a WARNING: a deprioritised sampler stops
-    calling the NDI capture under load, and the SDK drops audio after ~1.3 s (issue 1404 STEP 0)."""
+    """The one start line about where and how the sampler runs: its nice, its cpus (the unit's
+    CPUAffinity=) and its cgroup's cpu.weight. A positive nice is a WARNING: a deprioritised sampler stops
+    calling the NDI capture under load, and the SDK drops audio after ~1.3 s (issue 1404 STEP 0). On a box
+    with housekeeping CPUs (strih-snv) the unit runs it at Nice=10 on the OBS mask ON PURPOSE (issue 1425,
+    design 7119179275): the WARNING there marks the trade-off, read queue_drops / sender_stalls."""
     w = "unreadable" if weight is None else str(weight)
     line = f"scheduling nice={nice} cpus={cpus or '?'} cpu.weight={w}"
     if nice > 0:

@@ -45,7 +45,7 @@ from typing import Callable, Optional
 
 ISO = "%Y-%m-%dT%H:%M:%SZ"
 DEFAULT_LOOKAHEAD_S = 900
-DEFAULT_MAX_HOLD_S = 6300  # = full-path-e2e.yml timeout-minutes 105 (issue 1404)
+DEFAULT_MAX_HOLD_S = 6900  # = full-path-e2e.yml timeout-minutes 115 (issue 1404 + the issue-1551 pre-roll)
 
 RC_REFRESHED = 0
 RC_NOT_OURS = 1

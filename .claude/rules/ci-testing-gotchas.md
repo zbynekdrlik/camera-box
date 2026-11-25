@@ -1887,9 +1887,12 @@ The CI lint `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` froze dev1 twi
   sha256-checked). The 11 entry scripts whose closure passed 1 GB carry a file-scoped
   `extended-analysis=false` directive on line 2, its reason as a trailing `# issue 1395: ...` on
   the SAME line: several of these scripts sit at a pytest line budget (setup-strih.sh at exactly
-  1000), and a two-line form broke 18 budget tests. The full run now peaks at 984 MB, rc 0, in
-  ~3.5 min. 0.9.0 does not know the directive (SC1107) and still blows up, so
-  never lint with the distro binary.
+  1000), and a two-line form broke 18 budget tests. The full run peaked at 984 MB, rc 0, in
+  ~3.5 min (26.10.2026); by 23.11.2026 it read 1.93 GB under `/usr/bin/time -f %M` on the unchanged
+  origin/dev tree, so the 2G MemoryMax below is marginal and one run was killed (137). A new lib a
+  heavy closure sources can be kept out with `# shellcheck source=/dev/null` (it is still linted on
+  its own as an input file): issue 1425's housekeeping lib cost verify-strih.sh's `-x` closure ~80 MB.
+  0.9.0 does not know the directive (SC1107) and still blows up, so never lint with the distro binary.
 - **The set is pinned** by `tests/shellcheck_workflow_gate.rs`. A new heavy entry script gets the
   directive only after a measurement: per-file `-x` peak under the pinned binary, see below.
 - **Local full run** (one Bash call per line in a worktree lane, or from a script file):

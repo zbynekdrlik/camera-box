@@ -397,7 +397,7 @@ sibling. The E-core pin of the decode is empty on AMD (no `cpu_atom`).
 - **The decode's budget:** `decode_workers` follows `available_parallelism`, which reads the cpuset, so
   the decode runs 2 workers on strih-snv instead of `MAX_DECODE_WORKERS` 8, on one physical core. Measured
   before: 111 s for one recording on the whole box. Expect 4-5 x: ~8-10 min per box, NOT measured yet. No wider
-  fence: every CPU given to the decode is a CPU taken from OBS. The E2E job's 105 min and the soak's
+  fence: every CPU given to the decode is a CPU taken from OBS. The E2E job's 115 min and the soak's
   `DECODE_TIMEOUT_S` (slot - window - merge - overhead) must be checked against the first live run, and
   so must `MISSING_SLOT_PIXELS_TIMEOUT` (600 s): it bounds a full decode on these 2 CPUs.
 - **Kernel facts:**

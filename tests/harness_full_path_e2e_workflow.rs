@@ -123,9 +123,9 @@ fn full_path_e2e_yml_busy_gate_and_recording_are_one_job_not_split() {
 fn full_path_e2e_yml_job_timeout_has_busy_gate_headroom() {
     let s = read_workflow();
     assert!(
-        s.contains("timeout-minutes: 105"),
+        s.contains("timeout-minutes: 115"),
         "timeout-minutes must have headroom for the 30-min busy-gate budget + recording + \
-         decode + the issue-1404 YouTube stage (>= 105)"
+         decode + the issue-1404 YouTube stage + its issue-1551 pre-roll (115)"
     );
 }
 

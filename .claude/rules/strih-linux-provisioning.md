@@ -82,6 +82,12 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   `tests/python/test_strih_https_1399.py` and `tests/python/test_obs_box_stream_role_1412.py` (both pin
   the tail of the key list). Every other fixture copies the real `scripts/strih-boxes/*.env`, so the four
   fact files carrying the key is enough; the 1361 golden renders no raw fact.
+  - **A key placed mid-list (issue 1425: `STRIH_DANTE_RX_STAMP_MARGIN_MS` right after
+    `STRIH_DANTE_TX_TRACK`, so a concurrent lane appending at the end merges clean) moves two more
+    tail pins:** `tests/python/test_obs_box_xfce_1466.py` (`tail -n N` to STRIH_DESKTOP) and
+    `test_strih_dante_terms_1513.py` (`[-N:]`), besides the three above. A Dante term (`none` without a
+    program device) also needs the strih-snv VBAN-rollback fixtures set `none`: `test_strih_role_vban_1439.py`,
+    `test_dante_leg_generic_filter_1519.py`, `test_vban_leg_1439.py` (the full `tests/python` run finds them).
   - **A fact validated AGAINST another fact adds the fixtures that rewrite that other fact** (issue 1387:
     `STRIH_JXS_CAMERAS` must be a subset of `STRIH_CAMERAS`, like `STRIH_BKSHADING_RELAYS`). Every copied
     fixture that shrinks `STRIH_CAMERAS` (the 1361 `strih-zz` box and `seed_manifest_follows_the_camera_and_cg_facts`)

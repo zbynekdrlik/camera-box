@@ -854,11 +854,10 @@ if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(htt
 if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_grade_report || bad "(log-sink) the grader did not print all of its rows"; else note "(log-sink) not graded: ${WHY}"; fi   # 46) issue 1394 cambox log sink (scripts/lib/strih-cambox-log-sink.sh: files, units, listeners)
 obs_box_avsync_dock_grade_report "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}" "${STRIH_SHAREDIR:-/usr/share}" "${LOG:-}" "${USER_HOME}/.config/obs-studio/user.ini" || bad "(avsync-dock) the grader did not print all of its rows"; obs_box_loudness_dock_grade_report "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}" "${STRIH_SHAREDIR:-/usr/share}" "${LOG:-}" "${USER_HOME}/.config/obs-studio/user.ini" || bad "(loudness-dock) the grader did not print all of its rows"   # 47) issue 1470 A/V-sync dock + issue 1436 LUFS meter (scripts/lib/obs-box-{avsync,loudness}-dock.sh: installed + loaded on every role, the saved layout on the stream role)
 
-# 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
-#     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
-#     that IRQ's /proc/interrupts counter must be ADVANCING over a live 2-s window (NEVER a static
-#     file check -- a smp_affinity_list read alone is a lying gate). Read-only, drain-safe, fail loud.
+# 16) NIC IRQs off the OBS cores. issue 1425: with STRIH_HOUSEKEEPING_CPUS the housekeeping rows (scripts/lib/strih-housekeeping.sh).
+#     Else (issue 1317 item H) the USB NIC's xhci IRQ on a SINGLE E-core, its counter ADVANCING over a live 2-s window (never a static read).
 if WHY="$(obs_box_step_applies 11b)"; then   # issue 1412: a PCIe rig NIC has no xhci IRQ to grade
+  if [ "$(strih_lx_housekeeping_cpus)" != none ]; then strih_housekeeping_grade_report "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(housekeeping) the grader did not print all of its rows"; else
   IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}"
   IRQ_IFACE="${STRIH_NIC_IFACE:-}"
   if [ -z "$IRQ_IFACE" ]; then
@@ -901,6 +900,7 @@ if WHY="$(obs_box_step_applies 11b)"; then   # issue 1412: a PCIe rig NIC has no
     else
       bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
     fi
+  fi
   fi
 else
   note "NIC xhci IRQ affinity not graded: ${WHY}"
@@ -976,7 +976,7 @@ fi
 #     GNOME purged, the openbox autostart contract, the power envelope, the touchpad InputClass. One
 #     PASS/FAIL line per item; a box missing ANY item FAILS (it supersedes the old never-sleep,
 #     governor and crash-popup items).
-BASELINE_FACTS="$(bash -c "$(obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service "$(strih_box_desktop)")" 2>/dev/null || true)"
+HK_SLICE_EXCL="$(strih_housekeeping_slice_exclude)" || { bad "(housekeeping) the rig NIC IRQ CPU (STRIH_HOUSEKEEPING_CPUS) cannot be read"; HK_SLICE_EXCL=none; }; BASELINE_FACTS="$(bash -c "$(obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service "$(strih_box_desktop)" "$HK_SLICE_EXCL")" 2>/dev/null || true)"
 while IFS='|' read -r _bl_item _bl_state _bl_detail; do
   [ -n "$_bl_item" ] || continue
   if [ "$_bl_state" = OK ]; then

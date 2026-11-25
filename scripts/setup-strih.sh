@@ -613,15 +613,17 @@ if [ -e /etc/systemd/logind.conf.d/90-strih-lx.conf ]; then
   rm -f /etc/systemd/logind.conf.d/90-strih-lx.conf || fail "could not remove the retired logind drop-in 90-strih-lx.conf"
   echo "  removed the retired logind drop-in 90-strih-lx.conf (superseded by the baseline never-sleep item)"
 fi
+HK_SLICE_EXCL="$(strih_housekeeping_slice_exclude)" || fail "issue 1425: the rig NIC IRQ CPU (STRIH_HOUSEKEEPING_CPUS) cannot be read"
 # rtprio stays OFF (issue 1357): the retired 11c grant pinned the render tick SCHED_FIFO on cores strih-snv
 # never reserved and the FIFO + affinity leaked to 28 NDI threads (issue comment 5793075833). The shared
 # item removes a leftover grant; the grader's `rtprio` row (verify item 32) FAILs while one exists.
-obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice strih "$DESKTOP_USER" ; obs_box_coredump_bound || fail "issue 1441: the coredump bound could not be installed (above)"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice; issue 1441 coredump bound
+obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)" ; obs_box_background_slice strih "$DESKTOP_USER" "$HK_SLICE_EXCL" ; obs_box_coredump_bound || fail "issue 1441: the coredump bound could not be installed (above)"   # issue 1357 rtprio off; issue 1428 swap; issue 1387 background slice (issue 1425: off the rig NIC IRQ CPU); issue 1441 coredump bound
 
 # ---------------------------------------------------------------------------------------------
 # Lettered sub-step (TOTAL_STEPS unchanged -- the issue 1352/1353 precedent): the NIC-IRQ placement
 # is the biggest de-jitter win, so it rides alongside the never-sleep/de-jitter masks above.
-step "11b" "NIC xhci IRQ off the OBS cores (issue 1317 item H: NET_RX softirq must not share an OBS core)"
+step "11b" "rig NIC IRQs off the OBS cores (issue 1317 item H: NET_RX softirq must not share an OBS core) + housekeeping on its own CPUs (issue 1425)"
+strih_housekeeping_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1425: housekeeping off the OBS CPUs (above)"   # scripts/lib/strih-housekeeping.sh: the sysctl, the rustdesk + display-watch drop-ins, the launcher's file
 # The USB 2.5GbE NIC's xhci interrupt lands on ONE core (irqbalance is not installed, so the kernel
 # parks it) where ~1.1 Gb/s of NDI NET_RX softirq collides with OBS's ndir:video/libobs threads
 # (issue 1354, 22.9.2026: measured on strih-snv -- moving the IRQ to an idle E-core cut the genlock
@@ -629,7 +631,7 @@ step "11b" "NIC xhci IRQ off the OBS cores (issue 1317 item H: NET_RX softirq mu
 # placement FROM FACTS (iface -> xhci -> IRQ -> last cpu_atom E-core) and writes smp_affinity_list --
 # never a hard-coded IRQ number, so it survives a different IRQ after a kernel/firmware/USB-port
 # change. ENABLE-ONLY: the supervisor applies it live; the unit re-applies it at every boot.
-# issue 1412 (G7): only a USB rig NIC has an xhci IRQ to place (scripts/lib/obs-box-role.sh).
+# issue 1412 (G7): only a USB rig NIC has an xhci IRQ to place; issue 1425: with housekeeping CPUs every rig-NIC IRQ + RSS.
 if WHY="$(obs_box_step_applies 11b)"; then
   install -d -m 755 /usr/local/bin
   strih_nic_irq_affinity_script_text > /usr/local/bin/strih-nic-irq-affinity.sh \

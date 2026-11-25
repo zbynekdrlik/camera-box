@@ -1,0 +1,11 @@
+# camera-box issue 1425: housekeeping off the OBS CPUs (scripts/lib/strih-housekeeping.sh) -- do not edit
+[Unit]
+Description=strih box: re-balance the rig-NIC IRQs 5 min after boot (issue 1425)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=5min
+Unit=strih-nic-irq-rebalance.service
+
+[Install]
+WantedBy=timers.target

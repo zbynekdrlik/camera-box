@@ -159,8 +159,12 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_DANTE_RECEIVE_BUFFER_MS",
     "STRIH_DANTE_TX",
     "STRIH_DANTE_TX_TRACK",
+    // issue 1425 (obs#96): the program device's RX hand-off margin.
+    "STRIH_DANTE_RX_STAMP_MARGIN_MS",
     // issue 1502: the rig NIC's stable short name (`<mac>=<name>` | none).
     "STRIH_NIC_RENAME",
+    // issue 1425: the housekeeping CPUs (a cpulist | none).
+    "STRIH_HOUSEKEEPING_CPUS",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -249,8 +253,12 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_DANTE_RECEIVE_BUFFER_MS=12.041666",
         "STRIH_DANTE_TX=none",
         "STRIH_DANTE_TX_TRACK=none",
+        // issue 1425 (obs#96): strih-obs stamps every RX chunk 10 ms after dlink's play time.
+        "STRIH_DANTE_RX_STAMP_MARGIN_MS=10",
         // issue 1502: strih-snv's rig NIC keeps its kernel name.
         "STRIH_NIC_RENAME=none",
+        // issue 1425: strih-snv's housekeeping = the complement of the OBS mask 2-15.
+        "STRIH_HOUSEKEEPING_CPUS=0-1",
         "LOADED=strih-snv",
     ] {
         assert!(

@@ -162,7 +162,7 @@ def _program_doc(scene, source):
                        "remote": {"program_scene": scene}})
 
 
-def _run(tmp_path, snippet, env=None, sp_program=("sp-fast", 7)):
+def _run(tmp_path, snippet, env=None, sp_program=("sp-fast", 7), timeout=None):
     """Source the lib under `set -euo pipefail` with every fake installed and run `snippet`.
 
     `sp_program` = SongPlayer's program before the run as (scene, source), or None for an
@@ -208,7 +208,7 @@ def _run(tmp_path, snippet, env=None, sp_program=("sp-fast", 7)):
         full_env.update(env)
     script = f'set -euo pipefail\n. "{_LIB}"\n{snippet}\n'
     out = subprocess.run(["/bin/bash", "-c", script], env=full_env, capture_output=True,
-                         text=True, check=False)
+                         text=True, check=False, timeout=timeout)
     calls = [ln for ln in call_log.read_text().splitlines() if ln]
     return out.returncode, out.stdout, out.stderr, calls
 
@@ -317,6 +317,27 @@ def test_the_read_back_poll_is_bounded_by_wall_time(tmp_path):
     assert rc == 0, err
     assert 2 <= len(_health_reads(calls)) <= 6, calls
     assert "not confirmed after 1 attempt(s)" in err
+
+
+_FROZEN_DATE = r'''#!/bin/bash
+# The wall clock stands still (a clock step / a slewing runner): the epoch-ms read never moves.
+if [ "${1:-}" = "+%s%3N" ]; then echo 1700000000000; else exec /bin/date "$@"; fi
+'''
+
+
+def test_the_read_back_poll_ends_when_the_wall_clock_stands_still(tmp_path):
+    # The budget is ELAPSED time: a wall clock that does not move (or steps back) must not
+    # keep the poll going. 1 s at 200 ms on a monotonic clock = at most 1 + 5 reads.
+    fbin = tmp_path / "bin"
+    fbin.mkdir(exist_ok=True)
+    (fbin / "date").write_text(_FROZEN_DATE)
+    (fbin / "date").chmod(0o755)
+    rc, _, err, calls = _run(
+        tmp_path, "CG_CHAIN_BURN_ATTEMPTS=1 cg_chain_songplayer_burn on",
+        env={"FAKE_HEALTH_SEQ": "false", "CG_CHAIN_READBACK_POLL_MS": "200",
+             "CG_CHAIN_BURN_READBACK_S": "1"}, timeout=20)
+    assert rc == 0, err
+    assert 2 <= len(_health_reads(calls)) <= 6, calls
 
 
 def test_poll_knobs_default_and_reject_garbage(tmp_path):

@@ -129,8 +129,9 @@ jobs:
     # 30 min rig-busy-gate budget + up to 300s (PR)/1800s (manual soak) recording + decode headroom.
     # issue 1404: + the BLOCKING YouTube stage (the broadcast going live before the recording, the VOD
     # wait after it, the tick decode of the stream recording and the VOD on dev1): 75 -> 105 min. The
-    # rig-lease hold ceiling (scripts/lib/rig-lease.sh RIG_LEASE_MAX_HOLD_SECS) moves with it, 6300 s.
-    timeout-minutes: 105
+    # rig-lease hold ceiling (scripts/lib/rig-lease.sh RIG_LEASE_MAX_HOLD_SECS) moves with it.
+    # issue 1551: + the 10 min YouTube pre-roll before the recording: 105 -> 115 min, 6900 s.
+    timeout-minutes: 115
     # Job-level: never run this job concurrently with loopback-e2e.yml's job — they both drive
     # the same physical cam2/strih/stream hardware. Shares loopback-e2e.yml's exact group string.
     concurrency:

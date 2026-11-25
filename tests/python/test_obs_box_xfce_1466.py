@@ -68,8 +68,9 @@ def test_every_real_box_is_openbox_after_the_owner_rejected_xfce():
 
 
 def test_the_desktop_fact_is_the_last_key_and_the_accessor_reads_it():
-    # issues 1510 + 1513 appended the four Dante latency / TX facts after it, issue 1502 the rig-NIC rename
-    r = _bash("strih_box_fact_keys | tail -n 6 | head -n 1; strih_box_desktop; echo")
+    # issues 1510 + 1513 appended the four Dante latency / TX facts + issue 1425 the RX hand-off margin after it, issue 1502 the rig-NIC rename,
+    # issue 1425 the housekeeping CPUs
+    r = _bash("strih_box_fact_keys | tail -n 8 | head -n 1; strih_box_desktop; echo")
     assert r.stdout.split() == ["STRIH_DESKTOP", "xfce"], r.stderr
 
 
@@ -678,7 +679,7 @@ def test_setup_and_verify_wire_the_session_in_one_line_each():
     assert s.find("strih_openbox_autostart_text >") < s.find("obs_box_session_install ")
     v = VERIFY.read_text()
     assert v.count('obs_box_session_grade_report "${HERE}/.." "$USER_HOME"') == 1
-    assert 'strih-obs.service "$(strih_box_desktop)")' in v
+    assert 'strih-obs.service "$(strih_box_desktop)" "$HK_SLICE_EXCL")' in v   # issue 1425: the IRQ CPU kept out = the 5th argument
 
 
 def test_the_baseline_grader_reads_the_autologin_session_the_fact_names(tmp_path):

@@ -52,6 +52,26 @@ _strih_box_nic_rename_ok() {
   [ "$nic" != lo ] || { echo "strih-box ${name}: STRIH_NIC_RENAME name may not be lo" >&2; return 1; }
 }
 
+# _strih_box_housekeeping_cpus_ok NAME VALUE -> issue 1425: rc 0 for `none` or a kernel cpulist of plain
+# numbers and ascending ranges (`0-1`, `0,1`, `0-1,8`): the CPUs the box's housekeeping (the rig NIC IRQs,
+# rustdesk, the display watch) runs on. rc 1 + a named line otherwise. The number set is spelled out (issue 1302).
+_strih_box_housekeeping_cpus_ok() {
+  local name="$1" v="$2" d='0123456789' item a b ok=1 LC_ALL=C
+  local -a items=()
+  [ "$v" != none ] || return 0
+  if [[ "$v" =~ ^[${d}]{1,4}(-[${d}]{1,4})?(,[${d}]{1,4}(-[${d}]{1,4})?)*$ ]]; then
+    IFS=, read -ra items <<<"$v"
+    for item in "${items[@]}"; do
+      case "$item" in
+        *-*) a="${item%-*}"; b="${item#*-}"; [ "$((10#$a))" -lt "$((10#$b))" ] || ok=0 ;;
+      esac
+    done
+    [ "$ok" = 0 ] || return 0
+  fi
+  echo "strih-box ${name}: STRIH_HOUSEKEEPING_CPUS '${v}' must be none or a cpulist (e.g. 0-1, 0,1, 0-1,8) with ascending ranges" >&2
+  return 1
+}
+
 # strih_box_fact_keys -> every fact key, one per line (the fact-file contract; all are required).
 strih_box_fact_keys() {
   printf '%s\n' \
@@ -76,8 +96,9 @@ strih_box_fact_keys() {
     STRIH_JXS_CAMERAS STRIH_JXS_CAMERA_PIN_MS \
     STRIH_JXS_PROGRAM_PORT STRIH_JXS_PROGRAM_PIN_MS \
     STRIH_DESKTOP \
-    STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK \
-    STRIH_NIC_RENAME
+    STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK STRIH_DANTE_RX_STAMP_MARGIN_MS \
+    STRIH_NIC_RENAME \
+    STRIH_HOUSEKEEPING_CPUS
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -257,6 +278,7 @@ strih_box_validate() {
   [[ "${f[STRIH_NIC_MIN_LINK_MBPS]}" =~ ^[1-9][0-9]*$ ]] \
     || { echo "strih-box ${name}: STRIH_NIC_MIN_LINK_MBPS '${f[STRIH_NIC_MIN_LINK_MBPS]}' must be a speed in Mb/s (e.g. 5000)" >&2; bad=1; }
   _strih_box_nic_rename_ok "$name" "${f[STRIH_NIC_RENAME]}" || bad=1
+  _strih_box_housekeeping_cpus_ok "$name" "${f[STRIH_HOUSEKEEPING_CPUS]}" || bad=1
   for k in STRIH_OBS_PROFILE STRIH_OBS_COLLECTION; do
     [[ "${f[$k]}" =~ ^[A-Za-z0-9._\ -]+$ ]] \
       || { echo "strih-box ${name}: ${k} '${f[$k]}' may only carry letters, digits, space, . _ -" >&2; bad=1; }
@@ -332,6 +354,7 @@ strih_box_validate() {
   _strih_box_dante_devices_ok "$name" "${f[STRIH_DANTE_DEVICES]}" "${f[STRIH_PROGRAM_VBAN_LEG]}" "${f[STRIH_PROGRAM_VBAN_SENDER]}" || bad=1
   v=0; [[ " ${f[STRIH_DANTE_DEVICES]} " != *" ${f[STRIH_ROLE]}-obs="* ]] || v=1   # issues 1510 + 1513
   _strih_box_dante_terms_ok "$name" "$v" "${f[STRIH_DANTE_NETWORK_LATENCY_MS]}" "${f[STRIH_DANTE_RECEIVE_BUFFER_MS]}" "${f[STRIH_DANTE_TX]}" "${f[STRIH_DANTE_TX_TRACK]}" || bad=1
+  _strih_box_dante_margin_ok "$name" "$v" "${f[STRIH_DANTE_RX_STAMP_MARGIN_MS]}" || bad=1   # issue 1425
   # issue 1439 (ROZHODNUTÉ 6360417876, owner 23.10.2026): the VBAN-only leg on the console's audio VLAN
   # (scripts/lib/strih-vban-leg.sh). STRIH_PROGRAM_VBAN_LEG = `mac:<MAC>` (a second NIC, its MAC lower-case
   # as sysfs prints it; stream-snv) | `vlan:<id>` (a tagged VLAN 1..4094 on the rig NIC; strih-snv, the
@@ -922,6 +945,8 @@ strih_lx_nic_min_usb_mbps() { strih_box_fact STRIH_NIC_MIN_USB_MBPS; }
 strih_lx_nic_min_link_mbps() { strih_box_fact STRIH_NIC_MIN_LINK_MBPS; }
 # issue 1502: the rig NIC's stable short name, `<mac>=<name>` | `none` (scripts/lib/strih-nic-rename.sh).
 strih_lx_nic_rename() { strih_box_fact STRIH_NIC_RENAME; }
+# issue 1425: the housekeeping CPUs (`none` | a cpulist), scripts/lib/strih-housekeeping.sh.
+strih_lx_housekeeping_cpus() { strih_box_fact STRIH_HOUSEKEEPING_CPUS; }
 
 # strih_lx_ndi_runtime_peer -> the cam box the NDI runtime is copied from (fact STRIH_NDI_RUNTIME_PEER).
 strih_lx_ndi_runtime_peer() { strih_box_fact STRIH_NDI_RUNTIME_PEER; }

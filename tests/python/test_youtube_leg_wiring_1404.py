@@ -75,7 +75,8 @@ def test_the_camera_box_dead_man_margin_covers_the_youtube_pre_record_wait():
     floor = int(re.search(r"^CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=(\d+)$", s, re.M).group(1))
     default = int(re.search(r'^CAMERA_BOX_DEADMAN_OVERHEAD_MIN="\$\{CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-(\d+)\}"$',
                             s, re.M).group(1))
-    assert floor >= 30 and default >= floor + 5, (floor, default)
+    # issue 1551: + the 10 min pre-roll the stage holds before it returns
+    assert floor >= 40 and default >= floor + 5, (floor, default)
 
 
 def test_the_workflow_posts_the_per_point_report_and_has_the_time():
@@ -87,7 +88,7 @@ def test_the_workflow_posts_the_per_point_report_and_has_the_time():
     assert '>> "$GITHUB_STEP_SUMMARY"' in step and 'gh pr comment "$PR_NUMBER"' in step
     perms = w[w.index("permissions:"):w.index("\njobs:")]
     assert "pull-requests: write" in perms
-    assert "timeout-minutes: 105" in w
+    assert "timeout-minutes: 115" in w  # issue 1551: + the 10 min pre-roll
     assert w.index("- name: Per-point E2E report") > w.index("- name: Recording-based 4-node")
 
 
@@ -228,3 +229,98 @@ def test_cleanup_stops_the_stream_first_in_the_foreground_then_the_session(tmp_p
     bg = fn.index('stop --why "cleanup()") >>')
     assert quick < bg and "timeout 10" in fn[:quick]
     assert fn[bg:].lstrip().count("&") >= 1
+
+
+# ------------------------------------------------------------------ issue 1551: the pre-roll
+
+def test_the_preroll_default_is_ten_minutes():
+    lib = LIB.read_text()
+    assert '${YOUTUBE_LEG_PREROLL_S:-600}' in lib
+
+
+def test_start_holds_the_live_broadcast_for_the_preroll_before_it_returns(tmp_path):
+    import time
+    fk = Fakes(tmp_path)
+    fk.script("session", "start", 0, {"ok": True, "session_id": "s1", "broadcast_id": "b1"})
+    fk.script("obs", "stream-start", 0, {"ok": True, "publish_utc": 1.0})
+    fk.script("session", "wait-ready", 0, {"ok": True, "state": "ready"})
+    env = dict(fk.env, E2E_EXECUTE_VERDICT="1", YOUTUBE_LEG_WATCH_POLL_S="0.05", YOUTUBE_LEG_PREROLL_S="2")
+    stamp = tmp_path / "returned"
+    body = ('stray_session_check_assert() { :; }\n'
+            f'youtube_leg_start "{REPO}/scripts" 1.1.1.1 2.2.2.2 u p "{tmp_path}"\n'
+            f'date +%s.%N > "{stamp}"\n'
+            f'youtube_leg_stop "{REPO}/scripts" 2.2.2.2 u p "{tmp_path}"\necho END')
+    t0 = time.time()
+    r = _bash(body, env)
+    assert r.returncode == 0 and r.stdout.endswith("END\n"), r.stdout + r.stderr
+    assert float(stamp.read_text()) - t0 >= 2.0
+    assert "pre-roll" in r.stdout and "2 s" in r.stdout, r.stdout
+
+
+def _preroll(tmp_path, pid_text, secs):
+    d = tmp_path / "youtube-leg"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "watch.pid").write_text(pid_text)
+    return _bash(f'_youtube_leg_preroll "{d}" {secs}; echo "rc=$?"', dict(os.environ))
+
+
+def test_the_preroll_ends_early_and_loudly_when_the_watch_is_gone(tmp_path):
+    import time
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    t0 = time.time()
+    r = _preroll(tmp_path, str(dead.pid), 30)
+    assert time.time() - t0 < 10, "a gone watch ends the pre-roll at once"
+    assert r.returncode == 0 and r.stdout.endswith("rc=0\n"), r.stdout + r.stderr
+    assert "watch is gone" in r.stderr
+
+
+def test_the_preroll_waits_its_time_while_the_watch_lives(tmp_path):
+    import time
+    live = subprocess.Popen(["sleep", "30"])
+    try:
+        t0 = time.time()
+        r = _preroll(tmp_path, str(live.pid), 1)
+        assert time.time() - t0 >= 1.0
+        assert r.stdout.endswith("rc=0\n") and "watch is gone" not in r.stderr, r.stdout + r.stderr
+    finally:
+        live.kill()
+
+
+def test_the_painter_slack_covers_the_preroll():
+    # the cam2 painter exits on its own at DURATION + slack: the slack spans its launch to StopRecord,
+    # which now holds the 10 min pre-roll on top of the issue-1404 live wait (1800 s)
+    s = _e2e()
+    slack = int(re.search(r'^PAINTER_PRE_RECORD_SLACK_SECS="\$\{PAINTER_PRE_RECORD_SLACK_SECS:-(\d+)\}"$',
+                          s, re.M).group(1))
+    assert slack >= 1800 + 600, slack
+
+
+def test_the_freeze_watch_is_armed_after_the_preroll():
+    s = _e2e()
+    start = s.index('youtube_leg_start "$HERE" "$STRIH" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"')
+    assert start < s.index("    live_freeze_watch_start ")
+
+
+def test_the_preroll_reads_a_leading_zero_as_decimal(tmp_path):
+    import time
+    live = subprocess.Popen(["sleep", "30"])
+    try:
+        t0 = time.time()
+        r = _preroll(tmp_path, str(live.pid), "01")
+        assert time.time() - t0 >= 1.0 and r.stdout.endswith("rc=0\n"), r.stdout + r.stderr
+        assert "runs live 1 s" in r.stdout, r.stdout
+    finally:
+        live.kill()
+
+
+def test_the_preroll_ends_when_the_watch_dies_partway(tmp_path):
+    import time
+    # an orphaned sleep (reaped by init, like the lib's watch is reaped by its bash): a child of pytest
+    # would linger as a zombie that kill -0 still sees
+    pid = subprocess.run(["bash", "-c", "sleep 2 >/dev/null 2>&1 & echo $!"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    t0 = time.time()
+    r = _preroll(tmp_path, pid, 30)
+    assert 1.5 <= time.time() - t0 < 10, "the pre-roll ends once the live watch dies"
+    assert "watch is gone" in r.stderr, r.stderr

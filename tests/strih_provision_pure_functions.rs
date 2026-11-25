@@ -3230,7 +3230,7 @@ fn emitted_irq_script_resolves_and_writes_the_target_cpu() {
     let root = dir.path().to_str().unwrap().to_string();
     let body = "strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
                 SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
-                IRQ_DIR=\"$FX/irq\" STRIH_NIC_IFACE=enx6c1ff766154b bash \"$FX/affinity.sh\"";
+                IRQ_DIR=\"$FX/irq\" STRIH_HOUSEKEEPING_IRQ_CPUS=none STRIH_NIC_IFACE=enx6c1ff766154b bash \"$FX/affinity.sh\"";
     let (code, out, err) = run_sourced(&[("FX", root.as_str())], body);
     assert_eq!(
         code, 0,
@@ -3254,7 +3254,7 @@ fn emitted_irq_script_fails_loud_when_iface_unresolvable() {
     let root = dir.path().to_str().unwrap().to_string();
     let body = "strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
                 SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
-                IRQ_DIR=\"$FX/irq\" STRIH_NIC_IFACE=ghost0 bash \"$FX/affinity.sh\"";
+                IRQ_DIR=\"$FX/irq\" STRIH_HOUSEKEEPING_IRQ_CPUS=none STRIH_NIC_IFACE=ghost0 bash \"$FX/affinity.sh\"";
     let (code, out, err) = run_sourced(&[("FX", root.as_str())], body);
     assert_ne!(
         code, 0,
@@ -3317,7 +3317,7 @@ fn emitted_irq_script_and_lib_agree_on_a_multi_cluster_cpu_atom() {
     );
     let body = "strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
                 SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
-                IRQ_DIR=\"$FX/irq\" STRIH_NIC_IFACE=enx6c1ff766154b bash \"$FX/affinity.sh\"";
+                IRQ_DIR=\"$FX/irq\" STRIH_HOUSEKEEPING_IRQ_CPUS=none STRIH_NIC_IFACE=enx6c1ff766154b bash \"$FX/affinity.sh\"";
     let (code, _out, err) = run_sourced(&[("FX", root.as_str())], body);
     assert_eq!(
         code, 0,
@@ -3399,7 +3399,7 @@ fn emitted_irq_script_resolves_iface_by_driver_without_the_address() {
                 export STRIH_BOXES_DIR=\"$FX/boxes\"; \
                 strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
                 SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
-                IRQ_DIR=\"$FX/irq\" bash \"$FX/affinity.sh\"";
+                IRQ_DIR=\"$FX/irq\" STRIH_HOUSEKEEPING_IRQ_CPUS=none bash \"$FX/affinity.sh\"";
     let (code, out, err) = run_sourced(&[("FX", root.as_str()), ("BOXES", boxes)], body);
     assert_eq!(
         code, 0,
