@@ -5,6 +5,8 @@ paths:
   - "scripts/program_audio_sampler.py"
   - "scripts/program_audio_cg.py"
   - "scripts/program_audio_cg_corr.py"
+  - "scripts/program_audio_cg_advisory.py"
+  - "tests/python/test_program_audio_cg_advisory_1553.py"
   - "scripts/program_audio_ndi_url.py"
   - "tests/python/test_program_audio_cg_corr_1404.py"
   - "tests/python/test_program_audio_ndi_url_1404.py"
@@ -349,6 +351,50 @@ IN the program.
   - The committed real clip with the song = PRESENT; its null stays under 0.75 x the threshold.
   - Each UNDECIDED cause, the rings, the overlay and the payload, and the loop handing the arm the
     program's own frames.
+
+## The CG arm is ADVISORY while the program tree and the mbc proof hold (issue 1553, ROZHODNUTÉ 25.11.2026)
+
+Owner ruling (issue 1553 comment 7174499060), from the findings 7174372378 + 7174384065: stream-snv's
+program tree (`Development` = `PRO` nested + `JXS PGM src`) has ONE audio input, `mbc`, so CG audio can
+reach the stream only through the mbc mix, and fohmixer can prove that mix carries HAND 1 sync only.
+Goal: SongPlayer no longer needs blanking for YouTube/FB tests. `scripts/program_audio_cg_advisory.py`:
+- **(a) the program tree**, over OBS-WS read-only through `obs_phase2._conn` / `_rpc` (its
+  production-scene guard): GetCurrentProgramScene, GetSceneItemList / GetGroupSceneItemList descending
+  nested scenes and groups, ENABLED items only, plus GetSpecialInputs (the global audio devices mix into
+  every output). An input is audible when GetInputAudioTracks has a track on (mixers != 0) and
+  GetInputMute is false; an input without audio answers request code 604 (not audible); any other error
+  = unreadable. Holds when no audible input but the program-audio input = STRIH_PROGRAM_AUDIO_INPUT of
+  the stream box's fact file (`PROGRAM_AUDIO_STREAM_BOX`, default stream-snv -> `mbc`), never a literal.
+  Read every 15 s, valid 45 s (`TREE_INTERVAL_S` / `TREE_MAX_AGE_S`).
+- **(b) the mbc proof**: fohmixer's `GET /api/mbc/stream-proof` on the FOH hub (fohmixer issue 267,
+  LAN only, `Authorization: Bearer <the hub's automation token>`, JSON `{ok, ts, open, hand1_sync_only,
+  outputs, age_ms}`, `ok:false` + `reason` when it cannot read). Holds on `ok` true AND `hand1_sync_only`
+  true. Read at most once a minute (`MBC_PROOF_INTERVAL_S` 60, a failed attempt counts), the answer
+  cached; its age = our read's age + the hub's `age_ms` (the hub caches one walk per 30 s), valid
+  150 s (`MBC_PROOF_MAX_AGE_S`: two missed reads + the hub's cache). A missing / negative /
+  non-numeric `age_ms` is unreadable.
+- **Config** in the sampler's env file `~/.config/camera-box/program-audio-sampler.env`:
+  `PROGRAM_AUDIO_MBC_PROOF_URL` + `PROGRAM_AUDIO_MBC_PROOF_TOKEN_FILE` (a 0600 file holding the token,
+  read per request; never in git, argv or a log). Either absent = NO probe = the strict arm exactly as
+  before (one `CG arm strict (no ... configured ...)` start line). `PROGRAM_AUDIO_STREAM_OBS_PASSWORD`
+  (default none: the rig runs no auth).
+- **The decision** (`decide`, pure; `AdvisoryProbe` thread like `HomeProbe`, owned by `CgArm`):
+  both hold -> `program_audio_cg.overlay` returns the window's OWN verdict and reason (no FOREIGN, no
+  UNKNOWN, no latch); `pcg.suppressed` names what the strict arm would have made of it. A stream-side
+  spectral FOREIGN / UNKNOWN is never touched. Either proof unreadable, stale or false -> the strict arm,
+  byte for byte. A failed read REPLACES the last good one (strict at once).
+- **Visible:** the payload's `cg.advisory` = `{applies, text, suppressed, tree_age_s, mbc_proof_age_s}`
+  (only with a probe configured); the sampler logs each change (advisory on, strict with why, a
+  suppression starting / ending), never per window; the guard line appends
+  `cg advisory (mbc proof: hand1 sync only, program tree: mbc only)` and
+  `-- strict would be <V>: <reason>` when the arm would have acted. The note is display only.
+- **Install:** setup-strih step 16e adds `python3-websocket`, the probe, `dantesync_fleet.py` (the fact
+  parser), `obs_phase2.py` with its lazy imports and `scripts/strih-boxes/stream-snv.env` (DATA). A
+  missing websocket-client reads unreadable (strict), never a dead thread.
+- **Tests:** `tests/python/test_program_audio_cg_advisory_1553.py`, fakes only (an in-process
+  `obs_phase2` module, a patched `urlopen`), green under `unshare -n`.
+- **After deploy:** set the two env values once fohmixer's endpoint exists, try-restart the sampler,
+  read the start line and the endpoint's `cg.advisory` (`applies` true with SongPlayer playing).
 
 ## Each sampler receiver is pinned to an on-link address (SP-program connections 0, 3.11.2026)
 
