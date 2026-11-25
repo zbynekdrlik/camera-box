@@ -543,3 +543,22 @@ def test_a_password_file_others_can_read_is_refused(tmp_path):
                                                        "jump": "companion-pp"})
     r = _run_sh(["--venue", "pp"], {"NETCFG_RULES_FACTS": str(facts), "NETCFG_RULES_STATE_DIR": str(tmp_path / "st")})
     assert r.returncode == 2 and "readable by others" in r.stderr, r.stdout + r.stderr
+
+
+# ------------------------------------------------------------- review round 2
+def test_an_inline_runtime_comment_is_not_hashed():
+    a = nr.parse_export(["/ip route add dst-address=0.0.0.0/0 gateway=10.77.8.1 # gateway not reachable"])
+    b = nr.parse_export(["/ip route add dst-address=0.0.0.0/0 gateway=10.77.8.1"])
+    assert nr.export_hash(a) == nr.export_hash(b)
+    assert a[0]["props"] == {"dst-address": "0.0.0.0/0", "gateway": "10.77.8.1"}
+
+
+def test_a_replay_capture_never_overwrites_the_committed_baseline(tmp_path):
+    env = dict(os.environ, NETCFG_RULES_STATE_DIR=str(tmp_path / "st"))
+    env.pop("NETCFG_RULES_BASELINE", None)
+    env["PATH"] = str(_no_network_bin()) + os.pathsep + env["PATH"]
+    before = (_SCRIPTS / "netcfg-export-baseline.json").read_bytes()
+    r = subprocess.run(["bash", str(SH), "--venue", "snv", "--capture", "--from-dir", str(FIX / "snv")],
+                       env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2 and "NETCFG_RULES_BASELINE" in r.stderr, r.stdout + r.stderr
+    assert (_SCRIPTS / "netcfg-export-baseline.json").read_bytes() == before
