@@ -1,0 +1,198 @@
+=== identity
+  name: PP-SW-Stage
+=== routerboard
+                ;;; Firmware upgraded successfully, please reboot for changes 
+                ;;; to take effect!                                           
+       routerboard: yes                                                       
+             model: RB4011iGS+                                                
+     serial-number: B8F30B5D4954                                              
+     firmware-type: al2                                                       
+  minimum-firmware: 6.45.4                                                    
+  current-firmware: 7.25.1                                                    
+  upgrade-firmware: 7.25.2                                                    
+
+=== bridge-monitor
+1
+                  state: enabled                 
+    current-mac-address: C4:AD:34:31:84:86       
+              bridge-id: 0x6000.C4:AD:34:31:84:86
+            root-bridge: no                      
+         root-bridge-id: 0x1000.04:F4:1C:F1:6D:0D
+         root-path-cost: 22000                   
+              root-port: ether1::trunk::foh::a   
+             port-count: 10                      
+  designated-port-count: 0                       
+           fast-forward: no                      
+       multicast-router: no                      
+           igmp-querier: none                    
+            mld-querier: none                    
+      declared-vlan-ids: 70                      
+                         89                      
+                         100                     
+                         200                     
+    registered-vlan-ids: 70                      
+                         89                      
+
+
+=== bridge-port
+Flags: X - DISABLED, I - INACTIVE
+ 0    ;;; TRUNK do FOH-A
+      interface=ether1::trunk::foh::a bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=1
+      frame-types=admit-only-vlan-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=normal-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+ 1  I interface=ether2::70::dante bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=70
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+ 2  I interface=ether3::89::artnet1 bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+ 3  I interface=ether4::89::artnet2 bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+ 4  I interface=ether5::89::novastar bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+ 5  I interface=ether6::89::dbx bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+ 6  I interface=ether7 bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+ 7  I interface=ether8 bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+ 8  I interface=ether9 bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+ 9  X interface=ether10 bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+10  I interface=sfp-sfpplus1::trunk::foh bridge=bridge1 priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=1
+      frame-types=admit-only-vlan-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=normal-participant multicast-router=temporary-query
+      fast-leave=no
+
+=== port-monitor
+                      ;;; TRUNK do FOH-A                                       
+               interface: ether1::trunk::foh::a    ether2::70::dante ether3::89::artnet1 ether4::89::artnet2 ether5::89::novastar ether6::89::dbx ether7   ether8   ether9   ether10  sfp-sfpplus1::trunk::foh
+                  status: in-bridge                inactive          inactive            inactive            inactive             inactive        inactive inactive inactive disabled inactive
+                 port-id: 0x80.1                                               
+                    role: root-port                                            
+               edge-port: no                                                   
+     edge-port-discovery: yes                                                  
+     point-to-point-port: yes                                                  
+            external-fdb: no                                                   
+            sending-rstp: yes                                                  
+                learning: yes                                                  
+              forwarding: yes                                                  
+        actual-path-cost: 20000                                                
+          root-path-cost: 22000                                                
+    designated-bridge-id: 0x6000.78:9A:18:42:EA:0F                             
+         designated-cost: 2000                                                 
+      designated-port-id: 0x80.1                                               
+  designated-message-age: 1s                                                   
+      designated-max-age: 20s                                                  
+              tx-rx-bpdu: 4/3048                                               
+     discard-transitions: 0                                                    
+     forward-transitions: 1                                                    
+                tx-rx-tc: 2/2                                                  
+        topology-changes: 1                                                    
+    last-topology-change: 1h41m36s                                             
+        multicast-router: no                                                   
+       declared-vlan-ids: 70                                                   
+                          89                                                   
+     registered-vlan-ids: 70                                                   
+                          89                                                   
+                          100                                                  
+                          200                                                  
+
+
+=== export
+/interface bridge add frame-types=admit-only-vlan-tagged igmp-snooping=yes mvrp=yes name=bridge1 priority=0x6000 vlan-filtering=yes
+/interface bridge port add bridge=bridge1 comment='TRUNK do FOH-A' frame-types=admit-only-vlan-tagged interface=ether1::trunk::foh::a
+/interface bridge port add bridge=bridge1 frame-types=admit-only-untagged-and-priority-tagged interface=ether2::70::dante mvrp-applicant-state=non-participant pvid=70
+/interface bridge port add bridge=bridge1 frame-types=admit-only-untagged-and-priority-tagged interface=ether3::89::artnet1 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge1 frame-types=admit-only-untagged-and-priority-tagged interface=ether4::89::artnet2 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge1 frame-types=admit-only-untagged-and-priority-tagged interface=ether5::89::novastar mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge1 frame-types=admit-only-untagged-and-priority-tagged interface=ether6::89::dbx mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge1 frame-types=admit-only-untagged-and-priority-tagged interface=ether7 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge1 frame-types=admit-only-untagged-and-priority-tagged interface=ether8 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge1 frame-types=admit-only-untagged-and-priority-tagged interface=ether9 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge1 disabled=yes frame-types=admit-only-untagged-and-priority-tagged interface=ether10 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge1 frame-types=admit-only-vlan-tagged interface=sfp-sfpplus1::trunk::foh
+=== end

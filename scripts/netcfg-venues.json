@@ -1,0 +1,36 @@
+{
+  "_comment": "issue 1554: the venue network facts the netcfg rule checks (scripts/netcfg_rules.py, run by scripts/netcfg-rules.sh) read. One entry per venue: how to dial its MikroTiks (read-only accounts only: SNV the key user camerabox of network#15, PP the read-only user snv of the PP admin, ROZHODNUTE 7167031660 on issue 1554), which verified read commands each device gets, and the venue's network rules (zbynekdrlik/mikrotik docs/snv-siet-pravidla.md, network#18). No credential is stored here: a key or password FILE path only. See .claude/rules/netcfg-rules.md.",
+  "venues": {
+    "snv": {
+      "access": {"user": "camerabox", "key": "~/.ssh/camerabox_netcfg_ed25519", "password_file": "", "jump": ""},
+      "devices": [
+        {"name": "router_snv", "host": "10.77.8.1", "reads": "full", "qos": true, "dante_dhcp": true},
+        {"name": "foh1_audio", "host": "10.77.9.2", "reads": "full", "qos": true},
+        {"name": "stage_av", "host": "10.77.9.3", "reads": "full", "qos": true},
+        {"name": "foh1_video", "host": "10.77.9.4", "reads": "full", "qos": true},
+        {"name": "foh2_video", "host": "10.77.9.5", "reads": "full", "qos": true}
+      ],
+      "igmp": "off",
+      "dante_subnet": "10.77.7.0/24",
+      "dhcp_zone": [100, 200],
+      "dante_dhcp_no_gateway": false,
+      "dscp_traffic_class": {"56": "7", "46": "5"}
+    },
+    "pp": {
+      "access": {"user": "snv", "key": "", "password_file": "~/.secrets/pp-mikrotik-ro", "jump": "companion-pp"},
+      "devices": [
+        {"name": "pp_router", "host": "10.77.8.1", "reads": "router", "qos": false, "dante_dhcp": true},
+        {"name": "pp_foh_a", "host": "10.77.8.2", "reads": "full", "qos": true,
+         "ptp_mirror": {"rule_comment": "ptp-mirror", "source": "ether6::70::dante-gm",
+                        "target": "ether7::mirror::ptp-out", "return_port": "ether8::89::ptp", "return_pvid": "89"}},
+        {"name": "pp_foh_b", "host": "10.77.8.3", "reads": "full", "qos": true},
+        {"name": "pp_stage", "host": "10.77.8.4", "reads": "full", "qos": false, "cpu_bridge": true}
+      ],
+      "igmp": "querier",
+      "dante_subnet": "10.77.7.0/24",
+      "dhcp_zone": [100, 200],
+      "dante_dhcp_no_gateway": true,
+      "dscp_traffic_class": {"56": "7", "46": "6"}
+    }
+  }
+}
