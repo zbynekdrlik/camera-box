@@ -8,8 +8,8 @@
 #
 # Why: strih-pp's 10 GbE rig NIC sends the program / multiview bursts at line rate to receivers on slower
 # switch ports (stream-pp 2.5G, grading-pp 1G); the MikroTik egress queue of the slower port tail-dropped
-# the microbursts (measured live 25.11.2026). A hand-applied `mq` root + one `fq maxrate 900mbit
-# flow_limit 4000 limit 20000` per tx queue made the switch drops 0, and a reboot lost it. `fq` paces per
+# the microbursts (measured live 25.11.2026). A hand-applied `mq` root + one fq per tx queue
+# (a 900 Mb/s maxrate, flow_limit 4000, limit 20000) made the switch drops 0, and a reboot lost it. `fq` paces per
 # FLOW, so PTP / NTP and the intercom are their own flows, never queued behind a video frame.
 #
 # The tree (design issuecomment-7172341290, Approach 1), every step a `replace` (idempotent: re-run on an
