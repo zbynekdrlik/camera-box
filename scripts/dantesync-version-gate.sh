@@ -133,7 +133,9 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # 2026-11-20: v1.35.16 -- `--interface` takes a list (dsync#212): it joins the listed NIC that has an
 # IPv4 and re-joins on another listed one when PTP goes silent; the camboxes list both onboard ports
 # (camera-box issue 1545: cam3 ran the 19.11 SNV service on NTP with its cable in the other port).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.16}"
+# 2026-11-26: v1.35.17 -- the pinned-list re-join is trusted-GM aware (dsync#215, the dsync second-NIC
+# case of camera-box issue 1553); dstack confirmed every rig box's dstack devices >= v0.6.193.
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.17}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
