@@ -151,7 +151,7 @@ DANTESYNC_FLEET_REACH_PORT="${DANTESYNC_FLEET_REACH_PORT:-22}"
 
 # The dev1-local file that carries per-node ssh passwords by NAME (KEY=VALUE lines, mode 0600, never
 # committed). Only keys that a fleet row names as its credvar are read from it.
-DANTESYNC_FLEET_CRED_FILE="${DANTESYNC_FLEET_CRED_FILE:-$HOME/.config/camera-box/dantesync-fleet.env}"
+DANTESYNC_FLEET_CRED_FILE="${DANTESYNC_FLEET_CRED_FILE:-${HOME:-}/.config/camera-box/dantesync-fleet.env}"  # HOME may be unset (setup-device sources this, issue 1553)
 
 # The config.json path per OS (the drift check reads it; nothing here ever writes it).
 # shellcheck disable=SC2034  # consumed cross-file by scripts/dantesync-config-drift.sh
@@ -592,6 +592,46 @@ dantesync_fleet_venue_gm_host() {
     return 1
   fi
   printf '%s\n' "$gm"
+}
+
+# dantesync_fleet_camera_gm_host camN -> the PTP grandmaster camN's dsync must allow (issue 1553): the
+# grandmaster of the venue whose strih fact file lists the camera (remote_log_camera_venue, the same
+# camera -> venue lookup the log sink and the JPEG XS target use). A PP camera gets the PP grandmaster,
+# never the SNV name video-clock.lan, which PP has no DNS entry for (22.11.2026: the PP cameras locked to
+# nothing). A camera in no venue, or a venue without a grandmaster -> the helpers' stderr + rc 1.
+dantesync_fleet_camera_gm_host() {
+  local cam="${1:-}" venue
+  if ! declare -F remote_log_camera_venue >/dev/null; then
+    # shellcheck source=scripts/lib/remote-logging.sh
+    . "${BASH_SOURCE[0]%/*}/remote-logging.sh" || return 1
+  fi
+  venue="$(remote_log_camera_venue "$cam")" || return 1
+  dantesync_fleet_venue_gm_host "$venue"
+}
+
+# dantesync_fleet_gm_allowlist_verdict CONFIG_TEXT WANT -> one word on stdout, rc 0 always (issue 1553):
+#   ok            system.gm_allowlist is exactly [WANT]
+#   other:<a,b>   it lists something else (the entries, comma-joined)
+#   missing       the config has no system.gm_allowlist
+#   unreadable    the text is empty or not a JSON object
+dantesync_fleet_gm_allowlist_verdict() {
+  python3 -c '
+import json, sys
+text, want = sys.argv[1], sys.argv[2]
+try:
+    cfg = json.loads(text)
+except ValueError:
+    print("unreadable"); sys.exit(0)
+if not isinstance(cfg, dict):
+    print("unreadable"); sys.exit(0)
+gms = (cfg.get("system") or {}).get("gm_allowlist") if isinstance(cfg.get("system"), dict) else None
+if not isinstance(gms, list):
+    print("missing")
+elif [str(g) for g in gms] == [want]:
+    print("ok")
+else:
+    print("other:" + ",".join(str(g) for g in gms))
+' "${1-}" "${2-}" || printf 'unreadable\n'
 }
 
 # dantesync_fleet_role_gm_host <role> -> the grandmaster HOST a node of ROLE must lock to: the video

@@ -262,6 +262,10 @@
 #   (az) cameraman preview capped at 1080p (issue 1387) -- HARD FAIL: the running kernel's cmdline
 #        carries video=1920x1080@60 (setup-device STEP 10) and fb0 is no larger than 1920x1080. A
 #        monitor whose EDID prefers 4K60 otherwise reads "no signal"; no fb0 (no monitor at boot) is ok.
+#   (ba) dsync grandmaster allowlist (issue 1553) -- HARD FAIL: /etc/dsync/config.json's
+#        system.gm_allowlist is exactly [the camera's venue grandmaster] (STRIH_DANTE_GM of the venue's
+#        NTP-master fact file: video-clock.lan at SNV, 10.77.7.200 at PP; 22.11.2026 the PP cameras
+#        carried the SNV name and locked to nothing).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -325,6 +329,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/strih-follow.sh"  # strih_follow_gather_remote_snippet/strih_follow_verdict -- the (ax) check (issue 1431)
 # shellcheck source=scripts/lib/cambox-jxs-target.sh
 . "$HERE/lib/cambox-jxs-target.sh"  # cambox_jxs_target/_gather_remote_snippet/_verdict -- the (ay) check (issue 1387)
+# shellcheck source=scripts/lib/dantesync-fleet.sh
+. "$HERE/lib/dantesync-fleet.sh"  # dantesync_fleet_camera_gm_host / _gm_allowlist_verdict -- the (ba) check (issue 1553)
 # shellcheck source=scripts/lib/remote-logging.sh
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
@@ -1046,6 +1052,8 @@ Checks:
       environ; no runtime drop-in sets it
   (az) cameraman preview capped at 1080p (issue 1387): the kernel cmdline carries
       video=1920x1080@60 and fb0 is at most 1920x1080 (a 4K-preferring monitor read "no signal")
+  (ba) dsync grandmaster allowlist (issue 1553): gm_allowlist in /etc/dsync/config.json is exactly
+      [the camera's venue grandmaster] (the venue fact files), never another venue's name
   (aw) fleet kernel line (issue 1446): linux-lowlatency-hwe-24.04 installed (held reads installed),
       the running kernel booted with preempt=full, and uname -r = the image the installed
       linux-image-generic-hwe-24.04 meta depends on; a box off the line is moved by
@@ -1974,6 +1982,24 @@ else
     ok:*) ok "dsync PTP bound to + joined on the LAN NIC ${BA_V#ok:} (--interface, issue 1439)" ;;
     *) fail "dsync PTP NIC: ${BA_V} -- ok = --interface <LAN NIC> in dsync.service and joined there; fix a live box with scripts/cambox-ro-units-apply.sh --apply --box <name> (it restarts dsync once), or re-run setup-device.sh (issue 1439)" ;;
   esac
+fi
+
+# (ba) dsync grandmaster allowlist (issue 1553) -- HARD FAIL ---------------------------------------
+# setup-device STEP 17 writes the camera's venue grandmaster into /etc/dsync/config.json. One read-only
+# ssh read of that file, graded against the same venue lookup. Placed before the cameraman preview
+# check, outside the slices other tests EXECUTE; the .bak cruft check stays last.
+barc=0
+BA_CFG="$(ssh_box "cat /etc/dsync/config.json 2>/dev/null")" || barc=$?
+BA_WANT="$(dantesync_fleet_camera_gm_host "$CAMERA_NAME")" || BA_WANT=""   # the reason goes to stderr
+BA_V="$(dantesync_fleet_gm_allowlist_verdict "$BA_CFG" "$BA_WANT")"
+if [ -z "$BA_WANT" ]; then
+  fail "no venue grandmaster for ${CAMERA_NAME} from the fact files in scripts/strih-boxes/ (issue 1553)"
+elif [ "$barc" -ne 0 ] || [ -z "$BA_CFG" ]; then
+  fail "could not read /etc/dsync/config.json (ssh rc=$barc, issue 1553)"
+elif [ "$BA_V" = ok ]; then
+  ok "dsync gm_allowlist = [${BA_WANT}], the venue grandmaster (issue 1553)"
+else
+  fail "dsync gm_allowlist reads ${BA_V}, the venue grandmaster is ${BA_WANT} -- re-run setup-device STEP 17 (or set system.gm_allowlist to [\"${BA_WANT}\"] and restart dsync) (issue 1553)"
 fi
 
 # (az) cameraman preview capped at 1080p (issue 1387) -- HARD FAIL ---------------------------------
