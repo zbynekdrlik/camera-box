@@ -172,3 +172,36 @@ fn autorepeat_and_release_events_alone_never_toggle_1539() {
     assert!(rig.muted());
     assert_eq!(rig.preview.source(), PreviewSource::Strih);
 }
+
+/// One physical press reported by TWO of the box's KEY_POWER devices (the cambox lists two ACPI
+/// "Power Button" devices + "Intel HID events") is ONE press: a mic toggle, never a preview double.
+#[test]
+fn one_press_echoed_by_a_second_device_is_one_mic_toggle_1539() {
+    let rig = Rig::start(3);
+    rig.press(0);
+    rig.press(2);
+    assert!(
+        rig.wait_muted(false, TOGGLE_WITHIN),
+        "the echoed press must still UNMUTE the mic"
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        rig.preview.source(),
+        PreviewSource::Strih,
+        "an echo on another device is not a double press"
+    );
+}
+
+/// A press queued behind other input events (EV_MSC scancodes, EV_SYN) on the same device still
+/// reaches the classifier promptly: the loop drains every queued event per pass.
+#[test]
+fn a_press_behind_a_queue_of_other_events_toggles_promptly_1539() {
+    let rig = Rig::start(1);
+    let noise: Vec<[u8; 24]> = (0..60).map(|_| event(4, 4, 0x74)).collect();
+    rig.write(0, &noise);
+    rig.press(0);
+    assert!(
+        rig.wait_muted(false, Duration::from_millis(800)),
+        "60 queued events must not delay the press past the double-press window + a pass"
+    );
+}
