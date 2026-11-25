@@ -11,7 +11,8 @@
 # HOST dev2, scripts/youtube_leg_host.py: design 6387919956 -- dev1 only orchestrates and folds).
 #
 #   youtube_leg_enabled                                   rc 0 iff this run executes its verdict
-#   youtube_leg_start HERE STRIH STREAM USER PW OUTDIR      before StartRecord; always rc 0
+#   youtube_leg_start HERE STRIH STREAM USER PW OUTDIR      before StartRecord; always rc 0; returns after
+#                                                         the issue-1551 pre-roll (YOUTUBE_LEG_PREROLL_S, 600)
 #   youtube_leg_stop HERE STREAM USER PW OUTDIR [STREAM_HOST_PATH]
 #                                                         after the stream StopRecord; always rc 0;
 #                                                         with the recording's path it starts the
@@ -68,9 +69,36 @@ youtube_leg_start() {
       watch --parent "$$") >>"$d/watch.log" 2>&1 &
     echo "$!" >"$d/watch.pid"
     echo "    issue 1404: YouTube broadcast LIVE; channel guard watch every ${YOUTUBE_LEG_WATCH_POLL_S:-10} s (log $d/watch.log)"
+    _youtube_leg_preroll "$d" "${YOUTUBE_LEG_PREROLL_S:-600}"
   else
     echo "!! issue 1404: the YouTube stage did NOT start (reason above) -- the run goes on to measure the other points, its gate ends RED" >&2
   fi
+  return 0
+}
+
+# issue 1551 (owner 25.11.2026, ROZHODNUTÉ 7158756134): YouTube steps the VOD audio only in the first
+# ~8 min of a broadcast (the 60 min soak: one step in w01, none in the 52 min after it), so the broadcast
+# runs live for a PRE-ROLL before the recording starts and every judged window comes after it -- like a
+# production, which goes live before its program. Nothing is judged less strictly: the pre-roll lies
+# before the first window. The wait ends early, loudly, when the channel-guard watch is gone (it stopped
+# the broadcast on a refusal, or died): the gate then fails on that exactly as before.
+_youtube_leg_preroll() {
+  local d="$1" secs="$2" pid="" end now
+  case "$secs" in ''|*[!0-9]*) secs=600 ;; esac
+  [ "$secs" -gt 0 ] || return 0
+  pid="$(cat "$d/watch.pid" 2>/dev/null || true)"
+  echo "    issue 1551: YouTube pre-roll -- the broadcast runs live ${secs} s before the recording starts"
+  now="$(date +%s)"
+  end=$(( now + secs ))
+  while [ "$now" -lt "$end" ]; do
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+      echo "!! issue 1551: the channel-guard watch is gone during the pre-roll -- the recording starts now, the YouTube gate judges what the broadcast left" >&2
+      return 0
+    fi
+    sleep 1
+    now="$(date +%s)"
+  done
+  echo "    issue 1551: pre-roll done (${secs} s live)"
   return 0
 }
 
