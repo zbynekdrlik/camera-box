@@ -57,6 +57,18 @@ fn find_power_buttons() -> Vec<(String, i32)> {
     devices
 }
 
+/// Issue 1539: the most input events one power-button pass reads from one device.
+const MAX_EVENTS_PER_PASS: usize = 256;
+
+/// Issue 1539: a 24-byte x86_64 `struct input_event` that is a KEY_POWER press (EV_KEY 116, value
+/// 1; the release 0 and the autorepeat 2 are not presses).
+pub fn is_power_key_press(event: &[u8; 24]) -> bool {
+    let event_type = u16::from_ne_bytes([event[16], event[17]]);
+    let event_code = u16::from_ne_bytes([event[18], event[19]]);
+    let event_value = i32::from_ne_bytes([event[20], event[21], event[22], event[23]]);
+    event_type == 1 && event_code == 116 && event_value == 1
+}
+
 /// Issue 1501: the power button. A single press toggles the microphone (after the double-press
 /// window, `crate::button_press`), a double press flips the cameraman preview between the strih NDI
 /// feed and the local camera (`crate::preview_tap::PreviewSwitch`). Spawned by main.rs for every
@@ -96,6 +108,7 @@ pub fn run_power_button_loop(
     );
     let mut event_buf = [0u8; 24];
     let mut classifier = crate::button_press::PressClassifier::default();
+    let mut echo = crate::button_press::PressEcho::default();
     let clock = std::time::Instant::now();
     let mut last_path = String::new();
     let act = |action: crate::button_press::PressAction, path: &str| match action {
@@ -131,30 +144,36 @@ pub fn run_power_button_loop(
         if crate::preview_tap::take_preview_toggle_request() {
             act(crate::button_press::PressAction::Double, "SIGUSR1");
         }
-        for (path, fd) in &devices {
-            let n = unsafe {
-                libc::read(
-                    *fd,
-                    event_buf.as_mut_ptr() as *mut libc::c_void,
-                    event_buf.len(),
-                )
-            };
-            if n == 24 {
-                let event_type = u16::from_ne_bytes([event_buf[16], event_buf[17]]);
-                let event_code = u16::from_ne_bytes([event_buf[18], event_buf[19]]);
-                let event_value = i32::from_ne_bytes([
-                    event_buf[20],
-                    event_buf[21],
-                    event_buf[22],
-                    event_buf[23],
-                ]);
-                if event_type == 1 && event_code == 116 && event_value == 1 {
-                    let at = clock.elapsed().as_millis() as u64;
-                    if let Some(a) = classifier.press(at) {
-                        act(a, &last_path);
-                    }
-                    last_path.clone_from(path);
+        // Issue 1539: drain EVERY queued event of each device per pass (one event per pass
+        // delayed a press behind EV_MSC/EV_SYN), and count a press another device echoes once.
+        // Bounded per pass so a device that never stops reporting cannot hold the loop.
+        for (index, (path, fd)) in devices.iter().enumerate() {
+            for _ in 0..MAX_EVENTS_PER_PASS {
+                let n = unsafe {
+                    libc::read(
+                        *fd,
+                        event_buf.as_mut_ptr() as *mut libc::c_void,
+                        event_buf.len(),
+                    )
+                };
+                if n != 24 {
+                    break;
                 }
+                if !is_power_key_press(&event_buf) {
+                    continue;
+                }
+                let at = clock.elapsed().as_millis() as u64;
+                if !echo.accept(at, index) {
+                    tracing::info!(
+                        "power button: the same press also reported by {}, counted once (issue 1539)",
+                        path
+                    );
+                    continue;
+                }
+                if let Some(a) = classifier.press(at) {
+                    act(a, &last_path);
+                }
+                last_path.clone_from(path);
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
