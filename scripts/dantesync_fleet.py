@@ -186,6 +186,10 @@ def _fact_file(path: Path) -> dict:
     return out
 
 
+# issue 1553: the public name other modules use (the program-audio sampler's advisory probe)
+fact_file = _fact_file
+
+
 def venue_gm_host(venue: str) -> str:
     """The PTP grandmaster of VENUE: STRIH_DANTE_GM of the ONE strih fact file with
     STRIH_VENUE=<venue> + STRIH_DANTESYNC_ROLE=server (the bash dantesync_fleet_venue_gm_host).

@@ -64,14 +64,20 @@ fi
 
 STRIH_PROGRAM_AUDIO_UNIT="program-audio-sampler.service"
 STRIH_PROGRAM_AUDIO_UNIT_TEMPLATE="program-audio-sampler.strih-snv.service"
-STRIH_PROGRAM_AUDIO_PACKAGES=(python3-numpy)
+# python3-websocket: the CG arm's advisory probe reads the stream OBS program tree through obs_phase2
+# (issue 1553; the kiosk baseline installs it too).
+STRIH_PROGRAM_AUDIO_PACKAGES=(python3-numpy python3-websocket)
 # Everything the sampler imports + the decoder shim's sources and build script, in the checkout layout
 # (pinned against the sampler's real import closure by a test). scripts/lib/obs-fleet.sh is DATA here:
 # obs_fleet_table.py parses its OBS_FLEET + OBS_FLEET_IDENTITY declarations (issue 1404, the CG arm).
+# The stream-role fact files are DATA too: the advisory probe reads the stream box's
+# STRIH_PROGRAM_AUDIO_INPUT from one of them (PROGRAM_AUDIO_STREAM_BOX, issue 1553). obs_phase2.py brings
+# its lazy imports along.
 STRIH_PROGRAM_AUDIO_FILES=(
   scripts/program_audio.py
   scripts/program_audio_capture.py
   scripts/program_audio_cg.py
+  scripts/program_audio_cg_advisory.py
   scripts/program_audio_cg_corr.py
   scripts/program_audio_http.py
   scripts/program_audio_marker.py
@@ -81,6 +87,15 @@ STRIH_PROGRAM_AUDIO_FILES=(
   scripts/rig_serve_files.py
   scripts/obs_fleet_table.py
   scripts/lib/obs-fleet.sh
+  scripts/dantesync_fleet.py
+  scripts/obs_phase2.py
+  scripts/e2e_measurement_pins.py
+  scripts/imag_record_encoder.py
+  scripts/imag_scenes.py
+  scripts/program_audio_vban.py
+  scripts/stream_dev_scene.py
+  scripts/strih-boxes/stream-pp.env
+  scripts/strih-boxes/stream-snv.env
   scripts/qpsk_guard_shim.cpp
   scripts/build-qpsk-guard-shim.sh
   vendor/av-sync-dock/src/camera-box-audio.hpp

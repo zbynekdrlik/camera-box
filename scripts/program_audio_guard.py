@@ -23,7 +23,10 @@ Both YouTube gates call it before the broadcast starts and every ~10 s while it 
           unreadable payload, an unexpected verdict -- fail CLOSED
 
 Output, always exactly one line on stdout:
-  program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s> markers=<n> chain=<c>[ reason=<why>]
+  program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s> markers=<n> chain=<c>[ reason=<why>][ <cg advisory>]
+<cg advisory> (issue 1553) = `cg advisory (mbc proof: hand1 sync only, program tree: <input> only)`
+while the sampler runs its CG arm only as advisory, plus `-- strict would be <V>: <reason>` when
+the strict arm would have acted on the window.
 <V> is the EFFECTIVE verdict (UNKNOWN when the reading cannot be trusted), `-` for a missing
 number, `markers` / `chain` the sampler's raw CRC-valid word count and timecode chain over the
 trailing 4 s, and `reason=` explains every non-trivial outcome (stale, unreachable, the sampler's
@@ -75,12 +78,30 @@ def _fmt_count(v) -> str:
     return "-" if v is None else str(v)
 
 
-def _line(verdict, rms, outside, age, reason=None, markers=None, chain=None) -> str:
+def _line(verdict, rms, outside, age, reason=None, markers=None, chain=None, note=None) -> str:
     line = (f"program-audio verdict={verdict} rms={_fmt(rms)} outside_band={_fmt(outside)}% "
             f"age={_fmt(age)} markers={_fmt_count(markers)} chain={_fmt_count(chain)}")
     if reason:
         line += " reason=" + " ".join(str(reason).split())
+    if note:
+        line += " " + " ".join(str(note).split())
     return line
+
+
+def advisory_note(payload: dict) -> str | None:
+    """issue 1553: the CG arm's advisory state as the sampler wrote it (`cg.advisory`), shown on a
+    fresh passing line while it applies -- `cg advisory (mbc proof: hand1 sync only, program tree: mbc only)` and,
+    when the strict arm would have acted, `-- strict would be <V>: <reason>`. Display only: the
+    verdict the sampler wrote already is the advisory one."""
+    cg = payload.get("cg")
+    adv = cg.get("advisory") if isinstance(cg, dict) else None
+    if not isinstance(adv, dict) or adv.get("applies") is not True:
+        return None
+    text = adv.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    sup = adv.get("suppressed")
+    return text + (f" -- strict would be {sup}" if isinstance(sup, str) and sup else "")
 
 
 def decide(payload: dict, max_age_s: float, latch_s: float = DEFAULT_LATCH_S) -> tuple[int, str]:
@@ -113,7 +134,8 @@ def decide(payload: dict, max_age_s: float, latch_s: float = DEFAULT_LATCH_S) ->
             return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age,
                                        "MEASUREMENT without a marker chain (a sampler older than the "
                                        "marker requirement -- restart program-audio-sampler)", **counts)
-        return EXIT_OK, _line(verdict, rms, outside, age, **counts)
+        # issue 1553: the advisory note only on a fresh passing line, never on a stale/refusing one
+        return EXIT_OK, _line(verdict, rms, outside, age, note=advisory_note(payload), **counts)
     if verdict == "UNKNOWN":
         return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, payload.get("reason") or "sampler UNKNOWN",
                                    **counts)
