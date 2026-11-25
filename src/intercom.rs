@@ -71,7 +71,18 @@ pub fn run_power_button_monitor(
         tracing::warn!("No power button found - mute toggle disabled");
         return;
     }
+    run_power_button_loop(devices, muted, preview, running);
+}
 
+/// The power-button loop over already-open input-event fds (`(path, fd)`, the fds are owned and
+/// closed here). Split from [`run_power_button_monitor`] so a test can drive the real loop through
+/// pipe fds carrying real 24-byte `input_event` structs (issue 1539).
+pub fn run_power_button_loop(
+    devices: Vec<(String, i32)>,
+    muted: Arc<AtomicBool>,
+    preview: Arc<crate::preview_tap::PreviewSwitch>,
+    running: Arc<AtomicBool>,
+) {
     for (_path, fd) in &devices {
         unsafe {
             let flags = libc::fcntl(*fd, libc::F_GETFL);
