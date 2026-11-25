@@ -3450,8 +3450,10 @@ fn nic_irq_affinity_unit_is_enable_only_and_byte_parity_with_committed_file() {
 fn setup_strih_installs_the_irq_affinity_script_and_enables_the_unit_enable_only() {
     let s = read_script("scripts/setup-strih.sh");
     assert!(
-        s.contains("strih_nic_irq_affinity_script_text > /usr/local/bin/strih-nic-irq-affinity.sh"),
-        "setup-strih must emit the affinity script to /usr/local/bin"
+        s.contains(
+            "strih_nic_irq_affinity_script_install /usr/local/bin/strih-nic-irq-affinity.sh"
+        ),
+        "setup-strih must install the affinity script to /usr/local/bin (atomically, issue 1425)"
     );
     assert!(
         s.contains("systemctl enable strih-nic-irq-affinity.service"),

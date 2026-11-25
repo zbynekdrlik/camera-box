@@ -457,7 +457,7 @@ def test_setup_strih_wires_g5_g6_g7_g11_and_stays_in_budget():
     hub = s.index("strih_intercom_hub_binary_install /usr/local/bin/intercom-hub")
     assert s.index("step 13 ") < hub < s.index("step 14 ")
     g11b = s.index('if WHY="$(obs_box_step_applies 11b)"; then')
-    assert s.index('step "11b"') < g11b < s.index("strih_nic_irq_affinity_script_text >") < s.index("step 12 ")
+    assert s.index('step "11b"') < g11b < s.index("strih_nic_irq_affinity_script_install /usr/local/bin/") < s.index("step 12 ")
     g16e = s.index('if WHY="$(obs_box_step_applies 16e)"; then')
     assert s.index('step "16e"') < g16e < s.index('strih_program_audio_install "${HERE}/..') < s.index("step 17 ")
 

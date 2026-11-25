@@ -17,7 +17,10 @@ _SETUP = _ROOT / "scripts" / "setup-strih.sh"
 
 def _install(dest):
     return subprocess.run(
-        ["bash", "-c", 'set -euo pipefail\n. "$1"\nstrih_nic_irq_affinity_script_install "$2"', "h", str(_LIB), str(dest)],
+        # the renderer needs the box facts; the install's atomicity is what is under test here
+        ["bash", "-c", 'set -euo pipefail\n. "$1"\n'
+         'strih_nic_irq_affinity_script_text() { printf "#!/usr/bin/env bash\\necho new\\n"; }\n'
+         'strih_nic_irq_affinity_script_install "$2"', "h", str(_LIB), str(dest)],
         capture_output=True, text=True, timeout=60)
 
 
