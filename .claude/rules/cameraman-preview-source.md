@@ -73,3 +73,7 @@ waits the 30 s window (`the_old_named_strih_is_still_picked_after_the_window_141
   'STRIH-SNV (interkom)'` + `connected to 'STRIH-SNV (interkom)'`. The deploy's own service
   restart is the test. Never remote-reboot a cambox for it, and after a strih rename the next
   reconnect re-resolves on its own.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Cameraman HDMI preview SOURCE resolution (issue 1362: the pure `vstack:av/ndi/src/preview_source.rs` resolver — preferred `STRIH-SNV (interkom)` on sight, else the ONE `STRIH-<box> (interkom)` only after the full find window, 2+ = pick nothing, never a per-box config/env knob; `NdiReceiver::connect_with` finder-loop `pick` seam, `connect` keeps substring semantics for the probes; once-per-change resolution log) → `.claude/rules/cameraman-preview-source.md` (auto-loads on its `paths:`)

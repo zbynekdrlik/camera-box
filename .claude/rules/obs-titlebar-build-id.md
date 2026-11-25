@@ -77,3 +77,7 @@ Get RED→GREEN on the PURE header off-rig by compiling the standalone harness w
 directly (what `obs:tests/vendored/tests/obs_titlebar_newlevel_sha_parse.rs` does at runtime); the vendored C++ glue
 itself is first type-checked by the obs repo's Windows release build (camera-box's own 150-min
 `windows-genlock.yml` did it until issue 1505).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- OBS window-title build identity (the `/Brepro` `__DATE__`-blanking trap → read GENLOCK_BUILD_SHA.txt via `os_get_executable_path_ptr` not cwd; the anchor gate on OBSBasic.cpp now lives in the obs repo (issue 1505); FRONTEND change = full-bundle deploy not fast-dll; #152/#313/#1018) → `.claude/rules/obs-titlebar-build-id.md` (auto-loads on its `paths:`)

@@ -72,3 +72,7 @@ The #1218 lineage — `desired_ndi_state` / `is_deliberate_idle` / `ndi_policy_a
 removed by #1230. The commits are `f562011dc`…`eb42adb53`; do not resurrect the idle behaviour.
 A future thermal fix must NOT sleep receivers (owner ruling); the #1040 power-envelope guard is the
 sanctioned direction.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- imag NDI name-healing — the #1218 idle policy was REMOVED (#1230, owner ruling 2026-08-30 „ziadne nechcem mat hlupe idle policy"; all seven cameras always NAMED + alive, no receiver-sleeping); the KEPT #1158 healing via the ONE `enforce_ndi_names(obs)` point → shared #795-safe `obs_phase2.reenforce_ndi_name` (genlock_fifo True restored only on HEALED, OFFLINE untouched per #70); on-box lazy-`obs_phase2`-import safety, the `verify_parity` grep-qxF whole-line rule (no more idle line), passwordless imag WS → `.claude/rules/imag-ndi-active-set-policy.md` (auto-loads on its `paths:`)

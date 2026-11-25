@@ -154,3 +154,7 @@ receiver-policy layer.)
   `tests/python/test_ndi_mapping_verify_live_1180.py`. The live wrong-camera/frozen cure is not
   offline-verifiable (the wedge reproduces only live) — the offline tests prove the decision logic;
   the live confirmation is the supervisor's post-deploy rig verify.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- NDI `ndi_source_name` recovery (an EMPTY name STOPS the receiver thread so the in-loop #767/#1096 watchdogs can NEVER revive it — a permanent wedge fixed at the NAME layer, never vendored; the reattach CLEAR-then-SET no longer leaves ""; the ONE shared `obs_phase2.reenforce_ndi_name` policy — discoverable→set→read-back-verify→else OFFLINE, never a #795 mangle — reused by reattach's baseline re-enforce + `set-ndi-mapping --heal` + the [4c/8] self-heal; the #1133 `if`-not-bare set-e safety; #1158) → `.claude/rules/ndi-name-recovery.md` (auto-loads on its `paths:`)

@@ -133,3 +133,7 @@ and stream `2ME PGM` 0 new relocks at the step.
 The `cg-obs` offered 84-then-364 pattern (comment 5841162974) started 6.5 min BEFORE the first date
 step. It is the video-io thread lagging (video-io.c cache-full `count += / skipped +=` → dropped
 slots then duplicate bursts), not the render tick; see the Design-question 5841262854.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- A dantesync fleet DATE step on the OBS boxes (issue 1372: the wall clock steps ~50 ms every ~1.8 h while the media clock follows only the rate — ONE render-tick wall-step detector `obs-genlock-wall-step.h` ↔ `vstack:rig/core/src/genlock_wall_step.rs` re-grids the tick in ONE tick instead of the 2 ms/tick slew-back (DistroAV floors wall at emit, so its stamps follow, no sender change), the LOCK indicator BOOKS a ≤ 66 ms step (`genlock_qpc_wall_step_rebase_ms`, one `genlock-wall-step:` line, a clock set or a step storm still DEGRADE), the ASRC pays a CONFIRMED sample loss back at 1000 ppm (`step_recover_ms`, setpoint moves with the buffer, NOT booked out of the TS-smoothing timeline, `recover_ms=` on the `asrc:` line); the STEP 0 finding that the `mbc` drop was a REAL upstream loss; the two-clock bench; the resolume `cg-obs` bursts are a video-io lag, not this) → `.claude/rules/genlock-wall-step.md` (auto-loads on its `paths:`)

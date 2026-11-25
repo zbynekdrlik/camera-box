@@ -265,3 +265,7 @@ lipsync + audio dropouts by ear); the headphones carry VLC's audio. Owner decisi
      the next login's journal has no `Found ordering cycle` line;
    - stream-snv: start a stream -> `playing ... -> plughw:CARD=Gen,DEV=0`, and the Scarlett's headphones
      carry it. stream-pp -> `plughw:CARD=Generic_1,DEV=0` as before.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Stream-box headphone monitor (issue 1436, owner 15.10.2026: the SNV VLC-on-RTMP way, one PP/SNV design, never through PipeWire): setup-strih step 3 writes the box name as the stream OBS key when none is set (operator wins), the seeder puts the program audio `Zvuk z mixu` on Monitor Off, and the stream-role session app `strih-stream-monitor.service` plays the restreamer's `rtmp://127.0.0.1:1234/live/%l` audio with ffmpeg -> a Python relay (FIONREAD 200 ms ceiling, never a paused subscriber) -> `aplay -N` on the headphone PCM resolved by its PCM name (` Analog$`); verify-strih's three rows grade the last pass + the PCM owner (PipeWire on it FAILs), the key vs the short hostname, Monitor Off → `.claude/rules/stream-headphone-monitor.md` (auto-loads on its `paths:`)

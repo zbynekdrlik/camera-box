@@ -119,3 +119,7 @@ parity users, the av-sync dock twins), and the consumer side of an OBS log contr
   `obs:tests/vendored/tests/genlock_lock_indicator_guards.rs` and `obs:tests/vendored/tests/distroav_stale_duplicate_retarget_1367.rs` (obs has only its
   replay half). imag's `linux-genlock.yml` still compiles that `vendor/` tree, and nobody else runs
   them. Delete each one here only after obs carries it.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The forked OBS on the Linux AND Windows OBS boxes = a pinned release of `zbynekdrlik/obs` (issue 1487: `scripts/obs-release.pin` + `scripts/lib/obs-release.sh`, the tarball proved against the pin + its .sha256, every manifest file checked, the markers naming tag + commit, no fallback; the setup-strih deploy, the Linux bytes gate, the vendor-pin alarm and drift-guard versions read the pin; issue 1505: the Windows boxes take its Windows zip, a pin without it refuses them, camera-box's own windows-genlock build is retired; only imag keeps the vendor build) -> `.claude/rules/obs-pinned-release.md` (auto-loads on its `paths:`)

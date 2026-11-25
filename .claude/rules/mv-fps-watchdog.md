@@ -392,3 +392,7 @@ streak (`mv_fps_restart_reset` — the #391/#799 "counter reset → never page" 
 confirm at the 5-min cadence is what keeps a fresh OBS start's seconds-long warm-up from false-paging. The
 log id can contain a space (OBS names logs `YYYY-MM-DD HH-MM-SS.txt`); store/compare it as a whole quoted
 string (state `logid_<box>=...` and `mv_fps_restart_reset "$prev" "$curr"` both handle the space).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- MV-fps observability + live alarm (the `multiview-audit:` emit → `mv_audit.rs`/`mv-fps-gate` → dev1 `mv-fps-alert-watchdog.sh`; DATA-FIRST floor calibration mining live `rendered_fps` per box; the `target−tol` floor tight for BOTH boxes (#776 retargeted it from `canvas/2−tol`, which was loose for divisor-1 strih → floor 13 missed moderate collapses; now floor 28 both); strih 4K MV collapses under CONTENTION not itself; autostart-restart-reset via log-id change, #771/#1083) → `.claude/rules/mv-fps-watchdog.md` (auto-loads on its `paths:`)

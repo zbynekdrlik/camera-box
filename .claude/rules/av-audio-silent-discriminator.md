@@ -94,3 +94,7 @@ decision is `src/qpsk_probe_decision.rs` (crate-root, default-feature): `consist
   degraded-but-healthy chain false-ABORTING (fails SAFE, never a bad run through; class named loudly;
   `min_clusters`/window/ENABLE env-overridable). To widen the green margin, widen the WINDOW (25 s →
   green ∈ [7,9]), never relax the run.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- A/V silent-vs-undecoded discriminator (`all_cambox_av_sync.av_audio_silent` fed by `preamble_screens_passed` via crate-root `av_window::classify_av_audio_state`; distinguishes a silent mbc chain from present-but-undecoded audio; adding a field to probe-gated `AvMarkerInputs` = update all struct-literal sites, #748) → `.claude/rules/av-audio-silent-discriminator.md` (auto-loads on its `paths:`)

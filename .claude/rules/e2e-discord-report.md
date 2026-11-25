@@ -160,3 +160,7 @@ Two REAL verdict JSONs anchor the classifier (never invent field shapes):
 `compose_summary` stays PURE — it renders `meta["run_url"]`. The impure `main()` derives it from
 `GITHUB_SERVER_URL`/`GITHUB_REPOSITORY`/`GITHUB_RUN_ID` (or the `--run-url` override); outside CI
 the link line falls back to naming the verdict-JSON artifact.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- E2E per-run Discord report — TWO renderings (`compose_summary` short/`--json-chunks`/Discord vs `compose_report` full-detail/plain/CI-log); the caller captures stdout `2>&1`+jq so `--json-chunks` must print ONLY the JSON array; blocking-vs-report-only is DERIVED from each verdict-JSON seam's `gates_overall_pass` mirroring recording-verdict.rs's `all_pass` fold (SOURCE spread AND — since #1142 — DELIVERY spread BOTH block; report-only NEVER `❌`; PASS=3 lines); #711/#1127 → `.claude/rules/e2e-discord-report.md` (auto-loads on its `paths:`)

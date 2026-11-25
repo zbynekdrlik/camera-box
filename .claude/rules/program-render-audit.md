@@ -76,3 +76,7 @@ gather as `relock_bursts_from_log`) is SHIPPED — `scripts/render-freeze-alert-
 `scripts/render_freeze_decision.py`, production-critical time-bucketed re-ping, ships DISABLED. See
 `.claude/rules/render-freeze-watchdog.md` (RENDER arm's magnitude-floor-vs-relaunch discriminator,
 the `render-freeze` fleet facet, the relock parity mirror).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- PROGRAM-render observability line (`program-render-audit:` — the 3rd OBS-log audit family beside `genlock-fifo audit` + `multiview-audit:`; the PROGRAM output's honest render_fps + renderSkipped/`lagged` delta emitted ~5s by `obs_graphics_thread_loop`; `is_render_path_jump` attributes a burn-square JUMP to render-path vs FIFO/scanout; report-only, gate is issue 798; #1029's live jump root cause is HARDWARE throttle 880/1043 — at 3 ms the jump is correct FIFO behavior) → `.claude/rules/program-render-audit.md` (auto-loads on its `paths:`)

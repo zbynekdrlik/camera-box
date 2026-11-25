@@ -336,3 +336,7 @@ stops every E2E at the `[0/8]` issue-1421 preflight. It looks like foreign audio
   the journal line `#1387 painter priority: N thread(s) at nice -15`.
 - **Open gap:** rig-mode TEST's measurement-audio check reads only the level, so it reported WHOLE
   CHAIN verified while the painter ran at 47 fps.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- cam2 painter LIFECYCLE — who paints /dev/fb0 + emits the QPSK marker in each state (permanent supervised cam2-painter.service = durable steady state; the transient nohup = verification-only; rig-mode test HANDS OFF to the unit via cam2_painter_steady_state_handoff_cmds, event disables it #892, recording-e2e stops+restores it #872, the marker-log unit flag, #1008/#937; the TEST painter's ledger entry passes the bare remote `$PAINTER_PID` into a double-quoted printf `%s` argument, a backtick in an unquoted-heredoc comment runs on dev1, issue 1382) → `.claude/rules/cam2-painter-lifecycle.md` (auto-loads on its `paths:`)

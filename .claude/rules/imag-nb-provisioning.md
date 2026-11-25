@@ -882,3 +882,7 @@ apt-touching step — removes every `*.sources` whose `URIs:` line points at `fi
 archive sources byte-identical. It is idempotent (exit 0 when nothing matched) and fails loud only on
 a missing dir; the anchor-test's call string must appear exactly once and must sit BEFORE the apt
 update in `declare -f configure_in_chroot`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- imag-nb swap (install-imag-nb.sh → setup-imag.sh → verify-imag.sh acceptance gate, #821; derived CPU/GPU/IP) → `.claude/rules/imag-nb-provisioning.md` (auto-loads on its `paths:`)

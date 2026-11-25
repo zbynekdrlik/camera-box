@@ -83,3 +83,7 @@ restart actually needs, bounded by a wall-clock settle budget).
   bash. The dev1 harness captures it AFTER StopRecord via `imag_record_stats_capture.py` (ssh-greps
   the record window from the newest imag OBS log, parses, prints JSON) and passes it to the extract;
   best-effort (empty on any failure → no `record_render` carried, report-only).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- imag E2E record encoder (VAAPI-tex over x264/never-QSV; the WS-SetProfileParameter-needs-restart make-it-live ordering + `recordEncoder.json`-while-OBS-down; `[AdvOut]`-scoped RecEncoder read; disk-vs-live-encoder liveness via OBS-start-vs-json-mtime; the x264-vs-VAAPI-clean stop-stats parse shapes; record_render report-only carry + JSON-through-`printf %q`-ssh, #1143) → `.claude/rules/imag-record-encoder.md` (auto-loads on its `paths:`)

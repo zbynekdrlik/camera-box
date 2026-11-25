@@ -125,3 +125,7 @@ Po výmene za Intel X520-DA2 (27.8., jediný driver = 2019 ixgbn 4.1.197) sa str
 5. Diagnostický rozlišovač: REJECTED spiky sú filtrované a NEZHADZUJÚ lock (245/h koexistovalo so
    zdravým LOCK); lock zhadzuje wander PRIJATÝCH vzoriek (UNLOCKED Drift ±5–18 us/s riadky).
    Histogram `Spike`/`UNLOCKED` po hodinách z dantesync.log(+.old) datuje začiatok presne.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- NIC swap aftermath (a replaced network card leaves dantesync on a dead pcap handle — `ERROR_DEVICE_REMOVED` spam, no re-select, silent fall back to userspace NTP + step storm, gate reads `NTP STORM`/`PTP DEGRADED` while the grandmaster is reachable; cure = restart the dantesync service and verify the fresh `Found device:` names the NEW adapter; the `pcap_ntp_active:false` and Npcap-binding red herrings; the same swap also wedges strih NDI receivers into one frozen frame that only an OBS restart clears) → `.claude/rules/nic-swap-timesync-recovery.md` (auto-loads on its `paths:`)

@@ -245,3 +245,7 @@ Re-making the clips:
   The kit's `cmp.rs` is exactly that (its `today` decode). It matched the old
   `av_sync_from_recording` byte for byte (its `real` mode); that check works only on a runner rlib
   built before this change.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The CG segments' measurement clip, never music on YouTube (issue 1404 Task 5 part a: `scripts/gen_measurement_clip.py` writes `measurement-clip-v1.mp4`, a synthesized 30 fps recording of the cam2 painter — the dual-QR Vernier of the 60 Hz tick under the reserved, tick-excluded origin id 911016, the QPSK marker every 0.5 s with index = tick & 0xFF over the guard's imported -30 dBFS tone bed; one parameter set pinned to the Rust/C++ sources, the shim and the vendored norihiro encoder; deterministic, the CLI prints the sha256; the YouTube-leg tick decoder reads 911016 only with `runs=CLIP_RUNS` (the run-scoped timeline keeps it apart); the stream av-sync dock never pairs a reserved origin QR (911014/15/16); the CG A/V via `recording-verdict --av-sync --av-run 911016` (`src/av_run_pairing.rs`) and its 4 s fixture; the deliverable's sha256 and its checks with the real consumers; the loop-seam limit; the `--av-sync` painter path's full decode requests exactly the node burns its 60-frame head read (`painter_full_request`, ROZHODNUTÉ 6051603225): the 5.10 YouTube-leg fixtures are burns-OFF, their VODs are gone, how to re-make the clips, the pinned 540p CI clip) → `.claude/rules/measurement-clip.md` (auto-loads on its `paths:`)

@@ -199,3 +199,7 @@ Discriminator recipe for the next "late-arrival burst on strih" question:
    the same.
 3. On strih-snv (read-only): `/proc/net/snmp` Udp `RcvbufErrors` and `/proc/net/softnet_stat` col 2.
    Nonzero would mean the receive side itself is too slow. Zero means the loss is upstream.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Venue-switch config-drift audit + checked-in baseline (`netcfg` facet: read-only `admin@` ssh to the MikroTik chain — RB4011 router_snv 10.77.8.1 + 4× CRS310 10.77.9.2-.5; `scripts/netcfg-audit.sh --capture/--check/--json` diffs live shared-buffers/ROS/per-port rate+role vs `scripts/netcfg-baseline.json` + a live drop-RATE probe; report-only dev1 hourly alert-watchdog reusing obs_watchdog confirm/throttle, ships DISABLED; guards the KEPT #797 shared-buffers 40→80% microburst fix against a silent revert; pw NEVER committed → EnvironmentFile; the `python3 - <<'PY'` stdin-collision + `print stats` columnar-vs-`where name=` gotchas, #797) → `.claude/rules/netcfg-audit.md` (auto-loads on its `paths:`)

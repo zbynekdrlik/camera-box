@@ -92,3 +92,7 @@ the network waits for it itself (retry / `Restart=on-failure`). The issue-1404 d
 `rig-lease-server.service` dropped it, pinned by a test. A SYSTEM unit (`WantedBy=multi-user.target`,
 or a `DynamicUser=` unit like `intercom-hub.service` even with `WantedBy=default.target`) keeps it:
 there it is real.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- ANY new dev1 `--user` systemd unit's hardening directives (PrivateTmp/ProtectHome are currently live-verified INERT no-ops under dev1's unprivileged-userns kernel policy — declared intent only, never assume active isolation without re-checking) → `.claude/rules/dev1-systemd-user-unit-hardening.md` (auto-loads on its `paths:`)

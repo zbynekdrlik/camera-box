@@ -123,3 +123,7 @@ ignore the prefix. It takes the LAST timestamp token before the marker, so a jou
 wrapper prefix is safe. (2) The CLI (`genlock-jitter-report`) surfaces this ONLY as an
 ADDITIVE text-mode table with a `--relock-burst-min N` flag (default 8, window fixed 1000 ms);
 `--json` (`summaries_to_json`) stays byte-locked (#757) — NEVER add a relock key to it.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- genlock audit-log parser (`src/jitter_audit.rs` + `genlock-jitter-report`: two coexisting parser families — input `genlock-fifo audit` and #874 send-side `genlock-ndi-output`/`genlock-ndi-filter`; adding a new line kind needs a mutually-non-substring marker + RED→GREEN; the CLI `--json` is the #757 calibrator contract, input-side only, never add keys) → `.claude/rules/jitter-audit-parser.md` (auto-loads on its `paths:`)

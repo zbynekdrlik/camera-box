@@ -199,3 +199,7 @@ cargo fmt --all --check                 # rustfmt parses (so a test-file edit is
 A live read-back (READ-ONLY) confirms the baseline is current:
 `OBS_PASSWORD=<local secret> python3 scripts/latency_pins_verify.py --box strih --host 10.77.9.202`
 (exit 0 = live pins match the committed baseline).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Reading/verifying per-source genlock latency pins (authoritative key is `genlock_latency_ms_src` over WS, NOT bundle-state's DistroAV-stock `ndi_input_latency`=0; verify-at-start is REPORT-ONLY vs `scripts/latency-pins-baseline.json`; fail-closed enumeration vs honest-None per-input read, #1061/#866) → `.claude/rules/latency-pins-verify.md` (auto-loads on its `paths:`)

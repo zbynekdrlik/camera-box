@@ -62,3 +62,7 @@ Put the pure decision at the crate root (`switch_in_transient.rs`, no deps) and 
 not inside the probe-gated `probe` module / `recording-verdict.rs`. The RED->GREEN discipline
 applies: commit the tests + a STUB that returns not-transient/not-backed (`[red]`, verify the
 positive test fails against it), then the real impl (`[green]`).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Switch-in transient classifier (issue 1144, REPORT-ONLY): `src/switch_in_transient.rs` recognizes an imag NDI-receiver spin-up transient (a dense leading burn-loss burst that recovers after a program cut) so the imag per-segment sweep ATTRIBUTES it to cold-cut instead of failing the content gate — FAIL-CLOSED (never excuse a few-drop/half-window-dead/mid-window/sparse/non-recovering/frozen/independent-stuck shape); folds ONLY through the report-only content seam; n=1 calibrated → the constants MUST be re-validated against the item-2 sick-camera run before the flip, never widened so a red passes → `.claude/rules/switch-in-transient.md` (auto-loads on its `paths:`)

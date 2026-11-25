@@ -129,3 +129,7 @@ The owner ruling of 24.9.2026 also cut the burst itself (strih-snv connected a c
 only while it was shown; the multiview rendered low-bandwidth twins). That half was REMOVED on
 28.9.2026 on owner order: the strih-snv uplink is fixed in hardware (5 GbE, then 10 GbE), so every
 strih camera input is connected at full bandwidth again. The send stagger stays.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Per-camera NDI SEND stagger (`vstack:av/ndi/src/send_stagger.rs`: camN hands its frame to the NDI SDK (N-1)×1.2 ms after the emit gate so the seven per-tick bursts stop overflowing the strih-snv 2.5 GbE `foh1_video ether2` port; N from the OS hostname CAM<N> via one pure `plan()`, clamped to 45 % of the SHORTER of the send/capture interval; timecode + emit grid untouched; the sleep is added back into the buffered-queue dequeue signal via `idle_wait_ms` (taken BEFORE the dequeue); a backlogged frame skips the sleep; the per-5 s `#1242 send stagger:` budget line; the E2E burn path proves send timing but NOT the production capture-loop budget; the 1 GbE wire-time vs 2.5 G drain arithmetic + the live acceptance steps; issue 1242) → `.claude/rules/ndi-send-stagger.md` (auto-loads on its `paths:`)

@@ -65,3 +65,7 @@ a skip with `cap−emit ≥ 2` SUSTAINED across ≥2 consecutive 5-s buckets, or
 with one `residual missing_slots` well above the diffuse 883-fallback profile. Until then a
 nearest-frame degrade would over-emit on benign clock re-latches (there are no captured frames
 for the skipped boundaries to degrade to).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Classifying a `#707 genlock emit-gate SKIPPED N boundary interval(s)` event as LOSSY vs BENIGN (the N is a boundary-COUNTER leap, NOT N lost frames; the `!queue_had_frame` resync is the honest clock-STEP path — capture keeps flowing 60fps, emit==cap; triage = SOURCE `#707 emit-1s/cap-1s` bucket deficit around the skip + RECORD `verdict.segments[]` window/883-fallback correlation; buffered-drain already catches up 1 not leaps; issue 1131 closed overcome 2026-09-01 — nearest-frame degrade NOT needed, re-open only on a sustained cap−emit≥2 or a non-883 multi-slot residual) → `.claude/rules/emit-gate-skip-triage.md` (auto-loads on its `paths:`)

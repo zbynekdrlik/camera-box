@@ -108,3 +108,7 @@ owner must never wonder "co mam akoze ja s tym robit". Guarded by
 `tests/harness_optical_chain_watchdog_1117.rs` (static anchors on the Slovak markers + the dropped
 English "Confirmed over …" phrase). The airuleset#546 machine-channel ROUTING of agent-recoverable
 pages is an `airuleset.py notify` feature (out of camera-box scope) — here only the page TEXT changed.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Cam2 optical-injection-leg health (dead-painter/optical-black detection, alert, fail-fast: the dev1 alert-watchdog framework reuse, the pidfile-OR-service TEST/EVENT discriminator, reusing #901 assert-program-nonblack, the never-false-abort [0/8] preflight, the #712 CAMBOX_PARALLEL_FAILED_LABELS ::error:: surface, #860) → `.claude/rules/optical-chain-health-watchdog.md` (auto-loads on its `paths:`)

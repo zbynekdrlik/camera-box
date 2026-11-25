@@ -196,3 +196,7 @@ PROBABILISTICALLY across a seed set — a DETERMINISTIC RED needs the real faili
 committed fixture, mineable only from a CI run (per this rule's own "mine the real-frame fixture"
 section). Keep the seed loop bounded well under the nextest slow-test kill (`.config/nextest.toml`,
 8×60 s) since each robust decode runs ~12 rqrr passes.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Decode/recognition geometry or algorithm changes (crop/downscale/threshold/retry — never tuned blind) → `.claude/rules/pattern-change-needs-decode-fixture.md` (auto-loads on its `paths:`)

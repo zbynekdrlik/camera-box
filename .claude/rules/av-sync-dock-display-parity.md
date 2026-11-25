@@ -121,3 +121,7 @@ the mono mixdown, `camera-box-channel-pick.hpp`, so a poisoned channel cannot to
 shared decode kernel sanitizes its prefix-sum input (one NaN otherwise kills the whole ~68 ms
 window, on the live AND offline decode paths). Parity-mirrored + selftest-cross-checked like the
 rest of this file; the wiring/anchors are pinned by `tests/av_sync_dock_pairing_recover_1153.rs`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Dock DISPLAY math (`dock_lock_display_offset_ms`/`dock_latency_display_ms` ↔ C++ `cb_*` parity-mirrored VALUE seam gated by `obs:tests/vendored/tests/av_sync_dock_cpp_mirror_gate.rs`; the dock locks on the STREAM box not strih — `mbc` source; quantifying dock-vs-gate residual from paired stream-log + verdict data; #952/#1004 residual UNSTABLE → no compensation) → `.claude/rules/av-sync-dock-display-parity.md` (auto-loads on its `paths:`)

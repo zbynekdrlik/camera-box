@@ -125,3 +125,7 @@ The gate is red on all three until the causes are fixed or OBS restarts clean.
 fake home and compared with the raw grep, the awk cap, the two real reductions of 18.11.2026 in
 `tests/fixtures/genlock_session_continuity_1534/`), `tests/python/test_genlock_session_continuity_e2e_1534.py`
 (the lib under `set -euo pipefail` against fake homes, the recording-e2e.sh wiring, the report).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The E2E's BLOCKING whole-session video gate (issue 1534, owner ROZHODNUTÉ 18.11.2026: zero loss since the OBS start, not only the window): every genlock input's underruns / relocks after its start settle (first audit line + 60 s) and every JPEG XS input's per-window lost / concealed / undecodable slices summed since its first window with frames + 60 s, on strih + stream; the pure `scripts/genlock_session_continuity.py`, the box read = the strih log reader's `session` op (grep + an on-box awk reduction), `scripts/lib/genlock-session-continuity.sh`, the `genlock_session_continuity` block + `scripts/e2e_report_session_continuity.py` → `.claude/rules/genlock-session-continuity.md` (auto-loads on its `paths:`)

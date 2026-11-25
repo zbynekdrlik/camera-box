@@ -201,3 +201,7 @@ SKIP gate and the `frozen-input-$RECEIVER_NAME-$source` dedup key are unchanged 
 - A grep-filter pipeline exits 1 on "no match"; under `set -o pipefail` that fails the whole pipeline.
   A pure text FILTER whose empty result is a NORMAL outcome must end `|| true` so callers under
   pipefail (and the pure-fn test) do not read "nothing matched" as an error.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- dev1-side reachability + frozen-input alert watchdogs (probe-FROM-dev1, shared confirm/throttle, per-box/per-source state) → `.claude/rules/network-reach-watchdog.md` (reachability, #1001) + `.claude/rules/frozen-input-watchdog.md` (phase-2 frozen-input via the genlock-fifo `received=` tap + the no-double-page guard, #1052) (both auto-load on their `paths:`)

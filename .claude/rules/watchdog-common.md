@@ -114,3 +114,7 @@ About 18 dev1 units on the same 5-minute timer hit the rig at one instant: each 
 frames (encode max 75-95 ms on an idle rig) and stepped cam3 + cam5 down. Every `OnUnitActiveSec=5min` timer carries
 `RandomizedDelaySec=2min` (`tests/python/test_watchdog_batch_spread_1387.py`); a new one takes it too. The strih
 bundle-state server runs at `Nice=19` on cores 0-1, off OBS's 2-15.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The shared dev1 watchdog glue `scripts/lib/watchdog-common.sh` (issue 1386: `read_state_field` / `write_state_field` / `clear_*throttle` / `source_key` / `netreach_box_alerted` / `recovery_latch_fires` / `fetch_bundle_json` live once, sourced next to obs-watchdog-decision.sh; never copy one back (pinned by `declare -f` in `tests/python/test_watchdog_common_1386.py`); the ONE state write never drops state (read-first, rename only after a successful temp write, a loud ERROR line, always rc 0); a `*_FETCH_CMD` replay seam is the fetch's second ARGUMENT (the variable's name), never a copy; no watchdog runs its pass with errexit on — `set +e` after the last source line, since `set -uo pipefail` never clears a lib's -e (`tests/python/test_watchdog_errexit_1386.py`); the only override left is `read_state_field` in four watchdogs; the declare-f + dry-run replay proof recipe) → `.claude/rules/watchdog-common.md` (auto-loads on its `paths:`)

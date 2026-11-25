@@ -384,3 +384,7 @@ token.
 - **A stateful fake root must live in a FILE.** The ndi apply test's stubs are bash functions; the
   close reads `findmnt` and runs `mount` inside `$(...)` subshells, so a variable-held state
   silently never changes.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Read-only-root rw windows (issue 1407: every cambox/SBC root write — deploy-fleet's camera-box + frame-probe swaps, the dantesync upgrade/rollback, the bkshading relay mode + relay deploy, the cam2-painter enable-state, the ndi-discovery apply — closes through the ONE verified `ro_window_close_cmds` in `scripts/lib/ro-window.sh`: only writes/stops/enable inside the window, the root mode READ back, a root left writable fails by name naming the writers, and NOTHING starts before the close; no retry; the sweep test bans a swallowed `remount,ro` anywhere else; the camera-box and cam2 frame-probe swaps go through a byte-verified `.new` sidecar + atomic rename, the painter never starting on an unverified binary; rt-kernel-plan PRINTS the same close into each runbook step; a failed relay step in rig-mode is recorded, warned, every remaining step runs, and the exit folds it — the issue-868 pattern — except TEST stops before the painter launch when cam2's own rw window is broken: root stayed read-write, or the rw remount refused) → `.claude/rules/ro-window.md` (auto-loads on its `paths:`)

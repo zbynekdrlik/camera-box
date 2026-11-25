@@ -230,3 +230,7 @@ re-buffers — the sawtooth every dock/E2E A/V reading inherits.
 - **Tests:** `pytest tests/python/test_buffered_ms_1325.py` (gather + classify + analyze + the
   build_bundle_state passthrough) + `test_bundle_state_server_log.py` (the server gather FLOWS the
   facets — the order-sensitive `_parse_log_facets` unpack) + the #1206 sweep; `bash -n`/`shellcheck`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- OBS audio-timeline-lag alert (dev1-side watchdog: reads the `audio_ts_lag_ms` facet bundle_state_gather exposes on `:8899/bundle-state.json` — the MAX per-source `audio-telemetry #800 '<src>': ts_lag_ms=N` from obs-audio.c:698, parsed from the TAIL of the #1222 bounded read never a 2nd log scan, `-1`=no-timeline excluded, omit-when-empty; DETECTION-ONLY no auto-action since the cure is a live-box reboot owner-call; SKIP=fetch-fail defers #732/#1001, UNKNOWN=facet-absent, LAGGING>5000ms pages after 2-pass confirm; NEVER a false page since paging needs a fetched positive reading so no reference-anchor needed; pure `audio_lag_decision.py` #1199-mirror + `audio-lag-alert-watchdog.sh` reusing obs-watchdog-decision.sh; #1206 stable dedup-key `audio-lag-$box` + recovery log-only; ships DISABLED, #1226; #1231 adds the FRESHNESS `audio_ts_lag_age_s` facet + a STALE verdict — in-log recency anchored to the LAST line in FILE ORDER never max-seconds-of-day, telemetry stopped-while-log-advancing, never a false page) → `.claude/rules/audio-lag-watchdog.md` (auto-loads on its `paths:`)

@@ -64,3 +64,7 @@ vtedy má prísť správa do discordu, že sa zasekol výstup". Page ONLY in tha
   frame) -- frozen-input territory; a dead YouTube egress behind the local restreamer (`outputBytes`
   only measures to the RTMP target on the box).
 - Only stream-snv (`STREAM_OUTPUT_STUCK_BOX`); ships DISABLED, the supervisor runbook is the README.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Stream OBS STUCK-OUTPUT page (issue 1460, owner 12.11.2026: page only while the stream OBS programs `PRO` AND streams AND its output stands still): read-only probe through obs_phase2 (scene before + after, two GetStreamStatus/GetStats snapshots 3 s apart), pure decision (render / encode / bytes / reconnecting; a counter going backwards = new session; the `unresponsive` carry of a HUNG (never a refused) OBS within 300 s of a proven production), the airuleset `page:<box>-output-stuck` class, on the roster, ships DISABLED → `.claude/rules/stream-output-stuck-watchdog.md` (auto-loads on its `paths:`)

@@ -96,3 +96,7 @@ For each copy in a window, join the painted `tick` with the cambox's OWN digital
   1390609404 was this, not a receiver burst.
 - **strih clean, stream shows the defect** means the stream-hop (2ME PGM) FIFO.
 Over 80 windows (22–23.9): 30 receiver repeats, 9 source content repeats, 2 stream-only.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Attributing a copies/gaps residual to SOURCE (grabber) vs DOWNSTREAM (genlock-FIFO/60→30 decimation) from the cambox burn logs (`scripts/residual_churn_attribution.py`: the `#889 late-dupe copies emitted`/`starvation last-frame repeats` + `#707 emit-1s/cap-1s` + `Streaming: sent−captured` signals; the discriminator is BASELINE-RELATIVE — a steady deficit or steady `corrupted` floor is background NOT a source anomaly; issue 1242 finding = the ~0.06% churn is DOWNSTREAM, per-box cadence is a covariate, 609 clean-run emit-fills → 0 residuals) → `.claude/rules/residual-churn-attribution.md` (auto-loads on its `paths:`)

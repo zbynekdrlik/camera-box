@@ -73,3 +73,7 @@ issuecomment-7172341290. Sender only.
 3. Read the switch egress drop counters of the slower ports (read-only, companion-pp's own account at
    PP) over a production window: they stay 0.
 4. Rollback: set the fact `none` and re-run setup-strih, then `tc qdisc del dev <nic> root`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- strih / stream box sender egress PACING (issue 1553: box fact `STRIH_EGRESS_PACING_RATE`, `scripts/lib/strih-egress-pacing.sh` = an fq per tx queue under a root mq (a root fq on one queue), classes named in HEX, `systemd/strih-egress-pacing.service`, setup-strih step 11b, verify `(egress-pacing*)`, `tc -j` maxrate in bytes/s) → `.claude/rules/strih-egress-pacing.md` (auto-loads on its `paths:`)

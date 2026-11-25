@@ -80,3 +80,7 @@ are the reference. ⇒ **≥2 sources must be listed** (`ASIO_STARVE_SOURCES`, d
   CALLER's two-phase healthy-sibling composition + alert/recovery state machine has its own
   end-to-end guard (`tests/harness_asio_starve_alert_watchdog_1023.rs` drives `main()` via the
   `ASIO_STARVE_PROBE_CMD` seam + a temp state file — the sibling-watchdog glue-test convention).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- ASIO-source-starved alert (dev1-side watchdog: the NEW `asrc: source '<name>' … starved_blocks=N` tap — per-interval reset-on-read, NOT jitter_audit.rs's genlock-fifo family; healthy=0 vs starved~2946 sustained; the healthy-SIBLING discriminator = per-source defect vs box-wide UNKNOWN owned by obs-liveness/audio-presence; watch REAL inputs only — synthetic test-audio/fallback-repro excluded; alert-only OBS-reset cure since the closed VB-Matrix/Dante plugin is upstream of vendor/; complementary to the #786 launch guard; ships DISABLED, #1023) → `.claude/rules/asio-starve-watchdog.md` (auto-loads on its `paths:`)

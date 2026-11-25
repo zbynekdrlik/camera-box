@@ -148,3 +148,7 @@ The header is part of libobs, so strih-snv needs the Linux genlock bundle. Two c
 - The OBS log shows `render-tick thread not pinned: no isolated cores`.
 - `for t in /proc/$(pgrep -x obs)/task/*; do awk '/Cpus_allowed_list/{print $2}' $t/status; done | sort | uniq -c`
   shows ONE mask. There is no 10-11 group any more.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The vendored genlock render-tick CPU pin on the Linux OBS boxes (`obs-genlock-render-tick-pin.h`, included once by obs-video.c; issue 1357: pin only onto cores that are isolated AND nohz_full, never a fallback pair, so no current box pins; held only while the tick sleeps in `video_sleep`, so no NDI/driver thread it creates inherits the mask or SCHED_FIFO (+ `SCHED_RESET_ON_FORK`); a late tick skips it, a per-tick failure disarms once; rtprio stays OFF on every box via the shared `obs_box_rtprio_off` + grader row `rtprio` (also the running OBS realtime limit); the lift-and-compile gate with a stubbed syscall trace and a real-thread inheritance control; drift-guard grades `not pinned` and a pinned SCHED_OTHER tick OK) → `.claude/rules/genlock-render-tick-pin.md` (auto-loads on its `paths:`)

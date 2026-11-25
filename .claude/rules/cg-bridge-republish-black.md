@@ -66,3 +66,7 @@ watchdog: a pytest that SHELLS OUT to bash (`test_cg_bridge_alert_watchdog_1006.
 classifier + `--help`/`--dry-run`/unknown-arg + the ships-disabled contract (assert no
 `systemctl enable` of the timer in any installer, excluding doc comments). Both run under CI's
 `pytest tests/python` job — no Rust harness needed for this shell script.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- CG-bridge (Spout republish) black-on-air detection — DIFFERENTIAL not blanket (Arena publishes a black CG-bridge Spout while its upstream NDI is live; a blanket "every scene non-black" gate false-fails on legitimately-idle overlay scenes like CG bridge/Ableset; page ONLY when upstream LIVE + republish BLACK via `obs_phase2.py republish-black-check`; dev1 alert reuses obs-watchdog-decision.sh, ships disabled; Arena state = read-only win-strih MCP Snapshot, never a control op, #1006) → `.claude/rules/cg-bridge-republish-black.md` (auto-loads on its `paths:`)

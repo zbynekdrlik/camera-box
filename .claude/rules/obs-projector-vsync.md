@@ -80,3 +80,7 @@ reader only proves the mechanism is ENGAGED, never that tearing is gone.
 issue-1107 EGL read, so a vendored `git subtree pull` can't silently drop either the fix or its
 observability. Edit obs-display.c's `obs_display_set_vsync()` carefully: keep the substring
 `display->vsync = vsync;` intact (the 1107 test asserts it).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- imag HDMI tearing → OBS projector present-vsync (the dual-output 60Hz beat; picom compositor REVERTED for 21.57% render skips; the deployed cure is OBS's own EGL `eglSwapInterval(1)` armed ONLY for the fullscreen non-multiview Program projector — never both, serial graphics thread; Linux/EGL-only no-pwsh-mirror; the one-shot `projector-vsync: present-vsync ARMED` OBS-log marker at obs_display level; SCANOUT proof needs the #781 tap, #1107/#1146) → `.claude/rules/obs-projector-vsync.md` (auto-loads on its `paths:`)

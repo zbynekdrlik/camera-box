@@ -652,3 +652,7 @@ re-inited per round + the measure-retry count). Wiring this INTO the verdict JSO
 
 **Live acceptance (supervisor):** a release E2E whose `[4i/8align]` logs ≥ 1 re-init round and then
 passes the floor-aware plan. Live evidence + the restart-proof: issue 1349.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Floor-3 per-run camera auto-align (`qr_align_pins.py` + the BLOCKING `[4i/8align]` E2E step): the simultaneous painter-QR `gen_ts_ns`+`t_send` spread signal (NOT `frame_id×fps`); floor-3 relative-only model; sanity bound must stay BELOW the owner's 94ms nonsense; #893 active-floor is mutually exclusive with it; `CAMERA_ALIGN_SET` superset incl. cam4 minus acked-offline; strih pins only; the revert's dangling deep-pin fixtures; #1003) → `.claude/rules/qr-align.md` (auto-loads on its `paths:`)

@@ -101,3 +101,7 @@ the pure classify (`STUCK`/`OK`/`NODATA`) + marker-fps parse — tested
 `bash -n`, `shellcheck -S warning`, and a direct sourced run (`. scripts/lib/grabber-stuck-health.sh;
 …` and the `--dry-run` driver with `probe_box`/`sshpass` overridden) — the same net the harnesses
 encode, runnable with zero rig.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Fast-capture grabber STUCK self-heal + alert (ShadowCast ~62.5 fps + persistent corrupted — `systemctl restart` doesn't clear, USB re-auth does; the corrupted band is the DISCRIMINATOR that keeps the benign over-rate wobble from reset-spamming #909; re-auth reuses perform_usb_reset gated OFF by CAMERA_BOX_GRABBER_STUCK_SELFHEAL; dev1 watchdog relays the `#1128 grabber STUCK` marker, one ping per episode, ships DISABLED, #1128) → `.claude/rules/grabber-stuck-selfheal.md` (auto-loads on its `paths:`)

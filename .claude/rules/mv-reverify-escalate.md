@@ -294,3 +294,7 @@ every OTHER `ps_encoded_command` consumer parses a DIFFERENT audit-line family w
 non-byte-safe grep/sed shape — `mv-fps-alert-watchdog.sh`'s `multiview-audit:` grep, `ndi-halving-
 watchdog.sh`'s `recv-timing` tap, `asio-starve-alert-watchdog.sh`'s `asrc:` tap. Same fetch mechanism,
 same locale, same theoretical exposure — just unverified and out of #1258's `received=`-scoped remit.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Sender-bounce reverify painter-order proof + receiver-wedge escalation (the painter-dark-vs-strih-receiver-wedge `received=` discriminator; the headless strih-OBS restart = on strih-snv `systemctl --user restart strih-obs.service` over plain ssh (unit-installed guard, issue 1317 part 4), on a Windows strih kill+sentinel over ssh + AHK respawn, NEVER an ssh GUI launch, with the AHK-presence guard; READ_FAIL≠no-recv; the `--warm-settle` projector-independent re-check, #1093/#1096/#1098) → `.claude/rules/mv-reverify-escalate.md` (auto-loads on its `paths:`)

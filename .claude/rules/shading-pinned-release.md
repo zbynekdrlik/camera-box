@@ -95,3 +95,7 @@ Blackmagic Camera Setup -> Network access -> "Web media manager" ON (else 404 = 
    and the copies hold; `tests/python/test_bkshading_ndi_provision_1157.py` compares
    `scripts/lib/bkshading-ndi-runtime.sh` with the copy. Read the contract's diff: a gphoto2 key,
    a port or an env name is a camera-box change too.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- bkshading = a pinned release of `zbynekdrlik/shading` (issue 1487: `scripts/shading-release.pin` + `scripts/lib/shading-release.sh`; issue 1452: the relay pin PER BOX, `scripts/shading-release-boxes.txt` puts a box whose camera serves REST on `scripts/shading-release-rest.pin` (v0.2.x, no gphoto2 fallback), deploy-relay `--box` + its own-hostname check; the camera's USB-C link file `scripts/lib/bkshading-camera-link.sh`, verify-device (bb); the verified assets in `<tree>/shading-release/<tag>/`, only the pinned bytes deploy, no fallback, the relay graded against the pin never camera-box, `--check-config` on the strih seed compared by count, the bump steps; code + releases live in that repo, `docs/CONTRACT.md` is the contract) → `.claude/rules/shading-pinned-release.md` (auto-loads on its `paths:`)

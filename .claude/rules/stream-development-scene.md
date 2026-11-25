@@ -222,3 +222,7 @@ Where it lives:
   program to `Development` through the guarded obs_phase2 switch (which refuses `PRO`); after the
   test it is left on `Development`, the operator cuts back to `PRO` for a service.
 - Tests: `tests/python/test_stream_dev_safe_1380.py`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Stream OBS `Development` scene (issue 1380: development programs `Development` — the production scene `PRO` nested as its one scene source — and the owner's hard rule "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!": no tool ever puts `PRO` on program/preview (`obs_phase2._rpc` refuses it and every standalone OBS-WS client that selects a scene reuses that one guard — a completeness pytest lists them, teardown and the listed client restores skip it, an obs_phase2 cut off `PRO` in Studio Mode re-asserts the preview against OBS's swap), EVENT leaves the stream program alone, the contract has no stream item; `cg-chain-verify.sh` defaults to `cg-obs strih`, stream hop on request + ABSENT; the ONE name declaration `scripts/lib/stream-dev-scene.sh`; the pure `scripts/stream_dev_scene.py` (idempotent operator-wins seeder) behind `obs_phase2.py dev-scene`, lazily imported because obs_phase2.py is installed alone on the boxes; `switch` skips a same-scene set; `program-rendered-input` descends into a nested scene; the retired stream probe scene/input) → `.claude/rules/stream-development-scene.md` (auto-loads on its `paths:`)

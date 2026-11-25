@@ -273,3 +273,7 @@ or 1792 (pw-cat), `pipe_depth_frames` inside the dead band and not moving over t
 `pipe_refills` / `pipe_trims` flat, and no `pipe_servo_*` key left. The phones: the `phones`
 participant now carries a `jitter` facet (its ingress resampler leg) and an `asrc=phones:..`
 status-line group; the janus facet's `tx_underflows` / `tx_overflow_trims` stay flat.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Audio clock-domain + latency map (issue 1461, owner 22.10.2026: genlock for every audio path): every path's source clock, each crossing and what does it (the hub's `asrc` resampler on the VBAN legs + the card capture: Kaiser sinc 32 taps x 128 phases, ratio = the 64 s least-squares rate of each packet's arrival on the hub clock, followed at 5 ppm/s, a phase term only outside +-1/4 of the fixed target, +-1000 ppm; since lane 2 also the egress pipes (aplay card + HDMI, pw-cat; the ratio from the reader's consumed frames, the dead band a quarter of setpoint + reader buffer) and the phones' Janus ring + ingress), each hop's fixed latency, the total at every listener per box (strih-snv, strih-pp, stream-snv, stream-pp) and the double-sound budget; computed vs measured named; every audio change states its clocks, crossings and latencies there first → `.claude/rules/audio-clock-map.md` (auto-loads on its `paths:`)

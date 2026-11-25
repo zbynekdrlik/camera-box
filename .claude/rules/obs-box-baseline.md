@@ -607,3 +607,7 @@ Live conversion results (strih-snv, 23.9.2026, first kiosk boot on 7.0.0-31 + `p
   internet NTP server (`ntp_server` 162.159.200.1), so the spread tracks WAN jitter (dev1 saw ping
   mdev 1.6 ms to the same server at the same time). The PTP lock (`mode=LOCK`) is the fleet signal;
   compare against dev1's ping jitter to the upstream before treating it as a box regression.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The ONE shared OBS-box appliance baseline (issue 1357: imag's box-level provisioning moved verbatim into `scripts/lib/obs-box-baseline.sh` + `obs-box-kiosk.sh`, run by BOTH setup-imag.sh and setup-strih.sh with per-box facts as arguments -- openbox on plain Xorg, preempt=full, de-jitter, maxperf, power envelope, the PM QoS CPU idle wake-up latency bound (150 us holder unit, grader row `cstate` = unit + no deeper C-state entered in a 1 s sample); ONE grader `obs-box-baseline-verify.sh` for verify-imag/verify-strih; rtprio stays OFF; the strih-snv conversion runbook) → `.claude/rules/obs-box-baseline.md` (auto-loads on its `paths:`)

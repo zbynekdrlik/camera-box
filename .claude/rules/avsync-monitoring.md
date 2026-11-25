@@ -737,3 +737,7 @@ knob of the SNV Windows era; the operator aligns A/V on the program audio input.
 - **Sourcing the measurer in a test:** `avsync-measure-dev2.sh` parses its own argv even when sourced,
   so a `bash -c 'script' harness A B` that passes values as positional args must take them first and
   `set --` before the `.` line (else `unknown arg`, exit 2).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Stream-box avsync watchdog + VLC monitor + dev1 heartbeat alert (Task Scheduler keep-alive idiom, generalizing the dev1-side alert topology to a heartbeat FILE, the multi-file-one-ssh-call `type ... & echo SEP & type ...` trick, bounding an external call by what needs killing, #812/#807; issue 1441: the dev2 SyncNet measurer + both dev1 alarms PER VENUE from the ONE table `scripts/lib/avsync-venues.sh` -- stream-role fact files + the declared Windows stream-snv row, dial host = the obs-fleet row never STRIH_IP, template `avsync-measure-dev2@<venue>`, one SyncNet run at a time (flock), SNV legacy heartbeat symlink, AWAY venue never pages, `avsync-<venue>-` keys, dev2 installed BEFORE dev1) → `.claude/rules/avsync-monitoring.md` (auto-loads on its `paths:`)

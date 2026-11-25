@@ -67,3 +67,7 @@ the stream program (the owner cuts to `PRO` himself), so no contract item grades
 separately, whole-facet) and assert the affected `*_ok` function returns `False` — never raises —
 both directly and through `compute_item_results()` (the real call path `event_assert.py`'s CLI
 uses). Add a case here whenever a NEW facet/item is added to `compute_item_results`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- EVENT-mode CONTRACT (#722) facet decisions must be None-tolerant + fail-closed, never crash on a per-item or whole-facet None (#1225) → `.claude/rules/event-assert-none-tolerance.md` (auto-loads on its `paths:`)

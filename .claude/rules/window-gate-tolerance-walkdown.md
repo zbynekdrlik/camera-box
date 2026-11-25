@@ -503,3 +503,7 @@ state. **Guard rail (the one-line report-only revert):** if a healthy-chain run 
 on ONLY these seams, re-arm `copies_gaps_tolerance_gates_overall_pass() -> true` (back to the tol-2
 fold) — a data-thin false-red safety valve, NEVER a silent widen. Data reproduced by
 `scripts/window_gate_walkdown.py 02b53180b 7e8efff6a`. Issue 1242's walk-back trail closes with this.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Walking `WINDOW_COPIES_GAPS_TOLERANCE` up/down = a DATA-FIRST step (mine the verdict per-window copies/gaps distribution, segregate pre/post-fix by the RIG-VERIFIED genlock-OBS deploy time — verdicts record no version — exclude convergence-transient + dead-painter runs, step to the tightest value the steady post-fix data supports, keep the walk-down on its own ticket; #1031) → `.claude/rules/window-gate-tolerance-walkdown.md` (auto-loads on its `paths:`)

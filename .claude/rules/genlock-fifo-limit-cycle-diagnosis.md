@@ -255,3 +255,7 @@ non-zero late-tick ε; a fixture 1.05 frames apart proves nothing.
 The C mutation proof points `CARGO_MANIFEST_DIR` at a scratch tree
 holding only the mutated `obs-source.c`, and the test must be recompiled per mutation because `env!`
 is resolved at compile time.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Genlock FIFO limit-cycle diagnosis from a failed E2E verdict (frozen_leg = per-window aggregate, copies≈gaps uniform = FIFO signature, stream 2ME PGM audit deltas, frac(latency/33.3)<0.5 discriminator, date-less OBS logs, #998) → `.claude/rules/genlock-fifo-limit-cycle-diagnosis.md` (auto-loads on its `paths:`)

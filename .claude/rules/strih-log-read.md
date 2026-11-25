@@ -142,3 +142,7 @@ line at the HEAD of the newest log AND every `#800` line of the whole session, w
 count / since / tail / headtail ops returns. It runs ONE `grep -a -E` of the newest log on the box through
 `stream_box_exec` (Linux boxes only, the shared transport), never a second Windows reader. A further
 whole-log consumer should add a `grep` op here instead of a third copy.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Reading the strih OBS log from a helper/watchdog (the ONE platform-resolved reader `scripts/lib/strih-log-read.sh` — plain ssh `tail`/`wc`/`tail -n +N` on the newest spaced `~/.config/obs-studio/logs/*.txt` on strih-snv, the verbatim -EncodedCommand PowerShell on a Windows strih; `timeout` inside sshpass; `UserKnownHostsFile=/dev/null`; the `strih` os token for the MV-fps pair; the multi-box dev1 watchdogs branch on `strih_log_os` and keep their Windows read byte-identical; rig-health-audit.py's python twin (`headtail` op) pinned byte-for-byte to the bash; never a new inline Windows-only read; issue 1360) → `.claude/rules/strih-log-read.md` (auto-loads on its `paths:`)
