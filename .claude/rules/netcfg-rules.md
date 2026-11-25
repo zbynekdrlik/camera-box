@@ -43,15 +43,24 @@ pins the shape.
 
 ## Rules (hard = FAIL)
 
-- 1 drift: the normalised export (one canonical line per entry, sorted, comments dropped) hashed
-  per device against the committed hash -> DRIFT. No committed hash = report-only UNKNOWN.
+- 1 drift: the normalised export (one canonical line per entry, sorted, comments dropped; a terse
+  `!prop` kept as a property) hashed per device against the committed hash -> DRIFT. An export
+  that no longer parses while a hash exists is DRIFT too (capture refuses an unparseable export).
+  No committed hash = report-only UNKNOWN. **What a device changes by itself is left out** through
+  the device's facts `drift_ignore` (path + `comment` / `comment_prefix` + the props, or `*` for the
+  entry): router_snv's `pp-dns-switch` scheduler rewrites the address of the `pp-dns-switch NNN`
+  DNS entries every 30 s, and the `nlvpn-route-up/down` scripts add/remove the `nlvpn-dns` routes and
+  enable/disable the `nlvpn` mangle rule. A new on-device script that edits config needs its own
+  entry, or every E2E run after its next flip FAILs.
 - 2 IGMP: SNV (`igmp: off`) any bridge `igmp-snooping=yes`; PP (`querier`) snooping with
   `igmp-querier: none` in the bridge monitor. A router read without the monitor = UNKNOWN.
-- 3 RSTP: an in-bridge host port with `edge-port: no`; a bridge link whose `topology-changes` grew
+- 3 RSTP: an in-bridge, FORWARDING host port with `edge-port: no` (a port that just came up reads
+  `no` for ~3 s); a bridge link whose `topology-changes` grew
   since the previous run. A bridge link = `frame-types=admit-only-vlan-tagged` OR a port that
   RECEIVES BPDUs (`tx-rx-bpdu` rx > 0: router_snv ether15, the lan uplink, is one). Growth on a
   `restricted-tcn=yes` port is a WARN (those TCs never reach the MAC tables). A counter that went
-  back = a reboot, REBASE (report-only). First run = baseline, no finding.
+  back = a reboot, REBASE (report-only). First run = baseline, no finding. A link that is down
+  this run keeps its stored counter. Bridge ports that do not parse = RSTP UNKNOWN.
 - 4 HW offload: a static, enabled bridge port without `H`; a `cpu_bridge` device (PP Stage RB4011)
   only WARNs.
 - 5 Dante QoS on a `qos` device: `trust-l3=keep` on every bridge port, a profile per expected DSCP
@@ -70,15 +79,32 @@ pins the shape.
 
 The repo is PUBLIC and PP's configuration is Marcel's. So: the export TEXT is never committed --
 `--capture` writes it to `~/.camera-box/netcfg-export/<venue>/<device>.rsc` on dev1 and only its
-hash to the baseline JSON. A DRIFT line names the path + the entry key (`name=` / `interface=` /
-`address=` ...) and changed/added/removed, never another value; it can only name entries when the
-dev1 copy matches the committed hash. The test fixtures are EXCERPTS (the paths the rules read,
+hash to the baseline JSON (the copies are 0600 in a 0700 dir). A DRIFT line names the path + the
+entry's `name=` / `interface=` / `vlan-ids=` or its `[ find ... ]` target, else `entry <8 hex>` (a
+hash of the entry), and changed/added/removed -- never a comment or an address; it can only name
+entries when the dev1 copy matches the committed hash. The rule messages themselves name the
+Dante pool range, the IGMP querier and the firmware versions: internal facts the ticket already
+states, and what the reader must act on. The test fixtures are EXCERPTS (the paths the rules read,
 MAC addresses and WAN addresses dropped).
 
 ## Accepting a deliberate change
 
 `scripts/netcfg-rules.sh --venue <v> --capture` on dev1, then a PR with the new
 `scripts/netcfg-export-baseline.json`. A capture with one unreachable device writes nothing.
+
+## Access safety
+
+- Host keys are trusted on first use into `<state dir>/netcfg-known_hosts-<venue>`
+  (`StrictHostKeyChecking=accept-new`), then pinned: a password is never sent to a device whose
+  key changed. A legitimately replaced device needs its line removed from that file.
+- The PP password file must be 0600 / 0400, else exit 2 before any ssh.
+- **Tests must never be able to dial a device.** Every test that runs the script without its own
+  fake `ssh` gets a PATH stub whose `ssh` / `sshpass` exit 97 (`_no_network_bin` in the test). On
+  25.11.2026 a new test run against the PREVIOUS commit (to prove it RED) had no stub, the old script
+  had no password-file check yet, and it made one failed `snv` login on each PP device (issue 1554
+  comment 7174913720). Run a new subprocess test in `unshare -n` too.
+- `--from-dir` without an explicit `NETCFG_RULES_STATE_DIR` keeps its state in the temp dir, so a
+  replay never moves the live RSTP counters or export copies.
 
 ## State
 

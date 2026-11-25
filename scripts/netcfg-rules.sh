@@ -26,21 +26,23 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NR_PY="$HERE/netcfg_rules.py"
 NETCFG_RULES_FACTS="${NETCFG_RULES_FACTS:-$HERE/netcfg-venues.json}"
 NETCFG_RULES_BASELINE="${NETCFG_RULES_BASELINE:-$HERE/netcfg-export-baseline.json}"
+NETCFG_RULES_STATE_DIR_SET="${NETCFG_RULES_STATE_DIR:+1}"
 NETCFG_RULES_STATE_DIR="${NETCFG_RULES_STATE_DIR:-$HOME/.camera-box}"
 NETCFG_RULES_SSH_TIMEOUT="${NETCFG_RULES_SSH_TIMEOUT:-20}"
 
-usage() { sed -n '4,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,24{/^#/p}' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 log() { printf '%s [netcfg-rules] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 MODE="check"
 VENUE=""
 FROM_DIR=""
+_need_value() { [ "$2" -ge 2 ] || { echo "netcfg-rules: $1 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --venue) VENUE="${2:-}"; shift 2 ;;
+    --venue) _need_value "$1" "$#"; VENUE="$2"; shift 2 ;;
     --check) MODE="check"; shift ;;
     --capture) MODE="capture"; shift ;;
-    --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
+    --from-dir) _need_value "$1" "$#"; FROM_DIR="$2"; shift 2 ;;
     --help | -h) usage; exit 0 ;;
     *) echo "netcfg-rules: unknown arg '$1' (try --help)" >&2; exit 2 ;;
   esac
@@ -67,10 +69,12 @@ done <<< "$devices"
 
 # _nr_ssh <host> <routeros-command> -> the device's output on stdout (stderr dropped); rc = ssh's.
 # `ssh -n`: never read the caller's stdin. timeout bounds the whole call, not only the connect.
+# Host keys: trust on first use into a per-venue known_hosts in the state dir, then pinned, so a
+# password is never sent to a device whose key changed.
 _nr_ssh() {
   local host="$1" cmd="$2"
-  local -a opts=(-n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
-    -o ConnectTimeout="$NETCFG_RULES_SSH_TIMEOUT")
+  local -a opts=(-n -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$NR_KNOWN_HOSTS"
+    -o LogLevel=ERROR -o ConnectTimeout="$NETCFG_RULES_SSH_TIMEOUT")
   [ -n "$NR_JUMP" ] && opts+=(-J "$NR_JUMP")
   if [ -n "$NR_PWFILE" ]; then
     # timeout OUTSIDE sshpass: a command timeout starts is not in the terminal's foreground, and
@@ -86,6 +90,13 @@ _nr_ssh() {
 
 RAW_DIR="$(mktemp -d)"
 trap 'rm -rf "$RAW_DIR"' EXIT
+# A --from-dir replay must never overwrite the live run's RSTP counters or export copies: without
+# an explicit NETCFG_RULES_STATE_DIR it keeps its state in the temporary dir.
+if [ -n "$FROM_DIR" ] && [ -z "${NETCFG_RULES_STATE_DIR_SET:-}" ]; then
+  NETCFG_RULES_STATE_DIR="$RAW_DIR/state"
+fi
+NR_KNOWN_HOSTS="$NETCFG_RULES_STATE_DIR/netcfg-known_hosts-$VENUE"
+mkdir -p "$NETCFG_RULES_STATE_DIR"
 
 if [ -n "$FROM_DIR" ]; then
   [ -d "$FROM_DIR" ] || { echo "netcfg-rules: --from-dir '$FROM_DIR' is not a directory" >&2; exit 2; }
@@ -97,6 +108,10 @@ if [ -n "$FROM_DIR" ]; then
 else
   if [ -n "$NR_PWFILE" ]; then
     [ -r "$NR_PWFILE" ] || { log "no credential: $NR_PWFILE is not readable (venue $VENUE)"; exit 2; }
+    case "$(stat -c %a "$NR_PWFILE")" in
+      600 | 400) : ;;
+      *) log "the password file $NR_PWFILE is readable by others (mode $(stat -c %a "$NR_PWFILE")), refusing"; exit 2 ;;
+    esac
   elif [ ! -r "$NR_KEY" ]; then
     log "no credential: the key $NR_KEY is not readable (venue $VENUE)"; exit 2
   fi
@@ -109,7 +124,6 @@ fi
 
 EXPORT_DIR="$NETCFG_RULES_STATE_DIR/netcfg-export/$VENUE"
 STATE_FILE="$NETCFG_RULES_STATE_DIR/netcfg-rules-$VENUE-tc.json"
-mkdir -p "$NETCFG_RULES_STATE_DIR"
 
 if [ "$MODE" = "capture" ]; then
   python3 "$NR_PY" capture "$NETCFG_RULES_FACTS" "$VENUE" "$RAW_DIR" "$NETCFG_RULES_BASELINE" "$EXPORT_DIR" \

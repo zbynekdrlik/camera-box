@@ -17,7 +17,9 @@ configuration value, and the drift baseline commits only a hash per device
 (scripts/netcfg-export-baseline.json); the export text stays on dev1.
 
 Rules (the ticket's numbering):
-  1  export drift: the normalised `/export terse` hash per device vs the committed hash  FAIL
+  1  export drift: the normalised `/export terse` hash per device vs the committed hash, minus
+     what the device's own scripts change at runtime (facts `drift_ignore`); an export that
+     no longer parses is a change too                                                   FAIL
   2  IGMP: policy "off" = no bridge with igmp-snooping=yes; policy "querier" = snooping only
      with an active querier (bridge monitor igmp-querier not `none`)                     FAIL
   3  RSTP: an in-bridge host port with edge-port=no; a bridge link (admit-only-vlan-tagged,
@@ -62,8 +64,9 @@ READS = {
 }
 VERBS = ("add", "set")
 TRUNK_FRAME_TYPES = "admit-only-vlan-tagged"
-# the entry key a drift line names (never a value of any other property)
-ENTRY_KEYS = ("name", "interface", "vlan-ids", "address", "dst-address", "comment")
+# the entry keys a drift line may name; anything else is named by a short hash of the entry (a
+# comment or an address is configuration content, and CI logs of this repo are public)
+ENTRY_KEYS = ("name", "interface", "vlan-ids")
 
 
 class FactsError(ValueError):
@@ -91,6 +94,10 @@ def load_venue(path, venue):
             raise FactsError("device %r: unknown reads %r" % (d["name"], d.get("reads")))
         if not re.match(r"^[0-9.]+$", str(d.get("host", ""))):
             raise FactsError("device %r: bad host %r" % (d["name"], d.get("host")))
+        for r in d.get("drift_ignore", ()):
+            if not isinstance(r, dict) or not str(r.get("path", "")).startswith("/") \
+                    or not (r.get("props") == "*" or isinstance(r.get("props"), list)):
+                raise FactsError("device %r: bad drift_ignore rule %r" % (d["name"], r))
     if v.get("igmp") not in ("off", "querier"):
         raise FactsError("venue %r: igmp must be off or querier" % venue)
     return v
@@ -110,7 +117,9 @@ def parse_export(lines):
 
     Handles both forms: a `/path` header line followed by `add ...` / `set ...` lines, and the
     terse one-line `/path verb ...`. A trailing `\\` continues the line. `[ find ... ]` is kept as
-    the target text; `set <name>` keeps the bare name as the target. Comment lines are skipped.
+    the target text; `set <name>` keeps the bare name as the target. Any other bare token (terse's
+    `!prop` for an unset property) is kept as a property with an empty value, so it is hashed too.
+    Comment lines are skipped.
     """
     joined, cur = [], ""
     for ln in lines:
@@ -144,13 +153,12 @@ def parse_export(lines):
             j = rest.index("]") if "]" in rest else len(rest)
             target = "[ " + " ".join(rest[1:j]) + " ]"
             i = j + 1
-        elif rest and "=" not in rest[0]:
+        elif rest and words[vi] == "set" and "=" not in rest[0]:
             target = rest[0]
             i = 1
         for tok in rest[i:]:
-            k, sep, val = tok.partition("=")
-            if sep:
-                props[k] = val
+            k, _, val = tok.partition("=")
+            props[k] = val
         entries.append({"path": path, "verb": words[vi], "target": target, "props": props})
     return entries
 
@@ -216,17 +224,49 @@ def parse_device(raw, reads):
 
 
 # ---------------------------------------------------------------- export drift (rule 1)
-def export_lines(entries):
-    """Normalised export: one canonical line per entry, sorted (order-independent)."""
+def _canon(e):
+    props = " ".join("%s=%s" % (k, e["props"][k]) for k in sorted(e["props"]))
+    return " ".join(x for x in (e["path"], e["verb"], e["target"], props) if x)
+
+
+def drift_filter(entries, ignore):
+    """Drop what the device changes by itself (a facts `drift_ignore` list) before hashing.
+
+    Each rule: `path`, `comment` (exact) or `comment_prefix`, and `props`: a list of property
+    names left out of the hash, or "*" for the whole entry. router_snv's own scripts flip its PP
+    DNS entries every 30 s and add/remove the nlvpn routes; those are runtime state, not config.
+    """
     out = []
     for e in entries:
-        props = " ".join("%s=%s" % (k, e["props"][k]) for k in sorted(e["props"]))
-        out.append(" ".join(x for x in (e["path"], e["verb"], e["target"], props) if x))
-    return sorted(out)
+        c = e["props"].get("comment", "")
+        drop = set()
+        whole = False
+        for r in ignore or ():
+            if r.get("path") != e["path"]:
+                continue
+            if "comment" in r and c != r["comment"]:
+                continue
+            if "comment_prefix" in r and not c.startswith(r["comment_prefix"]):
+                continue
+            if r.get("props") == "*":
+                whole = True
+            else:
+                drop.update(r.get("props") or ())
+        if whole:
+            continue
+        if drop:
+            e = dict(e, props={k: v for k, v in e["props"].items() if k not in drop})
+        out.append(e)
+    return out
 
 
-def export_hash(entries):
-    return hashlib.sha256("\n".join(export_lines(entries)).encode()).hexdigest()
+def export_lines(entries, ignore=()):
+    """Normalised export: one canonical line per entry, sorted (order-independent)."""
+    return sorted(_canon(e) for e in drift_filter(entries, ignore))
+
+
+def export_hash(entries, ignore=()):
+    return hashlib.sha256("\n".join(export_lines(entries, ignore)).encode()).hexdigest()
 
 
 def _entry_label(e):
@@ -235,17 +275,17 @@ def _entry_label(e):
             return "%s %s %s=%s" % (e["path"], e["verb"], k, e["props"][k])
     if e["target"]:
         return "%s %s %s" % (e["path"], e["verb"], e["target"])
-    return "%s %s" % (e["path"], e["verb"])
+    return "%s %s entry %s" % (e["path"], e["verb"], hashlib.sha256(_canon(e).encode()).hexdigest()[:8])
 
 
 def export_diff_labels(old_entries, new_entries, limit=12):
     """Path + entry key of every entry that changed, was added or removed -- never a value."""
     old = {}
     for e in old_entries:
-        old.setdefault(_entry_label(e), []).append(export_lines([e])[0])
+        old.setdefault(_entry_label(e), []).append(_canon(e))
     new = {}
     for e in new_entries:
-        new.setdefault(_entry_label(e), []).append(export_lines([e])[0])
+        new.setdefault(_entry_label(e), []).append(_canon(e))
     out = []
     for lbl in sorted(set(old) | set(new)):
         a, b = sorted(old.get(lbl, [])), sorted(new.get(lbl, []))
@@ -257,19 +297,25 @@ def export_diff_labels(old_entries, new_entries, limit=12):
     return out
 
 
-def rule_drift(name, dev, baseline_hash, local_text):
+def rule_drift(name, dev, baseline_hash, local_text, ignore=()):
     if dev.get("export") is None:
+        if baseline_hash:
+            # capture refuses an unparseable export, so this one is not the baselined one
+            return [("DRIFT", True, "%s: the export no longer parses -- changed since the baseline" % name)]
         return [("UNKNOWN", False, "%s: export unreadable, drift not checked" % name)]
-    live = export_hash(dev["export"])
+    live = export_hash(dev["export"], ignore)
     if not baseline_hash:
         return [("UNKNOWN", False, "%s: no committed export baseline (run --capture, PR the hash)" % name)]
     if live == baseline_hash:
         return []
     detail = ""
     if local_text is not None:
-        old = parse_export(local_text.splitlines())
-        if export_hash(old) == baseline_hash:
-            labels = export_diff_labels(old, dev["export"])
+        try:
+            old = parse_export(local_text.splitlines())
+        except nbq.ParseError:
+            old = None
+        if old is not None and export_hash(old, ignore) == baseline_hash:
+            labels = export_diff_labels(drift_filter(old, ignore), drift_filter(dev["export"], ignore))
             detail = " -- " + "; ".join(labels) if labels else ""
         else:
             detail = " (the dev1 export copy is not the baselined one, no detail)"
@@ -296,7 +342,7 @@ def rule_igmp(name, dev, venue):
         return [("UNKNOWN", False, "%s: igmp-snooping=yes but no bridge monitor read, the querier "
                  "is not checked here" % name)]
     querier = mon.get("igmp-querier", "")
-    if not querier or querier == "none":
+    if not querier or "none" in querier.split():  # one column per bridge on a multi-bridge box
         return [("FAIL", True, "%s: igmp-snooping=yes with no active IGMP querier (igmp-querier: "
                  "%s) -- multicast (Dante) can stop after the membership timeout"
                  % (name, querier or "absent"))]
@@ -325,18 +371,21 @@ def _rx_bpdu(row):
 def rule_rstp(name, dev, prev):
     """-> (findings, new state {port: topology-changes})."""
     mon = dev.get("port_monitor")
-    if mon is None or dev.get("bridge_ports") is None:
-        return [], prev or {}
+    if mon is None:
+        return [], dict(prev or {})
+    if dev.get("bridge_ports") is None:
+        return [("UNKNOWN", False, "%s: bridge ports unreadable, RSTP not checked" % name)], dict(prev or {})
     if not mon:
-        return [("UNKNOWN", False, "%s: bridge port monitor not in a known shape" % name)], prev or {}
+        return [("UNKNOWN", False, "%s: bridge port monitor not in a known shape" % name)], dict(prev or {})
     trunks = _trunks(dev)
-    out, state = [], {}
+    # a link that is down this run keeps its previous counter, so its next run still compares
+    out, state = [], dict(prev or {})
     for port, row in sorted(mon.items()):
         if row.get("status") != "in-bridge":
             continue
         if _rx_bpdu(row) > 0:
             trunks.add(port)  # a bridge neighbour answers RSTP here: a link, not a host port
-        if port not in trunks and row.get("edge-port") == "no":
+        if port not in trunks and row.get("edge-port") == "no" and row.get("forwarding") == "yes":
             out.append(("FAIL", True, "%s: host port %s is not an RSTP edge port (edge-port: no) -- "
                         "a topology change there flushes the MAC tables" % (name, port)))
         tc = row.get("topology-changes", "")
@@ -386,6 +435,8 @@ def rule_qos(name, dev, facts, venue):
              if e["path"] == "/interface ethernet switch qos port" and e["verb"] == "set"}
     out = []
     for e in _static_ports(dev):
+        if "X" in e["flags"]:
+            continue
         iface = e["props"].get("interface", "?")
         if trust.get(iface) != "keep":
             out.append(("FAIL", True, "%s: port %s does not keep the DSCP (trust-l3=keep missing)"
@@ -512,7 +563,8 @@ def check_venue(venue, raws, baseline, local_texts, prev_state):
             if name in (prev_state or {}):
                 state[name] = prev_state[name]
             continue
-        findings += rule_drift(name, dev, (baseline or {}).get(name), (local_texts or {}).get(name))
+        findings += rule_drift(name, dev, (baseline or {}).get(name), (local_texts or {}).get(name),
+                               facts.get("drift_ignore", ()))
         findings += rule_igmp(name, dev, venue)
         tc_findings, tc_state = rule_rstp(name, dev, (prev_state or {}).get(name))
         findings += tc_findings
@@ -582,8 +634,9 @@ def cmd_capture(facts_path, venue_name, raw_dir, baseline_path, export_dir):
     baseline never silently loses a device.
     """
     v = load_venue(facts_path, venue_name)
-    parsed = {}
+    parsed, ignores = {}, {}
     for d in v["devices"]:
+        ignores[d["name"]] = d.get("drift_ignore", ())
         raw = _read(os.path.join(raw_dir, d["name"] + ".txt"))
         dev = parse_device(raw, d["reads"])
         if dev is None or dev.get("export") is None:
@@ -591,6 +644,7 @@ def cmd_capture(facts_path, venue_name, raw_dir, baseline_path, export_dir):
             return 1
         parsed[d["name"]] = (dev, "\n".join(dev["sections"]["export"]) + "\n")
     os.makedirs(export_dir, mode=0o700, exist_ok=True)
+    os.chmod(export_dir, 0o700)
     data = _load_json(baseline_path, {})
     data.setdefault("_comment", "issue 1554: sha256 of each device's normalised `/export terse` "
                     "(scripts/netcfg_rules.py export_hash). The text itself stays on dev1 "
@@ -598,9 +652,11 @@ def cmd_capture(facts_path, venue_name, raw_dir, baseline_path, export_dir):
                     "change = scripts/netcfg-rules.sh --capture --venue <v> + a PR of this file.")
     hashes = {}
     for name, (dev, text) in parsed.items():
-        with open(os.path.join(export_dir, name + ".rsc"), "w", encoding="utf-8") as fh:
+        fd = os.open(os.path.join(export_dir, name + ".rsc"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
-        hashes[name] = export_hash(dev["export"])
+        hashes[name] = export_hash(dev["export"], ignores[name])
     data[venue_name] = hashes
     tmp = baseline_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
