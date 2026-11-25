@@ -157,6 +157,8 @@ def parse_export(lines):
             target = rest[0]
             i = 1
         for tok in rest[i:]:
+            if tok == "#":
+                break  # RouterOS's inline runtime note (`# gateway not reachable`), not config
             k, _, val = tok.partition("=")
             props[k] = val
         entries.append({"path": path, "verb": words[vi], "target": target, "props": props})

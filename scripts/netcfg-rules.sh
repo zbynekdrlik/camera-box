@@ -25,6 +25,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NR_PY="$HERE/netcfg_rules.py"
 NETCFG_RULES_FACTS="${NETCFG_RULES_FACTS:-$HERE/netcfg-venues.json}"
+NETCFG_RULES_BASELINE_SET="${NETCFG_RULES_BASELINE:+1}"
 NETCFG_RULES_BASELINE="${NETCFG_RULES_BASELINE:-$HERE/netcfg-export-baseline.json}"
 NETCFG_RULES_STATE_DIR_SET="${NETCFG_RULES_STATE_DIR:+1}"
 NETCFG_RULES_STATE_DIR="${NETCFG_RULES_STATE_DIR:-$HOME/.camera-box}"
@@ -95,6 +96,11 @@ trap 'rm -rf "$RAW_DIR"' EXIT
 if [ -n "$FROM_DIR" ] && [ -z "${NETCFG_RULES_STATE_DIR_SET:-}" ]; then
   NETCFG_RULES_STATE_DIR="$RAW_DIR/state"
 fi
+# ...and a replay never writes the committed baseline from fixture files.
+if [ -n "$FROM_DIR" ] && [ "$MODE" = "capture" ] && [ -z "${NETCFG_RULES_BASELINE_SET:-}" ]; then
+  echo "netcfg-rules: --capture --from-dir needs an explicit NETCFG_RULES_BASELINE" >&2
+  exit 2
+fi
 NR_KNOWN_HOSTS="$NETCFG_RULES_STATE_DIR/netcfg-known_hosts-$VENUE"
 mkdir -p "$NETCFG_RULES_STATE_DIR"
 
@@ -118,7 +124,13 @@ else
   while IFS=$'\t' read -r tag name host cmd; do
     [ "$tag" = "DEVICE" ] || continue
     log "venue $VENUE: reading $name ($host)"
-    _nr_ssh "$host" "$cmd" > "$RAW_DIR/$name.txt" || log "venue $VENUE: $name ($host) read failed"
+    rc=0
+    _nr_ssh "$host" "$cmd" > "$RAW_DIR/$name.txt" || rc=$?
+    if [ "$rc" -eq 255 ]; then
+      log "venue $VENUE: $name ($host) ssh failed (rc 255: unreachable, login refused, or its host key no longer matches $NR_KNOWN_HOSTS -- a replaced device needs its line removed there)"
+    elif [ "$rc" -ne 0 ]; then
+      log "venue $VENUE: $name ($host) read failed (rc $rc)"
+    fi
   done <<< "$devices"
 fi
 
