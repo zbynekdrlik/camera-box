@@ -153,7 +153,8 @@ def test_the_stream_role_skips_the_strih_only_steps(boxes):
 
 
 def test_the_strih_role_runs_them(boxes):
-    assert _steps(boxes, "strih-pp") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "SKIP", "14": "RUN",
+    # issue 1553: strih-pp's housekeeping CPUs 0,8 run 11b too (its PCIe rig NIC's IRQs off the OBS mask)
+    assert _steps(boxes, "strih-pp") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "RUN", "14": "RUN",
                                         "16": "RUN", "16c": "RUN", "16e": "SKIP", "4b": "RUN"}
     # issue 1411: strih-snv's rig NIC is PCIe (the 10 GbE Thunderbolt Aquantia); issue 1425: its housekeeping
     # CPUs run 11b anyway (every rig-NIC IRQ + RSS onto 0-1).
