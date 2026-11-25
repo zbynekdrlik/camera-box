@@ -68,7 +68,7 @@
 #   RIG_LEASE_LOOKAHEAD_SECS   how far past "now" rig_lease_refresh_if_mine rolls the holder's
 #                              expected_release_at (default 900 = 15 min, issue 1383)
 #   RIG_LEASE_MAX_HOLD_SECS    the hold CEILING: no beat past acquired_at + this (default 6900 =
-#                              full-path-e2e.yml's timeout-minutes 105; the av-soak sets its own
+#                              full-path-e2e.yml's timeout-minutes 115; the av-soak sets its own
 #                              declared run window, issue 1383)
 #   RIG_LEASE_KEEPALIVE_SEC    the gate keep-alive's beat period (default 30, issue 1383)
 #   RIG_LEASE_KEEPALIVE_MAX_ERRORS  consecutive filesystem errors that end the gate keep-alive

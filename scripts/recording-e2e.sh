@@ -629,7 +629,8 @@ CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN=$(( (DURATION + 59) / 60 + CAMERA_BOX_DEADMAN_
 # tests string-anchor on -- the recording-e2e.sh static-anchor GOTCHA, project CLAUDE.md.)
 # issue 1404: the YouTube stage now waits for the live broadcast before the recording (up to its
 # ready deadline + the bound, ~9 min on a slow VPS boot), so the slack grows by that: 1200 -> 1800.
-PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-1800}"
+# issue 1551: + its 10 min pre-roll before the recording: 1800 -> 2400.
+PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-2400}"
 QR_SIZE="${QR_SIZE:-700}"
 # Topology v2 (#459, EPIC #466, SUPERSEDES the #11 60fps-end-to-end framing below): the 60fps
 # low-latency IMAG role moved OFF strih onto the new imag-nb box (10.77.9.182, #458/#463); strih
@@ -4578,6 +4579,11 @@ else
   echo "[4j/8settle] issue 1221 genlock-FIFO settle-wait — SKIPPED (E2E_GENLOCK_SETTLE=$E2E_GENLOCK_SETTLE, ALL_CAMBOX=${ALL_CAMBOX:-0})"
 fi
 
+# issue 1404: the YouTube end point goes live BEFORE the recording (its VOD must hold every window).
+# issue 1551: it returns only after its 10 min pre-roll, so it runs before the freeze watch is armed:
+# the watch judges the recording window, never the pre-roll.
+youtube_leg_start "$HERE" "$STRIH" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"
+
 # #758 item 3 — arm the in-run freeze watch for the WHOLE recording window (StartRecord through
 # StopRecord), right before StartRecord. ALL_CAMBOX only (mirrors the [0/8]/[1/8] preflight + [2/8]/[2b/8] reverify's
 # own gating) — excludes any acked-offline camera.
@@ -4619,9 +4625,6 @@ if [ "$LIVE_FREEZE_WATCH" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
 else
   echo "[5/8 pre] in-run freeze watch — SKIPPED (LIVE_FREEZE_WATCH=$LIVE_FREEZE_WATCH, ALL_CAMBOX=${ALL_CAMBOX:-0})"
 fi
-
-# issue 1404: the YouTube end point goes live BEFORE the recording (its VOD must hold every window).
-youtube_leg_start "$HERE" "$STRIH" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"
 
 # issue 1354 scope 3: BEFORE-window snapshot of strih's per-input genlock-fifo audit counters
 # (holds/relocks/converge_sheds), paired with the AFTER snapshot in [7/8]. Report-only + fail-open

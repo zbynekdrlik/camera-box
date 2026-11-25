@@ -85,6 +85,7 @@ youtube_leg_start() {
 _youtube_leg_preroll() {
   local d="$1" secs="$2" pid="" end now
   case "$secs" in ''|*[!0-9]*) secs=600 ;; esac
+  secs=$((10#$secs))   # a leading zero is decimal, never octal
   [ "$secs" -gt 0 ] || return 0
   pid="$(cat "$d/watch.pid" 2>/dev/null || true)"
   echo "    issue 1551: YouTube pre-roll -- the broadcast runs live ${secs} s before the recording starts"

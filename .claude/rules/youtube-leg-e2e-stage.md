@@ -108,8 +108,10 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   Known limit: `outputDuration` counts output frames, so a leftover that streamed for hours with many
   lagged frames can read older than 120 s off our publish; `recover` then refuses (the safe
   direction: the rig stays busy, never a foreign stream stopped) and the stream needs a hand stop.
-- The camera-box dead-man's first-fire margin (`CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN` 30 /
-  default 35 min) and the painter slack (1800 s) both carry the stage's pre-record wait.
+- The camera-box dead-man's first-fire margin (`CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN` 40 /
+  default 45 min) and the painter slack (2400 s) both carry the stage's pre-record wait, the
+  issue-1551 pre-roll included. The in-run freeze watch is armed after `youtube_leg_start`, so it
+  judges the recording window and never the pre-roll.
 - `youtube_leg_gate` in BOTH tails, right after the program-audio gate line (before the Discord report
   and `exit "$GATE"`): `measure --stream-path` (VOD wait, windows, the verdict tool ON dev2 with the
   probe binary + marker log shipped there, the fold). The recording never reaches dev1.
