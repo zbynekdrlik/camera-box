@@ -7,7 +7,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 
 ## Playbook router
 
-Every rule below lives in `.claude/rules/` and auto-loads on its `paths:`; its full router description is moved verbatim to its `## Router entry` section.
+Rules live in `.claude/rules/` and auto-load on their `paths:`. One short line per rule here; its full description goes in the rule (`## Router entry`). The 20 KB limit is a test (`test_claude_md_slim_1552.py`).
 
 - Rig ops (DanteSync clock, device deploy, recovery) → load `.claude/skills/ops`
 - bkshading = a pinned release of `zbynekdrlik/shading` → shading-pinned-release.md
