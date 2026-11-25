@@ -81,8 +81,9 @@ class ParseError(ValueError):
     """The read is not in the shape the parser knows -- report-only UNKNOWN, never DRIFT."""
 
 
-def _split_sections(raw):
-    """raw ssh output -> {section: [lines]}, or None when the read did not reach the end marker."""
+def _split_sections(raw, required=SECTIONS):
+    """raw ssh output -> {section: [lines]}, or None when the read did not reach the end marker
+    or misses a `required` section (issue 1554: netcfg_rules.py passes its own list)."""
     lines = raw.replace("\r", "").split("\n")
     if END_MARKER not in (ln.strip() for ln in lines):
         return None
@@ -98,7 +99,7 @@ def _split_sections(raw):
             continue
         if cur is not None:
             out[cur].append(ln)
-    if any(sec not in out for sec in SECTIONS):
+    if any(sec not in out for sec in required):
         return None
     return out
 
