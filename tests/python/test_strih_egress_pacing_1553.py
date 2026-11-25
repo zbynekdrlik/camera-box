@@ -187,7 +187,7 @@ def test_the_fact_is_the_last_key_and_every_box_paces_at_900mbit():
 
 def _load_with(tmp_path, value):
     d = tmp_path / "boxes"
-    d.mkdir()
+    d.mkdir(parents=True)
     for f in BOXES.glob("*.env"):
         (d / f.name).write_text(f.read_text())
     body = (d / "strih-pp.env").read_text()
@@ -242,7 +242,7 @@ def test_verdict_drift_on_a_wrong_value_a_missing_queue_and_no_tree():
     assert "fq flow_limit 2000 (want 4000)" in _verdict("900mbit", 1, TREE_1Q.replace('"flow_limit":4000', '"flow_limit":2000'))
     four = _verdict("900mbit", 4, TREE_3Q)
     assert "1:4 has nothing, not fq -- tx queue 4 is UNPACED" in four
-    assert _verdict("900mbit", 3, NOQUEUE).startswith("DRIFT the root is noqueue, not mq 1:")
+    assert _verdict("900mbit", 3, NOQUEUE).startswith("DRIFT the root is noqueue 0:, not mq 1:")
     assert _verdict("900mbit", 1, NOQUEUE).startswith("DRIFT the root is noqueue, not fq")
     assert _verdict("900mbit", 3, "").startswith("UNKNOWN")
     assert "an extra qdisc under 1:3" in _verdict("900mbit", 2, TREE_3Q)
