@@ -283,10 +283,26 @@ def _facts_subset(tmp_path, venue, names, access=None):
     return p
 
 
+_NO_NET = None
+
+
+def _no_network_bin():
+    """A PATH dir whose ssh / sshpass refuse to run: a test that reaches them without its own fake
+    must fail, never dial a real device (a PP login attempt shows in the PP admin's log)."""
+    global _NO_NET
+    if _NO_NET is None:
+        import tempfile
+        d = pathlib.Path(tempfile.mkdtemp(prefix="netcfg-rules-nonet-"))
+        for tool in ("ssh", "sshpass"):
+            (d / tool).write_text("#!/bin/sh\necho 'test reached a real %s' >&2\nexit 97\n" % tool)
+            (d / tool).chmod(0o755)
+        _NO_NET = d
+    return _NO_NET
+
+
 def _run_sh(args, env_extra, path_prefix=None):
     env = dict(os.environ, **env_extra)
-    if path_prefix:
-        env["PATH"] = str(path_prefix) + os.pathsep + env["PATH"]
+    env["PATH"] = str(path_prefix or _no_network_bin()) + os.pathsep + env["PATH"]
     return subprocess.run(["bash", str(SH)] + args, env=env, capture_output=True, text=True, timeout=120)
 
 
@@ -353,6 +369,7 @@ def _calls(log):
 def test_pp_reads_through_the_jump_host_with_the_password_file_one_call_per_device(tmp_path):
     pw = tmp_path / "pw"
     pw.write_text("not-a-real-password\n")
+    pw.chmod(0o600)
     facts = _facts_subset(tmp_path, "pp", PP4, access={"user": "snv", "key": "", "password_file": str(pw),
                                                        "jump": "companion-pp"})
     hosts = {"10.77.8.%d" % (i + 1): FIX / "pp" / (n + ".txt") for i, n in enumerate(PP4)}
@@ -369,6 +386,8 @@ def test_pp_reads_through_the_jump_host_with_the_password_file_one_call_per_devi
     for a in sshs:
         assert a[0] == "-n" and a[a.index("-J") + 1] == "companion-pp", a
         assert "PubkeyAuthentication=no" in a and "-i" not in a, a
+        assert "StrictHostKeyChecking=accept-new" in a, a
+        assert "UserKnownHostsFile=%s" % (tmp_path / "st" / "netcfg-known_hosts-pp") in a, a
         assert a[-1].startswith(':put "=== identity"') and a[-1].endswith(':put "=== end"'), a
 
 
@@ -409,3 +428,118 @@ def test_the_e2e_runs_the_snv_network_gate_before_the_clock_gate():
     assert s.count("netcfg-rules.sh") == 1
     assert call < s.index('echo "[0/8] DanteSync NTP+PTP gate')
     assert call < s.index('echo "[0/8] camera-box version-parity gate')
+
+
+# ------------------------------------------------------------- review round 1
+def _with_export_lines(raw, extra):
+    return raw.replace("=== end", "\n".join(extra) + "\n=== end", 1)
+
+
+def test_what_the_router_changes_by_itself_is_no_drift_but_a_real_change_is():
+    v = _venue("snv", ("router_snv",))
+    dns = '/ip dns static add address=10.76.8.202 comment="pp-dns-switch 202" name=strih-pp.lan ttl=30s type=A'
+    route = "/ip route add check-gateway=ping comment=nlvpn-dns dst-address=8.8.8.8/32 gateway=10.255.255.2"
+    mangle = "/ip firewall mangle add action=mark-routing chain=prerouting comment=nlvpn disabled=yes"
+    good = _with_export_lines(_raw("snv", "router_snv"), [dns, route, mangle])
+    base = {"router_snv": nr.export_hash(nr.parse_device(good, "full")["export"],
+                                         v["devices"][0]["drift_ignore"])}
+    flipped = _with_export_lines(_raw("snv", "router_snv"),
+                                 [dns.replace("10.76.8.202", "10.77.8.202"),
+                                  mangle.replace(" disabled=yes", "")])
+    assert not any(s == "DRIFT" for s, _, _ in _check(v, {"router_snv": flipped}, base)[0])
+    renamed = _with_export_lines(_raw("snv", "router_snv"),
+                                 [dns.replace("name=strih-pp.lan", "name=strih-xx.lan"), route, mangle])
+    assert any(s == "DRIFT" and h for s, h, _ in _check(v, {"router_snv": renamed}, base)[0])
+
+
+def test_an_export_that_no_longer_parses_is_drift_when_a_baseline_exists():
+    v = _venue("pp", ("pp_foh_a",))
+    good = _raw("pp", "pp_foh_a")
+    base = _baseline_of({"pp_foh_a": good}, v)
+    broken = _with_export_lines(good, ['/interface bridge port add comment="unbalanced'])
+    findings = _check(v, {"pp_foh_a": broken}, base)[0]
+    assert ("DRIFT", True, "pp_foh_a: the export no longer parses -- changed since the baseline") in findings
+
+
+def test_a_drift_line_never_names_a_comment_or_an_address():
+    old = nr.parse_export(['/ip firewall filter add action=accept chain=forward comment="secret thing" '
+                           'src-address=10.1.2.3'])
+    new = nr.parse_export(['/ip firewall filter add action=drop chain=forward comment="secret thing" '
+                           'src-address=10.1.2.3'])
+    labels = nr.export_diff_labels(old, new)
+    assert len(labels) == 2 and all("/ip firewall filter add entry " in lb for lb in labels), labels
+    assert not any("secret" in lb or "10.1.2.3" in lb for lb in labels), labels
+
+
+def test_a_port_that_is_not_forwarding_yet_is_not_judged_as_an_edge_port():
+    v = _venue("snv", ("foh1_audio",))
+    lines = _raw("snv", "foh1_audio").split("\n")
+    i = next(n for n, ln in enumerate(lines) if re.match(r"^\s*edge-port:", ln))
+    lines[i] = lines[i].replace("edge-port: yes", "edge-port: no ", 1)
+    j = next(n for n, ln in enumerate(lines) if re.match(r"^\s*forwarding:", ln))
+    lines[j] = lines[j].replace("forwarding: yes", "forwarding: no ", 1)
+    assert not any("edge port" in m for _, _, m in _check(v, {"foh1_audio": "\n".join(lines)})[0])
+
+
+def test_a_link_that_is_down_keeps_its_counter_for_the_next_run():
+    v = _venue("snv", ("foh1_audio",))
+    _, state = _check(v, {"foh1_audio": _raw("snv", "foh1_audio")},
+                      prev={"foh1_audio": {"sfp-sfpplus2": 4, "sfp-sfpplus1": 1}})
+    assert state == {"foh1_audio": {"sfp-sfpplus1": 1, "sfp-sfpplus2": 4}}
+
+
+def test_an_unreadable_bridge_port_table_reports_rstp_unknown():
+    v = _venue("snv", ("foh1_audio",))
+    raw = _raw("snv", "foh1_audio").replace("=== bridge-port\n", "=== bridge-port\nsomething unexpected\n", 1)
+    findings = _check(v, {"foh1_audio": raw})[0]
+    assert ("UNKNOWN", False, "foh1_audio: bridge ports unreadable, RSTP not checked") in findings, findings
+
+
+def test_a_missing_querier_on_one_of_two_bridges_fails():
+    v = _venue("pp", ("pp_foh_a",))
+    raw = re.sub(r"igmp-querier: none", "igmp-querier: 10.77.8.1 none", _raw("pp", "pp_foh_a"))
+    assert any("no active IGMP querier" in m for _, _, m in _hard(_check(v, {"pp_foh_a": raw})[0]))
+
+
+def test_the_ptp_mirror_target_in_the_bridge_and_a_wrong_return_pvid_fail():
+    v = _venue("pp", ("pp_foh_a",))
+    good = _raw("pp", "pp_foh_a")
+    in_bridge = good.replace("6 H interface=ether8::89::ptp", "6 H interface=ether7::mirror::ptp-out", 1)
+    assert in_bridge != good
+    hard = [m for _, _, m in _hard(_check(v, {"pp_foh_a": in_bridge})[0])]
+    assert "pp_foh_a: mirror target ether7::mirror::ptp-out is inside the bridge" in hard, hard
+    blocks = good.split("6 H interface=ether8::89::ptp", 1)
+    assert len(blocks) == 2
+    wrong_pvid = blocks[0] + "6 H interface=ether8::89::ptp" + blocks[1].replace("pvid=89", "pvid=70", 1)
+    hard = [m for _, _, m in _hard(_check(v, {"pp_foh_a": wrong_pvid})[0])]
+    assert "pp_foh_a: PTP return port ether8::89::ptp not in the bridge with pvid 89" in hard, hard
+
+
+def test_a_disabled_port_is_not_held_to_the_qos_rule():
+    v = _venue("snv", ("foh1_audio",))
+    raw = _raw("snv", "foh1_audio").replace(" 0   H  interface=ether1 ", " 0 X H  interface=ether1 ", 1)
+    assert raw != _raw("snv", "foh1_audio")
+    raw = raw.replace("/interface ethernet switch qos port set ether1 trust-l3=keep\n", "")
+    assert not any("ether1" in m for _, _, m in _hard(_check(v, {"foh1_audio": raw})[0]))
+
+
+def test_a_replay_never_touches_the_live_state(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home), NETCFG_RULES_BASELINE=str(tmp_path / "b.json"))
+    env["PATH"] = str(_no_network_bin()) + os.pathsep + env["PATH"]
+    env.pop("NETCFG_RULES_STATE_DIR", None)
+    r = subprocess.run(["bash", str(SH), "--venue", "pp", "--from-dir", str(FIX / "pp")],
+                       env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert list(home.iterdir()) == [], list(home.iterdir())
+
+
+def test_a_password_file_others_can_read_is_refused(tmp_path):
+    pw = tmp_path / "pw"
+    pw.write_text("x\n")
+    pw.chmod(0o644)
+    facts = _facts_subset(tmp_path, "pp", PP4, access={"user": "snv", "key": "", "password_file": str(pw),
+                                                       "jump": "companion-pp"})
+    r = _run_sh(["--venue", "pp"], {"NETCFG_RULES_FACTS": str(facts), "NETCFG_RULES_STATE_DIR": str(tmp_path / "st")})
+    assert r.returncode == 2 and "readable by others" in r.stderr, r.stdout + r.stderr

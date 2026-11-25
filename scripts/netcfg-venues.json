@@ -1,10 +1,14 @@
 {
-  "_comment": "issue 1554: the venue network facts the netcfg rule checks (scripts/netcfg_rules.py, run by scripts/netcfg-rules.sh) read. One entry per venue: how to dial its MikroTiks (read-only accounts only: SNV the key user camerabox of network#15, PP the read-only user snv of the PP admin, ROZHODNUTE 7167031660 on issue 1554), which verified read commands each device gets, and the venue's network rules (zbynekdrlik/mikrotik docs/snv-siet-pravidla.md, network#18). No credential is stored here: a key or password FILE path only. See .claude/rules/netcfg-rules.md.",
+  "_comment": "issue 1554: the venue network facts the netcfg rule checks (scripts/netcfg_rules.py, run by scripts/netcfg-rules.sh) read. One entry per venue: how to dial its MikroTiks (read-only accounts only: SNV the key user camerabox of network#15, PP the read-only user snv of the PP admin, ROZHODNUTE 7167031660 on issue 1554), which verified read commands each device gets, and the venue's network rules (zbynekdrlik/mikrotik docs/snv-siet-pravidla.md, network#18). No credential is stored here: a key or password FILE path only. drift_ignore = what a device's own scripts change at runtime (router_snv: the pp-dns-switch scheduler every 30 s, the nlvpn route up/down scripts), left out of the export hash. See .claude/rules/netcfg-rules.md.",
   "venues": {
     "snv": {
       "access": {"user": "camerabox", "key": "~/.ssh/camerabox_netcfg_ed25519", "password_file": "", "jump": ""},
       "devices": [
-        {"name": "router_snv", "host": "10.77.8.1", "reads": "full", "qos": true, "dante_dhcp": true},
+        {"name": "router_snv", "host": "10.77.8.1", "reads": "full", "qos": true, "dante_dhcp": true,
+         "drift_ignore": [
+           {"path": "/ip dns static", "comment_prefix": "pp-dns-switch ", "props": ["address"]},
+           {"path": "/ip route", "comment": "nlvpn-dns", "props": "*"},
+           {"path": "/ip firewall mangle", "comment": "nlvpn", "props": ["disabled"]}]},
         {"name": "foh1_audio", "host": "10.77.9.2", "reads": "full", "qos": true},
         {"name": "stage_av", "host": "10.77.9.3", "reads": "full", "qos": true},
         {"name": "foh1_video", "host": "10.77.9.4", "reads": "full", "qos": true},
