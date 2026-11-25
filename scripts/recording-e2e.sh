@@ -971,6 +971,13 @@ if [ "${AVAIL_MB:-0}" -lt "$NEED_MB" ]; then
   exit 1
 fi
 
+# issue 1554 (owner 25.11.2026): the venue network itself must pass its rules before any
+# measurement -- IGMP, RSTP edge ports and topology changes, HW offload, Dante QoS, the Dante DHCP
+# pool, and no configuration change since the committed export baseline. Read-only, one ssh call
+# per MikroTik; a FAIL here is a network problem to fix (or a deliberate change to --capture + PR).
+echo "[0/8] venue network rules gate -- the SNV MikroTiks must pass the network rules (issue 1554)"
+"$HERE/netcfg-rules.sh" --venue snv || exit 1
+
 # DanteSync NTP+PTP precondition gate (#7) — THE FIRST hard step. The whole test is
 # worthless unless EVERY measured node (cam1, cam2, strih, stream) is BOTH NTP-synced
 # AND PTP-locked (µs-grade fine servo, GM 10.77.9.184 up — NOT the ±1 ms NTP sawtooth

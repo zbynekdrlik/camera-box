@@ -217,6 +217,7 @@ Rules live in `.claude/rules/` and auto-load on their `paths:`. One short line p
 - MV-clone-vs-main presentation SKEW via OBS-WS … → mv-skew-measurement.md
 - NIC swap aftermath → nic-swap-timesync-recovery.md
 - Venue-switch config-drift audit + checked-in … → netcfg-audit.md
+- Venue network rule gate (SNV + PP) → netcfg-rules.md
 - Per-camera NDI SEND stagger → ndi-send-stagger.md
 - OBS-WS writes to a genlocked NDI input → obs-ws-lockdown-writes.md
 - imag-nb offline-ack leg skip → imag-offline-ack.md
