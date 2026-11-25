@@ -360,11 +360,13 @@ reach the stream only through the mbc mix, and fohmixer can prove that mix carri
 Goal: SongPlayer no longer needs blanking for YouTube/FB tests. `scripts/program_audio_cg_advisory.py`:
 - **(a) the program tree**, over OBS-WS read-only through `obs_phase2._conn` / `_rpc` (its
   production-scene guard) over ONE session kept open between reads (`ProgramTreeReader`; a failure
-  closes it, the next read reconnects; a session per read would log ~5,800 connect/close pairs a day
+  closes it, the next read reconnects; the probe's stop shuts it for good, so no read in flight
+  reconnects; a session per read would log ~5,800 connect/close pairs a day
   on the broadcast box): GetCurrentProgramScene, GetSceneItemList / GetGroupSceneItemList descending
   nested scenes and groups, ENABLED items only, plus GetSpecialInputs (the global audio devices mix into
-  every output) and GetCurrentSceneTransition (a kind outside OBS's built-in silent ones, a stinger,
-  reads as another audible input). Known limit: during a cut the OUTGOING scene's inputs stay in the
+  every output) and the transitions (GetCurrentSceneTransition and the program scene's own
+  GetSceneSceneTransitionOverride, its kind from GetSceneTransitionList; a kind outside OBS's built-in
+  silent ones, a stinger, reads as another audible input). Known limit: during a cut the OUTGOING scene's inputs stay in the
   mix for the transition's length. An input is audible when GetInputAudioTracks has a track on (mixers != 0) and
   GetInputMute is false; an input without audio answers request code 604 (not audible); any other error
   = unreadable. Holds when no audible input but the program-audio input = STRIH_PROGRAM_AUDIO_INPUT of

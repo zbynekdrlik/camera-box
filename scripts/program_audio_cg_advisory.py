@@ -12,7 +12,7 @@ payload, never FOREIGN/UNKNOWN, never latched) while BOTH hold:
       read over OBS-WS, read-only, through the obs_phase2 client over ONE session kept open -- the
       current program scene, its ENABLED items descending nested scenes and groups, plus the global
       audio devices (GetSpecialInputs, they mix into every output) and a scene transition whose kind
-      may carry audio (a stinger); an input is audible when it has an audio track on
+      may carry audio (a stinger; the UI transition and the program scene's own override); an input is audible when it has an audio track on
       (GetInputAudioTracks, mixers != 0) and is not muted (GetInputMute); an input without audio
       answers request code 604 and is not audible. Known limit: during a cut, the OUTGOING scene's
       inputs stay in the mix for the transition's length; the tree is re-read every 15 s;
@@ -281,8 +281,17 @@ def read_program_tree_over(ws, rpc) -> list[str]:
         return any(bool(v) for v in tracks.values()), muted
 
     audible = audible_inputs(names, audio_state)
-    trans = transition_audio(rpc(ws, "GetCurrentSceneTransition") or {})
-    return audible + ([trans] if trans else [])
+    transitions = [rpc(ws, "GetCurrentSceneTransition") or {}]
+    # the program scene's own transition override wins over the UI transition when it is set
+    override = (rpc(ws, "GetSceneSceneTransitionOverride", {"sceneName": scene}) or {}).get("transitionName")
+    if override:
+        kinds = {t.get("transitionName"): t for t in
+                 (rpc(ws, "GetSceneTransitionList") or {}).get("transitions") or [] if isinstance(t, dict)}
+        if override not in kinds:
+            raise Unreadable(f"the transition override {override!r} of {scene!r} is not in the transition list")
+        transitions.append(kinds[override])
+    extra = [t for t in (transition_audio(x) for x in transitions) if t]
+    return audible + [t for i, t in enumerate(extra) if t not in extra[:i]]
 
 
 class ProgramTreeReader:
@@ -295,6 +304,7 @@ class ProgramTreeReader:
         self.host = host
         self.password = password
         self._ws = None
+        self._shut = False
 
     def _client(self):
         try:
@@ -309,6 +319,8 @@ class ProgramTreeReader:
         def rpc(ws, rtype, data=None):
             return client._rpc(ws, rtype, data, timeout_s=OBS_REQUEST_TIMEOUT_S) or {}
 
+        if self._shut:
+            raise Unreadable("the tree reader is shut down")
         try:
             if self._ws is None:
                 self._ws = client._conn(self.host, self.password)
@@ -317,6 +329,11 @@ class ProgramTreeReader:
         except BaseException:
             self.close()
             raise
+
+    def shutdown(self) -> None:
+        """Close for good: a read still in flight when the probe stops never reconnects."""
+        self._shut = True
+        self.close()
 
     def close(self) -> None:
         ws, self._ws = self._ws, None
@@ -430,9 +447,9 @@ class AdvisoryProbe:
 
     def stop(self) -> None:
         self._stop.set()
-        close = getattr(self._read_tree, "close", None)
-        if close is not None:
-            close()
+        shutdown = getattr(self._read_tree, "shutdown", None)
+        if shutdown is not None:
+            shutdown()
 
 
 def from_env(env=None, *, boxes_dir: Path | None = None) -> AdvisoryProbe | None:
