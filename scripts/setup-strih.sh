@@ -623,8 +623,8 @@ obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile co
 # Lettered sub-step (TOTAL_STEPS unchanged -- the issue 1352/1353 precedent): the NIC-IRQ placement
 # is the biggest de-jitter win, so it rides alongside the never-sleep/de-jitter masks above.
 step "11b" "rig NIC IRQs off the OBS cores (issue 1317 item H: NET_RX softirq must not share an OBS core) + housekeeping on its own CPUs (issue 1425)"
-strih_housekeeping_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1425: housekeeping off the OBS CPUs (above)"
-strih_egress_pacing_install || fail "issue 1553: the rig NIC sender egress pacing (above)"   # scripts/lib/strih-egress-pacing.sh: an fq per tx queue, the boot unit   # scripts/lib/strih-housekeeping.sh: the sysctl, the rustdesk + display-watch drop-ins, the launcher's file
+strih_housekeeping_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1425: housekeeping off the OBS CPUs (above)"   # scripts/lib/strih-housekeeping.sh: the sysctl, the rustdesk + display-watch drop-ins, the launcher's file
+strih_egress_pacing_install || fail "issue 1553: the rig NIC sender egress pacing (above)"   # scripts/lib/strih-egress-pacing.sh: an fq per tx queue, the boot unit + NM hook
 # The USB 2.5GbE NIC's xhci interrupt lands on ONE core (irqbalance is not installed, so the kernel
 # parks it) where ~1.1 Gb/s of NDI NET_RX softirq collides with OBS's ndir:video/libobs threads
 # (issue 1354, 22.9.2026: measured on strih-snv -- moving the IRQ to an idle E-core cut the genlock

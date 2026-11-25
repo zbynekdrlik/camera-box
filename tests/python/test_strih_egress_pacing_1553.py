@@ -2,7 +2,7 @@
 
 The box fact STRIH_EGRESS_PACING_RATE (all four boxes 900mbit), scripts/lib/strih-egress-pacing.sh
 (the generated boot script, systemd/strih-egress-pacing.service, setup-strih step 11b's install and
-verify-strih item 16's rows). The libs run under the callers' `set -euo pipefail`; `tc` and `systemctl`
+verify-strih's rows on item 36's line). The libs run under the callers' `set -euo pipefail`; `tc` and `systemctl`
 are fakes on PATH (the fake tc keeps a qdisc tree in a JSON state file with the kernel's rules: mq only on
 a multiqueue device, a class must exist, the minor read as HEX), /sys and the install root are temp trees
 through the lib's seams. Values reach bash as ARGUMENTS, never inside the script text. The JSON fixtures
@@ -105,6 +105,7 @@ json.dump(tree, open(state, "w"))
 
 FAKE_SYSTEMCTL = r'''#!/bin/bash
 echo "$*" >> "$FAKE_SYSTEMCTL_LOG"
+[ "${1:-}" != --no-block ] || shift
 st="$FAKE_SYSTEMCTL_DIR/enabled"
 case "$1" in
   is-enabled) [ "${2:-}" = -q ] && { [ -f "$st" ]; exit $?; }; if [ -f "$st" ]; then echo enabled; else echo disabled; exit 1; fi ;;
@@ -393,7 +394,7 @@ def test_install_fails_by_name_when_the_rig_nic_cannot_be_resolved(tmp_path):
     assert not (w["root"] / "usr/local/sbin/strih-egress-pacing").exists()
 
 
-# --- verify-strih item 16: the grade ----------------------------------------------------------------------------
+# --- verify-strih item 36's line: the grade ----------------------------------------------------------------------------
 
 def _grade(w, box="strih-pp"):
     r = _w(w, "strih_egress_pacing_grade_report", box=box)
@@ -442,9 +443,13 @@ def test_grade_none_is_a_note_and_our_leftover_a_fail(tmp_path):
     r = _run('strih_box_load strih-pp; strih_egress_pacing_grade_report', env=env, path_prefix=str(w["bin"]))
     assert r.stdout.startswith("NOTE (egress-pacing) STRIH_EGRESS_PACING_RATE none"), r.stdout
     (w["root"] / "etc/systemd/system").mkdir(parents=True)
-    (w["root"] / "etc/systemd/system/strih-egress-pacing.service").write_text("x\n")
+    unit = w["root"] / "etc/systemd/system/strih-egress-pacing.service"
+    unit.write_text("x\n")                  # an operator's own file of that name: not ours, never a FAIL
     r = _run('strih_box_load strih-pp; strih_egress_pacing_grade_report', env=env, path_prefix=str(w["bin"]))
-    assert "FAIL (egress-pacing) STRIH_EGRESS_PACING_RATE none but strih-egress-pacing is installed" in r.stdout
+    assert r.stdout.startswith("NOTE (egress-pacing) STRIH_EGRESS_PACING_RATE none"), r.stdout
+    unit.write_text(UNIT.read_text())        # our own leftover unit
+    r = _run('strih_box_load strih-pp; strih_egress_pacing_grade_report', env=env, path_prefix=str(w["bin"]))
+    assert "FAIL (egress-pacing) STRIH_EGRESS_PACING_RATE none but ours is installed: %s" % unit in r.stdout
 
 
 # --- wiring + budgets + the one declaration --------------------------------------------------------------------
@@ -476,3 +481,73 @@ def test_the_fq_limits_are_declared_once():
     assert hits == [], hits
     lib = LIB.read_text()
     assert 'STRIH_EGRESS_PACING_FLOW_LIMIT="4000"' in lib and 'STRIH_EGRESS_PACING_LIMIT="20000"' in lib
+
+
+# --- review round 1: the NM hook, the u32 cap, the loader / lib shape parity ----------------------------------
+
+HOOK = "etc/NetworkManager/dispatcher.d/61-strih-egress-pacing"
+
+
+def test_install_writes_the_nm_hook_and_the_hook_restarts_the_unit_only_on_an_up_of_the_rig_nic(tmp_path):
+    w = _world(tmp_path, queues=2)
+    assert _w(w, "strih_egress_pacing_install").returncode == 0
+    hook = w["root"] / HOOK
+    assert oct(hook.stat().st_mode & 0o777) == "0o755"
+    text = hook.read_text()
+    assert text.startswith("#!/bin/sh\n") and "issue 1553" in text
+    env = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    env.update(w["env"])
+    env["PATH"] = "%s:%s" % (w["bin"], env["PATH"])
+    (tmp_path / "systemctl.log").unlink()
+    for args in (("enp5s0f1", "down"), ("wlan0", "up"), ("enp5s0f1.70", "up")):
+        assert subprocess.run(["sh", str(hook), *args], env=env, timeout=30).returncode == 0
+    assert not (tmp_path / "systemctl.log").exists()
+    (tmp_path / "tc.json").unlink()          # the re-added adapter came back on the default qdisc
+    assert subprocess.run(["sh", str(hook), "enp5s0f1", "up"], env=env, timeout=30).returncode == 0
+    assert _lines(tmp_path / "systemctl.log") == ["--no-block restart strih-egress-pacing.service"]
+    assert _verdict("900mbit", 2, (tmp_path / "tc.json").read_text()).startswith("OK")
+
+
+def test_grade_fails_a_missing_or_stale_hook(tmp_path):
+    w = _world(tmp_path, queues=2)
+    assert _w(w, "strih_egress_pacing_install").returncode == 0
+    hook = w["root"] / HOOK
+    hook.write_text(hook.read_text().replace("enp5s0f1", "enp9s0"))
+    out = _grade(w)
+    assert "FAIL (egress-pacing-install) %s is missing or not the render for enp5s0f1" % hook in out
+    hook.unlink()
+    assert "is missing or not the render for enp5s0f1" in _grade(w)
+
+
+def test_none_removes_our_hook_too_and_leaves_a_foreign_one(tmp_path):
+    w = _world(tmp_path, queues=2)
+    assert _w(w, "strih_egress_pacing_install").returncode == 0
+    d = tmp_path / "boxes"
+    d.mkdir()
+    for f in BOXES.glob("*.env"):
+        (d / f.name).write_text(f.read_text().replace("STRIH_EGRESS_PACING_RATE=900mbit\n", "STRIH_EGRESS_PACING_RATE=none\n"))
+    env = dict(w["env"], STRIH_BOXES_DIR=str(d))
+    r = _run('strih_box_load strih-pp; strih_egress_pacing_install', env=env, path_prefix=str(w["bin"]))
+    assert r.returncode == 0, r.stderr
+    assert not (w["root"] / HOOK).exists()
+    (w["root"] / HOOK).write_text("#!/bin/sh\n# the operator's own dispatcher script\n")
+    (w["root"] / "etc/systemd/system/strih-egress-pacing.service").write_text("[Unit]\n# hand-made\n")
+    r = _run('strih_box_load strih-pp; strih_egress_pacing_install', env=env, path_prefix=str(w["bin"]))
+    assert r.returncode == 0, r.stderr
+    assert (w["root"] / HOOK).exists() and (w["root"] / "etc/systemd/system/strih-egress-pacing.service").exists()
+    assert r.stdout.count("is not ours") == 2 and "SKIP egress pacing" in r.stdout
+
+
+def test_a_rate_the_kernel_u32_cannot_hold_is_refused_at_setup():
+    r = _run('strih_egress_pacing_rate_bytes 34gbit; strih_egress_pacing_rate_bytes 35gbit || echo cap-refused; '
+             'strih_egress_pacing_script_text enp5s0f1 999999gbit || echo script-refused')
+    assert r.stdout.split() == ["4250000000", "cap-refused", "script-refused"], r.stdout + r.stderr
+
+
+def test_the_loader_and_the_lib_take_the_same_rate_shapes(tmp_path):
+    table = ("none", "900mbit", "1gbit", "999999mbit", "900", "0mbit", "0900mbit", "900Mbit", "900kbit",
+             "1234567mbit", "", "fast", "9.5gbit")
+    for i, v in enumerate(table):
+        loader = _load_with(tmp_path / str(i), v).returncode == 0
+        lib = _run('strih_egress_pacing_rate_ok "$1"', v).returncode == 0
+        assert loader == lib, (v, loader, lib)

@@ -18,7 +18,9 @@ issuecomment-7172341290. Sender only.
 
 - **The fact** `STRIH_EGRESS_PACING_RATE` (the last key): `none` | `<N>mbit` | `<N>gbit` (N 1..999999,
   no leading zero, lower case). All four boxes `900mbit`, one value at both venues. The loader's check
-  rides the housekeeping-CPU line of `strih-box-facts.sh` (that lib is at its 1000-line budget).
+  rides the housekeeping-CPU line of `strih-box-facts.sh` (that lib is at its 1000-line budget); a test
+  pins its shape equal to `strih_egress_pacing_rate_ok`. fq's maxrate is a u32 in bytes/s, so a rate
+  above ~34 Gbit/s is refused by `strih_egress_pacing_rate_bytes` at setup.
 - **`scripts/lib/strih-egress-pacing.sh`** (sourced by strih-provision.sh) is the ONE declaration of
   the fq limits (`flow_limit` 4000, `limit` 20000). A test fails when any other `scripts/` or
   `systemd/` file spells `flow_limit 4000`.
@@ -31,13 +33,19 @@ issuecomment-7172341290. Sender only.
   exits 2 and is never retried (`RestartPreventExitStatus=2`).
 - **`systemd/strih-egress-pacing.service`** = `strih_egress_pacing_unit_text` byte for byte: oneshot,
   RemainAfterExit, After/Wants network-online, Restart=on-failure.
+- **The NM dispatcher hook** `/etc/NetworkManager/dispatcher.d/61-strih-egress-pacing` (0755, the rig
+  NIC baked in): an `up` of the rig NIC runs `systemctl --no-block restart strih-egress-pacing`, so a
+  re-added adapter (the stream boxes' USB r8152) is paced at once, not at the next boot. Any other
+  interface or action exits 0. (The housekeeping lib's `60-` hook is the same pattern.)
 - **setup-strih step 11b** (`strih_egress_pacing_install`, one line, every role): write-if-changed
-  (temp + rename), daemon-reload on a change, enable, then `systemctl restart` (= the same idempotent
-  `replace` script) only when a file changed or the live tree is not the declared one. `none` removes
-  OUR script + unit only (a file without the generator's marker is left); the live tree stays until a
-  reboot, the step prints the `tc qdisc del` that removes it now.
+  (temp + rename; a private writer because `obs_box_write_if_changed` calls `fail()` and always chowns),
+  daemon-reload on a script / unit change, enable, then `systemctl restart` (= the same idempotent
+  `replace` script) only when the script or unit changed or the live tree is not the declared one. `none`
+  removes OUR script + unit + hook only (a file of that name without the lib + `issue 1553` in its text is
+  named and left, and verify never FAILs it); the live tree stays until a reboot, the step prints the
+  `tc qdisc del` that removes it now.
 - **verify-strih** (`strih_egress_pacing_grade_report`, on item 36's line: verify is at its budget):
-  `(egress-pacing-install)` = script + unit equal to their render, enabled; `(egress-pacing)` =
+  `(egress-pacing-install)` = script + unit + hook equal to their render, enabled; `(egress-pacing)` =
   `tc -j qdisc show dev <nic>` graded by `strih_egress_pacing_tree_verdict`; `none` = one NOTE, our
   leftover files FAIL.
 
@@ -52,8 +60,8 @@ issuecomment-7172341290. Sender only.
 - **JPEG XS is paced with NDI here** (no cambox-style prio + fw exemption): `mq` takes no filter, and the
   program strih -> stream is exactly the burst onto a slower port. A 2 MB frame takes ~18 ms at 900 Mb/s,
   inside the receiver's fixed grid age.
-- **Known limit:** a USB adapter re-added at run time (the stream boxes' r8152) comes back on the
-  default qdisc until the unit runs again; verify FAILs it naming `systemctl restart strih-egress-pacing`.
+- **A box without NetworkManager on the rig NIC** gets no hook run: a re-added NIC there stays on the
+  default qdisc until the next boot, and verify FAILs it naming `systemctl restart strih-egress-pacing`.
 
 ## Supervisor live steps (the lane was code-only)
 
