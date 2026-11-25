@@ -155,3 +155,7 @@ the `(hk-softnet)` softnet_stat / InDroppedDma deltas) is tested with a `sleep` 
 (`SWAP_SLEEP`) that copies an "after" fixture over the file being read: the code's own sleep becomes the
 moment the counters move, with no extra env seam and no wall-clock wait. Write greedy expectations from a
 hand-run of the algorithm (ties to the lower CPU decide the light IRQs).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Housekeeping off the OBS CPUs on a strih box (issue 1425: box fact `STRIH_HOUSEKEEPING_CPUS`, strih-snv 0-1; the step-11b oneshot cuts RSS + places every rig-NIC IRQ on ONE housekeeping CPU, balanced by a 2 s rate sample (design 7119179275), the tasks + slice on the first CPU, the program-audio sampler on the OBS mask at nice 10, a udev rule sets RSS at add so no link drop after boot, an NM up hook re-pins, `strih-nic-irq-rebalance.timer` re-balances once 5 min after boot (design 7119686502, verify `(hk-rebalance)`); no netdev_budget_usecs change (kernel 7.0 refuses < 2000); rustdesk + display-watch drop-ins; the launcher moves its own shutdown watch; verify item 16 `(hk-*)` rows) → `.claude/rules/strih-housekeeping.md` (auto-loads on its `paths:`)

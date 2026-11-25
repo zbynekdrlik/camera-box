@@ -79,3 +79,7 @@ directly (a plain `VB_MATRIX_FETCH_CMD=… bash scripts/vb-matrix-alert-watchdog
 latch end-to-end. Pair with pytest for `vb_matrix_decision.py` + the gather parsers, and the Rust
 harness (`tests/harness_vb_matrix_alert_watchdog_1227.rs`). Add a committed
 fixture as `.txt` (not `.log`, gitignored) — here all fixtures are inline, so it did not bite.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- VB-Matrix presence facet + dev1 alert watchdog (the `vb_matrix_running` bundle-state facet is 3-STATE — install-present disk gate + native tasklist parse; a FAILED tasklist read must be None→UNKNOWN never a false "0" DOWN, install-absent imag omits it; `wmic` is GONE on the stream box so start-time = CIM `Get-CimInstance Win32_Process` `.ToString("s")` locale-stable, #1222 PID-keyed-cached + called unconditionally; ONE shared `tasklist_csv()` feeds both obs-count + vb-matrix; the 5th obs-watchdog sibling `vb-matrix-alert-watchdog.sh` DETECTION-ONLY, cure = owner `schtasks /run /tn StartVBMatrix` + durable AtLogon-trigger, dedup `vb-matrix-$box`, ships DISABLED; the `VB_MATRIX_FETCH_CMD` env fetch-seam dry-run, #1227) → `.claude/rules/vb-matrix-watchdog.md` (auto-loads on its `paths:`)

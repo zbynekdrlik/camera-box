@@ -146,3 +146,7 @@ nothing (live: run 35152458072 attempt 2 with both `COLD_CUT_BYPASS_*` variables
 must therefore ride an OPEN pull_request run: set the two repository variables immediately BEFORE opening
 the next dev→main PR, harvest the verdict, unset them. A `workflow_dispatch` run is plan-only
 (`E2E_EXECUTE_VERDICT=0`) and equally useless for it.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Cold-cut gate — the keepalive-bypass step (`scripts/lib/cold-cut-step.sh`: `COLD_CUT_BYPASS_CAM`/`COLD_CUT_BYPASS_INPUT` opt-in; idle-after-1st-appearance/restore-before-2nd-cut + cleanup restore-on-abort; the #767 keep-alive build keeps receivers warm off-program so a genuine cold cut needs clearing `ndi_source_name`), the `obs_phase2.py idle-receiver` primitive (overlay:True keeps the latency pin), and the report-only seam's LIVE-flip prerequisites (warm baseline + a genuine-cold run + per-cambox tick re-confirm + calibrating the sustained-fps / issue-793 segfault-discriminator constants; #768/#1086) → `.claude/rules/cold-cut-gate.md` (auto-loads on its `paths:`)

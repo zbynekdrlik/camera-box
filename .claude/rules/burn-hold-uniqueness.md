@@ -63,3 +63,7 @@ with margin, matches the ticket's "may hold for 2, never 5", and mirrors
 `imag_tick_gate::IMAG_OPTICAL_MAX_STUCK_RUN=3` (3 Δ0-pairs = 4 frames — the imag OPTICAL-tick
 sibling of this NODE-BURN gate; that module has `stuck_run_stats().max_run` but no per-length
 histogram, which is why burn_hold has its own single walk).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Burn-id contiguity is PRESENCE-ONLY (set-based, blind to a REPEATING/freezing hop) — the per-hop max-hold term is the separate `src/burn_hold.rs` (`MAX_HOLD_FRAMES=4`, LIVE since #870; hold input is #575-boundary-trimmed via `recording_boundary_trim::trim_boundary_pairs`); any repeat/run-length metric MUST use `burn_ids_with_frame_index_in` + break on non-adjacent `frame_index`, never `burn_ids_in` → `.claude/rules/burn-hold-uniqueness.md` (auto-loads on its `paths:`)

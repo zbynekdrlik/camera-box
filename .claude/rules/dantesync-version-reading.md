@@ -151,3 +151,8 @@ invariant. Update them in their OWN commit (read-only-during-GREEN discipline): 
 asserts move to `--win "$DV_WIN_NODES"`, and the negative-anchor count-1 list SWAPS `--win "strih=`
 for `--win "$DV_WIN_NODES"` (still count-1, still proves no invocation duplication). Same
 `strih_platform` per-box-branch pattern as the version-integrity gate's `STRIH_LINUX_GATE_ARG`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Reading dantesync's own VERSION (`dsync --version` answers on every platform, no journal/bundle-state coupling, pin-vs-relative-parity comparison model, #862) → `.claude/rules/dantesync-version-reading.md` (auto-loads on its `paths:`)
+- Reading dantesync's own VERSION (`dsync --version` answers on every platform, no journal/bundle-state coupling, pin-vs-relative-parity comparison model, #862; sourcing the gate exposes only the PURE parser + pin, not its SSH reader, #876) → `.claude/rules/dantesync-version-reading.md` (auto-loads on its `paths:`)

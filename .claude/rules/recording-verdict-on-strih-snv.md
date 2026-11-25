@@ -84,3 +84,7 @@ exactly the failure a bulk job on the strih notebook would cause during a produc
   new lowprio test. Run the occurrence-count anchor sweep after any edit anyway.
 - Acceptance is a supervisor rig step: the next full E2E showing **zero relocks on strih-snv during
   `[8/8a]`**.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- strih-snv in-place recording decode (`[8/8a]` `recording-verdict-on-strih-snv.sh`) at IDLE priority on the E-cores (`strih_lx_lowprio_prefix` pure encoding + the single-quoted remote-shell replica that resolves `/sys/devices/cpu_atom/cpus` ON the box; the issue-1354 post-run relock-storm root cause; binary scp + partial pull byte-identical; issue 1351) → `.claude/rules/recording-verdict-on-strih-snv.md` (auto-loads on its `paths:`)

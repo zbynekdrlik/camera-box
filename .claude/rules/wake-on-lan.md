@@ -103,3 +103,7 @@ Reuse this pattern for any other NM-managed Linux target:
   loses power in S5, so the dongle typically CANNOT wake the box from a full shutdown unless the BIOS
   keeps USB powered in standby (ErP/EuP/Deep-Sleep disabled + a "USB power in S3/S4/S5" option). That
   BIOS layer is the owner's hands-on step — the OS half (NM `magic`) is all the repo can provision.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Wake-on-LAN remote recovery for strih/stream (#1053 — dev1 `wake-box.sh` magic-packet sender + pure `scripts/lib/wol.sh` + `enable-nic-wol.ps1` NIC enable/verify; the STEP-0 finding that both NICs are ALREADY WoL-enabled so BIOS standby-power is the gap; the Realtek `*EEE` multi-element `RegistryValue` array gotcha) → `.claude/rules/wake-on-lan.md` (auto-loads on its `paths:`)

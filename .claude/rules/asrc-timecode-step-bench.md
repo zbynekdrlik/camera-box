@@ -141,3 +141,7 @@ or never.
   - The pin's A/V window starts at the sender's first followed BLOCK (its content slot at or after
     `follow_at`), not at the follow instant: an old-schedule block still in flight then reads |S|,
     over the forward bound (review round 4).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The issue-1381 wall-step, relabel and pending-relabel two-clock benches (`src/asrc_timecode_step_bench.rs` + `src/asrc_timecode_pending_bench.rs`: the sender that follows / catches up / never follows, the grid positions of a one-slot step, the late and jittered late follows counted from the follow on, split out of the ASRC bench harness rule) → `.claude/rules/asrc-timecode-step-bench.md` (auto-loads on its `paths:`)

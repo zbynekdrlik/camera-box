@@ -93,3 +93,7 @@ job's panel Playwright E2E sits in front of every post-merge camera-box deploy.
 Tests: `tests/python/test_deploy_fleet_relay_1452.py` (deploy-fleet run whole on the issue-1407 fake
 box with a fake `sshpass`; plant an old relay at `fs/usr/local/bin/bkshading-relay`, an active one
 via `state/active-bkshading-relay.service`; a foreign / own lease via `RIG_LEASE_DIR`).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Fleet upgrade = camera-box AND the pinned bkshading relay (issue 1452 + 1487: `deploy-fleet.sh`'s relay phase through `bkshading-deploy-relay.sh`, "not installed" never a failure, a box on the pin left alone, relay failures in FAILED, every box's two versions on the last line, `--no-relay` only for the [0/8] parity align, the caller's own rig lease goes through; the handheld SBC stays out; rig-dev-handover's shading item FORGOTs a relay off the shading pin) → `.claude/rules/fleet-relay-upgrade.md` (auto-loads on its `paths:`)

@@ -58,3 +58,7 @@ is unit-tested RED→GREEN. The `sigaction` glue, both `Drop` impls, and the pro
 probe-/hardware-gated — blank behavior exercised only on the rig / E2E (mirrors the untested #660
 `KmsPresenter::Drop` precedent). `rustfmt --check` DOES parse probe-gated files, so run it on every
 changed file before pushing.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- /dev/fb0 blank-on-teardown + frame-probe graceful shutdown (BOTH KmsPresenter::Drop #660 AND VsyncFb::Drop #1186 blank via blank_fbdev; the SIGTERM/SIGINT/SIGHUP handler in src/shutdown.rs sets a flag the paint loops poll so the existing Drop teardown runs; HARD invariant — never blank fb0 directly from a signal handler, drive it through the presenter Drop, #1176/#1186) → `.claude/rules/fb0-blank-on-teardown.md` (auto-loads on its `paths:`)

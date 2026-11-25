@@ -123,3 +123,7 @@ the real bash watchdog through `AUDIO_MIXER_FETCH_CMD`) and the follow-up tests 
 00:25:00 gap; the served JSON gained only `audio_mix_session` + `audio_rx` (key order kept); the one
 input-caused value change is `bounded:concat` `audio_mixer_age_s` 645 -> 606 (the bounded tail cut
 moved by the inserted bytes; that age is the whole tail span there).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Program-audio RECEIVE loss pager (issue 1460: the nested `:8899` `audio_rx` facet = per receiver the gated counter deltas of the last 660 s, both status lines inside the window, a re-init / backwards counter = a rebase; obs-vban `lost` (concealed included) / `re_anchors` / `emit_missed`, Dante = the E2E gate's GATED; the receiver from the box facts via `program_audio_rx_key`, never a literal; the fifth arm of the audio-mixer watchdog, PRODUCTION-CRITICAL `program-rx-<box>`, ships DISABLED behind `AUDIO_MIXER_PROGRAM_RX_PAGE=1`; the MIX-LATE session identity `audio_mix_session` + `handle_arm`'s return) → `.claude/rules/program-audio-rx-watchdog.md` (auto-loads on its `paths:`)

@@ -215,3 +215,7 @@ The reserved instance advertises the PGM name FRAMELESS for the ~seconds of OBS 
 stock NDI Studio Monitor / building TV tolerates a frameless source (drops it? blacklists it?) is
 UNVERIFIED and must be checked on the live rig at integration — a worktree/code worker cannot prove
 it. Keep it in the evidence block as UNVERIFIED, not as a done claim.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- DistroAV SENDER-output lifecycle + NDI port ordering (ports assigned by CREATION ORDER from :5961; the program starts LAST at FINISHED_LOADING so ndi_filter republishes win the low ports; #1185 reserve-at-obs_module_post_load + adopt-in-ndi_output_start pins 2ME PGM to :5961; the begin_data_capture-fail leak that turns the pin-holder into a frameless PGM ghost; call-site-unique lock-step anchors; the frameless-idle-sender tolerance is UNVERIFIED without the rig; Linux: libndi binds senders without SO_REUSEADDR so a TIME_WAIT on :5961 from the previous OBS walks the pin to :5962 — FIXED by the Linux-only `ndi-sender-port.{h,cpp}`: every sender create tracked (port = the one new /proc/self/fd listener in the sender band [5961,6960) -- libndi RECEIVERS pulling a remote source open their own :6960+ listeners concurrently; unidentified = PORTID-1363), every sender destroy preceded by SO_LINGER {1,0} PLUS an immediate AF_UNSPEC reset (libndi shutdown()s before close(), so linger alone leaves TIME_WAITs), WARN-1363 only at the reserve, never a wait; issue 1363) → `.claude/rules/distroav-sender-output-lifecycle.md` (auto-loads on its `paths:`)

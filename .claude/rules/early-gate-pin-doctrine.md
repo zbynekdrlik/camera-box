@@ -188,3 +188,7 @@ wrappers, so each gate's output is byte-identical to its former copy and a fix t
 (the merge-base scoping, `--end-of-options`, the empty-SHA rc 128, the no-`--first-parent` rule)
 lands in both at once. A NEW early gate that pins a deployed SHA against a vendored tree calls these
 three helpers with its own format + paths; it never copies them again.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Early-gate PIN doctrine (EVERY early version/preflight gate PINS to the expected release + fails CLOSED on UNKNOWN; peer parity is a supplement not a substitute; MOVING-pin for a continuously-deployed component = read origin/main + auto-deploy so pin+fleet advance together; the pin must NOT LAG the newest release — an orphan release (published-but-not-deployed+pinned) must SCREAM, advancing pin+deploy is a mandatory release step; live audit table + holes #1137 OBS-bundle-vs-vendor / #1138 frame-probe-unpinnable / #1139 dsync-tray+pin-lag; #1136) → `.claude/rules/early-gate-pin-doctrine.md` (auto-loads on its `paths:`)

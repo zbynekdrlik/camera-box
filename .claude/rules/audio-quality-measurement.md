@@ -156,3 +156,7 @@ target split into short segments -- the next segment can hold a genuinely differ
 once the ppm target has moved on, and reading into it mid-window costs real (not measurement-
 artifact) dB from cross-contamination. Pass `max_n=<this segment's own sample count>` -- see
 `thdn_segmented()`'s call site and `_find_coherent_n`'s own `max_n` parameter.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Offline audio-quality (THD+N) measurement (coherent-sampling window-leakage trap, the CI-only-vendor-code standalone-harness pattern, CPU-timing noise on a shared box, #929; the swr_set_compensation revert-vs-reissue proof + the stateless distance_ms-widening quantization fix, #1016) → `.claude/rules/audio-quality-measurement.md` (auto-loads on its `paths:`)

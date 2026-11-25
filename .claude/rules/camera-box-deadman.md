@@ -221,3 +221,7 @@ byte-verify reads the FINAL path, `stop …-deadman.timer` precedes the painter 
 Rust twin is `tests/harness_deploy_fleet_frame_probe_swap_1351.rs`. The `[0/8]` parity auto-align
 (`frame-probe-parity-align.sh`) inherits the fix for free — it invokes `deploy-fleet.sh
 --frame-probe`, so nothing there changes.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- On-box dead-man for PRODUCTION camera-box.service + the ExecStartPre device-free bake-in (#772): the KEY difference from cam2-painter-deadman — the burn never self-terminates, so DELAY the first fire past the run window instead of a presence-guard; + the systemd-run-action nested-quoting layering → `.claude/rules/camera-box-deadman.md` (auto-loads on its `paths:`)

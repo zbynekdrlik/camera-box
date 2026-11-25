@@ -238,3 +238,7 @@ checked statically (the call sits before the relay start, the note between the E
 the Discord send) and by sourcing it (the helpers are defined above its source-guard). The EVENT
 path cannot be run in a test; after editing it, run the old-vs-new literal-count anchor sweep over
 every test that reads `rig-mode.sh`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- E2E `[0/8]` test-camera shutter/ISO ENFORCE (issue 1371: read the ONE BMPCC on the relay-paused cambox holding its USB-C -- since issue 1452 over the camera's REST API on its USB-C link with `curl` on the box, the shading v0.2.x contract's endpoints/fields, gphoto2 gone -- set what differs from `scripts/camera-test-baseline.json` (schema 2: `iso`, the shutter in the unit the camera reports `shutterAngle` x100 / `shutterSpeed`), read back, abort on MISMATCH; absent camera + null baseline = loud report-only UNVERIFIED, once pinned an absent camera aborts; ack name `testcam`; the supervisor pin runbook; the owner's PRODUCTION exposure snapshotted before the first set of a development period and restored + read back by `rig-mode.sh event`, never fatal to it, reported by the handover check) → `.claude/rules/camera-test-settings.md` (auto-loads on its `paths:`)

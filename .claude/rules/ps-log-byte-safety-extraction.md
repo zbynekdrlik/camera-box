@@ -76,3 +76,7 @@ pass even when the underlying bytes are exactly what a strict downstream reader 
 `read_to_string`) would reject. Capture and assert on raw `Vec<u8>` (`std::str::from_utf8(&bytes).
 is_ok()`) when the property under test is "the output is valid UTF-8", not just "the output
 contains the expected substring".
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Byte-safe extraction from a PS-fetched OBS-log tail (grep's binary-detection trigger is narrower than "any invalid byte in the stream" — co-residence on the SAME line matters; `LC_ALL=C grep -a` fixes only the shell side, a Rust `read_to_string` consumer downstream still needs the byte STRIPPED; pin `LC_ALL=C.UTF-8` in any byte-safety test harness or its RED silently stops discriminating; issue 1258/1262) → `.claude/rules/ps-log-byte-safety-extraction.md` (auto-loads on its `paths:`)

@@ -109,3 +109,7 @@ signature is a hold that STAYS at −(latency) and never recovers, which a settl
 `backward_regime_ticks=<n>` in the `genlock-fifo audit` line only exists in the #1009 build — its
 presence is a one-glance proof the deployed `obs.dll` is the fixed one, independent of any
 `GENLOCK_BUILD_SHA.txt` stamp (which a rollback leaves stale, since Copy-Item preserves mtime).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Genlock hold-collapse diagnosis (A/V offset ≈ −latency_ms signature, the once-per-event backward-step latch that makes log silence lie, ceil-stamp hair-trigger, OBS-relaunch-only repair, 15-min offline arbiter recipe, Windows remote-grep traps, #1007/#1009) → `.claude/rules/genlock-hold-collapse-diagnosis.md` (auto-loads on its `paths:`)

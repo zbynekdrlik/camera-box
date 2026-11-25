@@ -179,3 +179,7 @@ Windows launch program (`Set-CbObsPriorityFloor`) raises Idle/BelowNormal to Nor
 Normal/AboveNormal/High (the resolume cg OBS runs High), prints `PRIORITY OK: ... <before> -> <after>`
 and exits 8 when it stays below Normal. Check a running box with
 `(Get-Process obs64).PriorityClass`; a logon start (explorer) already gets Normal.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- OBS launch-path contract (.lnk primary + per-box params test-pinned; obs-guarded-launch.ps1 bare-no-args = correct for stream; strih AHK versioned at scripts/strih/NL_STARTUP.ahk, #774/#775) → `.claude/rules/obs-launch-paths.md` (auto-loads on its `paths:`)

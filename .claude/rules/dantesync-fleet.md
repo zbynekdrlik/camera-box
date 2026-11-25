@@ -244,3 +244,7 @@ tests/python/test_dantesync_fleet_pp_1412.py tests/python/test_dantesync_fleet_p
 `tests/python/fixtures/dantesync_config_1372/`; PATH `sshpass`/`dantesync` stubs record which password
 each target was dialled with). A worktree worker drives bash through pytest subprocesses (the
 isolation guard refuses a bare `bash -c`).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The ONE declared dantesync fleet (issue 1372: `scripts/lib/dantesync-fleet.sh` + python twin `scripts/dantesync_fleet.py` — every camera a venue fact file lists (issue 1413: SNV cameras `always`, the Poprad ones `reach` at 10.76.9.x), dev1, the obs-fleet boxes, the PP boxes and alex-nb on the audio VLAN (mbc + fohabl are dsync's since 15.11.2026, issue 1487), lv1 excluded by the owner; per-node OS/role/home-gate/ssh user + a credential referenced by env-var NAME (none committed today; dev1-local 0600 cred file, parsed not sourced); the version gate + fleet upgrader `--fleet`, the clock watchdog defaults + `fixed` arm graded against the ROLE's grandmaster (audio 10.77.7.106), the handover item; the report-only per-role config drift check `scripts/dantesync-config-drift.sh` vs `scripts/dantesync-canonical-config.json`, BOM = drift, never writes a box; the E2E `[0/8]` gate deliberately stays per-run) → `.claude/rules/dantesync-fleet.md` (auto-loads on its `paths:`)

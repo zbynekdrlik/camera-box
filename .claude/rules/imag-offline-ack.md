@@ -187,3 +187,7 @@ imag-nb:owner 20.9.2026 - imag-nb mimo rig ~1 rok (USB NIC nesie strih-snv .202)
   from the watchdog/deploy rosters, and made `rig-health-audit.py` check_imag +
   `rig-dev-handover-check.sh` pins retired-aware (both read the `imag:`/`imag-nb:` ack here as the
   rig-wide source of truth).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- imag-nb offline-ack leg skip (imag ackable as box name "imag" via cambox-offline-ack.sh; the FULL imag hard-abort site inventory in recording-e2e.sh a "make imag optional" change must cover; the imag-vs-imag-nb naming split across gates; IMAG_OFFLINE_ACKED guard shape + #798 marker 3rd arg, #1013) → `.claude/rules/imag-offline-ack.md` (auto-loads on its `paths:`)

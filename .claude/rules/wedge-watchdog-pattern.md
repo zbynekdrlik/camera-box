@@ -122,3 +122,7 @@ dispatch (a production send `Ok`, or a queued burn job `ring.submit` `Ok`). Arm 
 after the first dispatch (0-sentinel heartbeat) so boot/NDI warmup never false-fires — the inverse
 of `#945`'s 0-seed (which treats "capture never started" as fireable, correct for a thread wedge
 but wrong for an output that legitimately has not warmed up yet).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Heartbeat wedge-watchdog recipe for a NEW blocking-hardware call site that can hang forever (the D-state/no-signal-can-preempt root cause, the 4-piece pattern, threshold-vs-existing-inner-timeout sizing, the `const _: () = assert!(...)` clippy gotcha, #945/#936) → `.claude/rules/wedge-watchdog-pattern.md` (auto-loads on its `paths:`)

@@ -271,3 +271,7 @@ Run it when no E2E / soak holds the rig lease (`curl -s http://127.0.0.1:8890/ri
   (`tests/python/test_bkshading_relay_gaps_808.py`, `tests/python/test_ndi_discovery_1342.py`).
   A new block there calls an undefined function under `set -e`, and its `warn` would trip their
   `'warn "' not in block` assertions. `(ap)` therefore sits right after `(ae)`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- cambox NDI egress PACING (issue 1242: the ONE declaration `scripts/lib/cambox-egress-pacing.sh` of `fq maxrate 400mbit`, the generated boot script + `systemd/cambox-egress-pacing.service`, setup-device `[egress-pacing]` enable-only, verify-device `(ap)` HARD, the report-only E2E `[0/8]` row, the supervisor runbook) → `.claude/rules/cambox-egress-pacing.md` (auto-loads on its `paths:`)

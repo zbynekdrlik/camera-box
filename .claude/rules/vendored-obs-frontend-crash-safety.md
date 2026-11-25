@@ -256,3 +256,7 @@ the file stops growing, and the test compiles the SHIPPED file instead of a slic
   can be lifted into one `g++ -fsyntax-only -Werror` file against the REAL `obs.h` (`-I libobs`
   plus the four-define `obsconfig.h` stub). That catches a wrong struct field or a missing export
   declaration without uic/moc stubs. Prove the harness bites with one deliberate typo.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Vendored OBS FRONTEND crash-safety (`obs_data_get_json()` returns NULL on json_dumps failure → the c0000005 `ucrtbase!strcmp` / `std::string(NULL)` NULL-deref class, guard at the CONSUMER; reading a live OBS crash log on strih via win-* MCP file read incl. the `Arg0=0x0` tell; Facet A anchor + Facet B `cc` lift of a frontend `.cpp` helper; no pwsh mirror + FULL-BUNDLE deploy, #773; issue 1378: the rig build's Windows `main_crash_handler` never shows the task-modal crash dialog — crash file + one `Crash report written to` / `could NOT be written to` LOG_ERROR line + `exit(-1)`, a non-throwing `canonical()`, the lifted-and-run handler test, in the obs repo since issue 1505) → `.claude/rules/vendored-obs-frontend-crash-safety.md` (auto-loads on its `paths:`)

@@ -510,3 +510,7 @@ prefix a state also uses. **Incident (issue 1351, 2026-09-21):** THREE `_1351` t
 passed only because it expected a REFUSAL and a different facet caught it. A whole-file sweep to
 catch this: compare the set of `write_(linux_)?manifest("NAME"` names against the set of
 `write_state("NAME"` names — any intersection is a live clobber.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- version-integrity-gate.sh Windows-stack drift gate (the 756→758 opt-in→ENFORCED two-step, the with_sha/with_obs_identity_ok enforced-fixture injection pattern, the port4455 non-elevated-gather limitation #829/#1067, strih obs_installs/startup_chain DRIFT = #826 physical cleanup not a code bug; issues 1377 + 1384: facet libs + main() as parsing + `vig_row_*` row calls + verdict, the row contract (counters by dynamic scope, never `local`), the parity row kept in the gate file for a text anchor, and the declare-f + end-to-end byte-identity proof recipe) → `.claude/rules/version-integrity-gate.md` (auto-loads on its `paths:`)

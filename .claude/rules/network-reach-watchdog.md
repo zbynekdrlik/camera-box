@@ -82,3 +82,8 @@ this reachability watchdog.
 
 The 2026-08-13 comment also floats enabling Wake-on-LAN in strih/stream BIOS + Windows NIC power
 settings for remote recovery — a separate hardware/BIOS task, not this software watchdog.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- dev1-side reachability + frozen-input alert watchdogs (probe-FROM-dev1, shared confirm/throttle, per-box/per-source state) → `.claude/rules/network-reach-watchdog.md` (reachability, #1001) + `.claude/rules/frozen-input-watchdog.md` (phase-2 frozen-input via the genlock-fifo `received=` tap + the no-double-page guard, #1052) (both auto-load on their `paths:`)
+- strih/stream network-UNREACHABLE alert (dev1-side watchdog that probes the two OBS boxes FROM dev1 — never ssh IN — with a multi-signal ping OR :4455 OR :8899 check; REACHABLE iff ANY; 2-pass confirm + shared obs_watchdog throttle; per-box state; reference-anchor guard against a dev1-side path outage; recovery ping; closes the 50-min silent-strih-outage gap, #1001) → `.claude/rules/network-reach-watchdog.md` (auto-loads on its `paths:`)

@@ -155,3 +155,7 @@ live `getent hosts resolume.lan` address.
 Watchdog/bundle-state/fleet registration → issue 1296 (merged — `scripts/lib/obs-fleet.sh`);
 dantesync NTP/phase-slew on this box → issue 1297; the in-OBS lock indicator → issue 1298;
 the per-frame pixel contiguity of the CG chain → issue 1301.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- RESOLUME-SNV cg OBS on the genlock fleet (the `resolume` arm in deploy-genlock-fleet.sh / launch-obs-genlock.sh: win-resolume MCP, AHK mode `guard` (the owner's AHK v2 safe-loop respawns Arena+OBS — issue 1372 ruling: stop it only if running, NEVER start/restart it, AutoHotkey64 count report-only, OBS launched directly + verified by one live obs64 and the `build <sha> - <label>: cg` title (label localized); the old #1295 stop→restart-AHK contract is retired), hostname-not-pinned-IP + live identity-confirm, explicit-only never the empty-default fleet; the genlock build DEFAULTS genlock_fifo=true + latency 3 + certified coercion so the "pin" step is a CONFIRM not a WS write; the `_ndi_inputs_matching` sp-*_video prefix-floor sentinel in latency_pins_verify.py/latency-pins-baseline.json; NDI output `RESOLUME-SNV (cg-obs)` + #1185 :5961 pin; the supervisor deploy→relaunch→confirm→cg-chain-verify runbook; #1295) → `.claude/rules/resolume-cg-obs.md` (auto-loads on its `paths:`)

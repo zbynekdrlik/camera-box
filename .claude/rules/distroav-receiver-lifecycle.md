@@ -616,3 +616,7 @@ CI is the first real compile, but a `g++ -fsyntax-only -std=c++17 -fPIC -Wall -W
 an inline include-array). A patch that is removed wholesale (no later commit touched the file) is
 cleanest as `git checkout <last pre-patch rev> -- <file>`, proven by an empty `git diff <rev>`,
 then this syntax check, then the pwsh mirrors in both windows-genlock*.yml and the Rust/python pins.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- DistroAV NDI receiver-thread lifecycle (a `break` never clears `s->running`, so `ndi_source_update` can't revive a dead thread → permanent reattach-proof black; retry-in-place not break; the #767 watchdog makes the reset path reachable unattended; the std-only decision-helper gate pattern; do not conflate with the #1096 finder-poison wedge; #1080/#1097); issue 1242: no receiver parks any more + the one-time strih-snv migration runbook of the low-bandwidth removal → `.claude/rules/distroav-receiver-lifecycle.md` (auto-loads on its `paths:`)

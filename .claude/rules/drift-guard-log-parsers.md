@@ -98,3 +98,7 @@ drift-guard.sh sources beside its other pure libs. version-integrity-gate.sh's `
 same three functions. Change the range logic there, once. The wrapper only picks drift-guard's own
 format (`--oneline`) and pathspec (`vendor/obs-studio vendor/distroav`). Rationale and traps:
 `.claude/rules/early-gate-pin-doctrine.md`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- drift-guard.sh `*_from_log` parsers must be drain-safe (every `printf | consumer` pipeline ends `|| true` — awk `exit` / `head -1` early-close SIGPIPEs printf on a large log → 141 under `set -euo pipefail` kills the whole `--check-imag` run; the SIGPIPE-survival test pattern: `run_sourced_status` under `set -euo pipefail` + a >1 MB fixture; issue 514 + #1189) → `.claude/rules/drift-guard-log-parsers.md` (auto-loads on its `paths:`)

@@ -100,3 +100,7 @@ the disciplined clock. A Dante-clocked sender still differs from system time by 
 
 The same parser reads a pktmon capture converted with `pktmon etl2pcap` (pcapng, EN10MB). Filter to
 the NIC component or pktmon's per-component copies show up as `dup=` (harmless — dedup is by counter).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Inter-PC VBAN rate + loss (issue 1372 part C: `scripts/vban_rate.py` pure pcap/pcapng parser — rate by the FRAME COUNTER least-squares slope, never the packet count (the −125 ppm mistake); loss = counter holes, dup/reorder never loss, jumps split segments; snaplen ≥ 96; `--dst` keeps inbound streams; an offline diagnosis CLI + the VBAN header layout the issue-1460 bench imports; the dev1 capture watchdog was RETIRED 26.10.2026 — the obs-vban receive status line + the BLOCKING E2E program-audio continuity gate measure rate + loss on the receiving box) → `.claude/rules/vban-rate.md` (auto-loads on its `paths:`)

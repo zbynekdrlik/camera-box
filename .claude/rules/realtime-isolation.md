@@ -236,3 +236,7 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   over 10 min; cam2's events are its card's re-timing (issue 1482), not the kernel. The rejected
   Approach 2 (move the NDI threads off core 3) is not warranted either. Re-open only on a measured
   emit defect that follows the kernel.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Realtime isolation subsystem (merged RT-conditional affinity.rs capture-IRQ routing + verify (ac); owner REJECTED Ubuntu Pro 2026-08-20 → STAGED two-step FREE kernel path: STEP 1 = `linux-lowlatency-hwe-24.04` (config meta = preempt=full, the imag-nb precedent — on the cam boxes it also pulls a new HWE image so it is reboot-class + single-kernel purge), STEP 2 = custom PREEMPT_RT via CI only with measurement data; reboot-class supervisor-only via the rt-kernel-upgrade.sh dry-run planner + runbook; safe atomic order reboot-before-purge; per-box GRUB drift; the before/after 10-min emit-jitter+underrun journal measurement gates STEP 2; defect 2 = per-thread SCHED_FIFO code-fixed (drop process-wide CPUSchedulingPolicy in both unit copies + `affinity.rs set_current_thread_realtime` + verify (ah)); #899) → `.claude/rules/realtime-isolation.md` (auto-loads on its `paths:`)

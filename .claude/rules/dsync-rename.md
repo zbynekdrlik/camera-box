@@ -131,3 +131,7 @@ together.
 
 `tests/python/test_dsync_swap_1487.py` RUNS the emitted Linux programs on a fake root (paths mapped,
 stub `systemctl`/`mount`/`findmnt` logging the root mode), and pins the Windows text.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- dantesync became dsync (issue 1487: dsync 1.25.0 renamed the binary, unit, service and state dir; `scripts/lib/dsync-swap.sh` = the swap: state dir RENAMED so the date master keeps its date-offset.json, the unit derived from the node's own, the old install removed only after the node verified; the pinned shas in `scripts/lib/dsync-release.sh`; a node dsync owns is no fleet row (mbc + fohabl since 15.11.2026, the self-upgraded middle state removed); which `dantesync` names stay and why; the ~95 s cold lock) → `.claude/rules/dsync-rename.md` (auto-loads on its `paths:`)

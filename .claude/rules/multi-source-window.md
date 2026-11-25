@@ -105,3 +105,7 @@ frame once (its node burn: zero loss, max hold 2).
   <real verdict.json> <out.json>` mirrors every key above and reproduces the fixture byte-identically.
   When a key changes, update the generator next to the Rust `json!` bodies and rerun it. Never
   hand-invent a shape.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- A MULTI-SOURCE cambox window (issue 1367: the camera films an OBS monitor, e.g. cam2 on the strih-snv multiview) is judged by its node burn — the tear detector's `multi_path_suspect_fraction` over `MULTI_PATH_SUSPECT_CEILING` (0.10, NOT the 0.005 tear-rate ceiling) makes its copies/gaps, the three cadence gates and its `frozen_leg` REPORT-ONLY while the node-burn contiguity + hold, presence, the optical floor, the tear gate and self-heal stay blocking; pure `src/multi_source_window.rs` + `segment_continuity_scoped`, tear stats computed before the continuity fold, the `multi-source (report-only by #1367 decision)` tag in the JSON and both Discord renderings, the real-window TSV fixture → `.claude/rules/multi-source-window.md` (auto-loads on its `paths:`)

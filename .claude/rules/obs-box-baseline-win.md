@@ -210,3 +210,7 @@ layout (`win_net_layout_declared <COMPUTERNAME>`, today RESOLUME-SNV) gets the r
 - **The reader's box summary line** lists only DRIFT items (`drift=`) and unread items
   (`unknown=`), never OK ones. The tests anchor the whole line (`re.M`, `^…$`), because an `in`
   substring check passed while every OK item was listed as unknown.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The ONE Windows OBS-box baseline (issue 1357: `scripts/lib/obs-box-baseline-win.sh` -- power plan max-performance class by GUID OR name (stream's High performance is a duplicated GUID), sleep/hibernate never on AC, USB selective suspend off, WER DontShowUI=1; OK/DRIFT/UNKNOWN pure grader over a read-only `.ps1` gather run by `powershell -File`; ONLY the power plan is set, by the Windows genlock deploy program's step (0b) before any OBS stop, read back; `scripts/win-baseline-check.sh` dev1 reader + the report-only `version-integrity-gate.sh --win-baseline` rows, fed by the E2E `[0/8]` via `scripts/lib/e2e-win-baseline.sh` + a rig-health NOTE row; obs-fleet facet `win-baseline`) → `.claude/rules/obs-box-baseline-win.md` (auto-loads on its `paths:`)

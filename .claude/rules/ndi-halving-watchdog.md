@@ -117,3 +117,7 @@ after one idle→restore and healed only after a SENDER restart (`systemctl rest
 cam5), which froze the receiver (`received` flat) until the in-loop #767 watchdog ran its own
 `reset_ndi_receiver` (~30 s) and it came back at 60 fps. Before handing the rig to production, read
 all seven `cap_avg` values (≈16.2 ms = 60 fps) — a 32-33 ms input is halved even though `locked=1`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- NDI per-connection rate-halving auto-heal (dev1-side watchdog + the FIRST cure arm in the family: the `recv-timing #797 '<input>': n=… cap_avg=…ms` tap is PER-INTERVAL so the rate is measured WITHIN-PASS from the last two lines' OWN timestamps — never a wall-clock divisor, never cross-pass; HALVED = fps≤0.6×exp OR cap_avg≥2×interval, BORDERLINE holds confirm, HEALTHY resets; pure decision in PYTHON (`ndi_halving_decision.py`, pytest per #1199) + bash orchestrator reusing obs-watchdog-decision confirm/throttle; no-double-page on BOTH receiver+sender #1001 state; healthy-sibling = context-only box-wide-vs-per-connection discriminator, never a page gate; CURE = obs_phase2 idle-receiver→restore gated OFF by NDI_HALVING_SELFHEAL + per-input cooldown, empty-name-window hazard per ndi-name-recovery; ships DISABLED, #1203) → `.claude/rules/ndi-halving-watchdog.md` (auto-loads on its `paths:`)

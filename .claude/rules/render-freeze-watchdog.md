@@ -75,3 +75,7 @@ there is NO auto-action; recovery is machine-channel log-only (never a phone pin
 + enables them (README supervisor procedure). Live read-only `--dry-run` seam:
 `scripts/render-freeze-alert-watchdog.sh --dry-run` (verified 16.9. against strih/stream/resolume =
 HEALTHY, strih-snv = SKIP).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Render-freeze / relock-storm alert (dev1-side watchdog, issue 1320 guardrail for the cured strih PROGRAM render freeze): two arms off `:8899` — RENDER on `program_render_lagged` (a `lagged>0` window = a render-thread freeze; pages on `lagged >= a magnitude FLOOR` (default 30, above the relaunch band 1/2/11, below the 61/228 real freeze) AND a fresh age, so a relaunch startup-lag never false-pages) + RELOCK on `relock_bursts` (issue 1318's `summarize_relock_bursts` PORTED to the gather as `relock_bursts_from_log`, parity-locked to the Rust fixtures; ≥8 relocks/1 s = a storm); `render-freeze` fleet facet = strih stream resolume strih-snv; pure `render_freeze_decision.py` + `render-freeze-alert-watchdog.sh` reusing obs-watchdog-decision.sh; PRODUCTION-CRITICAL time-bucketed dedup (`render-freeze-$box` / `relock-storm-$box`), SKIP=unfetchable defers issue 732/1001, UNKNOWN=facet absent, DETECTION-ONLY recovery log-only, ships DISABLED, #1320 → `.claude/rules/render-freeze-watchdog.md` (auto-loads on its `paths:`)

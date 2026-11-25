@@ -255,3 +255,7 @@ keeps the PowerShell text), `test_mbc_vban_transport_1462.py` (the pure decision
 CLI). Fakes: `tests/python/stream_box_fakes_1462.py` (a fake `sshpass` that RUNS the bash text on a
 stub PATH in the box user's home `FAKE_BOX_HOME`, resolves a relative scp path there, plays a box
 that does not answer with `FAKE_SSH_DOWN`, and decodes the PowerShell it would send).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The stream box is the Linux stream-snv since 22.10.2026 (issue 1462): every dev1 step that runs ON it (rig-mode TEST #901 items 1-2, recording-e2e `[0/8]` visibility + dantesync version arm, `[4b2/8]`, `[4b3/8]`, the bundle-state self-heal) picks bash-over-ssh or the unchanged PowerShell by its obs-fleet class through ONE lib `scripts/lib/stream-box.sh` (paths quoted by the ONE `scripts/lib/shell-quote.sh`); mbc there is the obs-vban source graded against the box facts; the full E2E runs there with the A/V measurement BLOCKING: the `[0/8]` version-integrity gate grades it with `--linux stream`, and `[8/8b]` decodes the stream recording ON the box (`recording-verdict-on-stream-snv.sh` onto the one Linux on-box decode, the `[8/8b-pre]` pushes via `scripts/lib/stream-lx-verdict.sh`); every still-Windows-only stream step (the soak, the lipsync arrival verify, the Windows planners, the cleanup plan text) is listed → `.claude/rules/stream-box-linux.md` (auto-loads on its `paths:`)

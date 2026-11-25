@@ -99,3 +99,7 @@ passed as `e2e_discord_report_send`'s 7th arg (anchors pinned in
 strih read goes through the shared `strih_log_tail` reader (a raw 3000-line window + a LOCAL audit
 filter, both strih platforms) — `.claude/rules/strih-log-read.md`; the `GENLOCK_AUDIT_SNAPSHOT_READER_CMD`
 seam replaces the whole read in tests.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- N>=2 conveyor arrival-jitter BUDGET (`GENLOCK_N2_JITTER_BUDGET_NS` = 15 ms, single-sourced across `should_converge_phase` in `vstack:rig/core/src/genlock_backlog.rs` + the vendored C `genlock_phase_converge_due` + the probe delegator; `budget = max(hysteresis, jitter budget)`; the parity gate MUST `lift_define` the new `#define`; the FINDING that SimConveyor1049's re-anchoring follower CANNOT reproduce the live phase ladder so the DIRECT arithmetic threshold test is the faithful RED→GREEN proof; the scope-3 `genlock_audit_snapshot.py` holds/relocks/converge_sheds audit-delta recipe that NAMES the ladder victim, report-only in `compose_report`; #1354) → `.claude/rules/genlock-conveyor-jitter-budget.md` (auto-loads on its `paths:`)

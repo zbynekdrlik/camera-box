@@ -190,3 +190,7 @@ scripts/splitter-port-alert-watchdog.sh --dry-run
 ```
 
 Runs entirely dev1-side; nothing is deployed to the camboxes (read-only ssh journal reads).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Per-cambox HDMI-splitter-port no-signal recurrence watch (dev1-side timer reads each ACTIVE cambox's last `capture chroma:` journal line; SELF-ANCHORING discriminator — PAGE (`DEAD_PORT`) only when a box is capturing-but-GRAYSCALE AND ≥1 sibling on the SAME camera+splitter is proven-good; `capturing=0` = `NO_CAPTURE` report-only, NOT a splitter-port page — it is the routine cambox-down/device-busy/E2E-stop class, a mis-attribution otherwise; all-grey = `SOURCE_WIDE` report-only; the FIRST check for "weird colours on some cameras" = per-box signal presence not card tuning; Elgato purple-noise residual; #739) → `.claude/rules/splitter-port-health-watchdog.md` (auto-loads on its `paths:`)

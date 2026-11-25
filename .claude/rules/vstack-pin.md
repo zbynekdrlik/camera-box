@@ -68,3 +68,7 @@ the cambox capture side, since v0.1.10 the NDI side. A `vstack:<path>` in this r
   it runs `cargo fetch` first; a missing checkout fails, it never skips.
 - **Vendored comments keep old paths** on purpose (`vendor/obs-studio`, `vendor/distroav`): editing them
   starts an OBS rebuild. They go with the next real vendor change.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Pinned vstack tag (issue 1487: `scripts/vstack-release.pin` = the four git dependencies; the JPEG XS link, rig primitives and QPSK marker live there; `vstack:<path>` in prose; the root re-exports; the strih archive built from the tag with this repo's release profile; reading pinned source from tests) -> `.claude/rules/vstack-pin.md` (auto-loads on its `paths:`)

@@ -356,3 +356,7 @@ fix lives entirely in the sourced lib; `scripts/recording-e2e.sh` is unchanged (
 pattern). The PHYSICAL thermal item (the box runs 83-95 °C under the 7-camera load and keeps
 tripping the 25 W step-down; a cooling pad / cleaned fan path removes the episodes at the source)
 stays the owner's — this harness item only stops the recovered-box false abort.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- imag-nb power/thermal envelope (the MMIO RAPL PL1 25W clamp diagnosis, identity-based zone selection, the source-only shared gather+verdict+guard-decision lib, the check_imag_report optional-arg convention, step-at-the-END TOTAL_STEPS rule, #1040) → `.claude/rules/imag-power-envelope.md` (auto-loads on its `paths:`)

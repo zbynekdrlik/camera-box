@@ -101,3 +101,7 @@ shape, DIFFERENT artifact: 1122 sweeps OBS **recordings** (`D:\_REC` `.mkv`, OBS
 this sweeps deploy **backup/stage DIRECTORIES** (`*-789` + `stage-genlock-*`). The neutral value
 types (`RetentionPolicy`/`KeepReason`/`SECONDS_PER_DAY`) are shared via `recordings_retention`; the
 allowlist + per-kind grouping are backup-specific.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- OBS deploy/backup DIRECTORY retention (#789 residual B / criterion 5 — a DIFFERENT artifact than #1122 recordings): the fleet deploy leaves dated `<stamp>-789` box-backups (`C:\obs-backup` / `/opt/obs-backup`) + per-sha stage dirs (`stage-genlock-*` under `C:\` / `genlock-stage-*` under `/tmp`) behind, swept only inline during a `--yes` deploy. Standalone dry-run-first sweep: pure `src/obs_backup_retention.rs` decision (keep newest-N PER KIND UNION younger-than-D-days; EXPLICIT allowlist, `previous/` + operator dirs PROTECTED, never a generic sweep) mirrored by `scripts/obs-backup-retention.ps1` (win) + the `--local-sweep` bash decision in `scripts/obs-backup-retention.sh` (imag); DRY-RUN default, `--execute`/`-Execute` = supervisor step; NOTHING wired automatically → `.claude/rules/obs-backup-retention.md` (auto-loads on its `paths:`)

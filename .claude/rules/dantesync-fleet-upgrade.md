@@ -338,3 +338,7 @@ after 900 s. It also reports `date_authority_hold_age_s`.
 Verify the bash logic by SOURCING the script directly in bash (the same thing
 `tests/dantesync_fleet_upgrade.rs`'s `run_sourced` does) and asserting the pure-fn outputs +
 generated command TEXT; plus `shellcheck`, `bash -n`, and `rustfmt --check` on the test.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- dantesync FLEET UPGRADE mechanism (canary-first per-OS-class, pin-not-latest, self-heal-not-blind-rollback, `.ps1`-file Windows path, `--ntp-master ""` single-node verify, #876; issue 1372: the same `.ps1` refreshes `dsync-tray.exe` from the same pinned release -- fetched before any stop, swapped after the service, relaunched through a temporary `BUILTIN\Users` task, a tray failure = a named WARNING never a rollback) → `.claude/rules/dantesync-fleet-upgrade.md` (auto-loads on its `paths:`)

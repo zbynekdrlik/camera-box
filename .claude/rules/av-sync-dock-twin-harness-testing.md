@@ -52,3 +52,7 @@ wide batch to be evaluated). Either way, verify by actually RUNNING the test —
 "should" avoid the trap is worth compiling and confirming (this cost one iteration in this session:
 the first "entry bar" test construction pushed all of side A before any of side B, and failed with
 a confusing "locked" panic exactly at the point A's count alone crossed `min_matched`).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Writing a NEW `tests/av_sync_dock_*.rs` twin-harness test (the `r#"..."#` raw-string vs an embedded `"#<N>:` CHECK message collision; incremental bimodal test-batch construction can trigger a premature degenerate lock, #999/#1005; since issue 1505 a vendor-only dock test lives in obs `obs:tests/vendored/tests/`) → `.claude/rules/av-sync-dock-twin-harness-testing.md` (auto-loads on its `paths:`)

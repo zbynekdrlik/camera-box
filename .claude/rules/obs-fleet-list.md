@@ -368,3 +368,8 @@ imag-nb was returned to the owner 16.9.2026 (10.77.9.182 dark). Its `OBS_FLEET` 
   (issue 1316): `network-reach`/`bundle-state` `REFERENCE_HOSTS` dropped the dead `.182` anchor;
   `dantesync-clock` `DANTE_CLOCK_OBS_NODES` + `mv-fps` `MV_FPS_BOXES` + `deploy-genlock-fleet`'s
   empty `--boxes` default dropped imag (imag stays a valid EXPLICIT deploy target).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- `OBS_FLEET` — the ONE declared managed-OBS-box list (`scripts/lib/obs-fleet.sh`, the camera-set.sh analogue): `obs_fleet_boxes <facet>` derives every watchdog's `BOXES=` default (byte-compatible env override); `obs_fleet_is_home` is the RESOLUME-SNV traveling-box gate (OBS-WS :4455 not dantesync :8898, issue 811); report-only in version-integrity/rig-health (issue 787 rate-exempt); the production strih is `strih-snv|10.77.9.202|linux-genlock|always` (Windows strih row REMOVED at M4), per-facet membership by premise + class-resolved Windows-only actions (bundle-state restart, obs-liveness recovery) — issue 1317; #1296 → `.claude/rules/obs-fleet-list.md` (auto-loads on its `paths:`)
+- "Is this address the Linux strih?" (the ONE alias-aware authority `obs_fleet_name_for_host` behind both the Windows-tool class gate and `strih_platform`, class-keyed — `strih.lan` still resolves to .202; python twin `scripts/obs_fleet_table.py`) + the retired Windows-strih remnant inventory (the #1199 NIC watcher REMOVED with the PC; issue 1317 part 4) → `.claude/rules/obs-fleet-list.md` (auto-loads on its `paths:`)

@@ -100,3 +100,7 @@ matter, and never let a silenced cmdlet be the last statement. Also: a path prob
 `win_ssh_path_exists`'s cmd.exe `if exist`, on a box whose default shell was never checked; and tell
 PowerShell's own exit 1 (absent) from an ssh transport rc (255 / sshpass 5-6). Worked example + a test
 fake that models the rule: `scripts/recording-verdict-on-resolume.sh`, `tests/harness_cg_chain_onbox_1302.rs`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- ssh vs win-* MCP on strih/stream — the HARD two-context rule (agent session = MCP ONLY, never ssh; headless CI/watchdog = ssh allowed but ONLY session-agnostic signals — session-0 `EnumWindows` blindness makes `MainWindowTitle` empty on a HEALTHY box, issue 958) → `.claude/rules/win-ssh-vs-mcp.md` (auto-loads on its `paths:`)

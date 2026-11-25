@@ -48,3 +48,7 @@ when `--painter` is given. It does NOT gate and changes NO threshold — the wal
 (`.claude/rules/window-gate-tolerance-walkdown.md`); this only ATTRIBUTES the residual so nobody
 re-chases the painter. A residual whose painter is clean is a downstream (optical / genlock) problem,
 not a per-box or painter software bug — and a per-box software fix can never be the answer's shape.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Attributing a DUPLICATE / `copies` residual — painter-stall vs downstream (the painter's own `painter-*.csv` `tick,gen_ts_ns,flip_ts_ns` exonerates/incriminates stage 1 via `src/painter_pacing.rs`: painted-tick faults + missed-DRM-vsync-deadline detection; clean painter ⇒ residual is downstream optical/genlock, never a per-box fix; surfaced report-only under `all_cambox_continuity.painter_pacing`, never gates, #859) → `.claude/rules/painter-pacing-attribution.md` (auto-loads on its `paths:`)

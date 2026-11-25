@@ -341,3 +341,7 @@ camera window (primary dual-QR decodes from the fb0 painter path, aux never deco
   simply reads `Unproven` every window (report-only signals show aux is not operable).
 - **When the IMAG role returns:** re-provision imag and cam2's projection tap comes back on its own
   (aux decodes again → `Observed`/`Unproven`/promotable as before). No code change needed to re-arm.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Projection-tap scanout-TEAR detector (issue 781 + the issue-1196 v2 aux Vernier tick pair — cam2's grabber captures imag-nb's HDMI, so cam2's sweep leg IS the projection path; tear = UNION span of the primary dual-QR + the bottom aux tick pair > 1, merge-side, no schema bump; `AUX_TICK_RUN_ID` 911013 in `NODE_BURN_RUN_IDS` + the python mirrors; **LIVE since #1196** — `gates_overall_pass()`=true, `TEAR_FRACTION_CEILING`=0.005, scoped to `viability=observed`; the OPERATIVE signal is the AUX SINGLE-MARK cross-band (primary band span is always ≤1 = blind; known-torn run 1700989544), so `aux_any_decode_fraction` is the honest operability metric while both-mark `aux_decode_fraction`≈0 on CAM2 — never drop the aux or the gate goes blind) → `.claude/rules/projection-tap-tear-detect.md` (auto-loads on its `paths:`)

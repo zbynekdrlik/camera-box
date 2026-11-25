@@ -149,3 +149,7 @@ The pure decision layer (`load_persisted_transits` / `restrict_to_active` covera
 wiring/ordering/on-by-default/fail-loud is guarded by `tests/harness_phase_sync_reanchor_900.rs`.
 The `main()`/`--apply` tests mock the WS layer and MUST still pin `--persisted-json`/`--out-json` to
 `tmp_path` (the real-home-clobber hazard above applies to `main()` regardless of what it is testing).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- phase-sync calibrator/snapshot test writes clobbering the real `~/.camera-box/phase-sync-last.json`, + recalibrating from a recent green run's own verdict JSON instead of a fresh ~1h E2E run (#893) → `.claude/rules/phase-sync-calibrator-testing.md` (auto-loads on its `paths:`)

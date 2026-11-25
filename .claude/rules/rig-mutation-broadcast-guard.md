@@ -115,3 +115,7 @@ fake `$HERE/obs_phase2.py` answering `rig-busy-check`+`stream-detail` (a plain `
 `bash -c` — the worktree guard refuses `bash -c` sourcing, #1265) and drive FAKE_BUSY through
 idle/recording/streaming/partial/unreachable. The pure `redact_stream_server` + `rig_busy_check`
 error path are pytest-covered.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Never mutate the rig while a broadcast may be LIVE — the shared `stray_session_check_assert` rig-busy guard runs before EVERY recording-e2e.sh mutation (bkshading pause / [0/8] parity / [2/8] / [2b/8]), reuses obs_phase2.py rig-busy-check (never a duplicated loop), fail-opens only when no readable box is busy, names WHAT streams key-free; the `rig-busy-check` single-occurrence + `[N/8]`-in-guard-label anchor traps; #1271 → `.claude/rules/rig-mutation-broadcast-guard.md` (auto-loads on its `paths:`)

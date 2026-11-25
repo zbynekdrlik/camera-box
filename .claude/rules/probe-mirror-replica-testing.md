@@ -22,3 +22,7 @@ which the existing suite never exercised → add DEMONSTRATIVE tests that manual
 `phase_anchor_ns` + `locked_next_boundary_ns` (private, same-module test access) and assert the
 nearest-anchor pick differs from newest-due (e.g. present index 12 not 39, keep the ~27-frame
 conveyor). Expect the SAME shape for the still-open #940 phase-pinned-deadline harness adoption.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Re-pinning a probe-gated `ReleaseCadence` mirror against OBSERVED output (the phase-anchored-selection==newest-due-when-anchor-unset finding; demonstrative set-anchor tests, #1037) → `.claude/rules/probe-mirror-replica-testing.md` (auto-loads on its `paths:`)

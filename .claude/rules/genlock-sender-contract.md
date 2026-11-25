@@ -59,3 +59,7 @@ Acceptance is ground truth on the RECEIVER's `genlock-fifo audit` counters, not 
 — the verdict is `src/resolume_playback.rs` `evaluate()` over the `src/jitter_audit.rs`-parsed
 counters (±20 ms `ts_head_skew_ms`, zero `underruns`/`dropped_due`/`relocks`/`late_holds`/
 `backward_steps`). See `.claude/rules/jitter-audit-parser.md` for the parser itself.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Genlocked NDI SENDER contract — the normative RFC-2119 spec ANY external sender (SongPlayer, the `cg` OBS, future senders) must meet to lock to the fleet clock: FLOOR-boundary 100ns-epoch `timecode` (never ceil/synthesize/0/monotonic), `clock_video=clock_audio=false`, epoch-grid pacing (catch-up ≤8 / resync / re-latch / starvation-repeat), audio raw-wall-clock timecode at real-time rate, 1Hz lock-state observability, acceptance = receiver `genlock-fifo audit` ground truth (±20ms skew, zero pathology deltas ≥1h). The camera-box `src/` + vendored OBS/DistroAV are the cited reference implementation (issue 1294) → `docs/genlock-sender-contract.md`; its keep-in-sync pointer → `.claude/rules/genlock-sender-contract.md` (auto-loads on its `paths:`)

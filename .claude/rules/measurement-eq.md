@@ -129,3 +129,7 @@ derivable from the verdict JSON the harness already holds post-merge.
   hiccup, a `verify-measurement-pins` mismatch) can never `set -e`-abort the run before `exit $GATE`.
   RUNTIME-verify by sourcing the lib under `set -euo pipefail` and calling each helper on its
   failure paths — a `bash -n` / static-anchor test cannot catch this class.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Measurement-window per-camera A/V equalization (`MEASUREMENT_EQ=1` opt-in harness profile: DELIVERY-derived deep pins + coherent hold snapshot-restored for the measurement window only, production untouched; the #900 re-anchor's PREVIEW basis is wrong for A/V so it's a separate profile; forces re-anchor off + replaces the #893 floor gate with a read-back verify; three-way classify_leftover fail-loud-on-stale; the pin-dependent cam→strih p99 bound must rise with the cam2 pin; #1003) → `.claude/rules/measurement-eq.md` (auto-loads on its `paths:`)

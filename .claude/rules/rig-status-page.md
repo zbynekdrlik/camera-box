@@ -90,3 +90,7 @@ from the audit via `importlib` — never a retyped `"RETIRED"` literal that can 
 also gained a companion false-green guard: a records-set with rows but ZERO real PASS/WARN/FAIL tiers
 (only neutral rows) is ERROR, not PASS — neutral rows are not proof of health, and `alert_condition` MIRRORS that guard (pages `prober-down:no-health-tiers`) so a neutral-only sweep never renders ERROR while staying silent on Discord. Tests:
 `tests/python/test_rig_status_retired_1316.py`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Rig status page (`scripts/rig-status.py` — dev1-hosted RENDERER over `rig-health-audit.py`, NEVER a second prober; the GENERIC key=value parser so a new feeder facet renders automatically — build-sha #789 belongs in the FEEDER not here; the FALSE-GREEN guard `overall_state()` — empty/crashed/timeout audit = ERROR + a page, never silent PASS; Discord dedup reuses obs-watchdog-decision.sh; serve-dir vs state-dir split; ships DISABLED, tailscale bind; pytest via importlib; #787) → `.claude/rules/rig-status-page.md` (auto-loads on its `paths:`)

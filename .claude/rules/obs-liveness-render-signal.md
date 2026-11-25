@@ -55,3 +55,7 @@ WS-dead, wrong obs64 count, DXGI device-lost (#89). Does NOT catch a frozen stri
 strih keeps compositing (a DistroAV receiver freeze) — that is a separate per-input `received=` watch
 scope (the #935 forensics' Class A; frozen-input-watchdog #1052 taps only the STREAM box's
 `NDI 2ME PGM`).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- obs-liveness watchdog (#391) render-liveness signal — GetStats `activeFps` LIES during a render stall (it is the configured canvas fps; read 30.0 while renderTotalFrames was frozen, #935); `render_advanced` (renderTotalFrames advancement) is the true WS-only signal; the probe→gate→classify seam list; #391 does/does-not cover → `.claude/rules/obs-liveness-render-signal.md` (auto-loads on its `paths:`)

@@ -137,3 +137,7 @@ git, a ticket, a test or a log. Build steps: `tally/esp/README.md`.
   (`python3 -m venv --system-site-packages <dir>; <dir>/bin/pip install websockets==15.0.1`).
 - A unit TEMPLATE's comment must not spell its own placeholder (`@USER@`): the render only fills the
   `User=` line, so a comment copy survives into the installed unit (caught by the first install test).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- strih-tally camera tally lights (issue 1417: the ESP8266 tallies show the strih OBS program red / preview green; `scripts/strih_tally.py` = the WsTally-protocol relay on :9240 + an obs-websocket client + `GET /state`, the pure scene -> camera rule `scripts/strih_tally_decision.py` (exactly ONE distinct camera by its NDI source name `CAM<n> (...)`, nested scenes + groups, enabled items only), TALLY-PVW before TALLY-PGM, a 10 s resend, gray after 10 s without OBS; `atemrpi.local` announced by `strih-tally-mdns.service`; setup-strih step 16f / verify-strih item 42 via `scripts/lib/strih-tally.sh`, strih role only; the unchanged firmware in `tally/esp/` with its WiFi credentials in a git-ignored `secrets.h`) -> `.claude/rules/strih-tally.md` (auto-loads on its `paths:`)

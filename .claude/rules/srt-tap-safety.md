@@ -68,3 +68,7 @@ Bake in a mutation proof (the SAME predicate over a synthetic no-free fixture th
 with-free one that MUST pass) and watch RED→GREEN (#1026). NB: this rule's
 own `paths:` do NOT cover `vendor/obs-studio/plugins/obs-ffmpeg/**`, so it won't auto-load when editing
 that plugin — the mpegts output is the same vendored-C / CI-first-compile / anchor-gate class as libobs.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- SRT A/V-sync tap safety (listener-not-caller-or-OBS-crashes #802: `srt_tap.py` guard, `probe_udp_port_refused` fail-open asymmetry, the ffmpeg listener-start bench probe, the bench-gated vendored-C leak) → `.claude/rules/srt-tap-safety.md` (auto-loads on its `paths:`)

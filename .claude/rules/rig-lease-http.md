@@ -406,3 +406,7 @@ same fixture lockdir and diffing their verdicts) was considered out of scope for
 (the mirror is a doc-comment-verified manual port, not a generated one) and is a reasonable
 follow-up if the two ever need machine-verified lock-step parity beyond the one shared constant
 (`RIG_LEASE_STALE_SECS`/`DEFAULT_STALE_SECS`) this ticket's tests already lock-step.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Rig lease read-only HTTP exposure on dev1 (:8890/rig-lease.json — the #830 same-machine premise is false for restreamer's stream-box runner; the restreamer#349 consumer contract, port choice, fail-open direction, PrivateTmp=no gotcha; issue 1383: a holder keeps ITS OWN lease live from acquire to release — `rig_lease_refresh_if_mine` (over `scripts/rig_lease_refresh.py`) bumps the heartbeat + rolls `expected_release_at` to max(current, now + 15 min), beaten by the gate's detached `rig_lease_keepalive_spawn` bridge, the issue-281 heartbeat refresher and the soak's slot loop; identity = the gate's RIG_LEASE_*/GITHUB_* env precedence (no local fallback) or explicit args; a hold CEILING (acquired_at + RIG_LEASE_MAX_HOLD_SECS = the job timeout) keeps the stale-reclaim backstop; dir-FD O_EXCL temp+rename write, never a foreign holder; issue 1404: the same server also serves `/rig-qpsk-markers.csv` from a separate serve dir, never the lease dir; `/program-audio.json` answers 404 once it runs the 8.10.2026 code, the verdict is served by strih-snv :8891) → `.claude/rules/rig-lease-http.md` (auto-loads on its `paths:`)

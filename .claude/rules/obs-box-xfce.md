@@ -174,3 +174,7 @@ login), so byte identity cannot hold. `scripts/obs_box_xfconf.py`:
    the pulseaudio plugin, the keyboard layout (the panel's xkb item + Alt+Shift).
 5. CPU (`top`) and OBS `program-render-audit lagged` beside the last openbox numbers.
 6. Rollback: `STRIH_DESKTOP=openbox` + setup-strih + reboot.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The operator desktop = box fact `STRIH_DESKTOP` openbox | xfce (issue 1466, the gradual move to XFCE: stream-snv first; the ONE session start `/usr/local/bin/obs-box-session-start` = `strih_session_start_text`, the openbox autostart its openbox form on every box; the xfce session, hidden autostarts, polkit power rule, keys and xfce4-panel from the tint2 launcher list; xfconf files merged + graded by property via `scripts/obs_box_xfconf.py`, never under a live xfconfd; verify item 48 + item 44's xfce rows; the slice-2 runbook) -> `.claude/rules/obs-box-xfce.md` (auto-loads on its `paths:`)

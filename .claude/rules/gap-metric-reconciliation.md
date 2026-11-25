@@ -63,3 +63,7 @@ This is read-only (no new gate run) and gave the exact real switch-to-switch dur
 explained issue 883's window-length anomaly (one specific switch call ran ~0.5s longer than
 every other one in the run — a one-off OBS-WS/ssh latency blip, not a systemic pattern) directly
 from measured data instead of speculation.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- `gaps` vs `residual_events` divergence (two independently-correct metrics, both directions locked by tests, #852/#883) + pulling real per-segment data from a historical CI run's own log → `.claude/rules/gap-metric-reconciliation.md` (auto-loads on its `paths:`)

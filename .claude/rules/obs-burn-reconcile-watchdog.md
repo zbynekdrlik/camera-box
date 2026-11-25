@@ -61,3 +61,7 @@ WIRING is proven by an offline smoke: a stubbed `obs_burn_filter.py` (env-driven
 on `OBS_BURN_FILTER_PY` + a stub `AIRULESET_NOTIFY`, driving `main` per box across
 seed/NOOP/SWEEP/retry/DEFER/enum-fail. The Rust harness (`tests/harness_obs_burn_reconcile_watchdog_1060.rs`)
 covers content/wiring + the decision truth-table sourced from the lib.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- dev1 fresh-OBS-start burn reconciliation for UNATTENDED strih/stream starts (renderTotalFrames restart signal via obs_burn_filter session-probe; discriminator is a FRESH START not burn-presence — a persistent TEST burn is legit; durable ~/.camera-box baseline never tmpfs; defer while #281 heartbeat/#830 lease coordinate; unresolved-retry; fail-closed; #1060) → `.claude/rules/obs-burn-reconcile-watchdog.md` (auto-loads on its `paths:`)

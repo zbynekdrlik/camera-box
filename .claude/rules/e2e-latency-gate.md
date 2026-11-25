@@ -60,3 +60,7 @@ module (`src/e2e_latency_gate.rs`, mirroring `src/optical_floor.rs` / `src/self_
 so it unit-tests on default features. The probe-gated verdict body only CALLS it: `all_pass &= pass ||
 !gates_overall_pass()`. Relax/re-tighten is then a one-line flip. Make a necessary gate DEFAULT-ON (CLI
 default = the constant, hard-locked) — not a forgettable flag a script must remember to pass.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Absolute e2e latency + freeze bounds — the MAIN E2E (recording-verdict) vs LOOPBACK E2E (frame-probe/differ) are SEPARATE gate subsystems; calibrate bounds from `/tmp/recording-e2e-*/verdict-*.json`; crate-root `gates_overall_pass()` seam; cam→stream ~1s hold is by design, freeze=frozen_leg already report-only (#1035) → `.claude/rules/e2e-latency-gate.md` (auto-loads on its `paths:`)

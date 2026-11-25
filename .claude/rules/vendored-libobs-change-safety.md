@@ -674,3 +674,7 @@ and drives it tick by tick. Lessons from its two review rounds:
   variants (the old code, the design as written, a candidate fix), over the same bench cases,
   settled the question on the ticket in one round: 20/30, 20/30 and 30/30 caught. The main then
   decided the bound (ROZHODNUTÉ 5902983227) instead of the lane picking it.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Changing the genlock C in libobs (CI is its first compile: the lift-and-compile-standalone recipe, the committed C-vs-Rust parity gate + why it was initially blind to a tie-break mutation, the remembered-state seam list, wrap-independent anchors, #1003) → `.claude/rules/vendored-libobs-change-safety.md` (auto-loads on its `paths:`)
