@@ -285,3 +285,42 @@ def test_the_preroll_waits_its_time_while_the_watch_lives(tmp_path):
         assert r.stdout.endswith("rc=0\n") and "watch is gone" not in r.stderr, r.stdout + r.stderr
     finally:
         live.kill()
+
+
+def test_the_painter_slack_covers_the_preroll():
+    # the cam2 painter exits on its own at DURATION + slack: the slack spans its launch to StopRecord,
+    # which now holds the 10 min pre-roll on top of the issue-1404 live wait (1800 s)
+    s = _e2e()
+    slack = int(re.search(r'^PAINTER_PRE_RECORD_SLACK_SECS="\$\{PAINTER_PRE_RECORD_SLACK_SECS:-(\d+)\}"$',
+                          s, re.M).group(1))
+    assert slack >= 1800 + 600, slack
+
+
+def test_the_freeze_watch_is_armed_after_the_preroll():
+    s = _e2e()
+    start = s.index('youtube_leg_start "$HERE" "$STRIH" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"')
+    assert start < s.index("    live_freeze_watch_start ")
+
+
+def test_the_preroll_reads_a_leading_zero_as_decimal(tmp_path):
+    import time
+    live = subprocess.Popen(["sleep", "30"])
+    try:
+        t0 = time.time()
+        r = _preroll(tmp_path, str(live.pid), "01")
+        assert time.time() - t0 >= 1.0 and r.stdout.endswith("rc=0\n"), r.stdout + r.stderr
+        assert "runs live 1 s" in r.stdout, r.stdout
+    finally:
+        live.kill()
+
+
+def test_the_preroll_ends_when_the_watch_dies_partway(tmp_path):
+    import time
+    # an orphaned sleep (reaped by init, like the lib's watch is reaped by its bash): a child of pytest
+    # would linger as a zombie that kill -0 still sees
+    pid = subprocess.run(["bash", "-c", "sleep 2 >/dev/null 2>&1 & echo $!"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    t0 = time.time()
+    r = _preroll(tmp_path, pid, 30)
+    assert 1.5 <= time.time() - t0 < 10, "the pre-roll ends once the live watch dies"
+    assert "watch is gone" in r.stderr, r.stderr
