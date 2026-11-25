@@ -250,8 +250,24 @@ window from record start + 5 s to the recording's stop - 3 s (`stop --record-sto
 - The workflow step "Per-point E2E report" (`always()`, pull_request) writes
   `e2e_report_youtube.py --verdict ... --out` to `$GITHUB_STEP_SUMMARY` and `gh pr comment`
   (`pull-requests: write`). A missing verdict still posts "nothing verified".
-- Job timeout 105 min (75 + the stage), the lease hold ceiling `RIG_LEASE_MAX_HOLD_SECS` 6300 with it
-  (pinned by `test_the_default_hold_ceiling_matches_the_full_path_job_timeout`).
+- Job timeout 115 min (75 + the stage + the issue-1551 pre-roll), the lease hold ceiling
+  `RIG_LEASE_MAX_HOLD_SECS` 6900 with it (pinned by
+  `test_the_default_hold_ceiling_matches_the_full_path_job_timeout`); the camera-box dead-man margin
+  floor/default 40/45 min.
+
+## The pre-roll (issue 1551, owner ROZHODNUTÉ 7158756134, 25.11.2026)
+
+- YouTube steps the VOD audio (`lag_jumps`) only in the first ~8 min of a broadcast: the 60 min soak
+  (`yt-soak-1551`, finding 7148132586) had one step in w01, none in the 52 min after it, and 0 dup/skip
+  in 30 windows. A 6 min recording that starts at go-live always sat inside it.
+- So `youtube_leg_start` holds the live broadcast `YOUTUBE_LEG_PREROLL_S` (600) after the watch starts
+  and only then returns: StartRecord and every judged window come after it, like a production going
+  live before its program. Nothing is judged less strictly; the VOD's pre-roll lies before the first
+  window.
+- A gone channel-guard watch (a refusal stopped the broadcast, or it died) ends the wait at once with an
+  `!! issue 1551` line; the gate then fails on that as before. `0` = no pre-roll (the fakes use it).
+- It adds ~10 min of rig time and VOD length per run (~2 min more VOD fetch + decode on dev2, inside the
+  tool bound).
 
 ## The restreamer hop: a REPORT-ONLY point at restreamer's input (issue 1387, 4.11.2026)
 
