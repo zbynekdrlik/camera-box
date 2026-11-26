@@ -598,7 +598,7 @@ def test_a_none_box_with_nothing_of_ours_is_silent(tmp_path):
 
 # --- verify: item 16's housekeeping rows -----------------------------------------------------------------
 
-def _grade_env(tmp_path, irq_aff=("1", "0", "1"), combined=2, nice=10, cpus="0", running=True,
+def _grade_env(tmp_path, irq_aff=("1", "1", "1"), combined=2, nice=10, cpus="0", running=True,
                sampler_cpus="2-15", sampler_nice=10):
     tmp_path.mkdir(parents=True, exist_ok=True)
     sysr, irq_dir, bin_dir, eenv = _pcie_box(tmp_path, combined=combined, irqs=(134, 135, 136))
@@ -666,7 +666,7 @@ def test_a_placed_box_passes_every_row(tmp_path):
                for r in rows), out
     assert "NOTE (hk-rx) enp7s0: rx_missed_errors +0, rx_dropped +0 over 0 s, total missed 7 (report-only)" in out
     assert "PASS (hk-cpus) housekeeping CPUs 0-1 = online 0-15 minus the OBS mask 2-15: rig NIC IRQs on 0-1, tasks on 0" in out
-    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->0 136->1" in out
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->1 136->1" in out
     assert "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ-only CPUs 1" in out
     assert "PASS (hk-unit) sampler: pid 4003 runs on CPUs 2-15 at nice 10" in out
     for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-slice)", "(hk-unit) rustdesk.service",
@@ -730,7 +730,7 @@ def test_verify_notes_a_driver_without_channel_control_and_skips_an_unrequested_
     (msi / "143").write_text("msix\n")
     r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
     assert "NOTE (hk-rss) enp7s0: RSS channel count not readable (the driver offers no channel control): queues left alone" in r.stdout, r.stdout
-    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->0 136->1" in r.stdout, r.stdout
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->1 136->1" in r.stdout, r.stdout
     assert "FAIL" not in r.stdout, r.stdout
 
 

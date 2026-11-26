@@ -93,3 +93,30 @@ def test_an_irq_only_list_outside_the_irq_cpus_or_not_a_cpulist_is_fatal(tmp_pat
         assert r.returncode == 1, (bad, r.stdout)
         assert "FATAL: STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS '%s' %s" % (bad, why) in r.stderr, (bad, r.stderr)
         assert set(aff.values()) == {"0-15"}, bad   # nothing placed before the refusal
+
+
+# --- verify item 16: an IRQ back on the task CPU is named (report-only) ---------------------------------
+
+def test_verify_names_an_irq_on_the_task_cpu_while_irq_only_cpus_exist(tmp_path):
+    # the 0-1 scenario box: task CPU 0, IRQ-only CPU 1; IRQ 135 sits on the task CPU
+    out = hk._grade(tmp_path, irq_aff=("1", "0", "1"))
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->0 136->1" in out
+    assert ("NOTE (hk-irq-task) enp7s0: IRQ(s) on the task CPU 0 while the IRQ-only CPUs 1 exist: 135->0 -- the "
+            "next placement run under load moves them (off-production: systemctl restart "
+            "strih-nic-irq-affinity.service)") in out
+
+
+def test_verify_is_silent_about_the_task_cpu_when_every_irq_is_on_an_irq_only_cpu(tmp_path):
+    out = hk._grade(tmp_path)
+    assert "(hk-irq-task)" not in out
+
+
+def test_verify_is_silent_about_the_task_cpu_on_a_one_cpu_set(tmp_path):
+    # set 0: the task CPU is the only CPU, so an IRQ on it is the placement
+    home, path, env = hk._grade_env(tmp_path, irq_aff=("0", "0", "0"))
+    env.update(hk._box_with(tmp_path, "0"))
+    r = hk._run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), hk.ME, env=env,
+                path_prefix=path)
+    assert r.returncode == 0, r.stderr
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0: 134->0 135->0 136->0" in r.stdout, r.stdout
+    assert "(hk-irq-task)" not in r.stdout
