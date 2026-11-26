@@ -309,8 +309,12 @@ def test_the_pinner_libs_are_gone_and_nothing_sources_them():
 
 def test_the_launcher_runs_obs_on_the_whole_mask_and_no_helper():
     s = (SCRIPTS / "strih-obs-start.sh").read_text()
-    for gone in ("RX_PIN", "strih-dante-rx-cpu.conf", "strih-dante-rx-pin", "sudo -n"):
+    for gone in ("RX_PIN", "strih-dante-rx-cpu.conf", "strih-dante-rx-pin"):
         assert gone not in s, gone
+    # issue 1425 (design 7182688018): the launcher's ONE sudo is the arm of the IRQ re-place timer, never a
+    # CPU-pinning helper
+    assert [ln.strip() for ln in s.splitlines() if "sudo -n" in ln and not ln.lstrip().startswith("#")] == [
+        'if sudo -n /usr/bin/systemctl restart --no-block "${timer##*/}" >/dev/null 2>&1; then']
 
 
 def test_the_dante_input_toml_follows_dlinks_default_latency(tmp_path):
