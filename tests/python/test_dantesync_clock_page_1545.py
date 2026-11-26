@@ -77,6 +77,11 @@ def _run(tmp, statuses, production="yes", nodes=None, passes=1, now_step=60, dry
     else:
         pbody = f"echo {production}\n"
     prod = _exe(tmp / "prod.sh", f"#!/usr/bin/env bash\necho \"$1\" >> '{calls}'\n{pbody}")
+    # a PATH sshpass / python3-obs stand-in: any rig login the production read attempts is recorded
+    stubs = tmp / "stubs"
+    stubs.mkdir(exist_ok=True)
+    rig = tmp / "rig-logins.txt"
+    _exe(stubs / "sshpass", f"#!/usr/bin/env bash\necho \"$*\" >> '{rig}'\nexit 255\n")
     roster = nodes if nodes is not None else f"cam3|{CAM3}|fixed|video"
     env = dict(os.environ)
     for k in list(env):
@@ -89,7 +94,8 @@ def _run(tmp, statuses, production="yes", nodes=None, passes=1, now_step=60, dry
         "DANTE_CLOCK_FETCH_CMD": str(fetch),
         "DANTE_CLOCK_BOX_UP_CMD": str(up),
         "DANTE_CLOCK_MGMT_SSH_CMD": str(mg),
-        "DANTE_CLOCK_PRODUCTION_CMD": str(prod),
+        "DANTE_CLOCK_PRODUCTION_CMD": str(prod) if production is not None else "",
+        "PATH": f"{stubs}:{os.environ['PATH']}",
         "RIG_GRANDMASTER_IP": GM,
         "DANTE_CLOCK_CONFIRM_THRESHOLD": "1",
         "DANTE_CLOCK_REPING_INTERVAL_S": str(_INTERVAL),
@@ -243,3 +249,67 @@ def test_the_real_notify_call_carries_a_page_key_airuleset_accepts(tmp_path):
 def test_the_page_seam_is_production_gated_in_the_rule_doc():
     rule = (_ROOT / ".claude" / "rules" / "dantesync-clock-alert-watchdog.md").read_text()
     assert "page:dante-clock-<venue>" in rule, "document the page class in the watchdog rule"
+
+
+# ------------------------------------------------------------------ review round 1
+def test_the_real_library_honours_a_no_production_override(tmp_path):
+    # no seam: the bounded --production-read child runs avsync_venue_production_live for real
+    (err,), _ = _run(tmp_path, {CAM3: LOST}, production=None,
+                     extra_env={"AVSYNC_PRODUCTION": "no"})
+    assert not _page_lines(err), err
+    assert "page withheld" in err, err
+
+
+def test_the_real_library_honours_a_production_override(tmp_path):
+    (err,), _ = _run(tmp_path, {CAM3: LOST}, production=None,
+                     extra_env={"AVSYNC_PRODUCTION": "yes"})
+    pages = _page_lines(err)
+    assert len(pages) == 1 and "stav produkcie: yes" in pages[0], err
+
+
+def test_a_dry_run_never_logs_into_the_rig_for_the_production_read(tmp_path):
+    (err,), _ = _run(tmp_path, {CAM3: LOST}, production=None)
+    assert "not read in --dry-run" in err, err
+    pages = _page_lines(err)
+    assert len(pages) == 1 and "stav produkcie: unknown" in pages[0], err
+    assert not (tmp_path / "rig-logins.txt").exists(), (tmp_path / "rig-logins.txt").read_text()
+
+
+def test_a_live_pass_reads_the_rig_mode_and_an_unreadable_one_pages(tmp_path):
+    # the live read dials cam2 through sshpass (stubbed: refuses), then the stream box OBS-WS
+    # (192.0.2.x via an unreadable table entry) -> unknown -> the page goes out.
+    log = tmp_path / "notify-argv.txt"
+    notify = _exe(
+        tmp_path / "notify.py",
+        "#!/usr/bin/env python3\nimport sys\n"
+        f"open({str(log)!r}, 'a').write('\\x1f'.join(sys.argv[1:]) + '\\n')\n",
+    )
+    _run(tmp_path, {CAM3: LOST}, production=None, dry=False,
+         extra_env={"AIRULESET_NOTIFY": str(notify), "AVSYNC_VENUE_TABLE": "snv|stream-snv|192.0.2.99|x",
+                    "DANTE_CLOCK_PRODUCTION_TIMEOUT": "5"})
+    assert (tmp_path / "rig-logins.txt").exists(), "the live read never tried the cam2 rig mode"
+    keys = [c.split("\x1f") for c in log.read_text().splitlines()]
+    assert any(c[c.index("--dedup-key") + 1].startswith("page:dante-clock-snv:") for c in keys), keys
+
+
+def test_a_hung_production_read_is_bounded_and_pages(tmp_path):
+    hang = _exe(tmp_path / "hang.sh", "#!/usr/bin/env bash\nsleep 20\necho no\n")
+    import time
+    t0 = time.monotonic()
+    (err,), _ = _run(tmp_path, {CAM3: LOST}, production="no",
+                     extra_env={"DANTE_CLOCK_PRODUCTION_CMD": str(hang),
+                                "DANTE_CLOCK_PRODUCTION_TIMEOUT": "1"})
+    assert time.monotonic() - t0 < 15, "the production read was not bounded"
+    pages = _page_lines(err)
+    assert len(pages) == 1 and "stav produkcie: unknown" in pages[0], err
+
+
+def test_a_zero_or_garbage_timeout_falls_back_to_the_default_bound():
+    src = _WATCHDOG.read_text()
+    assert 'PRODUCTION_TIMEOUT_S="${DANTE_CLOCK_PRODUCTION_TIMEOUT:-25}"' in src
+    assert "[[ \"$PRODUCTION_TIMEOUT_S\" =~ ^[123456789][0123456789]*$ ]] || PRODUCTION_TIMEOUT_S=25" in src
+
+
+def test_the_dns_page_line_names_the_dns_fault_not_a_box():
+    src = _WATCHDOG.read_text()
+    assert "BEZ dante clock: ${PAGE_LINES" not in src
