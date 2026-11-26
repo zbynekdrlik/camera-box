@@ -95,6 +95,13 @@ build_onstrihlx_command() {
 # program-audio sampler took, strih_program_audio_cpus) under SCHED_IDLE + nice 19 + ionice idle (new here),
 # never in the slice. A mask that is not a cpulist (N or N-M, comma separated, ASCII digits) keeps the choice
 # below. <etc_root> is the third argument (test seam, default /).
+# Finding 7187104711 (26.11.2026): the whole mask under SCHED_IDLE still shared every OBS core's SMT sibling,
+# L2/L3 and memory bandwidth (the OBS dlink pump woke late, late_to_mix 1 -> 14, for the decode's 8 minutes).
+# So the decode takes ONE whole physical core at the TOP of the mask: the highest CPU number of the mask plus
+# its SMT siblings from <sysfs_root>/devices/system/cpu/cpu<N>/topology/thread_siblings_list (strih-snv 4-15 ->
+# 14-15, stream-snv 2-11 -> 10-11); a siblings value that is not a cpulist = the single highest CPU. The CPUs
+# show in the box's `launch prefix:` line. Expected cost: ~2 CPUs instead of 12 (8 min there, ~55 min on one
+# busy CPU before): an estimated 35-45 min decode, read it at the next E2E against the 115-min job.
 strih_lx_lowprio_prefix() {
   local sysfs_root="${1:-/sys}" runner="${2:-/usr/local/sbin/obs-box-background-run}" etc_root="${3:-}"
   local cpus_file="${sysfs_root%/}/devices/cpu_atom/cpus"
@@ -102,7 +109,16 @@ strih_lx_lowprio_prefix() {
   if [ -s "${etc_root%/}/etc/strih-housekeeping-cpus.conf" ]; then
     mask="$(head -n 1 "${etc_root%/}/etc/strih-isolated-cpus.conf" 2>/dev/null | tr -d '[:space:]' || true)"
     if printf '%s' "$mask" | grep -Eqx '[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*'; then
-      printf 'nice -n 19 ionice -c 3 chrt --idle 0 taskset -c %s' "$mask"
+      # Finding 7187104711: ONE whole physical core at the top of the mask, never the whole mask.
+      local top=0 n core=""
+      for n in ${mask//[,-]/ }; do
+        if [ "$n" -gt "$top" ]; then top="$n"; fi
+      done
+      core="$(head -n 1 "${sysfs_root%/}/devices/system/cpu/cpu${top}/topology/thread_siblings_list" 2>/dev/null | tr -d '[:space:]' || true)"
+      if ! printf '%s' "$core" | grep -Eqx '[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*'; then
+        core="$top"
+      fi
+      printf 'nice -n 19 ionice -c 3 chrt --idle 0 taskset -c %s' "$core"
       return 0
     fi
   fi
@@ -194,7 +210,7 @@ main() {
   fi
 
   # STEP 2: run the verdict ON strih-snv against the LOCAL recording (NEVER copied off-box), at IDLE
-  # priority: on a housekeeping box the OBS mask under SCHED_IDLE (issue 1425); else off the OBS cores
+  # priority: on a housekeeping box the TOP physical core of the OBS mask under SCHED_IDLE (issue 1425); else off the OBS cores
   # (rig-background.slice, issue 1387; else the E-cores, issue 1351). Unpinned at nice 0 the multi-core QR/pixel sweep
   # competes with OBS's ndir:video decode threads on the P-cores and the live receivers relock-storm
   # for minutes after the run (issue 1354). LOWPRIO_SNIPPET is the remote-shell replica of
@@ -203,7 +219,7 @@ main() {
   # then `$LP` prefixes the on-box command. The scp of the binary and the partial pull are unchanged.
   local ONSTRIHLX_CMD LOWPRIO_SNIPPET
   ONSTRIHLX_CMD="$(build_onstrihlx_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
-  LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi; M="$(head -n 1 /etc/strih-isolated-cpus.conf 2>/dev/null | tr -d "[:space:]")"; if [ -s /etc/strih-housekeeping-cpus.conf ] && printf %s "$M" | grep -Eqx "[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*"; then LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c $M"; fi;'
+  LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi; M="$(head -n 1 /etc/strih-isolated-cpus.conf 2>/dev/null | tr -d "[:space:]")"; if [ -s /etc/strih-housekeeping-cpus.conf ] && printf %s "$M" | grep -Eqx "[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*"; then T=0; for N in $(printf %s "$M" | tr ",-" "  "); do if [ "$N" -gt "$T" ]; then T=$N; fi; done; C="$(head -n 1 /sys/devices/system/cpu/cpu$T/topology/thread_siblings_list 2>/dev/null | tr -d "[:space:]")"; printf %s "$C" | grep -Eqx "[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*" || C=$T; LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c $C"; fi;'
   echo "[recording-verdict-on-${LABEL}] running on ${LABEL} (${STRIH_LX_BOX}) at idle priority (the box resolves the launch prefix, printed by the box): $ONSTRIHLX_CMD"
   # The brace group keeps the decode gated on `mkdir -p` (the && short-circuits the WHOLE group, not
   # just the LP assignment the snippet begins with) — same failure semantics as before this change.

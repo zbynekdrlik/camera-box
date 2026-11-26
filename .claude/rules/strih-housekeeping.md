@@ -35,7 +35,8 @@ InDroppedDma +15k, Dante holes). So the fact now DRIVES the mask:
 - **Consumers on strih-snv** (all derive, none changed): the IRQ CPUs 0-3 (the oneshot's
   `@STRIH_HOUSEKEEPING_IRQ_CPUS@`, the 1361 golden's `IRQ_CPUS` default), RSS count 4 (atlantic ignores
   it), the task CPU 0 (rustdesk, the display watch, the launcher file, the slice), the slice exclude 1-3,
-  the sampler's `CPUAffinity=4-15`, the on-box decode's `taskset -c 4-15`.
+  the sampler's `CPUAffinity=4-15`, the on-box decode's `taskset -c 14-15` (the top core of the mask,
+  finding 7187104711).
 - **Whole cores (supervisor decision on the lane review's SMT finding):** the ruling first named 0-2 /
   3-15, but strih-snv's SMT pairs are adjacent, so CPU 2 would share a physical core with OBS CPU 3 and
   its RX softirq would run beside an OBS thread's sibling (the issue-1387 SMT fence grades only the
@@ -146,9 +147,10 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   background set at normal priority.
 - Trade-off: two Zen 5 cores carry the RX softirq; the tasks share CPU 0 (with its IRQs) at nice 10.
 - **The E2E on-box recording decode is not in the slice either** (finding 7178516822): on a box with
-  `/etc/strih-housekeeping-cpus.conf` it runs on the OBS mask under SCHED_IDLE + nice 19 + ionice idle
-  (`LOWPRIO_SNIPPET`, `.claude/rules/recording-verdict-on-strih-snv.md`); the slice's one task CPU gave it
-  one CPU beside the RX softirq.
+  `/etc/strih-housekeeping-cpus.conf` it runs on the TOP physical core of the OBS mask (the highest CPU +
+  its SMT siblings, strih-snv 14-15, finding 7187104711: the whole mask made OBS's dlink pump wake late)
+  under SCHED_IDLE + nice 19 + ionice idle (`LOWPRIO_SNIPPET`, `.claude/rules/recording-verdict-on-strih-snv.md`);
+  the slice's one task CPU gave it one CPU beside the RX softirq.
 
 ## What moves, and how
 
