@@ -1,6 +1,6 @@
 """issue 1425 (design 7106973291): strih-snv housekeeping off OBS's CPUs.
 
-The box fact STRIH_HOUSEKEEPING_CPUS (strih-snv 0-2 since ROZHODNUTE 7183885100, the complement of the OBS mask 3-15; the other
+The box fact STRIH_HOUSEKEEPING_CPUS (strih-snv 0-3 since ROZHODNUTE 7183885100 + the whole-core decision, the complement of the OBS mask 4-15; the other
 boxes `none`), the step-11b IRQ oneshot generalised to every IRQ of the rig NIC + the RSS channel
 count, the netdev_budget_usecs drop-in, the rustdesk / display-watch drop-ins, the OBS launcher's own
 placement (its shutdown watch = the stat / grep / tail loop) and verify item 16's rows.
@@ -11,8 +11,8 @@ ARGUMENTS, never inside the script text.
 
 The mechanics scenarios below model a TWO-CPU housekeeping box (0-1, OBS mask 2-15: strih-snv's set until
 ROZHODNUTE 7183885100, stream-pp's today). They run on SCENARIO_BOXES, a copy of the real fact files with
-strih-snv's set at 0-1, so they keep testing that shape after strih-snv moved to 0-2; a test that reads the
-REAL fact files passes `real_boxes=True`. strih-snv's own 0-2 set is test_obs_mask_from_housekeeping_1425.py.
+strih-snv's set at 0-1, so they keep testing that shape after strih-snv moved to 0-3; a test that reads the
+REAL fact files passes `real_boxes=True`. strih-snv's own 0-3 set is test_obs_mask_from_housekeeping_1425.py.
 """
 import os
 import pathlib
@@ -43,8 +43,8 @@ for _f in BOXES.glob("*"):
     if _f.is_file():
         (SCENARIO_BOXES / _f.name).write_bytes(_f.read_bytes())
 _snv = (SCENARIO_BOXES / "strih-snv.env").read_text()
-assert _snv.count("\nSTRIH_HOUSEKEEPING_CPUS=0-2\n") == 1
-(SCENARIO_BOXES / "strih-snv.env").write_text(_snv.replace("\nSTRIH_HOUSEKEEPING_CPUS=0-2\n",
+assert _snv.count("\nSTRIH_HOUSEKEEPING_CPUS=0-3\n") == 1
+(SCENARIO_BOXES / "strih-snv.env").write_text(_snv.replace("\nSTRIH_HOUSEKEEPING_CPUS=0-3\n",
                                                            "\nSTRIH_HOUSEKEEPING_CPUS=0-1\n"))
 
 
@@ -73,7 +73,7 @@ def _exe(path, text):
 
 def test_every_box_declares_its_housekeeping_cpus():
     # issue 1553 (SNV/PP parity): every box measured = online minus its OBS mask (read 25.11.2026)
-    want = {"strih-snv": "0-2", "strih-pp": "0,8", "stream-pp": "0-1", "stream-snv": "0-1,12-19"}
+    want = {"strih-snv": "0-3", "strih-pp": "0,8", "stream-pp": "0-1", "stream-snv": "0-1,12-19"}
     for box, v in want.items():
         r = _run('strih_box_load "$1"; strih_lx_housekeeping_cpus', box, real_boxes=True)
         assert r.returncode == 0, r.stderr
@@ -84,8 +84,8 @@ def _box_with(tmp_path, value):
     d = tmp_path / "boxes"
     d.mkdir(exist_ok=True)
     body = (BOXES / "strih-snv.env").read_text()
-    assert body.count("STRIH_HOUSEKEEPING_CPUS=0-2\n") == 1
-    (d / "strih-snv.env").write_text(body.replace("STRIH_HOUSEKEEPING_CPUS=0-2\n", "STRIH_HOUSEKEEPING_CPUS=%s\n" % value))
+    assert body.count("STRIH_HOUSEKEEPING_CPUS=0-3\n") == 1
+    (d / "strih-snv.env").write_text(body.replace("STRIH_HOUSEKEEPING_CPUS=0-3\n", "STRIH_HOUSEKEEPING_CPUS=%s\n" % value))
     return {"STRIH_BOXES_DIR": str(d)}
 
 

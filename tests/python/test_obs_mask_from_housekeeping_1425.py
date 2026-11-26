@@ -1,7 +1,8 @@
 """issue 1425 (ROZHODNUTÉ issuecomment-7183885100): the OBS mask follows the box fact STRIH_HOUSEKEEPING_CPUS.
 
-Two housekeeping CPUs could not carry strih-snv's atlantic RX softirq, so its fact widens to 0-2 and the OBS
-mask /etc/strih-isolated-cpus.conf that step 11 writes becomes online minus the fact (3-15). Every other box
+Two housekeeping CPUs could not carry strih-snv's atlantic RX softirq, so its fact widens to 0-3 (two whole
+cores, the supervisor's decision on the CPU 2/3 SMT split) and the OBS mask /etc/strih-isolated-cpus.conf
+that step 11 writes becomes online minus the fact (4-15). Every other box
 keeps its file byte-identical: when online minus the fact is the topology plan's CPU set, the plan's own
 string is written, as today.
 
@@ -108,11 +109,11 @@ def test_a_fact_outside_online_or_leaving_no_mask_or_malformed_is_refused():
 
 # --- every box from its own fact + topology ----------------------------------------------------------------
 
-def test_strih_snv_housekeeping_is_0_2_and_its_obs_mask_becomes_3_15():
-    assert _fact("strih-snv") == "0-2"
+def test_strih_snv_housekeeping_is_0_3_and_its_obs_mask_becomes_4_15():
+    assert _fact("strih-snv") == "0-3"
     online, _ = TOPOLOGY["strih-snv"]
     r = _mask(_plan("strih-snv"), online, _fact("strih-snv"))
-    assert r.returncode == 0 and r.stdout.strip() == "3-15", (r.stdout, r.stderr)
+    assert r.returncode == 0 and r.stdout.strip() == "4-15", (r.stdout, r.stderr)
 
 
 def test_every_other_box_writes_exactly_todays_mask():
@@ -125,12 +126,12 @@ def test_every_other_box_writes_exactly_todays_mask():
 
 
 def test_strih_snv_consumers_derive_from_the_new_fact():
-    # IRQ CPUs 0-2 (the oneshot + RSS count 3), task CPU 0, the slice keeps the IRQ-only CPUs 1-2 out
+    # IRQ CPUs 0-3 (the oneshot + RSS count 4), task CPU 0, the slice keeps the IRQ-only CPUs 1-3 out
     r = _bash('strih_box_load strih-snv >/dev/null; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus; '
               'strih_housekeeping_slice_exclude; strih_housekeeping_count "$(strih_housekeeping_irq_cpus)"',
               sources=(FACTS, PROVISION, BG, HK))
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == ["0-2", "0", "1-2", "3"], r.stdout
+    assert r.stdout.split() == ["0-3", "0", "1-3", "4"], r.stdout
 
 
 # --- the wiring --------------------------------------------------------------------------------------------
