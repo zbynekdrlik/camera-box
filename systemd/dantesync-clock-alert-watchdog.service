@@ -16,8 +16,9 @@ Type=oneshot
 ExecStart=%h/devel/camera-box/scripts/dantesync-clock-alert-watchdog.sh
 # Per pass: ~11 dantesync nodes × one :8898 curl (DANTE_CLOCK_CURL_TIMEOUT, default 10 s each) + a
 # local python decision + one getent for the grandmaster DNS. Generous ceiling so a slow event-day
-# link never hangs the timer.
-TimeoutStartSec=120
+# link never hangs the timer. Issue 1545 adds at most one bounded production read per paged venue
+# (DANTE_CLOCK_PRODUCTION_TIMEOUT, 25 s each; snv + pp = 50 s), so the ceiling moved 120 -> 180 s.
+TimeoutStartSec=180
 
 [Install]
 WantedBy=default.target

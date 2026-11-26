@@ -87,8 +87,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/avsync-production.sh"
 
 DRY_RUN=0
+PRODUCTION_READ_VENUE=""
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
+  # issue 1545 (internal): one bounded production read for VENUE, run by venue_production under
+  # `timeout` (a bash function cannot be timed out in-process). Prints yes | no | unknown.
+  --production-read) PRODUCTION_READ_VENUE="${2:-}" ;;
   --help | -h)
     sed -n '10,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
@@ -177,6 +181,11 @@ REPING_INTERVAL_S="${DANTE_CLOCK_REPING_INTERVAL_S:-600}"
 # venue, and is cached this long across passes (a cambox login writes 11 journal lines).
 PRODUCTION_TTL_S="${DANTE_CLOCK_PRODUCTION_TTL_S:-300}"
 [[ "$PRODUCTION_TTL_S" =~ ^[0123456789]+$ ]] || PRODUCTION_TTL_S=300
+# The whole production read (cam2 rig-mode ssh, then maybe the stream box OBS-WS) is bounded by this
+# (s); a read that does not finish in time is `unknown` (= a page). GNU `timeout 0` means no bound, so
+# only a positive whole number is taken.
+PRODUCTION_TIMEOUT_S="${DANTE_CLOCK_PRODUCTION_TIMEOUT:-25}"
+[[ "$PRODUCTION_TIMEOUT_S" =~ ^[123456789][0123456789]*$ ]] || PRODUCTION_TIMEOUT_S=25
 # DANTE_CLOCK_PRODUCTION_CMD (test seam): an executable run as `<cmd> <venue>` printing yes|no|unknown
 # in place of the live read (avsync_venue_production_live).
 # The pages queued this pass: venue -> "; "-joined box lines, in first-seen venue order.
@@ -437,9 +446,15 @@ venue_production() {
     return 0
   fi
   if [ -n "${DANTE_CLOCK_PRODUCTION_CMD:-}" ]; then
-    answer="$("$DANTE_CLOCK_PRODUCTION_CMD" "$venue" 2>/dev/null || true)"
+    answer="$(timeout "$PRODUCTION_TIMEOUT_S" "$DANTE_CLOCK_PRODUCTION_CMD" "$venue" 2>/dev/null || true)"
+  elif [ "$DRY_RUN" -eq 1 ] && [ -z "${AVSYNC_PRODUCTION:-}" ]; then
+    # --dry-run (the handover check's clock item, a hand run) never logs into cam2 or dials OBS-WS:
+    # it reports what a live pass would do with an unread state (unknown = page), caches nothing.
+    log "production at $venue not read in --dry-run (no rig login) -- treated as unknown"
+    printf 'unknown\n'
+    return 0
   else
-    answer="$(avsync_venue_production_live "$venue" "$(avsync_venue_ws_host "$venue" 2>/dev/null || true)" 2>/dev/null || true)"
+    answer="$(timeout "$PRODUCTION_TIMEOUT_S" bash "${BASH_SOURCE[0]}" --production-read "$venue" 2>/dev/null || true)"
   fi
   case "$answer" in
     yes | no) : ;;
@@ -475,7 +490,7 @@ flush_pages() {
       log "page withheld: no production at $venue (clock loss: ${PAGE_LINES[$venue]}) -- the plain alert above stays"
       continue
     fi
-    fire_page "$venue" "🚨 Dante-clock PRODUKCIA ($venue, $REPO_SLUG): BEZ dante clock: ${PAGE_LINES[$venue]}. Počas produkcie to potichu rozhodí A/V aj genlock. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol (stav produkcie: $prod); opakuje sa každých ~10 min kým to trvá."
+    fire_page "$venue" "🚨 Dante-clock PRODUKCIA ($venue, $REPO_SLUG): ${PAGE_LINES[$venue]}. Počas produkcie to potichu rozhodí A/V aj genlock. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol (stav produkcie: $prod); opakuje sa každých ~10 min kým to trvá."
   done
 }
 
@@ -563,7 +578,7 @@ handle_node() {
       confirm_then_alert "mgmt_${name}" 0 "dante-clock-${name}-mgmt"   # #1309: :8898 dead, mgmt not probed this pass
       confirm_then_alert "http_${name}" 1 "dante-clock-nohttp-${name}" \
         "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) je HORE, ale dantesync HTTP na :$STATUS_PORT NEODPOVEDÁ -- démon dantesync spadol/zamrzol na živom boxe.${vnote_txt} Bez neho uzol nemá dante clock a pri produkcii to potichu rozhodí A/V aj genlock. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. Náprava: reštartuj dantesync na $name a over :$STATUS_PORT."
-      [ "$CTA_FIRED" = "1" ] && queue_page "$(node_venue "$role")" "$name ($ip) dantesync neodpovedá"
+      [ "$CTA_FIRED" = "1" ] && queue_page "$(node_venue "$role")" "$name ($ip) bez dante clock: dantesync neodpovedá"
       return 0
       ;;
     NO_CLOCK) : ;;
@@ -587,7 +602,7 @@ handle_node() {
   [ -n "$venue" ] && fix_txt="Náprava: over PTP grandmaster miesta ${venue} (${gm:-<neznámy>}), dantesync na boxe, gm_allowlist."
   confirm_then_alert "node_${name}" 1 "dante-clock-${name}" \
     "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) STRATIL dante clock -- dôvod **${reason}**${steps_note}.${vnote_txt} Uzol nie je PTP-zosynchronizovaný na rig grandmaster (${gm:-<neznámy>}); pri produkcii to potichu rozhodí A/V aj genlock celej fleet. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. ${fix_txt}"
-  [ "$CTA_FIRED" = "1" ] && queue_page "$(node_venue "$role")" "$name ($ip) ${reason}"
+  [ "$CTA_FIRED" = "1" ] && queue_page "$(node_venue "$role")" "$name ($ip) bez dante clock: ${reason}"
   return 0
 }
 
@@ -713,5 +728,9 @@ main() {
 
 # Run only when EXECUTED (systemd/CLI). Sourcing (tests) only defines the functions above.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if [ -n "$PRODUCTION_READ_VENUE" ]; then
+    avsync_venue_production_live "$PRODUCTION_READ_VENUE" "$(avsync_venue_ws_host "$PRODUCTION_READ_VENUE" 2>/dev/null || true)"
+    exit 0
+  fi
   main
 fi

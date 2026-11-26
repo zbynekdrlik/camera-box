@@ -151,6 +151,15 @@ production-critical watchdog class (umbrella **#1308**).
     broadcast), `no` logs `page withheld`. Read only when a page is queued, once per venue per pass,
     cached `DANTE_CLOCK_PRODUCTION_TTL_S` (300 s) in the state file (a cambox login writes 11 journal
     lines). Test seam `DANTE_CLOCK_PRODUCTION_CMD` (`<cmd> <venue>` → yes|no|unknown).
+  - **The read is bounded as a whole** (`DANTE_CLOCK_PRODUCTION_TIMEOUT`, 25 s; a bash function
+    cannot be timed out in-process, so it runs as `timeout N bash <self> --production-read <venue>`);
+    a read that does not finish is `unknown` = a page. Two venues add at most 50 s, so the unit's
+    `TimeoutStartSec` is 180.
+  - **`--dry-run` never logs into the rig** for it (the handover clock item runs `--dry-run` under a
+    30 s probe bound): unread = `unknown`, nothing cached. `AVSYNC_PRODUCTION` (yes|no) is still
+    honoured there, which is how the tests exercise the real avsync-production.sh path.
+  - **Accepted gap:** every node without a venue role (dev1, an audio node) belongs to the home venue,
+    so dev1 losing its clock during a Poprad production while SNV is in TEST mode is not paged.
   - **Delivery:** after the roster loop, ONE `page:dante-clock-<venue>:$(watchdog_notify_key …)` per
     venue listing every box without the clock (a fleet-wide grandmaster loss is one message, not one
     per node); airuleset rewrites it to its 10-min window. `confirm_then_alert` sets `CTA_FIRED`, the
