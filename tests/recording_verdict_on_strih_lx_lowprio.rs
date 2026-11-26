@@ -280,7 +280,8 @@ impl FakeBox {
 
 #[test]
 fn housekeeping_box_runs_the_decode_on_the_obs_mask_at_idle_priority_1425() {
-    // strih-snv: housekeeping 0-1 (task CPU 0 on file), OBS mask 2-15, no cpu_atom (AMD).
+    // A two-CPU housekeeping box (strih-snv's shape until ROZHODNUTE 7183885100 moved it to 0-2 /
+    // mask 3-15): housekeeping 0-1 (task CPU 0 on file), OBS mask 2-15, no cpu_atom (AMD).
     let b = FakeBox::new(None, Some("0\n"), Some("2-15\n"));
     assert_eq!(b.pure(), HK_PREFIX_2_15, "pure contract");
     assert_eq!(

@@ -157,7 +157,7 @@ _strih_program_audio_housekeeping() {
 
 # strih_program_audio_cpus [SYSFS_ROOT] -> the sampler's CPU list (issue 1485), never every CPU:
 #   - a box with housekeeping CPUs (issue 1425, design 7119179275): the OBS mask
-#     (/etc/strih-isolated-cpus.conf, strih-snv 2-15: 14 CPUs with ~9 idle), at nice 10
+#     (/etc/strih-isolated-cpus.conf, strih-snv 4-15 since ROZHODNUTE 7183885100), at nice 10
 #     (strih_program_audio_nice): the rig NIC IRQs are spread over every housekeeping CPU, and the sampler
 #     (up to 83 % of a core) must never share one with the RX softirq again;
 #   - a hybrid box: its E-cores (strih_program_audio_ecores);

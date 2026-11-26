@@ -4,7 +4,8 @@
 #
 # scripts/lib/strih-housekeeping.sh -- issue 1425 (design 7106973291, dstack#476 + the 23.11.2026 exec
 # snoop): a strih box's housekeeping runs on the CPUs OBS does not use, the box fact
-# STRIH_HOUSEKEEPING_CPUS (strih-snv 0-1 = the complement of the OBS mask 2-15; `none` = nothing moved).
+# STRIH_HOUSEKEEPING_CPUS (strih-snv 0-3 = the complement of the OBS mask 4-15, which setup-strih step 11
+# derives from this fact, ROZHODNUTE 7183885100; `none` = nothing moved).
 #
 # Root cause (read live 23.11.2026 on strih-snv): OBS runs on 2-15 (/etc/strih-isolated-cpus.conf), but
 # the Aquantia RX IRQs kept smp_affinity_list 0-15 with 8 RSS queues and netdev_budget_usecs 2000, and
