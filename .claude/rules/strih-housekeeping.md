@@ -35,6 +35,12 @@ InDroppedDma +15k, Dante holes). So the fact now DRIVES the mask:
   `@STRIH_HOUSEKEEPING_IRQ_CPUS@`, the 1361 golden's `IRQ_CPUS` default), RSS count 3 (atlantic ignores
   it), the task CPU 0 (rustdesk, the display watch, the launcher file, the slice), the slice exclude 1-2,
   the sampler's `CPUAffinity=3-15`, the on-box decode's `taskset -c 3-15`.
+- **Accepted consequence (review of this lane, NOT measured): CPU 2 shares a physical core with OBS CPU 3**
+  (strih-snv's SMT pairs are adjacent), so an IRQ placed on CPU 2 runs its softirq beside an OBS thread's
+  sibling. The issue-1387 SMT fence grades only the background slice (CPU 0), so no verify row sees it.
+  The ruling names 0-2 / 3-15; the alternative `0-3` (two whole cores, mask 4-15) is the same one-line
+  fact change. Read at the first E2E after the deploy: `mpstat -P 2,3` and the genlock-fifo audit
+  relock / underrun deltas of the inputs whose threads sit on CPU 3.
 - The mechanics tests of `test_strih_housekeeping_1425.py` model a two-CPU set: they run on a copy of the
   fact files with strih-snv at 0-1 (`SCENARIO_BOXES`).
 

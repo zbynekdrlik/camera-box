@@ -7,7 +7,9 @@ string is written, as today.
 
 The pure helper `obs_box_obs_mask_from_housekeeping PLAN ONLINE HK` (scripts/lib/obs-box-background.sh) runs
 under the callers' `set -euo pipefail`; the plan comes from the REAL `obs_box_cpu_isolation_plan` over each
-box's topology (the thread-sibling layout read on the boxes, 25.11.2026). Values reach bash as ARGUMENTS.
+box's topology, MODELLED on the layouts the fact-file comments record (read 25.11.2026: strih-snv adjacent
+pairs, strih-pp N,N+8, stream-pp 12 threads adjacent, stream-snv 12 P-threads + 8 E-cores), not captures.
+Values reach bash as ARGUMENTS.
 """
 import os
 import pathlib
