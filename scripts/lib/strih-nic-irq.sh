@@ -295,6 +295,7 @@ IRQ_RATE_SAMPLE_S="${IRQ_RATE_SAMPLE_S:-2}"
 IRQ_LOAD_MIN_PER_S="${IRQ_LOAD_MIN_PER_S:-20000}"
 TARGET_IP="${STRIH_LX_TARGET_IP:-@STRIH_TARGET_IP@}"
 IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-@STRIH_HOUSEKEEPING_IRQ_CPUS@}"
+# a hand run that overrides STRIH_HOUSEKEEPING_IRQ_CPUS overrides STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS with it
 IRQ_ONLY_CPUS="${STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS:-@STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS@}"
 
 log() { printf 'strih-nic-irq-affinity: %s\n' "$*"; }
@@ -396,7 +397,7 @@ if [ "$IRQ_CPUS" != none ] && [ -d "$msi_dir" ]; then
   irqs="$(printf '%s\n' $irqs | sort -n | tr '\n' ' ' | sed 's/ $//')"
   src="msi ${iface}"
 else
-  [ "$IRQ_CPUS" = none ] || log "${iface}: no msi_irqs (not a PCIe NIC) -- RSS left alone, its xhci IRQ goes to the IRQ CPUs"
+  [ "$IRQ_CPUS" = none ] || log "${iface}: no msi_irqs (not a PCIe NIC) -- RSS left alone, its xhci IRQ goes to the placement CPUs"
   # (2) xhci host controller PCI function = walk the device symlink up to the usbN root.
   dev="$(readlink -f "${SYS_ROOT}/class/net/${iface}/device" 2>/dev/null || true)"
   [ -n "$dev" ] || die "no /sys device node for iface ${iface}"

@@ -659,7 +659,7 @@ strih_housekeeping_rx_note() {
 # CPUs, each unit's live placement on the task CPU, the sampler on the OBS mask. rc 0 after printing its rows.
 strih_housekeeping_grade_report() {
   local home="${1:?home required}" user="${2:?user required}" hk irq task iso online want sys nic irqs n aff badirq="" okirq=""
-  local cur conf live f
+  local cur conf live f irqonly ontask=""
   sys="${STRIH_HOUSEKEEPING_SYS:-/sys}"
   hk="$(strih_lx_housekeeping_cpus)" || { bad "(hk-cpus) the box fact STRIH_HOUSEKEEPING_CPUS cannot be read"; return 0; }
   if ! irq="$(strih_housekeeping_irq_cpus "$hk")" || ! task="$(strih_housekeeping_task_cpus "$hk")"; then
@@ -702,7 +702,8 @@ strih_housekeeping_grade_report() {
       case "$aff" in
         '' | *[!0123456789]*) badirq="${badirq:+$badirq }${n}=${aff:-unreadable}" ;;
         *) case " $(obs_box_cpulist_expand "$irq") " in
-             *" $((10#$aff)) "*) okirq="${okirq:+$okirq }${n}->${aff}" ;;
+             *" $((10#$aff)) "*) okirq="${okirq:+$okirq }${n}->${aff}"
+                                 case " $(obs_box_cpulist_expand "$task") " in *" $((10#$aff)) "*) ontask="${ontask:+$ontask }${n}->${aff}" ;; esac ;;
              *) badirq="${badirq:+$badirq }${n}=${aff}" ;;
            esac ;;
       esac
@@ -710,6 +711,12 @@ strih_housekeeping_grade_report() {
     if [ -z "$irqs" ]; then bad "(hk-irq) ${nic}: no IRQ found (msi_irqs / xhci)"
     elif [ -n "$badirq" ]; then bad "(hk-irq) ${nic}: IRQ(s) not on exactly one housekeeping CPU of ${irq}: ${badirq} -- systemctl restart strih-nic-irq-affinity.service (off-production: a channel change drops the link once)"
     else ok "(hk-irq) ${nic}: every IRQ on one housekeeping CPU of ${irq}: ${okirq}"; fi
+    # (hk-irq-task) report-only (finding 26.11.2026): the placement never uses the task CPU while IRQ-only
+    # CPUs exist, so an IRQ there is a stale placement (a run before this rule, a driver re-request).
+    irqonly="$(strih_housekeeping_slice_exclude "$hk" 2>/dev/null || true)"
+    if [ -n "$ontask" ] && [ -n "$irqonly" ] && [ "$irqonly" != none ]; then
+      note "(hk-irq-task) ${nic}: IRQ(s) on the task CPU ${task} while the IRQ-only CPUs ${irqonly} exist: ${ontask} -- the next placement run under load moves them (off-production: systemctl restart strih-nic-irq-affinity.service)"
+    fi
   fi
   # (hk-hooks) the udev RSS rule + the NetworkManager re-place hook as rendered.
   f="$(strih_lx_nic_driver 2>/dev/null || true)"
