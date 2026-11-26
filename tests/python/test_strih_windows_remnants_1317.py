@@ -281,7 +281,10 @@ def test_linux_pullback_note_names_scp_not_a_win_strih_download():
     # tests/harness_recording_e2e_paths.rs pins `FileDownload $STRIH_PIXELS_WIN` in that file; the
     # helper owns only the strih-snv text.
     lx = _platform("strih_lx_partial_pullback_note '/o/p.json' '/o/p-pixels'").stdout
-    assert "win-strih" not in lx and "FileDownload" not in lx and "scp" in lx, lx
+    # issue 1425: the strih-snv recording is decoded on dev1 from a paced copy, so the partial is
+    # written on dev1 by recording-verdict-on-strih-snv.sh itself; no scp pull-back is left to name.
+    assert "win-strih" not in lx and "FileDownload" not in lx, lx
+    assert "decoded on dev1" in lx and "recording-verdict-on-strih-snv.sh" in lx, lx
     assert "/o/p.json" in lx and "/o/p-pixels" in lx, lx
 
 
