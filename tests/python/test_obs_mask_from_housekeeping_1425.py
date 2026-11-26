@@ -2,8 +2,9 @@
 
 Two housekeeping CPUs could not carry strih-snv's atlantic RX softirq, so its fact widens to 0-3 (two whole
 cores, the supervisor's decision on the CPU 2/3 SMT split) and the OBS mask /etc/strih-isolated-cpus.conf
-that step 11 writes becomes online minus the fact (4-15). Every other box
-keeps its file byte-identical: when online minus the fact is the topology plan's CPU set, the plan's own
+that step 11 writes becomes online minus the fact (4-15). strih-pp takes the same two whole cores on its
+N,N+8 numbering (0-1,8-9 -> mask 2-7,10-15) since the IRQ-only placement. The stream boxes
+keep their file byte-identical: when online minus the fact is the topology plan's CPU set, the plan's own
 string is written, as today.
 
 The pure helper `obs_box_obs_mask_from_housekeeping PLAN ONLINE HK` (scripts/lib/obs-box-background.sh) runs
@@ -118,11 +119,48 @@ def test_strih_snv_housekeeping_is_0_3_and_its_obs_mask_becomes_4_15():
 
 def test_every_other_box_writes_exactly_todays_mask():
     # the ruling: nothing else moves. The written text = the topology plan string, byte for byte.
-    for box in ("strih-pp", "stream-pp", "stream-snv"):
+    for box in ("stream-pp", "stream-snv"):
         online, _ = TOPOLOGY[box]
         plan = _plan(box)
         r = _mask(plan, online, _fact(box))
         assert r.returncode == 0 and r.stdout == plan + "\n", (box, plan, r.stdout, r.stderr)
+
+
+def test_strih_pp_housekeeping_is_two_whole_cores_and_its_obs_mask_becomes_2_7_10_15():
+    # issue 1425 (IRQ-only placement): 0,8 was ONE core, so CPU 8 alone took both ixgbe RX queues.
+    # The strih-snv rule on the Ryzen's N,N+8 numbering: cores 0 and 1 = 0-1,8-9; OBS keeps six cores.
+    assert _fact("strih-pp") == "0-1,8-9"
+    online, _ = TOPOLOGY["strih-pp"]
+    r = _mask(_plan("strih-pp"), online, _fact("strih-pp"))
+    assert r.returncode == 0 and r.stdout.strip() == "2-7,10-15", (r.stdout, r.stderr)
+
+
+def test_every_strih_housekeeping_set_is_two_or_more_whole_smt_cores():
+    # the whole-core rule: no housekeeping CPU shares a physical core with an OBS CPU, and at least two
+    # cores (one task CPU leaves no IRQ-only CPU of a second core otherwise)
+    for box in ("strih-snv", "strih-pp"):
+        sib = {}
+        for line in TOPOLOGY[box][1].splitlines():
+            cpu, s = line.split()
+            sib[int(cpu)] = s
+        r = _bash('obs_box_cpulist_expand "$1"', _fact(box))
+        assert r.returncode == 0, r.stderr
+        hk = {int(c) for c in r.stdout.split()}
+        cores = {sib[c] for c in hk}
+        for core in cores:
+            r = _bash('obs_box_cpulist_expand "$1"', core)
+            assert {int(c) for c in r.stdout.split()} <= hk, (box, core, sorted(hk))
+        assert len(cores) >= 2, (box, cores)
+
+
+def test_strih_pp_consumers_derive_from_the_new_fact():
+    # IRQ CPUs 0-1,8-9 (RSS count 4: ixgbe has channel control, so the first live run is a link drop),
+    # task CPU 0, the IRQ-only CPUs 1,8-9 kept out of the slice and taking every rig-NIC IRQ
+    r = _bash('strih_box_load strih-pp >/dev/null; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus; '
+              'strih_housekeeping_slice_exclude; strih_housekeeping_count "$(strih_housekeeping_irq_cpus)"',
+              sources=(FACTS, PROVISION, BG, HK))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["0-1,8-9", "0", "1,8-9", "4"], r.stdout
 
 
 def test_strih_snv_consumers_derive_from_the_new_fact():

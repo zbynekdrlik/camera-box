@@ -73,7 +73,7 @@ def _exe(path, text):
 
 def test_every_box_declares_its_housekeeping_cpus():
     # issue 1553 (SNV/PP parity): every box measured = online minus its OBS mask (read 25.11.2026)
-    want = {"strih-snv": "0-3", "strih-pp": "0,8", "stream-pp": "0-1", "stream-snv": "0-1,12-19"}
+    want = {"strih-snv": "0-3", "strih-pp": "0-1,8-9", "stream-pp": "0-1", "stream-snv": "0-1,12-19"}
     for box, v in want.items():
         r = _run('strih_box_load "$1"; strih_lx_housekeeping_cpus', box, real_boxes=True)
         assert r.returncode == 0, r.stderr
@@ -103,7 +103,7 @@ def test_step_11b_runs_on_a_housekeeping_box_and_skips_a_pcie_box_without_one(tm
     body = 'strih_box_load "$1"; if WHY="$(obs_box_step_applies 11b)"; then echo RUN; else echo "SKIP $WHY"; fi'
     srcs = (FACTS, ROLE)
     assert _run(body, "strih-snv", sources=srcs).stdout.strip() == "RUN"
-    assert _run(body, "strih-pp", sources=srcs).stdout.strip() == "RUN"   # PCIe, housekeeping 0,8
+    assert _run(body, "strih-pp", sources=srcs).stdout.strip() == "RUN"   # PCIe, housekeeping 0-1,8-9
     # a PCIe box without housekeeping CPUs (no deployed box has that since issue 1553: strih-snv set to none)
     out = _run(body, "strih-snv", sources=srcs, env=_box_with(tmp_path, "none")).stdout.strip()
     assert out.startswith("SKIP the rig NIC is not a USB device") and "STRIH_HOUSEKEEPING_CPUS=none" in out
@@ -941,7 +941,7 @@ def test_the_irqs_get_the_whole_set_and_the_tasks_its_first_cpu(tmp_path):
     r = _run('strih_box_load strih-snv; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
     assert r.stdout.split() == ["0-1", "0"], r.stdout
     r = _run('strih_box_load strih-pp; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
-    assert r.stdout.split() == ["0,8", "0"], r.stdout
+    assert r.stdout.split() == ["0-1,8-9", "0"], r.stdout
     r = _run('strih_box_load strih-snv; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus',
              env=_box_with(tmp_path, "none"))
     assert r.stdout.split() == ["none", "none"], r.stdout
