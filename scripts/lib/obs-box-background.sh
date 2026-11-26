@@ -99,7 +99,7 @@ obs_box_background_cpus() {
 # ROZHODNUTE 7183885100): HK `none` = PLAN (the topology plan) as it is; else online minus HK, which must be a
 # cpulist inside ONLINE that leaves a mask. When that complement is the plan's own CPU set the PLAN string is
 # printed byte for byte (strih-pp's out-of-order `1,9,2,10,...` stays its file), otherwise the compressed
-# complement (strih-snv 0-2 -> 3-15). rc 1 + a stderr line on a refused fact or an unreadable online list.
+# complement (strih-snv 0-3 -> 4-15). rc 1 + a stderr line on a refused fact or an unreadable online list.
 obs_box_obs_mask_from_housekeeping() {
     local plan="${1-}" online="${2-}" hk="${3-}" on hke mask plane c out=""
     if [ "$hk" = none ]; then printf '%s\n' "$plan"; return 0; fi
