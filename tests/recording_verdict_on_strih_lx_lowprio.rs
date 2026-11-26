@@ -185,7 +185,12 @@ fn the_probe_scp_and_partial_pull_are_unchanged() {
 // task CPU, which also carries rig-NIC IRQs). A box without housekeeping keeps today's prefix.
 // ================================================================================================
 
-const HK_PREFIX_2_15: &str = "nice -n 19 ionice -c 3 chrt --idle 0 taskset -c 2-15";
+// Finding 7187104711 (26.11.2026): the whole OBS mask under SCHED_IDLE still shared every OBS core's SMT
+// sibling, L2/L3 and memory bandwidth (the OBS dlink pump woke late for the decode's 8 minutes). So the
+// decode takes ONE whole physical core at the TOP of the mask: the highest CPU of the mask plus its SMT
+// siblings, read on the box from `<sysfs>/devices/system/cpu/cpu<N>/topology/thread_siblings_list`; a
+// siblings value that is not a cpulist falls back to the single highest CPU.
+const HK_PREFIX_TOP_15: &str = "nice -n 19 ionice -c 3 chrt --idle 0 taskset -c 15";
 
 /// A fake box: `<root>/devices/cpu_atom/cpus` (sysfs, optional), `<root>/etc/strih-housekeeping-cpus.conf`
 /// and `<root>/etc/strih-isolated-cpus.conf` (optional), an executable runner and a `sudo` stub
@@ -221,6 +226,16 @@ impl FakeBox {
             fs::set_permissions(&f, perm).unwrap();
         }
         FakeBox { dir }
+    }
+    /// Write `<root>/devices/system/cpu/cpu<cpu>/topology/thread_siblings_list` (the box's SMT map).
+    fn siblings(self, cpu: u32, list: &str) -> FakeBox {
+        let d = self
+            .dir
+            .path()
+            .join(format!("devices/system/cpu/cpu{cpu}/topology"));
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("thread_siblings_list"), list).unwrap();
+        self
     }
     fn root(&self) -> String {
         self.dir.path().to_str().unwrap().to_string()
@@ -282,11 +297,12 @@ impl FakeBox {
 fn housekeeping_box_runs_the_decode_on_the_obs_mask_at_idle_priority_1425() {
     // A two-CPU housekeeping box (strih-snv's shape until ROZHODNUTE 7183885100 moved it to 0-2 /
     // mask 3-15): housekeeping 0-1 (task CPU 0 on file), OBS mask 2-15, no cpu_atom (AMD).
+    // No topology file in this fixture: the single highest CPU of the mask (finding 7187104711).
     let b = FakeBox::new(None, Some("0\n"), Some("2-15\n"));
-    assert_eq!(b.pure(), HK_PREFIX_2_15, "pure contract");
+    assert_eq!(b.pure(), HK_PREFIX_TOP_15, "pure contract");
     assert_eq!(
         b.remote(),
-        HK_PREFIX_2_15,
+        HK_PREFIX_TOP_15,
         "the remote snippet must agree with the pure contract"
     );
     assert!(!b.remote().contains("obs-box-background-run") && !b.remote().contains("sudo"));
@@ -295,7 +311,7 @@ fn housekeeping_box_runs_the_decode_on_the_obs_mask_at_idle_priority_1425() {
 #[test]
 fn housekeeping_beats_the_e_cores_too_1425() {
     let b = FakeBox::new(Some("12-15\n"), Some("0-1\n"), Some("2-11\n"));
-    let want = "nice -n 19 ionice -c 3 chrt --idle 0 taskset -c 2-11";
+    let want = "nice -n 19 ionice -c 3 chrt --idle 0 taskset -c 11";
     assert_eq!(b.pure(), want);
     assert_eq!(b.remote(), want);
 }
@@ -338,4 +354,84 @@ fn an_empty_housekeeping_file_is_no_housekeeping_1425() {
     let b = FakeBox::new(None, Some(""), Some("2-15\n"));
     assert_eq!(b.pure(), format!("sudo -n {}/bin/run", b.root()));
     assert_eq!(b.remote(), format!("sudo -n {}/bin/run", b.root()));
+}
+
+// ================================================================================================
+// Finding 7187104711: ONE whole physical core at the top of the OBS mask, never the whole mask.
+// ================================================================================================
+
+#[test]
+fn strih_snv_decodes_on_the_top_core_14_15_of_its_obs_mask_7187104711() {
+    // strih-snv: housekeeping 0-3 (task CPU 0 on file), OBS mask 4-15, Zen 5 adjacent SMT pairs.
+    let b = FakeBox::new(None, Some("0\n"), Some("4-15\n")).siblings(15, "14-15\n");
+    let want = "nice -n 19 ionice -c 3 chrt --idle 0 taskset -c 14-15";
+    assert_eq!(b.pure(), want, "pure contract");
+    assert_eq!(b.remote(), want, "the shipped snippet");
+}
+
+#[test]
+fn stream_snv_decodes_on_the_top_p_core_10_11_of_its_obs_mask_7187104711() {
+    // stream-snv: i7-12700H, P-core pairs 0-11, E-cores 12-19 (housekeeping with 0-1), mask 2-11.
+    let b = FakeBox::new(Some("12-19\n"), Some("0\n"), Some("2-11\n")).siblings(11, "10-11\n");
+    let want = "nice -n 19 ionice -c 3 chrt --idle 0 taskset -c 10-11";
+    assert_eq!(b.pure(), want);
+    assert_eq!(b.remote(), want);
+}
+
+#[test]
+fn the_top_cpu_is_the_highest_number_of_any_cpulist_shape_7187104711() {
+    for (mask, top) in [
+        ("4-7,9,12-15\n", 15),
+        ("12-15,4-7\n", 15),
+        ("1,9,2,10,3,11\n", 11),
+        ("7\n", 7),
+        ("3-15\n", 15),
+    ] {
+        let b = FakeBox::new(None, Some("0\n"), Some(mask)).siblings(top, &format!("{top}\n"));
+        let want = format!("nice -n 19 ionice -c 3 chrt --idle 0 taskset -c {top}");
+        assert_eq!(b.pure(), want, "mask {mask:?}");
+        assert_eq!(b.remote(), want, "mask {mask:?}");
+    }
+}
+
+#[test]
+fn comma_form_siblings_are_kept_as_the_kernel_prints_them_7187104711() {
+    // A box whose SMT pairs are N,N+8 (strih-pp's shape) prints `7,15`.
+    let b = FakeBox::new(None, Some("0,8\n"), Some("1-7,9-15\n")).siblings(15, "7,15\n");
+    let want = "nice -n 19 ionice -c 3 chrt --idle 0 taskset -c 7,15";
+    assert_eq!(b.pure(), want);
+    assert_eq!(b.remote(), want);
+}
+
+#[test]
+fn unreadable_or_malformed_siblings_fall_back_to_the_single_top_cpu_7187104711() {
+    for sib in [
+        None,
+        Some(""),
+        Some("  \n"),
+        Some("14-15; rm -rf /\n"),
+        Some("all\n"),
+        Some("14-\n"),
+        Some("\u{0661}\u{0664}-\u{0661}\u{0665}\n"),
+    ] {
+        let mut b = FakeBox::new(None, Some("0\n"), Some("4-15\n"));
+        if let Some(v) = sib {
+            b = b.siblings(15, v);
+        }
+        assert_eq!(b.pure(), HK_PREFIX_TOP_15, "siblings {sib:?}");
+        assert_eq!(b.remote(), HK_PREFIX_TOP_15, "siblings {sib:?}");
+    }
+}
+
+#[test]
+fn the_decode_never_takes_the_whole_obs_mask_7187104711() {
+    let s = script_text();
+    assert!(
+        !s.contains("chrt --idle 0 taskset -c $M\""),
+        "the housekeeping arm must pin the top core, never the whole mask $M"
+    );
+    assert!(
+        s.contains("/topology/thread_siblings_list"),
+        "the snippet reads the SMT siblings on the box"
+    );
 }
