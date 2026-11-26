@@ -85,7 +85,7 @@ strih_obs_restart_hint() {
 # INLINE in recording-e2e.sh's else-branch: tests/harness_recording_e2e_paths.rs pins it there.
 strih_lx_partial_pullback_note() {
   printf '    pull back to dev1: %s  AND the #186 pixel-proof dir %s\n' "${1:-}" "${2:-}"
-  printf '      (strih-snv: already pulled back over scp by recording-verdict-on-strih-snv.sh;\n'
+  printf '      (strih-snv: decoded on dev1 from a paced copy by recording-verdict-on-strih-snv.sh, issue 1425;\n'
   printf '       the pixel-proof dir is absent on a clean run)\n'
 }
 

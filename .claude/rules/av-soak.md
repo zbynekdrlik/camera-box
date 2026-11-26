@@ -123,6 +123,9 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   volume: full cleanup, exit = the report's verdict) -- it never holds the lease through a
   production. An unreadable
   read or a stalled marker log is a transient: a skipped row.
+- **Issue 1425: the soak's Linux decodes run on dev1** (through the same entry scripts, a paced copy
+  of the recording); the on-box kill below is now a harmless no-op on a Linux box, the local timeout
+  stops the decode, and the inner copy `timeout --foreground` calls stay in the caller's group.
 - **A decode is stopped on the box too.** Killing the local `timeout` does not stop a remote
   `recording-verdict`: on a decode timeout, and in cleanup while a decode runs, the soak stops
   THIS run's decode, matched by its own output name `av-soak-<stamp>-s...`

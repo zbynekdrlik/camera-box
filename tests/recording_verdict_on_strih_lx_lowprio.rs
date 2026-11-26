@@ -146,10 +146,15 @@ fn step2_ssh_run_launches_onstrihlx_cmd_through_the_lowprio_prefix() {
         "STEP 2 must pin to the E-cores read ON the box (so a replacement notebook uses its own map)"
     );
 
-    // The on-box verdict command must be launched THROUGH the prefix: `$LP $ONSTRIHLX_CMD`.
+    // issue 1425: the box runs no decode any more; the prefix only wraps the box's sha256 read of
+    // the recording (scripts/lib/rec-pull-paced.sh), and the verdict runs on dev1.
     assert!(
-        s.contains(r#"\$LP $ONSTRIHLX_CMD"#),
-        "the ssh-run line must invoke $ONSTRIHLX_CMD through the low-priority prefix $LP"
+        s.contains(r#"rec_pull_paced "$STRIH_USER" "$STRIH_PW" "$STRIH_LX_BOX" "$STRIH_REC" "$LOCAL_REC" "$LABEL" "$LOWPRIO_SNIPPET""#),
+        "the recording copy must hand the box's low-priority prefix to the box-side sha256 read"
+    );
+    assert!(
+        !s.contains("$LP $ONSTRIHLX_CMD"),
+        "issue 1425: recording-verdict must never be launched on the box"
     );
 }
 
@@ -165,17 +170,17 @@ fn the_lowprio_snippet_is_single_quoted_so_dev1_never_expands_the_cat() {
 }
 
 #[test]
-fn the_probe_scp_and_partial_pull_are_unchanged() {
-    // The change is confined to STEP 2's launch prefix — the binary deploy and the partial/pixels
-    // pull-back stay byte-identical (small files, seconds).
+fn no_binary_goes_to_the_box_and_the_decode_runs_on_dev1_1425() {
+    // issue 1425 (owner ROZHODNUTE issuecomment-7187562277): no recording-verdict upload, no
+    // on-box decode, no partial pull-back -- the copy comes to dev1 and the verdict runs here.
     let s = script_text();
     assert!(
-        s.contains(r#"sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "$VERDICT_BIN" "${TARGET}:${REMOTE_BIN}""#),
-        "the binary scp must be unchanged"
+        !s.contains("${TARGET}:${REMOTE_BIN}"),
+        "no binary upload to the box"
     );
     assert!(
-        s.contains(r#"sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "${TARGET}:${OUT_PARTIAL}" "$local_partial""#),
-        "the partial pull-back must be unchanged"
+        s.contains(r#"env RUST_LOG=info nice -n 19 "$VERDICT_BIN" "${LOCAL_ARGS[@]}""#),
+        "the verdict runs on dev1 with the rewritten args"
     );
 }
 

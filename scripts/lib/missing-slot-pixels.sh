@@ -15,7 +15,9 @@
 #
 # WHAT: after the merge, before the Discord report and the #652 cleanup plan, for the classified
 # slots with `png == null` (capped, MISSING_SLOT_PIXELS_CAP, default 12 per run) this exports the
-# slot frame plus its two neighbours as PNG ON the box that holds the recording (camN -> the strih
+# slot frame plus its two neighbours as PNG from the recording of the box that holds it -- a Linux
+# box's recording is copied to dev1 and exported THERE (issue 1425: no ffmpeg on a rig box; a
+# Windows box still exports on the box) (camN -> the strih
 # recording, strih/stream -> the stream recording — the verdict's NodeSpec pairing), pulls them to
 # `$OUTDIR/<node>-missing/`, logs every path, and records a `missing_slot_pixels` block in the
 # verdict JSON the Discord report reads. Best-effort: it never changes the verdict or $GATE.
@@ -31,6 +33,10 @@
 # after the verdict frame_index. The PNGs are GRAY — exactly the luma the decoder saw.
 # tests/harness_missing_slot_pixels_1367.rs pins this against a VFR fixture with real ffmpeg.
 
+if ! declare -F rec_pull_paced >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/rec-pull-paced.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/rec-pull-paced.sh"
+fi
 if ! declare -F win_ssh_ps_encoded_command >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/win-ssh-exec.sh
   . "$(dirname "${BASH_SOURCE[0]}")/win-ssh-exec.sh"
@@ -130,7 +136,8 @@ missing_slot_pixels_lowprio_snippet() {
   printf '%s' 'LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi; M="$(head -n 1 /etc/strih-isolated-cpus.conf 2>/dev/null | tr -d "[:space:]")"; if [ -s /etc/strih-housekeeping-cpus.conf ] && printf %s "$M" | grep -Eqx "[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*"; then LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c $M"; fi;'
 }
 
-# The REMOTE bash script for a Linux box: probe the size, then run the two-stage export at idle
+# The bash script for a Linux box's recording (issue 1425: run on DEV1 against the paced copy; the
+# low-priority snippet resolves to plain `nice -n 19` there and stays byte-pinned to the decode's): probe the size, then run the two-stage export at idle
 # priority into $2 (its exit status is stage 2's). $1 = recording path on the box, $2 = remote output dir,
 # $3..$N = the ordinals (missing_slot_pixels_indices output). Every dynamic value is %q-quoted, so
 # spaces in an OBS file name are safe. Pure.
@@ -198,17 +205,24 @@ missing_slot_pixels_box_extract() {
   local -a ssh_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
   mkdir -p "$lparent"
   if [ "$os" = linux ]; then
-    script="$(missing_slot_pixels_linux_script "$rec" "$rdir" "$@")"
-    if ! timeout "$tmo" sshpass -p "$pw" ssh "${ssh_opts[@]}" "$user@$host" "$script" >/dev/null 2>&1; then
-      echo "[missing-slot-pixels] WARNING: $box ($host): export failed or timed out (${tmo}s)" >&2
+    # issue 1425 (owner ROZHODNUTÉ issuecomment-7187562277): no ffmpeg on a rig box. The recording is
+    # copied to dev1 PACED + sha256-verified (rec-pull-paced.sh), the SAME two-stage export runs on
+    # dev1 into <lparent>/<basename of rdir> (where the pull used to land), and the copy is removed.
+    local copy_dir copy rc=0
+    copy_dir="$(mktemp -d "${lparent%/}/.rec-copy-$box.XXXXXX")" || return 1
+    copy="$copy_dir/$(basename -- "$rec")"
+    if ! rec_pull_paced "$user" "$pw" "$host" "$rec" "$copy" "missing-slot-pixels $box"; then
+      rm -rf -- "$copy_dir"
+      echo "[missing-slot-pixels] WARNING: $box ($host): the recording copy failed" >&2
       return 1
     fi
-    if ! sshpass -p "$pw" scp -r "${ssh_opts[@]}" "$user@$host:$rdir" "$lparent/" >/dev/null 2>&1; then
-      echo "[missing-slot-pixels] WARNING: $box ($host): pull of $rdir failed" >&2
+    script="$(missing_slot_pixels_linux_script "$copy" "${lparent%/}/$(basename -- "$rdir")" "$@")"
+    timeout --foreground -k 5 "$tmo" bash -c "$script" >/dev/null 2>&1 || rc=$?
+    rm -rf -- "$copy_dir"
+    if [ "$rc" -ne 0 ]; then
+      echo "[missing-slot-pixels] WARNING: $box: export on dev1 failed or timed out (${tmo}s, rc $rc)" >&2
       return 1
     fi
-    sshpass -p "$pw" ssh "${ssh_opts[@]}" "$user@$host" \
-      "rm -f -- $(printf '%q' "$rdir")/frame-*.png; rmdir -- $(printf '%q' "$rdir")" >/dev/null 2>&1 || true
     return 0
   fi
   if ! script="$(missing_slot_pixels_windows_ps "$rec" "$rdir" "$@")"; then
