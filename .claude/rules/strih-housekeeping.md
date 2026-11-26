@@ -7,6 +7,7 @@ paths:
   - "systemd/strih-nic-irq-rebalance.*"
   - "scripts/strih-obs-start.sh"
   - "tests/python/test_strih_housekeeping_1425.py"
+  - "tests/python/test_strih_nic_irq_task_cpu_1425.py"
 ---
 
 # Housekeeping off the OBS CPUs on a strih box (issue 1425, design 7106973291)
@@ -72,7 +73,17 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   `obs_box_cpulist_canon` / `obs_box_cpulist_first` in `obs-box-background.sh`.
 - **The placement (the oneshot):** it samples `/proc/interrupts` over `IRQ_RATE_SAMPLE_S` (2 s, a whole
   number of seconds or FATAL; 0 in tests = the delta of two reads) and puts each IRQ on ONE CPU, greedily:
-  heaviest first to the CPU with the least assigned rate, ties to the lower CPU. **An idle sample keeps
+  heaviest first to the CPU with the least assigned rate, ties to the lower CPU. **Only the IRQ-only
+  CPUs take IRQs (finding 26.11.2026):** the placement set is `@STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS@` =
+  `strih_housekeeping_slice_exclude` (env override `STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS`; a list that is not a
+  cpulist or not inside the IRQ CPUs is FATAL), the whole IRQ set only when it is `none` (a one-CPU set).
+  Live: ties-to-lower put IRQ 139 (12k/s) on the task CPU 0 of strih-snv's 0-3, beside rustdesk, the
+  display watch, the launcher and the slice: CPU 0 43 % softirq, time_squeeze ~5/s, ~750 InDroppedDma in
+  25 min, CPU 1 at 1.5 %. Per box: strih-snv 1-3 (RSS count 4, ignored by atlantic), strih-pp 8 (ixgbe RSS
+  count stays 2, both queues on CPU 8: more queues than placement CPUs on purpose, a count change is a link drop), stream-pp 1 and stream-snv 1,12-19 (the USB xhci IRQ moves 0 -> 1). An IRQ on the task CPU
+  is misplaced, so the idle sample below moves it too. RSS count, the udev rule and `(hk-irq)` still
+  read the whole IRQ set. The mechanics tests pass `STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS=none`; the
+  placement set is pinned by `tests/python/test_strih_nic_irq_task_cpu_1425.py`. **An idle sample keeps
   the placement (finding 26.11.2026):** a total under `IRQ_LOAD_MIN_PER_S` (default 20000/s, env
   override, a whole number or FATAL; loaded reads were ~120k/s and ~42k/s) is no load to balance by. A
   genlock deploy stops OBS, and a run in that window (the NM `up` hook, a hand restart) sampled tiny,
@@ -188,7 +199,7 @@ loop). The drop finding stays open on issue 1425.
 
 `(hk-cpus)` (also the launcher's file = the task CPUs), `(hk-rss)` (current combined = the IRQ CPU
 count), `(hk-irq)` (every rig-NIC IRQ's `smp_affinity_list` = exactly ONE CPU of the housekeeping set:
-placement only, the balance is traffic-dependent and never graded), `(hk-hooks)` (the udev rule + the executable hook as rendered), `(hk-rx)`
+placement only, the balance is traffic-dependent and never graded), `(hk-irq-task)` (REPORT-ONLY NOTE, only while IRQ-only CPUs exist: an IRQ on the task CPU, a stale placement the next run under load moves), `(hk-hooks)` (the udev rule + the executable hook as rendered), `(hk-rx)`
 (REPORT-ONLY NOTE: rx_missed_errors / rx_dropped delta over `STRIH_HOUSEKEEPING_SAMPLE_S`), `(hk-softnet)`
 (REPORT-ONLY NOTE over the SAME sample: each housekeeping CPU's `time_squeeze` increase from
 `/proc/net/softnet_stat` -- one row per CPU, column 3 hex, column 13 the CPU id, else the row index -- and

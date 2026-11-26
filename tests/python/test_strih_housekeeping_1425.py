@@ -30,7 +30,7 @@ VERIFY = SCRIPTS / "verify-strih.sh"
 LAUNCHER = SCRIPTS / "strih-obs-start.sh"
 BOXES = SCRIPTS / "strih-boxes"
 LEAKY = ("STRIH_LX_IP", "STRIH_NIC_IFACE", "STRIH_BOXES_DIR", "OBS_FLEET", "STRIH_HOUSEKEEPING_CPUS",
-         "STRIH_HOUSEKEEPING_IRQ_CPUS", "OBS_BOX_ONLINE_CPUS", "STRIH_PROGRAM_AUDIO_SYSFS",
+         "STRIH_HOUSEKEEPING_IRQ_CPUS", "STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS", "OBS_BOX_ONLINE_CPUS", "STRIH_PROGRAM_AUDIO_SYSFS",
          "STRIH_PROGRAM_AUDIO_ISOLATED_CONF",
          "STRIH_HOUSEKEEPING_ROOT", "STRIH_HOUSEKEEPING_SYS", "STRIH_HOUSEKEEPING_PROC", "ETHTOOL")
 ME = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
@@ -170,11 +170,18 @@ def _pcie_box(tmp_path, combined=8, irqs=range(134, 143)):
     return sysr, irq_dir, bin_dir, env
 
 
-def _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env):
+def _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env, render_env=None, real_boxes=False):
+    # The placement mechanics tests (greedy, idle keep, RSS, read-back) run over the WHOLE IRQ set:
+    # STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS defaults to `none` here (place over every IRQ CPU, the one-CPU-set
+    # rule). Which CPUs the placement uses on a real box (the IRQ-only CPUs, never the task CPU while any
+    # exist, finding 26.11.2026) is test_strih_nic_irq_task_cpu_1425.py; an EMPTY value there = the
+    # rendered default.
     script = tmp_path / "affinity.sh"
-    r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text > "$1"', str(script))
+    r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text > "$1"', str(script), env=render_env,
+             real_boxes=real_boxes)
     assert r.returncode == 0, r.stderr
     full = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    full["STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS"] = "none"
     full.update(env)
     full.update({"SYS_ROOT": str(sysr), "IRQ_DIR": str(irq_dir), "PATH": "%s:%s" % (bin_dir, full["PATH"]),
                  "CARRIER_WAIT_S": env.get("CARRIER_WAIT_S", "0"),
@@ -591,7 +598,7 @@ def test_a_none_box_with_nothing_of_ours_is_silent(tmp_path):
 
 # --- verify: item 16's housekeeping rows -----------------------------------------------------------------
 
-def _grade_env(tmp_path, irq_aff=("1", "0", "1"), combined=2, nice=10, cpus="0", running=True,
+def _grade_env(tmp_path, irq_aff=("1", "1", "1"), combined=2, nice=10, cpus="0", running=True,
                sampler_cpus="2-15", sampler_nice=10):
     tmp_path.mkdir(parents=True, exist_ok=True)
     sysr, irq_dir, bin_dir, eenv = _pcie_box(tmp_path, combined=combined, irqs=(134, 135, 136))
@@ -659,7 +666,7 @@ def test_a_placed_box_passes_every_row(tmp_path):
                for r in rows), out
     assert "NOTE (hk-rx) enp7s0: rx_missed_errors +0, rx_dropped +0 over 0 s, total missed 7 (report-only)" in out
     assert "PASS (hk-cpus) housekeeping CPUs 0-1 = online 0-15 minus the OBS mask 2-15: rig NIC IRQs on 0-1, tasks on 0" in out
-    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->0 136->1" in out
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->1 136->1" in out
     assert "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ-only CPUs 1" in out
     assert "PASS (hk-unit) sampler: pid 4003 runs on CPUs 2-15 at nice 10" in out
     for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-slice)", "(hk-unit) rustdesk.service",
@@ -723,7 +730,7 @@ def test_verify_notes_a_driver_without_channel_control_and_skips_an_unrequested_
     (msi / "143").write_text("msix\n")
     r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
     assert "NOTE (hk-rss) enp7s0: RSS channel count not readable (the driver offers no channel control): queues left alone" in r.stdout, r.stdout
-    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->0 136->1" in r.stdout, r.stdout
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->1 136->1" in r.stdout, r.stdout
     assert "FAIL" not in r.stdout, r.stdout
 
 
