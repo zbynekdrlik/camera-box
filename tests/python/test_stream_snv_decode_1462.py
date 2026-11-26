@@ -50,7 +50,8 @@ if os.environ.get("FAKE_VERDICT_PIXELS"):
         f.write(b"\x89PNG-fake")
 '''
 
-BOX_TOOLS = ("sha256sum", "cut", "mkdir", "chmod", "nice", "taskset", "cat", "env", "basename")
+BOX_TOOLS = ("sha256sum", "stat", "head", "tr", "grep", "cut", "mkdir", "chmod", "nice", "taskset", "cat", "env",
+             "basename")
 
 
 def _rig(tmp_path, verdict_body=_VERDICT):
@@ -65,6 +66,8 @@ def _rig(tmp_path, verdict_body=_VERDICT):
     rig["local_out"] = tmp_path / "dev1-out"
     rig["remote_out"] = rig["home"] / "verdict-out"
     rig["remote_bin"] = rig["home"] / "recording-verdict"
+    # issue 1425: the decode copies the box recording to dev1 -- the fake box needs a real file
+    (rig["home"] / "2026-10-24 02-58-45.mkv").write_bytes(b"fake-mkv-" * 1000)
     return rig
 
 
@@ -91,43 +94,24 @@ def _uploads(rig):
 
 # --- recording-verdict-on-stream-snv.sh ------------------------------------------------------------
 
-def test_the_stream_box_decodes_its_recording_in_place_and_the_partial_comes_back(tmp_path):
+def test_the_stream_recording_is_copied_to_dev1_and_decoded_there(tmp_path):
+    """issue 1425 (owner ROZHODNUTE issuecomment-7187562277): the stream box serves the recording,
+    the decode runs on dev1 (was: on the box, issue 1462)."""
     rig = _rig(tmp_path)
     p = _wrapper(rig, env={"FAKE_VERDICT_PIXELS": "1"})
     assert p.returncode == 0, p.stdout + p.stderr
-    # the verdict binary went up once, behind the sha256 gate (absent -> upload)
-    assert len(_uploads(rig)) == 1 and rig["remote_bin"].read_bytes() == rig["verdict"].read_bytes()
-    # the decode ran ON the box against the recording where it lives (a space in the name, one arg)
+    assert _uploads(rig) == [] and not rig["remote_bin"].exists(), "no binary goes to the box"
     (argv,) = _verdict_calls(rig)
     assert argv[argv.index("--extract-partial") + 1] == "stream"
-    assert argv[argv.index("--stream") + 1].endswith("2026-10-24 02-58-45.mkv")
-    # ... at idle priority (the E-core pin is added when the box has cpu_atom)
-    (decode,) = [c for c in calls(rig) if c["tool"] == "ssh" and "--extract-partial" in c["remote"]]
-    assert 'LP="nice -n 19"' in decode["remote"] and "$LP env RUST_LOG=info" in decode["remote"], decode["remote"]
-    # the partial + its pixel dir are back on dev1, byte-identical
+    # the dev1 copy keeps the recording's name (a space in it, one arg), never the box path
+    rec = argv[argv.index("--stream") + 1]
+    assert rec.endswith("2026-10-24 02-58-45.mkv") and not rec.startswith(str(rig["home"])), rec
+    assert not any("--extract-partial" in c.get("remote", "") for c in calls(rig) if c["tool"] == "ssh")
     local = rig["local_out"] / "stream-partial-7.json"
-    assert local.read_bytes() == (rig["remote_out"] / "stream-partial-7.json").read_bytes()
+    assert local.is_file() and not (rig["remote_out"] / "stream-partial-7.json").exists()
     px = rig["local_out"] / "stream-partial-7-pixels" / "frame-12.png"
     assert px.read_bytes() == b"\x89PNG-fake"
     assert "stream-snv" in p.stdout and "strih-snv" not in p.stdout, p.stdout
-
-
-def test_an_identical_binary_on_the_box_is_never_uploaded_again(tmp_path):
-    rig = _rig(tmp_path)
-    assert _wrapper(rig).returncode == 0
-    n = len(_uploads(rig))
-    assert _wrapper(rig).returncode == 0
-    assert len(_uploads(rig)) == n, "identical sha256 -> skip (issue 1118)"
-
-
-def test_a_stale_binary_on_the_box_is_replaced(tmp_path):
-    rig = _rig(tmp_path)
-    rig["remote_bin"].write_text("#!/bin/sh\nexit 0\n")
-    rig["remote_bin"].chmod(0o755)
-    p = _wrapper(rig)
-    assert p.returncode == 0, p.stdout + p.stderr
-    assert len(_uploads(rig)) == 1
-    assert hashlib.sha256(rig["remote_bin"].read_bytes()).hexdigest() == hashlib.sha256(rig["verdict"].read_bytes()).hexdigest()
 
 
 def test_a_failed_decode_fails_the_stream_leg_and_brings_nothing_back(tmp_path):
@@ -410,6 +394,8 @@ def test_run_stream_extract_really_decodes_on_the_linux_stream_box(tmp_path):
     fn = _stream_extract_fn(_e2e())
     rec = str(rig["home"] / "2026-10-24 02-58-45.mkv")
     marker = str(rig["remote_out"] / "av-markers-7.csv")
+    rig["remote_out"].mkdir()
+    pathlib.Path(marker).write_text("t,idx\n")
     out = tmp_path / "outdir"
     out.mkdir()
     text = (
@@ -427,11 +413,14 @@ def test_run_stream_extract_really_decodes_on_the_linux_stream_box(tmp_path):
     p = subprocess.run(["bash", str(drv)], capture_output=True, text=True, env=rig["env"], cwd=str(REPO), timeout=120)
     assert p.returncode == 0 and "EXTRACT-DONE" in p.stdout, p.stdout + p.stderr
     (argv,) = _verdict_calls(rig)
-    assert argv[argv.index("--stream") + 1] == rec
-    assert argv[argv.index("--av-marker-log") + 1] == marker
+    # issue 1425: the dev1 decode reads dev1 copies of the recording and of the pushed marker log
+    got_rec = argv[argv.index("--stream") + 1]
+    got_marker = argv[argv.index("--av-marker-log") + 1]
+    assert got_rec != rec and os.path.basename(got_rec) == os.path.basename(rec)
+    assert got_marker != marker and os.path.basename(got_marker) == "av-markers-7.csv"
     assert argv[argv.index("--extract-partial") + 1] == "stream"
     assert (out / "stream-partial-7.json").is_file()
-    assert rig["remote_bin"].is_file(), "the binary went to STREAM_LX_REMOTE_BIN"
+    assert not rig["remote_bin"].exists(), "issue 1425: no binary goes to the box"
 
 
 # --- review round 1: missing-slot pixel proofs of the stream recording on the Linux box ----------
@@ -471,9 +460,9 @@ def test_the_stream_recording_pixel_proofs_are_exported_on_the_linux_stream_box(
     assert '"stream": "ok"' in report.read_text()
     sshs = [c for c in calls(rig) if c["tool"] == "ssh"]
     assert sshs and not any(c["remote"].startswith("powershell") for c in sshs)
-    # the STREAM out dir (this test's own box home), never the strih default under /home/newlevel
-    want = str(rig["home"] / "verdict-out" / "missing-slot-pixels-stream-77")
-    assert all(want in c["remote"] for c in sshs), sshs
+    # issue 1425: exported on dev1 from a copy -- the box runs no ffmpeg / ffprobe
+    assert not any("ffmpeg" in c["remote"] or "ffprobe" in c["remote"] for c in sshs), sshs
+    assert not list(out.rglob("*.mkv"))
 
 
 def test_a_windows_stream_box_keeps_the_powershell_pixel_export(tmp_path):
