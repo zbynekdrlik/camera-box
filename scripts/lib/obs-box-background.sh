@@ -95,6 +95,31 @@ obs_box_background_cpus() {
     obs_box_cpulist_compress "$out"
 }
 
+# obs_box_obs_mask_from_housekeeping PLAN ONLINE HK -> the OBS mask obs_box_cpu_affinity writes (issue 1425,
+# ROZHODNUTE 7183885100): HK `none` = PLAN (the topology plan) as it is; else online minus HK, which must be a
+# cpulist inside ONLINE that leaves a mask. When that complement is the plan's own CPU set the PLAN string is
+# printed byte for byte (strih-pp's out-of-order `1,9,2,10,...` stays its file), otherwise the compressed
+# complement (strih-snv 0-2 -> 3-15). rc 1 + a stderr line on a refused fact or an unreadable online list.
+obs_box_obs_mask_from_housekeeping() {
+    local plan="${1-}" online="${2-}" hk="${3-}" on hke mask plane c out=""
+    if [ "$hk" = none ]; then printf '%s\n' "$plan"; return 0; fi
+    on="$(obs_box_cpulist_expand "$online")" || { echo "issue 1425: online CPUs '${online}' unreadable -- cannot derive the OBS mask from the housekeeping CPUs" >&2; return 1; }
+    hke="$(obs_box_cpulist_expand "$hk")" || { echo "issue 1425: housekeeping CPUs '${hk}' is not a cpulist" >&2; return 1; }
+    for c in $hke; do
+        case " $on " in *" $c "*) ;; *) echo "issue 1425: housekeeping CPU ${c} (of '${hk}') is not online (${online})" >&2; return 1 ;; esac
+    done
+    for c in $on; do
+        case " $hke " in *" $c "*) ;; *) out="${out}${out:+ }${c}" ;; esac
+    done
+    [ -n "$out" ] || { echo "issue 1425: housekeeping CPUs '${hk}' leave OBS no CPU of ${online}" >&2; return 1; }
+    mask="$(obs_box_cpulist_compress "$out")"
+    if plane="$(obs_box_cpulist_expand "$plan" 2>/dev/null)" && [ "$plane" = "$out" ]; then
+        printf '%s\n' "$plan"
+    else
+        printf '%s\n' "$mask"
+    fi
+}
+
 # obs_box_background_smt_shared BG OBS (stdin: `<cpu> <thread_siblings_list>` lines) -> the background
 # CPUs whose SMT sibling is an OBS CPU, space separated (empty = none). Such a pair shares one physical
 # core: the fence would hold on paper and the load would still slow the OBS thread beside it. Prints

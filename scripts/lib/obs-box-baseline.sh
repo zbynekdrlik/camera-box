@@ -583,6 +583,14 @@ OBS_BOX_ISOLATION_PLAN="$(
 OBS_BOX_ISOLATED_CPUS="$(printf '%s\n' "$OBS_BOX_ISOLATION_PLAN" | sed -n 1p)"
 [ -n "$OBS_BOX_ISOLATED_CPUS" ] \
     || fail "#816: could not derive the CPU affinity plan from this box's topology"
+# issue 1425 (ROZHODNUTE 7183885100): a strih box's fact STRIH_HOUSEKEEPING_CPUS (2nd argument; passed EMPTY =
+# the fact could not be read = fail) decides the mask = online minus the fact; the plan's string stays when
+# that is the same set, so only a box whose fact differs from the topology moves. imag passes none.
+if [ $# -ge 2 ]; then
+    [ -n "$2" ] || fail "issue 1425: the housekeeping CPUs (STRIH_HOUSEKEEPING_CPUS) could not be read"
+    OBS_BOX_ISOLATED_CPUS="$(obs_box_obs_mask_from_housekeeping "$OBS_BOX_ISOLATED_CPUS" "$(head -n 1 "${OBS_BOX_ONLINE_CPUS:-/sys/devices/system/cpu/online}" 2>/dev/null || true)" "$2")" \
+        || fail "issue 1425: no OBS mask from housekeeping CPUs '$2' (above)"
+fi
 # #841: persist the SAME derived value imag-obs-start.sh falls back to for a manual "Spustit OBS"
 # invocation (no IMAG_ISOLATED_CPUS env set) -- ONE source of truth for the taskset affinity pin,
 # the boot autostart's env export (step 16), and the wrapper's own fallback. Never a second

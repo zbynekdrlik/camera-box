@@ -599,7 +599,7 @@ obs_box_max_performance "$STRIH_NIC" strih
 obs_box_never_sleep "$DESKTOP_USER" strih
 obs_box_boot_safety_net "$STRIH_KERNEL_SERIES" strih
 obs_box_lowlatency_kernel "$STRIH_KERNEL_SERIES"
-obs_box_cpu_affinity strih        # -> /etc/strih-isolated-cpus.conf, strih-obs-start.sh's taskset pin
+obs_box_cpu_affinity strih "$(strih_lx_housekeeping_cpus)"   # -> /etc/strih-isolated-cpus.conf = online minus the fact (issue 1425)
 obs_box_nvidia_prime strih        # nvidia-driver-595-open + PRIME nvidia-PRIMARY (the RTX 5050)
 obs_box_dejitter "$DESKTOP_USER" strih "$OBS_CFG"
 obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth "$(strih_box_desktop)"   # issue 1466: the lightdm session = STRIH_DESKTOP

@@ -11,10 +11,43 @@ paths:
 
 # Housekeeping off the OBS CPUs on a strih box (issue 1425, design 7106973291)
 
-OBS runs on the CPUs in `/etc/strih-isolated-cpus.conf` (strih-snv 2-15). Everything else that wakes up
-often belongs on the rest: the box fact `STRIH_HOUSEKEEPING_CPUS` (strih-snv `0-1`, every other box `none`
-until measured). It must equal online minus the OBS mask (`obs_box_background_cpus`); verify `(hk-cpus)`
-FAILs otherwise.
+OBS runs on the CPUs in `/etc/strih-isolated-cpus.conf` (strih-snv 3-15). Everything else that wakes up
+often belongs on the rest: the box fact `STRIH_HOUSEKEEPING_CPUS` (strih-snv `0-2`, strih-pp `0,8`,
+stream-pp `0-1`, stream-snv `0-1,12-19`). It must equal online minus the OBS mask (`obs_box_background_cpus`);
+verify `(hk-cpus)` FAILs otherwise.
+
+## The OBS mask follows the fact (ROZHODNUTE 7183885100, 26.11.2026)
+
+Two CPUs could not carry strih-snv's atlantic RX softirq (9 MSI vectors, ~105k IRQ/s under the E2E load):
+any rate-based placement went stale when flows re-hashed (CPU 1 49 % soft, time_squeeze ~85-145/s,
+InDroppedDma +15k, Dante holes). So the fact now DRIVES the mask:
+- `obs_box_cpu_affinity BOX [HOUSEKEEPING]` (shared baseline, step 11): with the 2nd argument the mask =
+  `obs_box_obs_mask_from_housekeeping PLAN ONLINE HK` (`obs-box-background.sh`, pure): `none` = the
+  topology plan; else HK must be a cpulist inside online (`/sys/devices/system/cpu/online`, seam
+  `OBS_BOX_ONLINE_CPUS`) that leaves a non-empty mask, and when online minus HK is the plan's own CPU set the
+  PLAN STRING is written byte for byte, otherwise the compressed complement (strih-snv `0-2` -> `3-15`).
+  An argument passed EMPTY (setup-strih's `"$(strih_lx_housekeeping_cpus)"` when the fact cannot be read)
+  fails; imag passes none and stays topology-only.
+- **Nothing else moves:** strih-pp (`1,9,2,10,...` from its N,N+8 pairs), stream-pp and stream-snv write
+  exactly today's file; `tests/python/test_obs_mask_from_housekeeping_1425.py` proves it over each box's
+  fact + topology.
+- **Consumers on strih-snv** (all derive, none changed): the IRQ CPUs 0-2 (the oneshot's
+  `@STRIH_HOUSEKEEPING_IRQ_CPUS@`, the 1361 golden's `IRQ_CPUS` default), RSS count 3 (atlantic ignores
+  it), the task CPU 0 (rustdesk, the display watch, the launcher file, the slice), the slice exclude 1-2,
+  the sampler's `CPUAffinity=3-15`, the on-box decode's `taskset -c 3-15`.
+- The mechanics tests of `test_strih_housekeeping_1425.py` model a two-CPU set: they run on a copy of the
+  fact files with strih-snv at 0-1 (`SCENARIO_BOXES`).
+
+**Deploy (supervisor), strih-snv, off-production:** stop OBS (`systemctl --user stop strih-obs.service`,
+the genlock deploy does it), `sudo ./scripts/setup-strih.sh --box strih-snv` (step 11 writes
+`/etc/strih-isolated-cpus.conf` = `3-15`, the slice moves to `AllowedCPUs=0`, the oneshot script + udev
+rule are re-rendered for 0-2, the sampler unit gets `CPUAffinity=3-15` and is try-restarted), then
+`sudo systemctl restart strih-nic-irq-affinity.service` (the IRQs spread over 0-2 by the 2 s rate sample:
+run it under load, or the 180 s OBS-start re-balance places them), then start OBS
+(`systemctl --user start strih-obs.service`: the launcher's taskset pin 3-15). Read back:
+`cat /etc/strih-isolated-cpus.conf` = `3-15`, `taskset -cp $(pgrep -xo obs)` = 3-15, every rig-NIC IRQ's
+`smp_affinity_list` in 0-2, `mpstat -P 0,1,2 10 1` %soft, verify item 16 (`(hk-cpus)` PASS) and item 32
+(`background`). Rollback: the fact back to `0-1` + the same steps.
 
 ## The spread: the rig NIC IRQs over every housekeeping CPU by load (design 7119179275, 24.11.2026)
 

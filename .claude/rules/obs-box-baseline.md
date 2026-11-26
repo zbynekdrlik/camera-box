@@ -371,7 +371,9 @@ render at 23 of 33 ms. The on-box decode did the same. nice is a weight; it fenc
 sibling. The E-core pin of the decode is empty on AMD (no `cpu_atom`).
 
 - **The slice:** `rig-background.slice`, `AllowedCPUs` = online CPUs minus `/etc/<BOX>-isolated-cpus.conf`,
-  always derived (`obs_box_background_cpus`). strih-snv: 0-1, one physical core. imag: 0-1 + the E-cores.
+  always derived (`obs_box_background_cpus`). imag: 0-1 + the E-cores. On a strih box the mask itself
+  follows the fact `STRIH_HOUSEKEEPING_CPUS` (`obs_box_cpu_affinity strih <fact>`, issue 1425 ROZHODNUTE
+  7183885100: strih-snv 0-2 -> mask 3-15; `strih-housekeeping.md`), and the slice keeps the IRQ-only CPUs out.
   The launcher runs OBS on that whole block (the issue-1485 Dante CPU reservation that narrowed it is
   removed, `strih-dante-input.md`).
   `CPUWeight=1`, `IOWeight=1`, `MemoryHigh=30%`. Enabled and started by setup (`[Install]`
