@@ -32,8 +32,16 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   `obs_box_cpulist_canon` / `obs_box_cpulist_first` in `obs-box-background.sh`.
 - **The placement (the oneshot):** it samples `/proc/interrupts` over `IRQ_RATE_SAMPLE_S` (2 s, a whole
   number of seconds or FATAL; 0 in tests = the delta of two reads) and puts each IRQ on ONE CPU, greedily:
-  heaviest first to the CPU with the least assigned rate, ties to the lower CPU. All rates 0 (boot, no
-  traffic) = round-robin in IRQ order. An IRQ with no `/proc/interrupts` row counts as rate 0 (logged). It
+  heaviest first to the CPU with the least assigned rate, ties to the lower CPU. **An idle sample keeps
+  the placement (finding 26.11.2026):** a total under `IRQ_LOAD_MIN_PER_S` (default 20000/s, env
+  override, a whole number or FATAL; loaded reads were ~120k/s and ~42k/s) is no load to balance by. A
+  genlock deploy stops OBS, and a run in that window (the NM `up` hook, a hand restart) sampled tiny,
+  wrong-ordered rates and put 7 of 9 heavy queues on CPU 0 (time_squeeze ~117/s, InDroppedDma 4501 ->
+  32451, Dante holes, release E2E red). Under the floor every IRQ already on ONE housekeeping CPU keeps
+  it (logged `kept`, never written), and only an IRQ outside the set goes to the CPU holding the fewest
+  IRQs, in IRQ order, ties to the lower CPU: at boot nothing is kept, so that is the round-robin in IRQ
+  order. setup-strih step 11b is enable-only (never restarts the oneshot), so the fix lives in the
+  script, where every trigger runs it. An IRQ with no `/proc/interrupts` row counts as rate 0 (logged). It
   logs each IRQ's rate and CPU and the assigned load per CPU, and writes an affinity ONLY when it differs
   (every move costs a short loss burst, measured 24.11.2026). The placement holds until the next run (boot,
   NM `up`, the re-balance below); a later traffic change can unbalance it, the `(hk-softnet)` NOTE shows that.
