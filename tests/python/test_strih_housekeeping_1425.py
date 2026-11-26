@@ -30,7 +30,7 @@ VERIFY = SCRIPTS / "verify-strih.sh"
 LAUNCHER = SCRIPTS / "strih-obs-start.sh"
 BOXES = SCRIPTS / "strih-boxes"
 LEAKY = ("STRIH_LX_IP", "STRIH_NIC_IFACE", "STRIH_BOXES_DIR", "OBS_FLEET", "STRIH_HOUSEKEEPING_CPUS",
-         "STRIH_HOUSEKEEPING_IRQ_CPUS", "OBS_BOX_ONLINE_CPUS", "STRIH_PROGRAM_AUDIO_SYSFS",
+         "STRIH_HOUSEKEEPING_IRQ_CPUS", "STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS", "OBS_BOX_ONLINE_CPUS", "STRIH_PROGRAM_AUDIO_SYSFS",
          "STRIH_PROGRAM_AUDIO_ISOLATED_CONF",
          "STRIH_HOUSEKEEPING_ROOT", "STRIH_HOUSEKEEPING_SYS", "STRIH_HOUSEKEEPING_PROC", "ETHTOOL")
 ME = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
@@ -170,11 +170,18 @@ def _pcie_box(tmp_path, combined=8, irqs=range(134, 143)):
     return sysr, irq_dir, bin_dir, env
 
 
-def _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env):
+def _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env, render_env=None, real_boxes=False):
+    # The placement mechanics tests (greedy, idle keep, RSS, read-back) run over the WHOLE IRQ set:
+    # STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS defaults to `none` here (place over every IRQ CPU, the one-CPU-set
+    # rule). Which CPUs the placement uses on a real box (the IRQ-only CPUs, never the task CPU while any
+    # exist, finding 26.11.2026) is test_strih_nic_irq_task_cpu_1425.py; an EMPTY value there = the
+    # rendered default.
     script = tmp_path / "affinity.sh"
-    r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text > "$1"', str(script))
+    r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text > "$1"', str(script), env=render_env,
+             real_boxes=real_boxes)
     assert r.returncode == 0, r.stderr
     full = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    full["STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS"] = "none"
     full.update(env)
     full.update({"SYS_ROOT": str(sysr), "IRQ_DIR": str(irq_dir), "PATH": "%s:%s" % (bin_dir, full["PATH"]),
                  "CARRIER_WAIT_S": env.get("CARRIER_WAIT_S", "0"),
