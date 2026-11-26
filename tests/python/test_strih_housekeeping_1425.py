@@ -315,6 +315,97 @@ def test_an_irq_missing_from_proc_interrupts_counts_as_no_traffic(tmp_path):
     assert _aff(irq_dir, (134, 135)) == ["0", "1"]
 
 
+# --- the idle sample (finding 26.11.2026) ---------------------------------------------------------------
+# A genlock deploy stops OBS; a placement run in that window sampled tiny, wrong-ordered rates and put 7 of
+# 9 heavy queues on CPU 0 (time_squeeze ~117/s, InDroppedDma 4501 -> 32451). Under IRQ_LOAD_MIN_PER_S an IRQ
+# already on ONE housekeeping CPU keeps it; only an IRQ outside the set is placed.
+
+# the 05:24 loaded placement (60266/s vs 60261/s) and an OBS-down sample whose greedy would undo it
+BALANCED = {134: "1", 135: "0", 136: "1", 137: "0", 138: "1", 139: "0", 140: "1", 141: "1", 142: "0"}
+IDLE_RATES = {134: 40, 135: 900, 136: 30, 137: 700, 138: 20, 139: 600, 140: 10, 141: 500, 142: 5}
+
+
+def _sampled_from(tmp_path, rates, start, extra_env=None, lock=True):
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=sorted(start))
+    for n, a in start.items():
+        (irq_dir / str(n) / "smp_affinity_list").write_text(a + "\n")
+    (tmp_path / "interrupts").write_text(_interrupts(rates, 1))
+    (tmp_path / "interrupts.after").write_text(_interrupts(rates, 3))
+    _exe(bin_dir / "sleep", SWAP_SLEEP)
+    (tmp_path / "sleep.log").write_text("")
+    env.update({"PROC_INTERRUPTS": str(tmp_path / "interrupts"), "IRQ_RATE_SAMPLE_S": "2",
+                "FAKE_SLEEP_LOG": str(tmp_path / "sleep.log"),
+                "FAKE_SLEEP_SWAP": "%s:%s" % (tmp_path / "interrupts.after", tmp_path / "interrupts")})
+    env.update(extra_env or {})
+    # a kept IRQ is never written: its read-only file would fail a write
+    kept = [n for n, a in start.items() if lock and a in ("0", "1")]
+    for n in kept:
+        (irq_dir / str(n) / "smp_affinity_list").chmod(0o444)
+    try:
+        r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
+    finally:
+        for n in kept:
+            (irq_dir / str(n) / "smp_affinity_list").chmod(0o644)
+    return r, irq_dir
+
+
+def test_an_idle_sample_keeps_every_irq_already_on_one_housekeeping_cpu(tmp_path):
+    r, irq_dir = _sampled_from(tmp_path, IDLE_RATES, BALANCED)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert dict(zip(sorted(BALANCED), _aff(irq_dir, sorted(BALANCED)))) == BALANCED
+    assert ("rig NIC IRQ traffic 2805/s measured over 2 s is under IRQ_LOAD_MIN_PER_S 20000/s (no real load: "
+            "OBS down or boot) -- an IRQ already on one of cpus 0 1 keeps it, the rest round-robin") in r.stdout
+    assert "IRQ 135 (msi enp7s0, iface enp7s0): 900/s -> cpu 0 (already there, unchanged)" in r.stdout
+    assert "IRQ 135: on housekeeping cpu 0 -- kept (no load to balance by)" in r.stdout
+    assert "rig NIC IRQ rates measured over" not in r.stdout
+
+
+def test_an_idle_sample_places_only_an_irq_outside_the_set_on_the_cpu_with_fewest_irqs(tmp_path):
+    start = {134: "1", 135: "1", 136: "0-15", 137: "2"}
+    r, irq_dir = _sampled_from(tmp_path, {134: 10, 135: 10, 136: 10, 137: 10}, start)
+    assert r.returncode == 0, r.stderr + r.stdout
+    # 136: cpu 0 holds 0 IRQs, cpu 1 holds 2 -> 0; 137 (on an OBS CPU): 1 vs 2 -> 0
+    assert _aff(irq_dir, (134, 135, 136, 137)) == ["1", "1", "0", "0"]
+    assert "IRQ 136 (msi enp7s0, iface enp7s0): 10/s -> cpu 0 (was 0-15)" in r.stdout
+    assert "IRQ 137 (msi enp7s0, iface enp7s0): 10/s -> cpu 0 (was 2)" in r.stdout
+
+
+def test_a_loaded_sample_still_re_places_by_rate_over_the_current_placement(tmp_path):
+    start = {n: "1" for n in LIVE_RATES}
+    r, irq_dir = _sampled_from(tmp_path, LIVE_RATES, start, lock=False)
+    assert r.returncode == 0, r.stderr + r.stdout
+    want = {136: "0", 140: "1", 137: "1", 138: "1", 134: "0", 135: "1", 139: "0", 141: "1", 142: "0"}
+    assert dict(zip(sorted(want), _aff(irq_dir, sorted(want)))) == want
+    assert "rig NIC IRQ rates measured over 2 s, assigned load: cpu 0 21150/s, cpu 1 21100/s" in r.stdout
+
+
+def test_the_load_floor_is_inclusive_and_env_overridable(tmp_path):
+    start = {134: "1", 135: "1"}
+    (tmp_path / "at").mkdir()
+    (tmp_path / "under").mkdir()
+    r, irq_dir = _sampled_from(tmp_path / "at", {134: 60, 135: 40}, start, {"IRQ_LOAD_MIN_PER_S": "100"},
+                               lock=False)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert _aff(irq_dir, (134, 135)) == ["0", "1"]   # total 100 = the floor: placed by rate
+    r, irq_dir = _sampled_from(tmp_path / "under", {134: 60, 135: 39}, start, {"IRQ_LOAD_MIN_PER_S": "100"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert _aff(irq_dir, (134, 135)) == ["1", "1"]   # 99: kept
+
+
+def test_a_garbage_load_floor_is_refused(tmp_path):
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134,))
+    env["IRQ_LOAD_MIN_PER_S"] = "20k"
+    r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
+    assert r.returncode == 1
+    assert "FATAL: IRQ_LOAD_MIN_PER_S '20k' is not a whole number of interrupts per second" in r.stderr
+
+
+def test_the_rendered_oneshot_carries_the_20000_per_s_load_floor():
+    r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text')
+    assert r.returncode == 0, r.stderr
+    assert 'IRQ_LOAD_MIN_PER_S="${IRQ_LOAD_MIN_PER_S:-20000}"' in r.stdout
+
+
 def test_a_garbage_sample_time_is_refused(tmp_path):
     sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134,))
     env["IRQ_RATE_SAMPLE_S"] = "2s"
