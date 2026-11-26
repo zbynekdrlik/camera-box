@@ -437,6 +437,12 @@ if args[:1] in (["enable"], ["disable"]):
 if args[:1] == ["is-enabled"]:
     sys.exit(0 if args[-1] in enabled else 1)
 # the re-balance pair answers only for its own unit names (a wrong name reads nothing, like an unknown unit)
+if args[:1] == ["show"] and args[-1] == "strih-obs.service" and "ActiveEnterTimestampMonotonic" in args:
+    print(os.environ.get("FAKE_OBS_SHOW", "ActiveState=inactive\nActiveEnterTimestampMonotonic=0"))
+    sys.exit(0)
+if args[:1] == ["show"] and args[-1] == "strih-nic-irq-rebalance-obs.timer":
+    print(os.environ.get("FAKE_OBS_TIMER_SHOW", "ActiveState=inactive\nSubState=dead\nActiveEnterTimestampMonotonic=0"))
+    sys.exit(0)
 if args[:1] == ["show"] and "ExecMainStartTimestampMonotonic" in args:
     if args[-1] == "strih-nic-irq-rebalance.service":
         print(os.environ.get("FAKE_REBALANCE_SHOW", "ExecMainStartTimestampMonotonic=0\nResult=success\nExecMainStatus=0"))
@@ -464,10 +470,16 @@ def _install_env(tmp_path):
     bin_dir.mkdir()
     _exe(bin_dir / "systemctl", FAKE_SYSTEMCTL)
     _exe(bin_dir / "udevadm", '#!/bin/sh\necho "udevadm $*" >> "$FAKE_SYSTEMCTL_LOG"\n')
+    # the OBS-start re-place trigger: visudo checks the sudoers line, sudo -n -l grades it (no log line in
+    # the systemctl log, so the existing call lists stay exact)
+    _exe(bin_dir / "visudo", '#!/bin/sh\necho "visudo $*" >> "$FAKE_SUDO_LOG"\nexit "${FAKE_VISUDO_RC:-0}"\n')
+    _exe(bin_dir / "sudo", '#!/bin/sh\necho "sudo $*" >> "$FAKE_SUDO_LOG"\nexit "${FAKE_SUDO_RC:-0}"\n')
     (tmp_path / "systemctl.log").write_text("")
+    (tmp_path / "sudo.log").write_text("")
     env = {"STRIH_HOUSEKEEPING_ROOT": str(root), "STRIH_HOUSEKEEPING_OWNER": "%s:%s" % (ME, MYGRP),
            "STRIH_SESSION_APPS_EUID": "1000", "FAKE_SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"),
            "FAKE_SYSTEMCTL_ENABLED": str(tmp_path / "systemctl.enabled"),
+           "FAKE_SUDO_LOG": str(tmp_path / "sudo.log"),
            "FAKE_ACTIVE": "rustdesk.service strih-display-watch.service"}
     return root, home, bin_dir, env
 
@@ -543,7 +555,9 @@ def test_a_box_with_none_removes_ours_and_keeps_a_foreign_file(tmp_path):
     assert not (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance.timer").exists()
     assert not (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance.service").exists()
     calls = (tmp_path / "systemctl.log").read_text().splitlines()
-    assert calls == ["disable --now strih-nic-irq-rebalance.timer", "daemon-reload",
+    assert not (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance-obs.timer").exists()
+    assert not (root / "etc" / "sudoers.d" / "strih-nic-irq-rebalance-obs").exists()
+    assert calls == ["stop strih-nic-irq-rebalance-obs.timer", "disable --now strih-nic-irq-rebalance.timer", "daemon-reload",
                      "reset-failed strih-nic-irq-rebalance.service",
                      "daemon-reload", "--user daemon-reload"], calls
 
@@ -593,12 +607,14 @@ def _grade_env(tmp_path, irq_aff=("1", "0", "1"), combined=2, nice=10, cpus="0",
     (stats / "rx_dropped").write_text("0\n")
     env.update({"STRIH_HOUSEKEEPING_SYS": str(sysr), "STRIH_HOUSEKEEPING_PROC": str(proc), "STRIH_NIC_IFACE": "enp7s0",
                 "STRIH_HOUSEKEEPING_IPADDR": "", "STRIH_HOUSEKEEPING_SAMPLE_S": "0",
-                "FAKE_REBALANCE_SHOW": REBALANCE_RAN_OK})
+                "FAKE_REBALANCE_SHOW": REBALANCE_RAN_OK, "FAKE_OBS_SHOW": OBS_STARTED})
     return home, "%s:%s" % (bin_dir, sbin), env
 
 
 # `systemctl show -p ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus` of the re-balance service
 REBALANCE_RAN_OK = "Result=success\nExecMainStartTimestampMonotonic=301204512\nExecMainStatus=0"
+# `systemctl --user show -p ActiveState -p ActiveEnterTimestampMonotonic strih-obs.service`
+OBS_STARTED = "ActiveState=active\nActiveEnterTimestampMonotonic=120000000"
 
 
 def _grade(tmp_path, **kw):
@@ -629,7 +645,7 @@ def test_a_placed_box_passes_every_row(tmp_path):
     assert "PASS (hk-unit) sampler: pid 4003 runs on CPUs 2-15 at nice 10" in out
     for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-slice)", "(hk-unit) rustdesk.service",
                 "(hk-unit) strih-display-watch.service", "(hk-unit) launcher", "(hk-softnet)", "(hk-unit) sampler",
-                "(hk-rebalance)"):
+                "(hk-rebalance)", "(hk-obs-rebalance)"):
         assert any(tag in r for r in rows), (tag, out)
 
 
@@ -1173,3 +1189,155 @@ def test_none_never_reset_fails_a_foreign_service_beside_our_timer(tmp_path):
     assert svc.exists() and "not ours" in r.stderr
     log = (tmp_path / "systemctl.log").read_text()
     assert "disable --now strih-nic-irq-rebalance.timer" in log and "reset-failed" not in log
+
+
+# --- the re-place under load after every OBS start (issuecomment-7182637589, design 7182688018) ----------
+
+OBS_TIMER = REPO / "systemd" / "strih-nic-irq-rebalance-obs.timer"
+SUDO_CMD = "/usr/bin/systemctl restart --no-block strih-nic-irq-rebalance-obs.timer"
+
+
+def test_the_obs_start_timer_is_the_lib_text_byte_for_byte():
+    r = _run("strih_housekeeping_rebalance_obs_text")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == OBS_TIMER.read_text()
+
+
+def test_the_obs_start_timer_runs_the_same_service_once_180_s_after_it_is_armed():
+    text = OBS_TIMER.read_text()
+    lines = text.splitlines()
+    assert lines[0].startswith("# camera-box issue 1425")
+    assert "OnActiveSec=180s" in lines and "Unit=strih-nic-irq-rebalance.service" in lines
+    # armed only by the launcher (restart = re-arm): no [Install], never periodic, no catch-up
+    assert "[Install]" not in lines
+    for banned in ("OnBootSec", "OnUnitActiveSec", "OnUnitInactiveSec", "OnCalendar", "Persistent"):
+        assert banned not in text, banned
+    assert "strih-snv" not in text
+
+
+def test_setup_writes_the_obs_start_timer_and_the_one_sudoers_line(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance-obs.timer").read_text() == OBS_TIMER.read_text()
+    sudoers = root / "etc" / "sudoers.d" / "strih-nic-irq-rebalance-obs"
+    lines = sudoers.read_text().splitlines()
+    assert lines[0].startswith("# camera-box issue 1425")
+    assert lines[1:] == ["%s ALL=(root) NOPASSWD: %s" % (ME, SUDO_CMD)]
+    assert oct(sudoers.stat().st_mode & 0o777) == "0o440"
+    assert [x for x in (tmp_path / "sudo.log").read_text().splitlines() if x.startswith("visudo -cf ")], \
+        "the sudoers line is checked by visudo before the write"
+    # the timer is never started or enabled by setup: only the launcher arms it
+    calls = (tmp_path / "systemctl.log").read_text().splitlines()
+    assert not [c for c in calls if "rebalance-obs" in c], calls
+
+
+def test_a_sudoers_line_visudo_refuses_is_never_written(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    env["FAKE_VISUDO_RC"] = "1"
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 1
+    assert not (root / "etc" / "sudoers.d" / "strih-nic-irq-rebalance-obs").exists()
+    assert "does not parse" in r.stderr + r.stdout
+
+
+def _arm(tmp_path, content, timer=True, rc=0):
+    bin_dir = tmp_path / "b"
+    bin_dir.mkdir()
+    log = tmp_path / "arm.log"
+    log.write_text("")
+    _exe(bin_dir / "sudo", '#!/bin/sh\necho "sudo $*" >> "%s"\nexit %d\n' % (log, rc))
+    f = tmp_path / "hk.conf"
+    if content is not None:
+        f.write_text(content)
+    t = tmp_path / "strih-nic-irq-rebalance-obs.timer"
+    if timer:
+        t.write_text("[Timer]\n")
+    r = _run('strih_launcher_irq_rebalance_arm "$1" "$2"', str(f), str(t), sources=(LAUNCHER,), path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr
+    return r.stdout, log.read_text().splitlines()
+
+
+def test_the_launcher_arms_the_re_place_180_s_after_this_obs_start(tmp_path):
+    out, calls = _arm(tmp_path, "0\n")
+    assert calls == ["sudo -n " + SUDO_CMD]
+    assert "re-placed under load 180 s after this OBS start" in out
+
+
+def test_the_launcher_arms_nothing_without_housekeeping_cpus_or_the_timer(tmp_path):
+    for i, (content, timer) in enumerate(((None, True), ("none\n", True), ("", True), ("0\n", False))):
+        sub = tmp_path / ("c%d" % i)
+        sub.mkdir()
+        out, calls = _arm(sub, content, timer=timer)
+        assert calls == [] and out == "", (content, timer)
+
+
+def test_a_refused_sudo_is_one_warn_never_fatal(tmp_path):
+    out, calls = _arm(tmp_path, "0\n", rc=1)
+    assert calls == ["sudo -n " + SUDO_CMD]
+    assert out.startswith("WARN issue 1425: could not arm")
+
+
+def test_the_launcher_arms_the_re_place_after_its_own_move_before_the_shutdown_watch():
+    s = LAUNCHER.read_text()
+    place = s.index('strih_launcher_housekeeping_place "${STRIH_HOUSEKEEPING_CPUS_FILE:-/etc/strih-housekeeping-cpus.conf}" "$$"')
+    arm = s.index('strih_launcher_irq_rebalance_arm "${STRIH_HOUSEKEEPING_CPUS_FILE:-/etc/strih-housekeeping-cpus.conf}"')
+    assert s.count("strih_launcher_irq_rebalance_arm \"") == 1
+    assert place < arm < s.index('strih_obs_shutdown_watch "$OBS_PID"')
+
+
+def _obs_rows(tmp_path, **env_over):
+    home, path, env = _grade_env(tmp_path)
+    env.update(env_over)
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    assert r.returncode == 0, r.stderr
+    return [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x], env
+
+
+def test_verify_passes_a_re_place_that_ran_after_the_current_obs_start(tmp_path):
+    rows, env = _obs_rows(tmp_path)
+    assert rows == ["PASS (hk-obs-rebalance) the rig-NIC IRQs were re-placed under load 181 s after the current "
+                    "OBS start: success (exit 0)"], rows
+    assert "sudo -n -l " + SUDO_CMD in pathlib.Path(env["FAKE_SUDO_LOG"]).read_text()
+
+
+def test_verify_notes_obs_down(tmp_path):
+    rows, _ = _obs_rows(tmp_path, FAKE_OBS_SHOW="ActiveState=inactive\nActiveEnterTimestampMonotonic=0")
+    assert len(rows) == 1 and rows[0].startswith("NOTE (hk-obs-rebalance) strih-obs.service is not running"), rows
+
+
+def test_verify_notes_a_re_place_armed_at_this_obs_start_that_has_not_fired_yet(tmp_path):
+    for i, sub in enumerate(("waiting", "running")):
+        rows, _ = _obs_rows(tmp_path / str(i), FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=400000000",
+                            FAKE_OBS_TIMER_SHOW="ActiveState=active\nSubState=%s\nActiveEnterTimestampMonotonic=401000000" % sub)
+        assert len(rows) == 1 and rows[0].startswith("NOTE (hk-obs-rebalance) armed at the current OBS start"), rows
+
+
+def test_verify_fails_an_obs_start_whose_re_place_was_never_armed(tmp_path):
+    # the run at 301 s predates the OBS start at 400 s, and the timer was armed by an EARLIER start (elapsed)
+    rows, _ = _obs_rows(tmp_path, FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=400000000",
+                        FAKE_OBS_TIMER_SHOW="ActiveState=active\nSubState=elapsed\nActiveEnterTimestampMonotonic=100000000")
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) strih-obs.service started at 400 s but the "
+                                                 "re-place was never armed"), rows
+
+
+def test_verify_fails_a_failed_re_place_after_the_obs_start(tmp_path):
+    rows, _ = _obs_rows(tmp_path, FAKE_REBALANCE_SHOW="ExecMainStartTimestampMonotonic=301204512\nResult=exit-code\nExecMainStatus=1")
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) the re-place after the current OBS start "
+                                                 "failed: exit-code (exit 1)"), rows
+
+
+def test_verify_fails_a_drifted_timer_or_a_sudo_rule_that_does_not_allow_the_arm(tmp_path):
+    home, path, env = _grade_env(tmp_path / "drift")
+    f = pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance-obs.timer"
+    f.write_text(f.read_text().replace("180s", "30s"))
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x]
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) ") and "drifted" in rows[0], rows
+    rows, _ = _obs_rows(tmp_path / "sudo", FAKE_SUDO_RC="1")
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) sudo does not allow"), rows
+
+
+def test_verify_fails_an_unreadable_obs_start(tmp_path):
+    rows, _ = _obs_rows(tmp_path, FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=12x")
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) cannot read"), rows
