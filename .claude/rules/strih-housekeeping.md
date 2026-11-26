@@ -13,7 +13,7 @@ paths:
 # Housekeeping off the OBS CPUs on a strih box (issue 1425, design 7106973291)
 
 OBS runs on the CPUs in `/etc/strih-isolated-cpus.conf` (strih-snv 4-15). Everything else that wakes up
-often belongs on the rest: the box fact `STRIH_HOUSEKEEPING_CPUS` (strih-snv `0-3`, strih-pp `0,8`,
+often belongs on the rest: the box fact `STRIH_HOUSEKEEPING_CPUS` (strih-snv `0-3`, strih-pp `0-1,8-9`,
 stream-pp `0-1`, stream-snv `0-1,12-19`). It must equal online minus the OBS mask (`obs_box_background_cpus`);
 verify `(hk-cpus)` FAILs otherwise.
 
@@ -29,9 +29,9 @@ InDroppedDma +15k, Dante holes). So the fact now DRIVES the mask:
   PLAN STRING is written byte for byte, otherwise the compressed complement (strih-snv `0-3` -> `4-15`).
   An argument passed EMPTY (setup-strih's `"$(strih_lx_housekeeping_cpus)"` when the fact cannot be read)
   fails; imag passes none and stays topology-only.
-- **Nothing else moves:** strih-pp (`1,9,2,10,...` from its N,N+8 pairs), stream-pp and stream-snv write
-  exactly today's file; `tests/python/test_obs_mask_from_housekeeping_1425.py` proves it over each box's
-  fact + topology.
+- **Nothing else moves:** stream-pp and stream-snv write exactly today's file (the plan string byte for
+  byte); `tests/python/test_obs_mask_from_housekeeping_1425.py` proves it over each box's fact + topology.
+  strih-pp moved with the IRQ-only placement (below): its old `1,9,2,10,...` plan file becomes `2-7,10-15`.
 - **Consumers on strih-snv** (all derive, none changed): the IRQ CPUs 0-3 (the oneshot's
   `@STRIH_HOUSEKEEPING_IRQ_CPUS@`, the 1361 golden's `IRQ_CPUS` default), RSS count 4 (atlantic ignores
   it), the task CPU 0 (rustdesk, the display watch, the launcher file, the slice), the slice exclude 1-3,
@@ -40,9 +40,30 @@ InDroppedDma +15k, Dante holes). So the fact now DRIVES the mask:
   3-15, but strih-snv's SMT pairs are adjacent, so CPU 2 would share a physical core with OBS CPU 3 and
   its RX softirq would run beside an OBS thread's sibling (the issue-1387 SMT fence grades only the
   background slice, so no verify row would see it). The set is therefore `0-3`: two whole cores, OBS
-  on 4-15 (six whole cores). A housekeeping set must be whole SMT pairs on a box with SMT.
+  on 4-15 (six whole cores). A housekeeping set must be whole SMT pairs on a box with SMT, and at least
+  two of them on a strih box (`test_every_strih_housekeeping_set_is_two_or_more_whole_smt_cores`).
+- **strih-pp, the same rule on N,N+8 numbering (26.11.2026):** its fact was `0,8` (one core). Since the
+  IRQ-only placement that left CPU 8 alone for both ixgbe RX queues (4 PP cameras over JPEG XS + the
+  program). It is now `0-1,8-9` (cores 0 and 1): task CPU 0, IRQ-only CPUs `1,8-9` (placement + slice
+  exclude), IRQ CPUs `0-1,8-9`, RSS count 4 (was 2), OBS mask `2-7,10-15` (12 threads, was 14). The
+  program-audio sampler is off there (`STRIH_PROGRAM_AUDIO_SAMPLER=off`), so no sampler mask moves.
 - The mechanics tests of `test_strih_housekeeping_1425.py` model a two-CPU set: they run on a copy of the
   fact files with strih-snv at 0-1 (`SCENARIO_BOXES`).
+
+**Deploy (supervisor), strih-pp, off-production -- ONE live link drop is implied:** ixgbe HAS channel control,
+so the first run of the oneshot script after setup does `ethtool -L <nic> combined 4` (2 -> 4) = a ring re-init
+= the rig link drops once (the script logs `carrier_changes A -> B`). The udev rule (count 4 at `add`) only
+covers the NEXT boot. Every live trigger before that runs the -L: the NM `up` hook, the 5-min boot timer, the
+OBS-start re-balance 180 s after an OBS start, a hand restart. So never leave it to the next OBS start (a
+production OBS restart would then drop the link 180 s later): stop OBS, `sudo ./scripts/setup-strih.sh --box
+strih-pp` (step 11 writes `/etc/strih-isolated-cpus.conf` = `2-7,10-15`, the slice keeps `AllowedCPUs=0` with
+exclude `1,8-9`, the oneshot script + udev rule for 0-1,8-9 / count 4), then deliberately `sudo systemctl
+restart strih-nic-irq-affinity.service` (the one drop, then the IRQs spread over 1,8-9; or reboot instead: the
+udev rule sets 4 at `add`, before the link is up), then start OBS (`taskset -cp $(pgrep -xo obs)` =
+2-7,10-15). Read back `ethtool -l <nic>` combined 4, each rig-NIC IRQ's `smp_affinity_list` in 1,8-9, `mpstat
+-P 1,8,9 10 1` %soft, verify item 16. Not read from this lane: the ixgbe channel maximum on that NIC
+(`ethtool -l` pre-set max; 4 is expected well under it). Rollback: the fact back to `0,8` + the same steps
+(again one drop, 4 -> 2).
 
 **Deploy (supervisor), strih-snv, off-production:** stop OBS (`systemctl --user stop strih-obs.service`,
 the genlock deploy does it), `sudo ./scripts/setup-strih.sh --box strih-snv` (step 11 writes
@@ -79,8 +100,9 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   cpulist or not inside the IRQ CPUs is FATAL), the whole IRQ set only when it is `none` (a one-CPU set).
   Live: ties-to-lower put IRQ 139 (12k/s) on the task CPU 0 of strih-snv's 0-3, beside rustdesk, the
   display watch, the launcher and the slice: CPU 0 43 % softirq, time_squeeze ~5/s, ~750 InDroppedDma in
-  25 min, CPU 1 at 1.5 %. Per box: strih-snv 1-3 (RSS count 4, ignored by atlantic), strih-pp 8 (ixgbe RSS
-  count stays 2, both queues on CPU 8: more queues than placement CPUs on purpose, a count change is a link drop), stream-pp 1 and stream-snv 1,12-19 (the USB xhci IRQ moves 0 -> 1). An IRQ on the task CPU
+  25 min, CPU 1 at 1.5 %. Per box: strih-snv 1-3 (RSS count 4, ignored by atlantic), strih-pp 1,8-9 (ixgbe RSS
+  count 4 = the IRQ CPU count: 4 queues + the link vector over 3 placement CPUs; the 2 -> 4 change is a link
+  drop, see the strih-pp deploy below), stream-pp 1 and stream-snv 1,12-19 (the USB xhci IRQ moves 0 -> 1). An IRQ on the task CPU
   is misplaced, so the idle sample below moves it too. RSS count, the udev rule and `(hk-irq)` still
   read the whole IRQ set. The mechanics tests pass `STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS=none`; the
   placement set is pinned by `tests/python/test_strih_nic_irq_task_cpu_1425.py`. **An idle sample keeps

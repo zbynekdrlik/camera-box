@@ -379,7 +379,7 @@ def test_strih_lx_runs_the_irq_unit_and_the_sampler():
 
 def test_strih_pp_skips_the_irq_unit_and_the_sampler_by_fact(tmp_path):
     env = _pp_filled(tmp_path)
-    # issue 1553: strih-pp has housekeeping CPUs (0,8) now, so 11b places its PCIe NIC IRQs
+    # issue 1553: strih-pp has housekeeping CPUs (0-1,8-9) now, so 11b places its PCIe NIC IRQs
     assert _applies(("pp", env), "11b") == "RUN"
     assert _applies(("pp", env), "16e").startswith("SKIP STRIH_PROGRAM_AUDIO_SAMPLER=off")
     assert _applies(("pp", env), "16c") == "RUN"

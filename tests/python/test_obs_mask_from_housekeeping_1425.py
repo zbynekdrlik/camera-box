@@ -2,8 +2,9 @@
 
 Two housekeeping CPUs could not carry strih-snv's atlantic RX softirq, so its fact widens to 0-3 (two whole
 cores, the supervisor's decision on the CPU 2/3 SMT split) and the OBS mask /etc/strih-isolated-cpus.conf
-that step 11 writes becomes online minus the fact (4-15). Every other box
-keeps its file byte-identical: when online minus the fact is the topology plan's CPU set, the plan's own
+that step 11 writes becomes online minus the fact (4-15). strih-pp takes the same two whole cores on its
+N,N+8 numbering (0-1,8-9 -> mask 2-7,10-15) since the IRQ-only placement. The stream boxes
+keep their file byte-identical: when online minus the fact is the topology plan's CPU set, the plan's own
 string is written, as today.
 
 The pure helper `obs_box_obs_mask_from_housekeeping PLAN ONLINE HK` (scripts/lib/obs-box-background.sh) runs
