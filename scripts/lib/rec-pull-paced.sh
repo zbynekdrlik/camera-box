@@ -44,7 +44,7 @@ rec_pull_paced() {
   local tmo="${REC_PULL_TIMEOUT:-1800}" rate stat box_size box_sha t0 t1 loc_size loc_sha
   [[ $tmo =~ ^[123456789][0123456789]*$ ]] || tmo=1800
   rate="$(rec_pull_rate_mbit)"
-  if ! stat="$(timeout 600 sshpass -p "$pw" ssh "${ssh_opts[@]}" "$user@$host" "$(rec_pull_box_stat_cmd "$rpath" "$snippet")" 2>/dev/null)"; then
+  if ! stat="$(timeout --foreground -k 5 600 sshpass -p "$pw" ssh "${ssh_opts[@]}" "$user@$host" "$(rec_pull_box_stat_cmd "$rpath" "$snippet")" 2>/dev/null)"; then
     echo "[rec-pull] ERROR: $label: could not read the size + sha256 of $host:$rpath" >&2
     return 1
   fi
@@ -57,7 +57,7 @@ rec_pull_paced() {
   mkdir -p "$(dirname "$lpath")"
   echo "[rec-pull] $label: copying $host:$rpath ($box_size B) -> $lpath paced at $rate Mbit/s"
   t0="$(date +%s.%N)"
-  if ! timeout "$tmo" sshpass -p "$pw" scp -q -l "$((rate * 1000))" "${ssh_opts[@]}" "$user@$host:$rpath" "$lpath" 2>/dev/null; then
+  if ! timeout --foreground -k 5 "$tmo" sshpass -p "$pw" scp -q -l "$((rate * 1000))" "${ssh_opts[@]}" "$user@$host:$rpath" "$lpath" 2>/dev/null; then
     rm -f -- "$lpath"
     echo "[rec-pull] ERROR: $label: the copy of $host:$rpath failed or timed out (${tmo}s)" >&2
     return 1

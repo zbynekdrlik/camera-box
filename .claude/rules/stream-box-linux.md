@@ -111,6 +111,12 @@ full E2E, on a Linux stream box exactly as on Windows.
   for real there), and a failed push ENDS the run (`|| exit 1`): the decode reads them, a missing
   marker log would cost the A/V term. The Windows `if [ "$E2E_EXECUTE_VERDICT" = "1" ]` arm became
   an `elif` (its literal stays a substring, which the 703 test reads).
+- **Issue 1425 (owner ROZHODNUTÉ issuecomment-7187562277): the decode below now runs on DEV1.** The
+  entry point and its arguments are unchanged; `recording-verdict-on-strih-snv.sh` copies the stream
+  recording paced + sha256-verified to dev1 (`scripts/lib/rec-pull-paced.sh`), fetches the pushed
+  marker log / schedule back, decodes with the dev1 binary and removes the copy. No binary goes to the
+  box (`--remote-bin` / `STREAM_LX_REMOTE_BIN` are ignored; an old `/home/newlevel/recording-verdict`
+  on the box is a leftover). Read 'ON the box' / 'upload gate' below as the retired shape.
 - **`[8/8b]` decode:** `run_stream_extract` takes a Linux branch first: `STREAM_LX_BOX="$STREAM"
   STREAM_USER=… STREAM_PW=… "$HERE/recording-verdict-on-stream-snv.sh"` with the same forwarded
   verdict args as Windows (`--av-marker-log`, `--switch-schedule`, the burn ids, `--cam2-run-id`, the

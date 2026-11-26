@@ -136,7 +136,8 @@ missing_slot_pixels_lowprio_snippet() {
   printf '%s' 'LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi; M="$(head -n 1 /etc/strih-isolated-cpus.conf 2>/dev/null | tr -d "[:space:]")"; if [ -s /etc/strih-housekeeping-cpus.conf ] && printf %s "$M" | grep -Eqx "[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*"; then LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c $M"; fi;'
 }
 
-# The REMOTE bash script for a Linux box: probe the size, then run the two-stage export at idle
+# The bash script for a Linux box's recording (issue 1425: run on DEV1 against the paced copy; the
+# low-priority snippet resolves to plain `nice -n 19` there and stays byte-pinned to the decode's): probe the size, then run the two-stage export at idle
 # priority into $2 (its exit status is stage 2's). $1 = recording path on the box, $2 = remote output dir,
 # $3..$N = the ordinals (missing_slot_pixels_indices output). Every dynamic value is %q-quoted, so
 # spaces in an OBS file name are safe. Pure.
@@ -216,7 +217,7 @@ missing_slot_pixels_box_extract() {
       return 1
     fi
     script="$(missing_slot_pixels_linux_script "$copy" "${lparent%/}/$(basename -- "$rdir")" "$@")"
-    timeout "$tmo" bash -c "$script" >/dev/null 2>&1 || rc=$?
+    timeout --foreground -k 5 "$tmo" bash -c "$script" >/dev/null 2>&1 || rc=$?
     rm -rf -- "$copy_dir"
     if [ "$rc" -ne 0 ]; then
       echo "[missing-slot-pixels] WARNING: $box: export on dev1 failed or timed out (${tmo}s, rc $rc)" >&2

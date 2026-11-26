@@ -187,6 +187,24 @@ def test_the_stream_box_decode_reads_the_pushed_marker_log_from_dev1(tmp_path):
         assert "--extract-partial" not in t and "ffmpeg" not in t, t
 
 
+def test_the_av_soak_relative_out_dir_shape_works(tmp_path):
+    """av-soak passes a RELATIVE box out dir (`verdict-out`, the ssh user's home) for --out-dir, --out
+    and the pushed inputs; the copy + the fetched schedule + the local partial all still work."""
+    rig = _rig(tmp_path)
+    (rig["remote_out"] / "switch-schedule-7.json").write_text('{"s": 1}')
+    e = dict(rig["env"], STRIH_LX_BOX="10.77.9.202")
+    rec = str(rig["rec"])
+    args = ["bash", str(DECODE), "--verdict-bin", str(rig["verdict"]), "--out-dir", "verdict-out",
+            "--local-out-dir", str(rig["local_out"]), "--strih-rec", rec, "--", "--extract-partial", "strih",
+            "--strih", rec, "--switch-schedule", "verdict-out/switch-schedule-7.json",
+            "--out", "verdict-out/strih-partial-7.json"]
+    p = subprocess.run(args, capture_output=True, text=True, env=e, cwd=str(REPO), timeout=120)
+    assert p.returncode == 0, p.stdout + p.stderr
+    (v,) = _verdicts(rig)
+    assert v["--switch-schedule"] == '{"s": 1}'
+    assert (rig["local_out"] / "strih-partial-7.json").is_file() and _copies_left(rig) == []
+
+
 def test_the_verdict_bin_is_required_on_dev1(tmp_path):
     rig = _rig(tmp_path)
     rig["verdict"] = tmp_path / "missing-binary"

@@ -161,8 +161,9 @@ main() {
 
   # STEP 2: the forwarded recording-verdict args with every box path moved to dev1: the recording
   # -> the verified copy; `--out <box dir>/<name>` -> <local-out-dir>/<name> (so the partial and its
-  # #186 `<partial>-pixels` dir land exactly where the callers read them); any other path under the
-  # box out dir (the [8/8b-pre] marker log / switch schedule) -> fetched back once into the copy dir.
+  # #186 `<partial>-pixels` dir land exactly where the callers read them); the value of an INPUT flag
+  # (--av-marker-log / --switch-schedule: the [8/8b-pre] pushes) under the box out dir -> fetched back
+  # once into the copy dir. Callers pass `--flag value`, never `--flag=value`.
   local -a LOCAL_ARGS=()
   local i a prev="" local_partial=""
   for ((i = 0; i < ${#PASS_ARGS[@]}; i++)); do
@@ -172,7 +173,7 @@ main() {
       a="$local_partial"
     elif [ "$a" = "$STRIH_REC" ]; then
       a="$LOCAL_REC"
-    elif [ "${a#"${OUT_DIR%/}"/}" != "$a" ]; then
+    elif { [ "$prev" = "--av-marker-log" ] || [ "$prev" = "--switch-schedule" ]; } && [ "${a#"${OUT_DIR%/}"/}" != "$a" ]; then
       local fetched
       fetched="$COPY_DIR/inputs/$(basename -- "$a")"
       mkdir -p "$COPY_DIR/inputs"
