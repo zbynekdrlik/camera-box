@@ -1,6 +1,6 @@
 """issue 1425 (design 7106973291): strih-snv housekeeping off OBS's CPUs.
 
-The box fact STRIH_HOUSEKEEPING_CPUS (strih-snv 0-1, the complement of the OBS mask 2-15; the other
+The box fact STRIH_HOUSEKEEPING_CPUS (strih-snv 0-2 since ROZHODNUTE 7183885100, the complement of the OBS mask 3-15; the other
 boxes `none`), the step-11b IRQ oneshot generalised to every IRQ of the rig NIC + the RSS channel
 count, the netdev_budget_usecs drop-in, the rustdesk / display-watch drop-ins, the OBS launcher's own
 placement (its shutdown watch = the stat / grep / tail loop) and verify item 16's rows.
@@ -8,10 +8,16 @@ placement (its shutdown watch = the stat / grep / tail loop) and verify item 16'
 Every lib runs under the callers' `set -euo pipefail`; host tools (ethtool, systemctl, taskset, renice)
 are fakes on PATH, /sys + /proc + /etc are temp trees through the libs' seams. Values reach bash as
 ARGUMENTS, never inside the script text.
+
+The mechanics scenarios below model a TWO-CPU housekeeping box (0-1, OBS mask 2-15: strih-snv's set until
+ROZHODNUTE 7183885100, stream-pp's today). They run on SCENARIO_BOXES, a copy of the real fact files with
+strih-snv's set at 0-1, so they keep testing that shape after strih-snv moved to 0-2; a test that reads the
+REAL fact files passes `real_boxes=True`. strih-snv's own 0-2 set is test_obs_mask_from_housekeeping_1425.py.
 """
 import os
 import pathlib
 import subprocess
+import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
@@ -31,11 +37,24 @@ ME = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).s
 MYGRP = subprocess.run(["id", "-gn"], capture_output=True, text=True, check=True).stdout.strip()
 
 
-def _run(body, *args, env=None, path_prefix=None, sources=(FACTS, PROVISION)):
+_SCENARIO_DIR = tempfile.TemporaryDirectory(prefix="hk-1425-boxes-")
+SCENARIO_BOXES = pathlib.Path(_SCENARIO_DIR.name)
+for _f in BOXES.glob("*"):
+    if _f.is_file():
+        (SCENARIO_BOXES / _f.name).write_bytes(_f.read_bytes())
+_snv = (SCENARIO_BOXES / "strih-snv.env").read_text()
+assert _snv.count("\nSTRIH_HOUSEKEEPING_CPUS=0-2\n") == 1
+(SCENARIO_BOXES / "strih-snv.env").write_text(_snv.replace("\nSTRIH_HOUSEKEEPING_CPUS=0-2\n",
+                                                           "\nSTRIH_HOUSEKEEPING_CPUS=0-1\n"))
+
+
+def _run(body, *args, env=None, path_prefix=None, sources=(FACTS, PROVISION), real_boxes=False):
     harness = ("set -euo pipefail\n" + "".join('. "%s"\n' % s for s in sources) +
                'fail() { echo "FAIL: $*" >&2; return 1; }\n'
                'ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n' + body)
     full = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    if not real_boxes:
+        full["STRIH_BOXES_DIR"] = str(SCENARIO_BOXES)
     if path_prefix:
         full["PATH"] = "%s:%s" % (path_prefix, full["PATH"])
     if env:
@@ -56,7 +75,7 @@ def test_every_box_declares_its_housekeeping_cpus():
     # issue 1553 (SNV/PP parity): every box measured = online minus its OBS mask (read 25.11.2026)
     want = {"strih-snv": "0-2", "strih-pp": "0,8", "stream-pp": "0-1", "stream-snv": "0-1,12-19"}
     for box, v in want.items():
-        r = _run('strih_box_load "$1"; strih_lx_housekeeping_cpus', box)
+        r = _run('strih_box_load "$1"; strih_lx_housekeeping_cpus', box, real_boxes=True)
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == v, box
 
