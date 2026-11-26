@@ -92,7 +92,11 @@ case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   # issue 1545 (internal): one bounded production read for VENUE, run by venue_production under
   # `timeout` (a bash function cannot be timed out in-process). Prints yes | no | unknown.
-  --production-read) PRODUCTION_READ_VENUE="${2:-}" ;;
+  --production-read)
+    PRODUCTION_READ_VENUE="${2:-}"
+    # no venue: answer unknown, never fall through to a live (notifying) pass
+    [ -n "$PRODUCTION_READ_VENUE" ] || { printf 'unknown\n'; exit 0; }
+    ;;
   --help | -h)
     sed -n '10,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
@@ -450,7 +454,7 @@ venue_production() {
   elif [ "$DRY_RUN" -eq 1 ] && [ -z "${AVSYNC_PRODUCTION:-}" ]; then
     # --dry-run (the handover check's clock item, a hand run) never logs into cam2 or dials OBS-WS:
     # it reports what a live pass would do with an unread state (unknown = page), caches nothing.
-    log "production at $venue not read in --dry-run (no rig login) -- treated as unknown"
+    log "production at $venue not read in --dry-run (no rig login) -- treated as unknown: a live pass pages unless the venue reads no production"
     printf 'unknown\n'
     return 0
   else
