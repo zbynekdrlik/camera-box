@@ -5,6 +5,22 @@ paths:
   - "scripts/recording-verdict-on-stream-snv.sh"
 ---
 
+**Since issue 1425 (owner ROZHODNUTÉ issuecomment-7187562277, 26.11.2026) NOTHING decodes on a rig
+box.** `recording-verdict-on-strih-snv.sh` copies the recording to a run-private dev1 dir under
+`--local-out-dir` through `scripts/lib/rec-pull-paced.sh` (`rec_pull_paced`: size + sha256 read on
+the box behind `LOWPRIO_SNIPPET`, `scp -l` PACED to `REC_PULL_RATE_MBIT` (default 200 Mbit/s =
+25 MB/s; an E2E recording is ~790 MB, so ~32 s, both boxes in parallel 400 Mbit/s into dev1),
+size + sha256 checked on dev1, one `[rec-pull]` line with bytes / seconds / rate / sha match), runs
+the SAME forwarded recording-verdict args LOCALLY with `--verdict-bin` (the dev1 binary) at nice 19,
+the box paths rewritten (the recording -> the copy, `--out <box dir>/<name>` -> `<local-out-dir>/<name>`
+so the partial + its `-pixels` dir land where the callers read them, any other path under
+`--out-dir` -- the `[8/8b-pre]` marker log / schedule -- fetched back once), logs the decode time,
+and removes the copy on EVERY exit (EXIT trap). No binary goes to the box (`--remote-bin` is
+accepted and ignored). The missing-slot pixel proofs of a Linux box export from a dev1 copy the same
+way (`.claude/rules/missing-slot-pixels.md`). The sections below describe the retired on-box decode;
+`strih_lx_lowprio_prefix` / `LOWPRIO_SNIPPET` now only place the box's sha256 read. Tests:
+`tests/python/test_dev1_decode_1425.py`.
+
 **It is the ONE Linux on-box decode (issue 1462).** The Linux stream box stream-snv decodes its
 `[8/8b]` stream recording through it: `scripts/recording-verdict-on-stream-snv.sh` resolves + checks
 the box and `exec`s this script with `STRIH_LX_BOX`/`STRIH_USER`/`STRIH_PW` = the stream box,

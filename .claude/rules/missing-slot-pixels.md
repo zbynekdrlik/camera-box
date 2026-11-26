@@ -45,6 +45,12 @@ NodeSpec `source`. The cap (`MISSING_SLOT_PIXELS_CAP`, default 12) counts SLOTS,
 
 ## Per box
 
+- **Issue 1425: a Linux box (strih-snv, stream-snv) exports on DEV1.** `missing_slot_pixels_box_extract`
+  copies the recording with `rec_pull_paced` (paced + sha256-verified, `scripts/lib/rec-pull-paced.sh`)
+  into `<lparent>/.rec-copy-<box>.*`, runs the unchanged `missing_slot_pixels_linux_script` locally
+  into `<lparent>/<basename of the remote dir>` (where the pull used to land), and removes the copy.
+  The box runs no ffmpeg. The strih-snv / stream-snv bullets below are the retired on-box shape.
+
 - **strih-snv (Linux)**: one ssh bash script (`missing_slot_pixels_linux_script`, every dynamic value
   `%q`-quoted — OBS file names have spaces) probes the size, then runs both stages at the SAME idle
   priority as the on-box decode: `missing_slot_pixels_lowprio_snippet` is byte-identical to

@@ -86,6 +86,6 @@ stream_lx_recording_cleanup_note() {
 
 stream_lx_partial_pullback_note() {
   printf '    pull back to dev1: %s  AND the #186 pixel-proof dir %s\n' "${1:-}" "${2:-}"
-  printf '      (the Linux stream box: already pulled back over scp by recording-verdict-on-stream-snv.sh;\n'
+  printf '      (the Linux stream box: decoded on dev1 from a paced copy by recording-verdict-on-stream-snv.sh, issue 1425;\n'
   printf '       the pixel-proof dir is absent on a clean run)\n'
 }

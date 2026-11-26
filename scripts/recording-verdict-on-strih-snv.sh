@@ -1,67 +1,41 @@
 #!/usr/bin/env bash
-# recording-verdict-on-strih-snv.sh — run recording-verdict ON the strih-snv box (Linux notebook,
-# 10.77.9.202, M4 cut-over — issue 1351), where the strih recording already lives, to EXTRACT its
-# small per-box PARTIAL JSON. This is the Linux sibling of recording-verdict-on-strih.sh (Windows,
-# unchanged) and mirrors recording-verdict-on-imag.sh's shape: strih-snv is a plain Ubuntu box
-# reached over plain ssh/scp (targets.md's "Linux OBS Targets" access class, SAME as imag-nb and
-# cam1/cam2) — never the win-* MCP, never PowerShell.
+# recording-verdict-on-strih-snv.sh — the [8/8a] strih (and, through recording-verdict-on-stream-snv.sh,
+# the [8/8b] stream) recording decode for a Linux OBS box: copy the recording to dev1, decode there.
 #
-# WHY THIS SCRIPT ALWAYS EXECUTES (unlike recording-verdict-on-strih.sh's Windows-only planner-by-
-# default shape): ssh/scp to a plain Linux box is always allowed on this rig (#701/#462 precedent),
-# so there is no "paste into the MCP Shell" fallback to preserve — this script runs the deploy +
-# decode + pull-back for real every time it is invoked, exactly like recording-verdict-on-imag.sh.
+# issue 1425 (owner ROZHODNUTÉ issuecomment-7187562277, 26.11.2026): the full-path E2E's recording
+# decode + recording-verdict run on dev1, NEVER on a rig box. This script used to run recording-verdict
+# ON the box (issue 1351 strih-snv, issue 1462 stream-snv) — a multi-core QR/pixel sweep beside the
+# live OBS. Now:
+#   1. the box's recording is copied to a run-private dev1 dir under --local-out-dir, PACED
+#      (scp -l, REC_PULL_RATE_MBIT default 200 Mbit/s) and verified: size + sha256 against the box
+#      (scripts/lib/rec-pull-paced.sh; the box's sha256sum runs at its idle-priority prefix,
+#      LOWPRIO_SNIPPET). The box runs no ffmpeg and no recording-verdict;
+#   2. the forwarded recording-verdict arguments (everything after `--`, unchanged at the callers)
+#      run LOCALLY with the dev1 binary --verdict-bin, their box paths moved to dev1: the recording ->
+#      the copy, `--out <box dir>/<name>` -> <local-out-dir>/<name> (the partial and its #186
+#      `<partial>-pixels` dir land where the callers read them, byte-compatible), any other path
+#      under --out-dir (the pushed marker log / switch schedule) -> fetched back once;
+#   3. the dev1 copy is removed on every exit (an EXIT trap), the verdict's own failure included.
+# Bytes, seconds, rate, the sha match and the decode time are logged.
 #
-# HOW THE PIECES FIT (per-box decode-in-place, #208):
-#   1. CI builds `recording-verdict` (probe-tools-linux-amd64) — the SAME Linux binary
-#      recording-e2e.sh's PROBE_BIN_DIR already holds for imag-nb (#462). strih-snv is x86_64
-#      Ubuntu — the identical binary runs there unmodified.
-#   2. scp that binary to strih-snv ONCE (skipped when already present + executable there).
-#   3. ssh runs `recording-verdict --extract-partial strih --strih <local rec>` ON strih-snv
-#      against the recording as it lives there (NEVER copied off-box).
-#   4. scp pulls back ONLY the small partial JSON (+ the sibling `<partial>-pixels` dir, #186 —
-#      absent on a clean run) to dev1.
-#
-# Usage:
-#   recording-verdict-on-strih-snv.sh \
-#       --strih-rec /home/newlevel/... \
-#       --verdict-bin target/release/recording-verdict \
-#       --out-dir /home/newlevel/verdict-out \
-#       --local-out-dir /tmp/recording-e2e-12345 \
-#       -- --extract-partial strih --strih /home/newlevel/... --capture-fps 30 \
+# Usage (unchanged at every caller; --remote-bin is accepted and ignored):
+#   recording-verdict-on-strih-snv.sh --strih-rec '/srv/_REC/2026-11-26 09-24-08.mkv' \
+#       --verdict-bin <dev1 recording-verdict> --out-dir /home/newlevel/verdict-out \
+#       --local-out-dir <run dir> \
+#       -- --extract-partial strih --strih '/srv/_REC/2026-11-26 09-24-08.mkv' --capture-fps 30 \
 #          --out /home/newlevel/verdict-out/strih-partial-12345.json
 #
-# Env: STRIH_LX_BOX / STRIH_USER / STRIH_PW — ssh target (default 10.77.9.202 / newlevel /
-#      newlevel, the SAME creds recording-e2e.sh's own $STRIH_USER/$STRIH_PW use for strih today).
-#
-# issue 1462: this is the ONE on-box decode for every Linux OBS box reached over plain ssh. The Linux
-# stream box stream-snv uses it through scripts/recording-verdict-on-stream-snv.sh, which sets
-# STRIH_LX_BOX / STRIH_USER / STRIH_PW to the stream box, ONBOX_LABEL=<its fleet name> (the log tag,
-# default strih-snv) and hands its recording as `--rec <path>` (an alias of --strih-rec). Nothing
-# else differs: the same sha256 upload gate, idle-priority launch and pull-back serve both boxes.
+# Env: STRIH_LX_BOX / STRIH_USER / STRIH_PW — the box (default 10.77.9.202 / newlevel / newlevel);
+#      ONBOX_LABEL (the log tag, default strih-snv); REC_PULL_RATE_MBIT / REC_PULL_TIMEOUT.
 set -euo pipefail
 
-# onstrihlx_upload_decision <force> <present> <local_sha> <remote_sha> — issue 1351 (review
-# finding). Pure/testable (no network): mirrors recording-verdict-on-imag.sh's issue-1118
-# onimag_upload_decision EXACTLY — a present-but-DIFFERENT-sha binary on strih-snv must be
-# re-uploaded (a schema bump left stale, or a corrupt partial-transfer), never silently reused
-# just because the path is executable.
-#   force=1                               -> upload
-#   present!=1 (absent / not executable)  -> upload
-#   present=1 but local_sha empty         -> upload (can't verify identity -> fail-safe)
-#   present=1 and local_sha != remote_sha -> upload (VERSION GATE)
-#   present=1 and local_sha == remote_sha (non-empty) -> skip
-# Issue 1302: the decision itself is the ONE shared verdict_upload_decision (also used by the imag
-# and RESOLUME-SNV extracts); this name stays as the strih-snv entry point.
-# shellcheck source=scripts/lib/verdict-upload-gate.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib/verdict-upload-gate.sh"
-onstrihlx_upload_decision() {
-  verdict_upload_decision "$@"
-}
+# shellcheck source=scripts/lib/rec-pull-paced.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/rec-pull-paced.sh"
 
 # Pure-string function so a unit test can source the script and assert the command is well-formed
-# (strih-snv-local paths only, %q-quoted — no dev1 path, no unescaped argument) WITHOUT touching
-# the network. RUST_LOG=info so the decode progress is visible in the ssh output (the agent's
-# liveness signal), mirroring build_onimag_command's shape.
+# (%q-quoted, no unescaped argument) WITHOUT touching the network. RUST_LOG=info so the decode
+# progress is visible in the output (the agent's liveness signal). Since issue 1425 it is the dev1
+# command line printed before the local decode.
 build_onstrihlx_command() {
   local exe="$1"; shift
   printf 'env RUST_LOG=info %q' "$exe"
@@ -73,8 +47,8 @@ build_onstrihlx_command() {
 }
 
 # strih_lx_lowprio_prefix <sysfs_root> — issue 1351. The canonical (pure, network-free) encoding of
-# the low-priority launch prefix for the on-box recording-verdict decode ([8/8a] in
-# recording-e2e.sh): always `nice -n 19`, plus `taskset -c <range>` onto the Intel hybrid E-cores
+# the low-priority launch prefix the box uses for its side of the recording copy (issue 1425: the
+# sha256 read; the decode itself runs on dev1 since then): always `nice -n 19`, plus `taskset -c <range>` onto the Intel hybrid E-cores
 # when this box exposes <sysfs_root>/devices/cpu_atom/cpus as a non-empty range. A multi-core
 # QR/pixel sweep over a 1080p60 5-min recording at nice 0 on the P-cores starves OBS's live NDI
 # receiver decode threads (the post-run relock storms of issue 1354); the E-cores + idle priority
@@ -120,20 +94,19 @@ strih_lx_lowprio_prefix() {
   fi
 }
 
-# Parse flags + run the plan for real. Wrapped in a function so SOURCING the script (a unit test
-# calling build_onstrihlx_command) does NOT trigger arg-parsing / ssh against the sourcing shell's
-# $@.
+# Parse flags + run the decode for real. Wrapped in a function so SOURCING the script (a unit test
+# calling build_onstrihlx_command / strih_lx_lowprio_prefix) does NOT trigger arg-parsing / ssh
+# against the sourcing shell's $@.
 main() {
   local STRIH_LX_BOX="${STRIH_LX_BOX:-10.77.9.202}"
   local STRIH_USER="${STRIH_USER:-newlevel}"
   local STRIH_PW="${STRIH_PW:-newlevel}"
-  local VERDICT_BIN=""                                 # LOCAL (dev1) Linux binary to deploy
-  local REMOTE_BIN="/home/newlevel/recording-verdict"  # where it lands / already lives on strih-snv
-  local OUT_DIR="/home/newlevel/verdict-out"           # box-local (strih-snv) out dir
-  local LOCAL_OUT_DIR="."                              # dev1-side dir to pull results into
+  local VERDICT_BIN=""                                 # the dev1 recording-verdict the E2E downloaded
+  local OUT_DIR="/home/newlevel/verdict-out"           # the box dir the callers name in --out
+  local LOCAL_OUT_DIR="."                              # dev1-side dir the partial is written into
   local STRIH_REC=""
   local LABEL="${ONBOX_LABEL:-strih-snv}"                # issue 1462: the box name in the log lines
-  # Everything after `--` is passed verbatim to recording-verdict on strih-snv.
+  # Everything after `--` is passed to recording-verdict (on dev1), its box paths rewritten.
   local -a PASS_ARGS=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -148,7 +121,7 @@ main() {
       --strih-rec)     STRIH_REC="$2"; shift 2 ;;
       --rec)           STRIH_REC="$2"; shift 2 ;;   # issue 1462: the box-neutral spelling
       --verdict-bin)   VERDICT_BIN="$2"; shift 2 ;;
-      --remote-bin)    REMOTE_BIN="$2"; shift 2 ;;
+      --remote-bin)    shift 2 ;;                   # issue 1425: no binary goes to the box any more
       --out-dir)       OUT_DIR="$2"; shift 2 ;;
       --local-out-dir) LOCAL_OUT_DIR="$2"; shift 2 ;;
       --)              shift; PASS_ARGS=("$@"); break ;;
@@ -160,89 +133,72 @@ main() {
     echo "ERROR: --strih-rec / --rec <recording path as it lives on ${LABEL}> is required" >&2
     exit 2
   fi
-
+  if [ -z "$VERDICT_BIN" ] || [ ! -x "$VERDICT_BIN" ]; then
+    echo "ERROR: --verdict-bin <dev1 recording-verdict> is required and must be executable (got '${VERDICT_BIN}'); the decode runs on dev1 (issue 1425)" >&2
+    exit 2
+  fi
   command -v sshpass >/dev/null 2>&1 || {
-    echo "ERROR: sshpass not found — needed to ssh/scp into ${LABEL} (issue 1351)." >&2
+    echo "ERROR: sshpass not found — needed to copy the recording from ${LABEL} (issue 1351)." >&2
     exit 1
   }
 
   local -a SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
   local TARGET="${STRIH_USER}@${STRIH_LX_BOX}"
-
-  # STEP 1: deploy the Linux verdict binary to strih-snv — ONLY if missing/not-executable there,
-  # its sha256 DIFFERS from the local binary, or --force-upload is given. Mirrors
-  # recording-verdict-on-imag.sh's issue-1118 sha256 VERSION GATE exactly — a stale on-box binary
-  # after a schema bump (e.g. RecordingPartial vN->vN+1) must never be silently reused just
-  # because the path is present+executable (review finding, issue 1351).
-  if [ -n "$VERDICT_BIN" ]; then
-    local present=0 local_sha="" remote_sha=""
-    if sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "[ -x '$REMOTE_BIN' ]" 2>/dev/null; then
-      present=1
-      local_sha="$(sha256sum "$VERDICT_BIN" 2>/dev/null | cut -d' ' -f1)" || local_sha=""
-      remote_sha="$(sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" \
-          "sha256sum '$REMOTE_BIN' 2>/dev/null | cut -d' ' -f1" 2>/dev/null | tr -dc '0-9a-f')" || remote_sha=""
-    fi
-    local decision
-    decision="$(onstrihlx_upload_decision 0 "$present" "$local_sha" "$remote_sha")"
-    if [ "$decision" = "upload" ]; then
-      echo "[recording-verdict-on-${LABEL}] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN} (present=$present local_sha=${local_sha:0:12} remote_sha=${remote_sha:0:12})"
-      sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "$VERDICT_BIN" "${TARGET}:${REMOTE_BIN}"
-      sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "chmod +x '$REMOTE_BIN'"
-    else
-      echo "[recording-verdict-on-${LABEL}] $REMOTE_BIN already present+executable AND identical sha256 on ${LABEL} — skipping upload (issue 1118 version gate)"
-    fi
-  fi
-
-  # STEP 2: run the verdict ON strih-snv against the LOCAL recording (NEVER copied off-box), at IDLE
-  # priority: on a housekeeping box the OBS mask under SCHED_IDLE (issue 1425); else off the OBS cores
-  # (rig-background.slice, issue 1387; else the E-cores, issue 1351). Unpinned at nice 0 the multi-core QR/pixel sweep
-  # competes with OBS's ndir:video decode threads on the P-cores and the live receivers relock-storm
-  # for minutes after the run (issue 1354). LOWPRIO_SNIPPET is the remote-shell replica of
-  # strih_lx_lowprio_prefix (the unit-tested pure contract): SINGLE-QUOTED on the dev1 side so the
-  # $(cat …) is evaluated by the strih-snv shell — a replacement notebook resolves its OWN E-cores —
-  # then `$LP` prefixes the on-box command. The scp of the binary and the partial pull are unchanged.
-  local ONSTRIHLX_CMD LOWPRIO_SNIPPET
-  ONSTRIHLX_CMD="$(build_onstrihlx_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
-  LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi; M="$(head -n 1 /etc/strih-isolated-cpus.conf 2>/dev/null | tr -d "[:space:]")"; if [ -s /etc/strih-housekeeping-cpus.conf ] && printf %s "$M" | grep -Eqx "[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*"; then LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c $M"; fi;'
-  echo "[recording-verdict-on-${LABEL}] running on ${LABEL} (${STRIH_LX_BOX}) at idle priority (the box resolves the launch prefix, printed by the box): $ONSTRIHLX_CMD"
-  # The brace group keeps the decode gated on `mkdir -p` (the && short-circuits the WHOLE group, not
-  # just the LP assignment the snippet begins with) — same failure semantics as before this change.
-  sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && { $LOWPRIO_SNIPPET echo \"[${LABEL}] launch prefix: \$LP\" >&2; \$LP $ONSTRIHLX_CMD; }"
-
-  # #186/#208: the on-box --extract-partial writes the pixel-proof PNGs of every flagged /
-  # undecodable frame into the SIBLING `<partial>-pixels` dir (beside the --out partial JSON) — so
-  # the merge's #186 "SEE the missing frame" guarantee survives the per-box split. Derive that dir
-  # from the forwarded `--out <partial>` so STEP 3 pulls it back too.
-  local OUT_PARTIAL="" PIXELS_DIR=""
-  local i
-  for ((i = 0; i + 1 < ${#PASS_ARGS[@]}; i++)); do
-    if [ "${PASS_ARGS[$i]}" = "--out" ]; then
-      OUT_PARTIAL="${PASS_ARGS[$((i + 1))]}"
-      break
-    fi
-  done
-
-  if [ -z "$OUT_PARTIAL" ]; then
-    echo "WARNING: no --out <partial.json> found in the forwarded args — nothing to pull back." >&2
-    return 0
-  fi
-  PIXELS_DIR="${OUT_PARTIAL%.json}-pixels"
-
-  # STEP 3: pull back ONLY the small partial JSON (+ its sibling <partial>-pixels dir — a handful
-  # of flagged-frame PNGs, absent on a clean run). The strih recording itself never leaves the box.
   mkdir -p "$LOCAL_OUT_DIR"
-  local partial_base local_partial
-  partial_base="$(basename "$OUT_PARTIAL")"
-  local_partial="$LOCAL_OUT_DIR/$partial_base"
-  echo "[recording-verdict-on-${LABEL}] pulling back $OUT_PARTIAL -> $local_partial"
-  sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "${TARGET}:${OUT_PARTIAL}" "$local_partial"
-  if sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "[ -d '$PIXELS_DIR' ]" 2>/dev/null; then
-    echo "[recording-verdict-on-${LABEL}] pulling back #186 pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
-    sshpass -p "$STRIH_PW" scp -r "${SSH_OPTS[@]}" "${TARGET}:${PIXELS_DIR}" "$LOCAL_OUT_DIR/"
-  else
-    echo "[recording-verdict-on-${LABEL}] no pixel-proof dir on ${LABEL} — clean run, nothing flagged"
+
+  # STEP 1 (issue 1425): copy the recording to a run-private dev1 dir, PACED + sha256-verified
+  # (scripts/lib/rec-pull-paced.sh). The copy is removed on EVERY exit, the verdict's own failure
+  # included: dev1 keeps no recording. The box's sha256sum runs behind LOWPRIO_SNIPPET, the box's own
+  # idle-priority prefix (the remote-shell replica of strih_lx_lowprio_prefix, single-quoted so the
+  # box resolves its own placement); the box runs no decode.
+  local LOWPRIO_SNIPPET COPY_DIR LOCAL_REC
+  LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi; M="$(head -n 1 /etc/strih-isolated-cpus.conf 2>/dev/null | tr -d "[:space:]")"; if [ -s /etc/strih-housekeeping-cpus.conf ] && printf %s "$M" | grep -Eqx "[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*"; then LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c $M"; fi;'
+  COPY_DIR="$(mktemp -d "${LOCAL_OUT_DIR%/}/.rec-copy-${LABEL}.XXXXXX")"
+  # shellcheck disable=SC2064  # the dir is fixed now, on purpose
+  trap "rm -rf -- '$COPY_DIR'" EXIT
+  LOCAL_REC="$COPY_DIR/$(basename -- "$STRIH_REC")"
+  rec_pull_paced "$STRIH_USER" "$STRIH_PW" "$STRIH_LX_BOX" "$STRIH_REC" "$LOCAL_REC" "$LABEL" "$LOWPRIO_SNIPPET" || exit 1
+
+  # STEP 2: the forwarded recording-verdict args with every box path moved to dev1: the recording
+  # -> the verified copy; `--out <box dir>/<name>` -> <local-out-dir>/<name> (so the partial and its
+  # #186 `<partial>-pixels` dir land exactly where the callers read them); any other path under the
+  # box out dir (the [8/8b-pre] marker log / switch schedule) -> fetched back once into the copy dir.
+  local -a LOCAL_ARGS=()
+  local i a prev="" local_partial=""
+  for ((i = 0; i < ${#PASS_ARGS[@]}; i++)); do
+    a="${PASS_ARGS[$i]}"
+    if [ "$prev" = "--out" ]; then
+      local_partial="${LOCAL_OUT_DIR%/}/$(basename -- "$a")"
+      a="$local_partial"
+    elif [ "$a" = "$STRIH_REC" ]; then
+      a="$LOCAL_REC"
+    elif [ "${a#"${OUT_DIR%/}"/}" != "$a" ]; then
+      local fetched
+      fetched="$COPY_DIR/inputs/$(basename -- "$a")"
+      mkdir -p "$COPY_DIR/inputs"
+      if ! sshpass -p "$STRIH_PW" scp -q "${SSH_OPTS[@]}" "${TARGET}:${a}" "$fetched" 2>/dev/null; then
+        echo "ERROR: [recording-verdict-on-${LABEL}] could not fetch the decode input ${a} from ${LABEL}" >&2
+        exit 1
+      fi
+      echo "[recording-verdict-on-${LABEL}] decode input ${a} -> ${fetched}"
+      a="$fetched"
+    fi
+    LOCAL_ARGS+=("$a")
+    prev="${PASS_ARGS[$i]}"
+  done
+  if [ -z "$local_partial" ]; then
+    echo "WARNING: no --out <partial.json> found in the forwarded args — the decode writes no partial." >&2
   fi
-  echo "[recording-verdict-on-${LABEL}] done: partial at $local_partial"
+
+  # STEP 3: the SAME recording-verdict run, on dev1, at nice 19 (a dev1 run dir, never a rig box).
+  local CMD t0 t1
+  CMD="$(build_onstrihlx_command "$VERDICT_BIN" "${LOCAL_ARGS[@]}")"
+  echo "[recording-verdict-on-${LABEL}] decoding on dev1 (issue 1425, no decode on ${LABEL}): nice -n 19 $CMD"
+  t0="$(date +%s)"
+  env RUST_LOG=info nice -n 19 "$VERDICT_BIN" "${LOCAL_ARGS[@]}"
+  t1="$(date +%s)"
+  echo "[recording-verdict-on-${LABEL}] decode time on dev1: $((t1 - t0)) s"
+  echo "[recording-verdict-on-${LABEL}] done: partial at ${local_partial:-<none>} (the dev1 recording copy is removed on exit)"
 }
 
 # Run main only when EXECUTED, not when SOURCED (so a test can source + call

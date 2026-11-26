@@ -138,7 +138,9 @@ def test_the_strih_recording_is_decoded_on_dev1_from_a_verified_copy(tmp_path):
 
 def test_the_pacing_rate_is_configurable_and_a_bad_value_keeps_200(tmp_path):
     for value, want in (("50", "50000"), ("0", "200000"), ("1e3", "200000"), ("", "200000")):
-        rig = _rig(tmp_path / ("r" + (value or "empty")))
+        sub = tmp_path / ("r" + (value or "empty"))
+        sub.mkdir()
+        rig = _rig(sub)
         p = _decode(rig, env={"REC_PULL_RATE_MBIT": value})
         assert p.returncode == 0, p.stdout + p.stderr
         (cp,) = [c for c in calls(rig) if c["tool"] == "scp" and c["src"].endswith(".mkv")]

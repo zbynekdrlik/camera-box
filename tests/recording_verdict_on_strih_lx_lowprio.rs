@@ -174,7 +174,10 @@ fn no_binary_goes_to_the_box_and_the_decode_runs_on_dev1_1425() {
     // issue 1425 (owner ROZHODNUTE issuecomment-7187562277): no recording-verdict upload, no
     // on-box decode, no partial pull-back -- the copy comes to dev1 and the verdict runs here.
     let s = script_text();
-    assert!(!s.contains("${TARGET}:${REMOTE_BIN}"), "no binary upload to the box");
+    assert!(
+        !s.contains("${TARGET}:${REMOTE_BIN}"),
+        "no binary upload to the box"
+    );
     assert!(
         s.contains(r#"env RUST_LOG=info nice -n 19 "$VERDICT_BIN" "${LOCAL_ARGS[@]}""#),
         "the verdict runs on dev1 with the rewritten args"
