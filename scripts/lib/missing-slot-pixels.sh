@@ -127,7 +127,7 @@ missing_slot_pixels_stage2_args() {
 # on the P-cores relock-storms the live NDI receivers). A test pins the two copies equal. Pure.
 missing_slot_pixels_lowprio_snippet() {
   # shellcheck disable=SC2016  # expanded by the REMOTE shell, on purpose
-  printf '%s' 'LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi; M="$(head -n 1 /etc/strih-isolated-cpus.conf 2>/dev/null | tr -d "[:space:]")"; if [ -s /etc/strih-housekeeping-cpus.conf ] && [ -n "$M" ] && [ -z "$(printf %s "$M" | tr -d 0-9,-)" ]; then LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c $M"; fi;'
+  printf '%s' 'LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi; M="$(head -n 1 /etc/strih-isolated-cpus.conf 2>/dev/null | tr -d "[:space:]")"; if [ -s /etc/strih-housekeeping-cpus.conf ] && printf %s "$M" | grep -Eqx "[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*"; then LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c $M"; fi;'
 }
 
 # The REMOTE bash script for a Linux box: probe the size, then run the two-stage export at idle

@@ -42,9 +42,11 @@ does not use. The `nice` + E-core text below stays only for a box not yet provis
 which also carries rig-NIC IRQs (design 7119179275): measured live, the decode ran on CPU 0 alone
 (~1000 frames / 6 min, a 9443-frame recording ~55 min) beside the RX softirq. So the snippet's LAST
 clause, when `/etc/strih-housekeeping-cpus.conf` is non-empty (setup-strih writes it only for a fact
-other than `none`) and the first line of `/etc/strih-isolated-cpus.conf` is a cpulist (digits, `,`,
-`-` only), sets `LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c <OBS mask>"` -- the program-audio
-sampler precedent: SCHED_IDLE runs only when an OBS CPU would idle. An empty or malformed mask keeps the
+other than `none`) and the first line of `/etc/strih-isolated-cpus.conf` is a cpulist (`N` or `N-M`,
+comma separated, ASCII digits; `grep -Eqx`), sets `LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c
+<OBS mask>"`: the OBS-mask placement the program-audio sampler took (`strih_program_audio_cpus`), plus
+SCHED_IDLE (new here; it runs only when an OBS CPU would idle). The box prints the prefix it resolved
+(`[<box>] launch prefix: ...` on stderr): read it in the E2E log. An empty or malformed mask keeps the
 runner / E-core / nice choice; a box without the file keeps today's prefix byte-identical. The pure
 `strih_lx_lowprio_prefix` takes the same branch first (3rd argument = an etc root, test seam). stream-snv
 execs this script and has housekeeping CPUs, so it gets the same placement; the issue-1367 pixel export
@@ -52,6 +54,16 @@ execs this script and has housekeeping CPUs, so it gets the same placement; the 
 with its box paths moved into a fixture and pins it to the pure function. Expected effect (not measured
 yet): decode_workers follows the 14-CPU cpuset back to `MAX_DECODE_WORKERS`; read the decode's
 `Cpus_allowed_list` (= the OBS mask) and `chrt -p` (SCHED_IDLE) on the box at the next E2E.
+
+Accepted trade-offs, NOT measured (review of the issue-1425 lane, design comment 7178556621):
+- SCHED_IDLE decides who gets a CPU, not the SMT sibling, L3 or memory bandwidth: the decode shares
+  physical cores with OBS (strih-snv Zen 5 2-15, stream-snv the P-core pairs 2-11; its E-cores 12-19 are
+  housekeeping CPUs there and stay out). Issue 1354 measured ~800 relocks per camera from a decode at
+  nice 0 on the OBS cores; SCHED_IDLE was not measured. The blocking whole-session gate (issue 1534)
+  reads the logs after the decode, so a decode that disturbs OBS turns the E2E red by itself. Read the
+  genlock-fifo audit relock / underrun deltas over the `[8/8a]` / `[8/8b]` window at the first runs.
+- The slice's `CPUWeight=1` / `IOWeight=1` / `MemoryHigh=30%` no longer apply to this path (the
+  pre-1387 decode ran without them too); `decode_workers` stays bounded by `MemAvailable`.
 
 ## Why STEP 2 must be low-priority + E-core-pinned
 

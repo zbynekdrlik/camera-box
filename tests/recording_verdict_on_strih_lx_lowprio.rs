@@ -319,6 +319,11 @@ fn an_empty_or_malformed_obs_mask_keeps_todays_prefix_1425() {
         Some("  \n"),
         Some("2-15; rm -rf /\n"),
         Some("all\n"),
+        Some("2-\n"),
+        Some("-\n"),
+        Some(",,\n"),
+        Some("2-15,\n"),
+        Some("٢-١٥\n"),
     ] {
         let b = FakeBox::new(None, Some("0\n"), mask);
         let want = format!("sudo -n {}/bin/run", b.root());
