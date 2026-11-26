@@ -575,6 +575,10 @@ def test_the_installed_files_are_the_import_closure_plus_the_shim_sources():
             want.add(str(f.relative_to(_ROOT)))
     assert "scripts/strih-boxes/stream-pp.env" in want and "scripts/strih-boxes/stream-snv.env" in want
     assert {"scripts/program_audio_cg_advisory.py", "scripts/obs_phase2.py"} <= want
+    # issue 1553 (26.11.2026, live crash loop on strih-snv): dantesync_fleet.py reads its canonical config
+    # JSON at import time, so that DATA file ships too
+    import dantesync_fleet as dsf
+    want.add(str(dsf.TEMPLATES_JSON.relative_to(_ROOT)))
     assert set(_lib_value("STRIH_PROGRAM_AUDIO_FILES").split()) == want
 
 
