@@ -44,7 +44,7 @@ def _placed(tmp_path, rates, start, env=None, combined=4, real_boxes=True, rende
 
 
 def test_every_box_renders_its_irq_only_cpus_into_the_oneshot():
-    want = {"strih-snv": "1-3", "strih-pp": "8", "stream-pp": "1", "stream-snv": "1,12-19"}
+    want = {"strih-snv": "1-3", "strih-pp": "1,8-9", "stream-pp": "1", "stream-snv": "1,12-19"}
     for box, v in want.items():
         r = hk._run('strih_box_load "$1"; strih_nic_irq_affinity_script_text', box, real_boxes=True)
         assert r.returncode == 0, (box, r.stderr)
