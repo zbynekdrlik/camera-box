@@ -111,10 +111,16 @@ fn mic_pct_per_box_table() {
     );
 }
 
-/// Per-box PCM (playback / headphone) gain: cam5-7 = 94, every other box = 79.
+/// Per-box PCM (playback / headphone) gain: cam2 = 100 (its output is only the marker XLR into
+/// mbc, issue 1553), cam5-7 = 94, every other box = 79.
 #[test]
 fn pcm_pct_per_box_table() {
-    for name in ["CAM1", "CAM2", "CAM3", "CAM4"] {
+    assert_eq!(
+        sourced_stdout("interkom_pcm_pct CAM2").trim(),
+        "100",
+        "CAM2 PCM gain must be 100% (the marker line out to mbc, issue 1553)"
+    );
+    for name in ["CAM1", "CAM3", "CAM4"] {
         assert_eq!(
             sourced_stdout(&format!("interkom_pcm_pct {name}")).trim(),
             "79",
