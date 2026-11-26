@@ -37,6 +37,22 @@ allows it:** `sudo -n /usr/local/sbin/obs-box-background-run` = `rig-background.
 does not use. The `nice` + E-core text below stays only for a box not yet provisioned (AMD has no
 `cpu_atom`, so it fenced nothing there). `.claude/rules/obs-box-baseline.md` has the slice.
 
+**On a box with housekeeping CPUs the decode leaves the slice for the OBS mask at idle priority
+(issue 1425, finding 7178516822).** There the slice is the ONE housekeeping task CPU (strih-snv 0),
+which also carries rig-NIC IRQs (design 7119179275): measured live, the decode ran on CPU 0 alone
+(~1000 frames / 6 min, a 9443-frame recording ~55 min) beside the RX softirq. So the snippet's LAST
+clause, when `/etc/strih-housekeeping-cpus.conf` is non-empty (setup-strih writes it only for a fact
+other than `none`) and the first line of `/etc/strih-isolated-cpus.conf` is a cpulist (digits, `,`,
+`-` only), sets `LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c <OBS mask>"` -- the program-audio
+sampler precedent: SCHED_IDLE runs only when an OBS CPU would idle. An empty or malformed mask keeps the
+runner / E-core / nice choice; a box without the file keeps today's prefix byte-identical. The pure
+`strih_lx_lowprio_prefix` takes the same branch first (3rd argument = an etc root, test seam). stream-snv
+execs this script and has housekeeping CPUs, so it gets the same placement; the issue-1367 pixel export
+(the byte-pinned twin) too. `tests/recording_verdict_on_strih_lx_lowprio.rs` runs the SHIPPED snippet
+with its box paths moved into a fixture and pins it to the pure function. Expected effect (not measured
+yet): decode_workers follows the 14-CPU cpuset back to `MAX_DECODE_WORKERS`; read the decode's
+`Cpus_allowed_list` (= the OBS mask) and `chrt -p` (SCHED_IDLE) on the box at the next E2E.
+
 ## Why STEP 2 must be low-priority + E-core-pinned
 
 The decode is a multi-core QR/pixel sweep over a 1080p60 5-min recording. Run at nice 0, unpinned,

@@ -67,6 +67,10 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   mostly idle. The housekeeping lib must be loaded (setup + verify); a `none` box keeps the E-cores / the
   background set at normal priority.
 - Trade-off: two Zen 5 cores carry the RX softirq; the tasks share CPU 0 (with its IRQs) at nice 10.
+- **The E2E on-box recording decode is not in the slice either** (finding 7178516822): on a box with
+  `/etc/strih-housekeeping-cpus.conf` it runs on the OBS mask under SCHED_IDLE + nice 19 + ionice idle
+  (`LOWPRIO_SNIPPET`, `.claude/rules/recording-verdict-on-strih-snv.md`); the slice's one task CPU gave it
+  one CPU beside the RX softirq.
 
 ## What moves, and how
 
