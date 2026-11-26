@@ -88,10 +88,24 @@ build_onstrihlx_command() {
 # issue 1387: when the box carries the baseline's background runner the decode runs through it instead:
 # rig-background.slice on the CPUs OBS does not use (AMD has no cpu_atom, so the E-core pin fenced
 # nothing there), idle priority included. <runner> is the second argument (test seam).
+# issue 1425 (finding 7178516822): on a box with housekeeping CPUs that slice is the ONE housekeeping
+# task CPU, which also carries rig-NIC IRQs (design 7119179275): the decode got one CPU (~55 min) beside the
+# RX softirq. There (`/etc/strih-housekeeping-cpus.conf` non-empty, written by setup-strih only when the box
+# fact is not `none`) it runs on the OBS mask `/etc/strih-isolated-cpus.conf` instead (the placement the
+# program-audio sampler took, strih_program_audio_cpus) under SCHED_IDLE + nice 19 + ionice idle (new here),
+# never in the slice. A mask that is not a cpulist (N or N-M, comma separated, ASCII digits) keeps the choice
+# below. <etc_root> is the third argument (test seam, default /).
 strih_lx_lowprio_prefix() {
-  local sysfs_root="${1:-/sys}" runner="${2:-/usr/local/sbin/obs-box-background-run}"
+  local sysfs_root="${1:-/sys}" runner="${2:-/usr/local/sbin/obs-box-background-run}" etc_root="${3:-}"
   local cpus_file="${sysfs_root%/}/devices/cpu_atom/cpus"
-  local cpus=""
+  local cpus="" mask=""
+  if [ -s "${etc_root%/}/etc/strih-housekeeping-cpus.conf" ]; then
+    mask="$(head -n 1 "${etc_root%/}/etc/strih-isolated-cpus.conf" 2>/dev/null | tr -d '[:space:]' || true)"
+    if printf '%s' "$mask" | grep -Eqx '[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*'; then
+      printf 'nice -n 19 ionice -c 3 chrt --idle 0 taskset -c %s' "$mask"
+      return 0
+    fi
+  fi
   if [ -x "$runner" ] && sudo -n -l "$runner" >/dev/null 2>&1; then
     printf 'sudo -n %s' "$runner"
     return 0
@@ -180,7 +194,8 @@ main() {
   fi
 
   # STEP 2: run the verdict ON strih-snv against the LOCAL recording (NEVER copied off-box), at IDLE
-  # priority off the OBS cores (rig-background.slice, issue 1387; else the E-cores, issue 1351). Unpinned at nice 0 the multi-core QR/pixel sweep
+  # priority: on a housekeeping box the OBS mask under SCHED_IDLE (issue 1425); else off the OBS cores
+  # (rig-background.slice, issue 1387; else the E-cores, issue 1351). Unpinned at nice 0 the multi-core QR/pixel sweep
   # competes with OBS's ndir:video decode threads on the P-cores and the live receivers relock-storm
   # for minutes after the run (issue 1354). LOWPRIO_SNIPPET is the remote-shell replica of
   # strih_lx_lowprio_prefix (the unit-tested pure contract): SINGLE-QUOTED on the dev1 side so the
@@ -188,11 +203,11 @@ main() {
   # then `$LP` prefixes the on-box command. The scp of the binary and the partial pull are unchanged.
   local ONSTRIHLX_CMD LOWPRIO_SNIPPET
   ONSTRIHLX_CMD="$(build_onstrihlx_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
-  LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi;'
-  echo "[recording-verdict-on-${LABEL}] running on ${LABEL} (${STRIH_LX_BOX}) at idle priority (off the OBS cores): $ONSTRIHLX_CMD"
+  LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi; R=/usr/local/sbin/obs-box-background-run; if [ -x "$R" ] && sudo -n -l "$R" >/dev/null 2>&1; then LP="sudo -n $R"; fi; M="$(head -n 1 /etc/strih-isolated-cpus.conf 2>/dev/null | tr -d "[:space:]")"; if [ -s /etc/strih-housekeeping-cpus.conf ] && printf %s "$M" | grep -Eqx "[0123456789]+(-[0123456789]+)?(,[0123456789]+(-[0123456789]+)?)*"; then LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c $M"; fi;'
+  echo "[recording-verdict-on-${LABEL}] running on ${LABEL} (${STRIH_LX_BOX}) at idle priority (the box resolves the launch prefix, printed by the box): $ONSTRIHLX_CMD"
   # The brace group keeps the decode gated on `mkdir -p` (the && short-circuits the WHOLE group, not
   # just the LP assignment the snippet begins with) — same failure semantics as before this change.
-  sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && { $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD; }"
+  sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && { $LOWPRIO_SNIPPET echo \"[${LABEL}] launch prefix: \$LP\" >&2; \$LP $ONSTRIHLX_CMD; }"
 
   # #186/#208: the on-box --extract-partial writes the pixel-proof PNGs of every flagged /
   # undecodable frame into the SIBLING `<partial>-pixels` dir (beside the --out partial JSON) — so
