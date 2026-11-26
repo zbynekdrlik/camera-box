@@ -74,7 +74,7 @@ production without, invisible without a page:
 
 | watchdog | ticket | fault |
 |---|---|---|
-| `dantesync-clock-alert-watchdog.sh` | #1307 | PTP clock loss / GM move / DNS / NTP storm / dantesync-dead |
+| `dantesync-clock-alert-watchdog.sh` | #1307 | PTP clock loss / GM move / DNS / NTP storm / dantesync-dead -- since issue 1545 a confirmed clock loss in a venue that is in a production ALSO goes out as ONE airuleset `page:dante-clock-<venue>` per venue (the class the owner policy lets through) |
 | `genlock-lock-alert-watchdog.sh` | #1299 | fleet genlock UNLOCKED/DEGRADED |
 | `network-reach-alert-watchdog.sh` | #1001 | strih/stream unreachable |
 | `bundle-state-alert-watchdog.sh` | #732 | :8899 bundle-state server down |
