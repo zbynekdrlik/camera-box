@@ -276,13 +276,13 @@ _strih_housekeeping_show_value() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | hea
 # (both CLOCK_MONOTONIC, systemd's own stamps): a run after it = PASS / FAIL by its result; none yet with the
 # timer armed after that start = NOTE (it runs 180 s after it); none and not armed = FAIL; OBS down = NOTE.
 strih_housekeeping_obs_rebalance_row() {
-  local user="$1" f show state obs mono result status tstate tsub tmono svc="${STRIH_HOUSEKEEPING_REBALANCE}.service"
+  local user="$1" f show state obs mono result status sstate tstate tsub tmono btime mtime svc="${STRIH_HOUSEKEEPING_REBALANCE}.service"
   f="$(strih_housekeeping_rebalance_path obs)"
   if ! cmp -s "$f" <(strih_housekeeping_rebalance_obs_text); then
     bad "(hk-obs-rebalance) ${f} missing or drifted -- re-run setup-strih.sh step 11b"; return 0
   fi
   # shellcheck disable=SC2086  # the arm command is split into its words on purpose (sudo -l matches argv)
-  if ! { if [ "$(id -u)" = 0 ]; then sudo -n -U "$user" -l $STRIH_HOUSEKEEPING_OBS_ARM; else sudo -n -l $STRIH_HOUSEKEEPING_OBS_ARM; fi; } >/dev/null 2>&1; then
+  if ! { if [ "${STRIH_SESSION_APPS_EUID:-$(id -u)}" = 0 ]; then sudo -n -U "$user" -l $STRIH_HOUSEKEEPING_OBS_ARM; else sudo -n -l $STRIH_HOUSEKEEPING_OBS_ARM; fi; } >/dev/null 2>&1; then
     bad "(hk-obs-rebalance) sudo does not allow ${user} to arm the re-place (${STRIH_HOUSEKEEPING_OBS_ARM}) -- re-run setup-strih.sh step 11b"; return 0
   fi
   show="$(_strih_housekeeping_systemctl user "$user" show -p ActiveState -p ActiveEnterTimestampMonotonic strih-obs.service 2>/dev/null || true)"
@@ -294,16 +294,21 @@ strih_housekeeping_obs_rebalance_row() {
   if ! [[ "$obs" =~ ^[0123456789]+$ ]] || [ "$obs" = 0 ]; then
     bad "(hk-obs-rebalance) cannot read strih-obs.service's start (ActiveEnterTimestampMonotonic '${obs}')"; return 0
   fi
-  show="$(systemctl show -p ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus "$svc" 2>/dev/null || true)"
+  show="$(systemctl show -p ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus -p ActiveState "$svc" 2>/dev/null || true)"
   mono="$(_strih_housekeeping_show_value "$show" ExecMainStartTimestampMonotonic)"
   result="$(_strih_housekeeping_show_value "$show" Result)"
   status="$(_strih_housekeeping_show_value "$show" ExecMainStatus)"
+  sstate="$(_strih_housekeeping_show_value "$show" ActiveState)"
   if ! [[ "$mono" =~ ^[0123456789]+$ ]]; then
     bad "(hk-obs-rebalance) cannot read ${svc}'s last run (ExecMainStartTimestampMonotonic '${mono}')"; return 0
   fi
   if [ "$mono" != 0 ] && [ "$mono" -ge "$obs" ]; then
-    if [ "$result" = success ] && [ "$status" = 0 ]; then
-      ok "(hk-obs-rebalance) the rig-NIC IRQs were re-placed under load $(( (mono - obs) / 1000000 )) s after the current OBS start: success (exit 0)"
+    # a run still in progress has the new start stamp and the previous run's result (review round 1)
+    if [ "$sstate" = activating ]; then
+      note "(hk-obs-rebalance) the IRQ placement is running now ($(( (mono - obs) / 1000000 )) s after the current OBS start)"
+    elif [ "$result" = success ] && [ "$status" = 0 ]; then
+      # any run after the start counts (the 5-min boot timer's too); its own journal says what it moved
+      ok "(hk-obs-rebalance) the IRQ placement ran $(( (mono - obs) / 1000000 )) s after the current OBS start: success (exit 0)"
     else
       bad "(hk-obs-rebalance) the re-place after the current OBS start failed: ${result:-unread} (exit ${status:-unread}) -- journalctl -b -u ${svc}"
     fi
@@ -316,6 +321,18 @@ strih_housekeeping_obs_rebalance_row() {
   if [ "$tstate" = active ] && { [ "$tsub" = waiting ] || [ "$tsub" = running ]; } \
      && [[ "$tmono" =~ ^[0123456789]+$ ]] && [ "$tmono" -ge "$obs" ]; then
     note "(hk-obs-rebalance) armed at the current OBS start: the re-place runs 180 s after it (${f##*/} ${tstate}/${tsub})"
+    return 0
+  fi
+  if [ "$tstate" = active ] && [ "$tsub" = elapsed ] && [[ "$tmono" =~ ^[0123456789]+$ ]] && [ "$tmono" -ge "$obs" ]; then
+    bad "(hk-obs-rebalance) ${f##*/} fired after the current OBS start but ${svc} did not run -- journalctl -b -u ${f##*/} -u ${svc}"
+    return 0
+  fi
+  # an OBS that was already running when setup installed the timer was never armed: its next start is
+  # (review round 1; the wall time of the start = btime + its monotonic stamp, a box that never suspends)
+  btime="$(sed -n 's/^btime //p' "${STRIH_HOUSEKEEPING_PROC:-/proc}/stat" 2>/dev/null || true)"
+  mtime="$(stat -c %Y "$f" 2>/dev/null || true)"
+  if [[ "$btime" =~ ^[0123456789]+$ ]] && [[ "$mtime" =~ ^[0123456789]+$ ]] && [ "$mtime" -gt $(( btime + obs / 1000000 )) ]; then
+    note "(hk-obs-rebalance) ${f##*/} was installed after the current OBS start: the re-place is graded after the next one"
   else
     bad "(hk-obs-rebalance) strih-obs.service started at $(( obs / 1000000 )) s but the re-place was never armed (${f##*/} ${tstate:-unread}/${tsub:-unread}) -- the launcher's 'could not arm' WARN in /tmp/strih-obs-start.log"
   fi

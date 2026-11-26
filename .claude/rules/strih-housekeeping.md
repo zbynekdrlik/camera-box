@@ -168,9 +168,13 @@ the boot it was installed in never runs it), a FAIL when it predates the boot, a
 `reset-failed`s a removed service. `(hk-obs-rebalance)`: the OBS-start timer as rendered, `sudo -n -l` (as root
 `-U <user>`) allows the operator the exact arm command, then the service's `ExecMainStartTimestampMonotonic` vs
 the operator's `strih-obs.service` `ActiveEnterTimestampMonotonic` (one CLOCK_MONOTONIC): a run at or after the
-current OBS start = PASS on success + exit 0, else FAIL; none yet with the timer `active/waiting|running` and
-armed after that start = NOTE (it runs 180 s after it); none and not armed = FAIL (the launcher's `could not
-arm` WARN in /tmp/strih-obs-start.log); OBS not running = NOTE; an unreadable stamp FAILs.
+current OBS start = PASS on success + exit 0 (any run counts, the 5-min boot timer's too), a run still
+`activating` = NOTE, else FAIL; none yet with the timer `active/waiting|running` armed after that start = NOTE
+(it runs 180 s after it); the timer `active/elapsed` after that start with no service run = FAIL (journalctl of
+both); the timer file written after that start (`btime` + the start's monotonic, setup on a running OBS) = NOTE,
+graded at the next start; otherwise FAIL (the launcher's `could not arm` WARN in /tmp/strih-obs-start.log); OBS
+not running = NOTE; an unreadable stamp FAILs. The sudo check as root asks `-U <operator>` (seam
+`STRIH_SESSION_APPS_EUID`).
 
 ## Deploy (supervisor)
 

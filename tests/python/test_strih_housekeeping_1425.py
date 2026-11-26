@@ -1296,7 +1296,7 @@ def _obs_rows(tmp_path, **env_over):
 
 def test_verify_passes_a_re_place_that_ran_after_the_current_obs_start(tmp_path):
     rows, env = _obs_rows(tmp_path)
-    assert rows == ["PASS (hk-obs-rebalance) the rig-NIC IRQs were re-placed under load 181 s after the current "
+    assert rows == ["PASS (hk-obs-rebalance) the IRQ placement ran 181 s after the current "
                     "OBS start: success (exit 0)"], rows
     assert "sudo -n -l " + SUDO_CMD in pathlib.Path(env["FAKE_SUDO_LOG"]).read_text()
 
@@ -1313,10 +1313,21 @@ def test_verify_notes_a_re_place_armed_at_this_obs_start_that_has_not_fired_yet(
         assert len(rows) == 1 and rows[0].startswith("NOTE (hk-obs-rebalance) armed at the current OBS start"), rows
 
 
+def _old_timer_file(env):
+    # the timer file predates the OBS start (btime 1700000000 + 400 s): installed before it
+    f = pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance-obs.timer"
+    os.utime(f, (1_700_000_100, 1_700_000_100))
+    (pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"]) / "stat").write_text("cpu  1 2 3\nbtime 1700000000\nprocesses 9\n")
+
+
 def test_verify_fails_an_obs_start_whose_re_place_was_never_armed(tmp_path):
     # the run at 301 s predates the OBS start at 400 s, and the timer was armed by an EARLIER start (elapsed)
-    rows, _ = _obs_rows(tmp_path, FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=400000000",
-                        FAKE_OBS_TIMER_SHOW="ActiveState=active\nSubState=elapsed\nActiveEnterTimestampMonotonic=100000000")
+    home, path, env = _grade_env(tmp_path)
+    _old_timer_file(env)
+    env.update(FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=400000000",
+               FAKE_OBS_TIMER_SHOW="ActiveState=active\nSubState=elapsed\nActiveEnterTimestampMonotonic=100000000")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x]
     assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) strih-obs.service started at 400 s but the "
                                                  "re-place was never armed"), rows
 
@@ -1341,3 +1352,37 @@ def test_verify_fails_a_drifted_timer_or_a_sudo_rule_that_does_not_allow_the_arm
 def test_verify_fails_an_unreadable_obs_start(tmp_path):
     rows, _ = _obs_rows(tmp_path, FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=12x")
     assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) cannot read"), rows
+
+
+def test_verify_notes_a_timer_installed_after_the_current_obs_start(tmp_path):
+    # review round 1: setup on a running OBS armed nothing for that start; the next start is graded
+    home, path, env = _grade_env(tmp_path)
+    # the OBS start = btime 1700000000 + 400 s; the timer file was written now, long after it
+    (pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"]) / "stat").write_text("cpu  1 2 3\nbtime 1700000000\nprocesses 9\n")
+    env["FAKE_OBS_SHOW"] = "ActiveState=active\nActiveEnterTimestampMonotonic=400000000"
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x]
+    assert len(rows) == 1 and rows[0].startswith("NOTE (hk-obs-rebalance) strih-nic-irq-rebalance-obs.timer was "
+                                                 "installed after the current OBS start"), rows
+
+
+def test_verify_notes_a_placement_still_running(tmp_path):
+    rows, _ = _obs_rows(tmp_path, FAKE_REBALANCE_SHOW="ExecMainStartTimestampMonotonic=301204512\nResult=exit-code\n"
+                                                      "ExecMainStatus=1\nActiveState=activating")
+    assert rows == ["NOTE (hk-obs-rebalance) the IRQ placement is running now (181 s after the current OBS start)"], rows
+
+
+def test_verify_fails_a_timer_that_fired_after_the_obs_start_without_the_service(tmp_path):
+    home, path, env = _grade_env(tmp_path)
+    _old_timer_file(env)
+    env.update(FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=400000000",
+               FAKE_OBS_TIMER_SHOW="ActiveState=active\nSubState=elapsed\nActiveEnterTimestampMonotonic=401000000")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x]
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) strih-nic-irq-rebalance-obs.timer fired after "
+                                                 "the current OBS start but strih-nic-irq-rebalance.service did not run"), rows
+
+
+def test_verify_as_root_asks_sudo_for_the_operator(tmp_path):
+    rows, env = _obs_rows(tmp_path, STRIH_SESSION_APPS_EUID="0")
+    assert "sudo -n -U %s -l %s" % (ME, SUDO_CMD) in pathlib.Path(env["FAKE_SUDO_LOG"]).read_text()
