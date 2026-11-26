@@ -54,7 +54,7 @@ def _exe(path, text):
 
 def test_every_box_declares_its_housekeeping_cpus():
     # issue 1553 (SNV/PP parity): every box measured = online minus its OBS mask (read 25.11.2026)
-    want = {"strih-snv": "0-1", "strih-pp": "0,8", "stream-pp": "0-1", "stream-snv": "0-1,12-19"}
+    want = {"strih-snv": "0-2", "strih-pp": "0,8", "stream-pp": "0-1", "stream-snv": "0-1,12-19"}
     for box, v in want.items():
         r = _run('strih_box_load "$1"; strih_lx_housekeeping_cpus', box)
         assert r.returncode == 0, r.stderr
@@ -65,8 +65,8 @@ def _box_with(tmp_path, value):
     d = tmp_path / "boxes"
     d.mkdir(exist_ok=True)
     body = (BOXES / "strih-snv.env").read_text()
-    assert body.count("STRIH_HOUSEKEEPING_CPUS=0-1\n") == 1
-    (d / "strih-snv.env").write_text(body.replace("STRIH_HOUSEKEEPING_CPUS=0-1\n", "STRIH_HOUSEKEEPING_CPUS=%s\n" % value))
+    assert body.count("STRIH_HOUSEKEEPING_CPUS=0-2\n") == 1
+    (d / "strih-snv.env").write_text(body.replace("STRIH_HOUSEKEEPING_CPUS=0-2\n", "STRIH_HOUSEKEEPING_CPUS=%s\n" % value))
     return {"STRIH_BOXES_DIR": str(d)}
 
 

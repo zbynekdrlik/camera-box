@@ -203,7 +203,7 @@ IRQ_RATE_SAMPLE_S="${IRQ_RATE_SAMPLE_S:-2}"
 # far less. Under it the current placement is kept, never re-balanced on meaningless rates.
 IRQ_LOAD_MIN_PER_S="${IRQ_LOAD_MIN_PER_S:-20000}"
 TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
-IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-0-1}"
+IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-0-2}"
 
 log() { printf 'strih-nic-irq-affinity: %s\n' "$*"; }
 die() { printf 'strih-nic-irq-affinity: FATAL: %s\n' "$*" >&2; exit 1; }
