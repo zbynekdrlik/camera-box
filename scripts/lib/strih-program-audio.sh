@@ -88,6 +88,7 @@ STRIH_PROGRAM_AUDIO_FILES=(
   scripts/obs_fleet_table.py
   scripts/lib/obs-fleet.sh
   scripts/dantesync_fleet.py
+  scripts/dantesync-canonical-config.json
   scripts/obs_phase2.py
   scripts/e2e_measurement_pins.py
   scripts/imag_record_encoder.py
