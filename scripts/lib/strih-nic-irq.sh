@@ -264,9 +264,11 @@ set -euo pipefail
 # (box fact STRIH_HOUSEKEEPING_CPUS, issue 1425) it places EVERY IRQ of the rig NIC
 # (/sys/class/net/<nic>/device/msi_irqs; a USB NIC: its xhci interrupt) on ONE of them, balanced by the
 # rate measured over IRQ_RATE_SAMPLE_S (design 7119179275: heaviest first to the least-loaded CPU, ties to
-# the lower CPU; round-robin in IRQ order with no traffic), writing an affinity only when it differs (every
-# move costs a short loss burst), after it set the NIC's RSS queues to the IRQ CPU count (ethtool -L
-# combined, only when it differs). Without them
+# the lower CPU), writing an affinity only when it differs (every move costs a short loss burst). A sample
+# under IRQ_LOAD_MIN_PER_S in total (boot, or OBS down during a deploy: 26.11.2026 such a sample put 7 of 9
+# heavy queues on CPU 0) is no load to balance by: an IRQ already on one housekeeping CPU keeps it, only
+# one outside the set is placed, round-robin by IRQ count. Before that it set the NIC's RSS queues to the
+# IRQ CPU count (ethtool -L combined, only when it differs). Without them
 # (`none`) it pins the USB NIC's xhci interrupt to the last E-core (issue 1354: cut the genlock
 # "slow output_video" rate ~75%). It resolves the placement FROM FACTS -- never a hard-coded IRQ
 # number -- and FAILS LOUD (exit 1 + a journal line) on any unresolved step or a read-back mismatch.
@@ -280,6 +282,10 @@ IRQ_DIR="${IRQ_DIR:-/proc/irq}"
 ETHTOOL="${ETHTOOL:-ethtool}"
 CARRIER_WAIT_S="${CARRIER_WAIT_S:-5}"
 IRQ_RATE_SAMPLE_S="${IRQ_RATE_SAMPLE_S:-2}"
+# The total rig-NIC IRQ rate below which a sample is no load (finding 26.11.2026): the loaded SNV strih read
+# ~120k/s (05:24, 60266/s vs 60261/s per CPU) and ~42k/s (24.11, the CPU-1 split); boot and OBS down read
+# far less. Under it the current placement is kept, never re-balanced on meaningless rates.
+IRQ_LOAD_MIN_PER_S="${IRQ_LOAD_MIN_PER_S:-20000}"
 TARGET_IP="${STRIH_LX_TARGET_IP:-@STRIH_TARGET_IP@}"
 IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-@STRIH_HOUSEKEEPING_IRQ_CPUS@}"
 
@@ -332,6 +338,7 @@ if [ "$IRQ_CPUS" != none ]; then
   hk="$(cpulist_canon "$IRQ_CPUS")"
   [ -n "$hk" ] || die "STRIH_HOUSEKEEPING_IRQ_CPUS '${IRQ_CPUS}' is not a cpulist"
   [[ $IRQ_RATE_SAMPLE_S =~ ^[0123456789]{1,4}$ ]] || die "IRQ_RATE_SAMPLE_S '${IRQ_RATE_SAMPLE_S}' is not a whole number of seconds"
+  [[ $IRQ_LOAD_MIN_PER_S =~ ^[0123456789]{1,9}$ ]] || die "IRQ_LOAD_MIN_PER_S '${IRQ_LOAD_MIN_PER_S}' is not a whole number of interrupts per second"
 fi
 
 if [ "$IRQ_CPUS" != none ] && [ -d "$msi_dir" ]; then
@@ -413,8 +420,10 @@ irq_count() {
 }
 
 # (4) each IRQ's target CPU. Housekeeping CPUs: ONE of them per IRQ, by the measured rate (greedy: heaviest
-# first to the CPU with the least assigned rate, ties to the lower CPU; all rates 0 = round-robin in IRQ
-# order). Without them: the LAST cpu in cpu_atom (an E-core), fallback the highest online cpu, for every IRQ.
+# first to the CPU with the least assigned rate, ties to the lower CPU; a total under IRQ_LOAD_MIN_PER_S =
+# keep every IRQ already on one of them, the rest to the CPU holding the fewest IRQs, in IRQ order, ties to
+# the lower CPU: round-robin at boot). Without them: the LAST cpu in cpu_atom (an E-core), fallback the
+# highest online cpu, for every IRQ.
 declare -A tgt=() rate=()
 if [ "$IRQ_CPUS" != none ]; then
   read -ra cpus <<<"$hk"
@@ -436,10 +445,31 @@ if [ "$IRQ_CPUS" != none ]; then
     total=$((total + rate[$irq]))
   done
   for c in "${cpus[@]}"; do load[$c]=0; done
-  if [ "$total" = 0 ]; then
-    log "no IRQ traffic measured (rates all 0) -- round-robin in IRQ order over cpus ${hk}"
-    i=0
-    for irq in $irqs; do tgt[$irq]="${cpus[i % ${#cpus[@]}]}"; i=$((i + 1)); done
+  if [ "$total" -lt "$IRQ_LOAD_MIN_PER_S" ]; then
+    if [ "$total" = 0 ]; then
+      log "no IRQ traffic measured (rates all 0) -- round-robin in IRQ order over cpus ${hk}; an IRQ already on one of them keeps it"
+    else
+      log "rig NIC IRQ traffic ${total}/s measured over ${IRQ_RATE_SAMPLE_S} s is under IRQ_LOAD_MIN_PER_S ${IRQ_LOAD_MIN_PER_S}/s (no real load: OBS down or boot) -- an IRQ already on one of cpus ${hk} keeps it, the rest round-robin"
+    fi
+    declare -A nirq=()
+    for c in "${cpus[@]}"; do nirq[$c]=0; done
+    pending=""
+    for irq in $irqs; do
+      curc="$(cpulist_canon "$({ tr -d '[:space:]' < "${IRQ_DIR}/${irq}/smp_affinity_list"; } 2>/dev/null || true)")"
+      if [ -n "$curc" ] && [ -n "${nirq[$curc]+x}" ]; then
+        tgt[$irq]="$curc"; nirq[$curc]=$((nirq[$curc] + 1))
+        log "IRQ ${irq}: on housekeeping cpu ${curc} -- kept (no load to balance by)"
+      else
+        pending="${pending:+$pending }${irq}"
+      fi
+    done
+    for irq in $pending; do
+      best=""
+      for c in "${cpus[@]}"; do
+        if [ -z "$best" ] || [ "${nirq[$c]}" -lt "${nirq[$best]}" ]; then best="$c"; fi
+      done
+      tgt[$irq]="$best"; nirq[$best]=$((nirq[$best] + 1))
+    done
   else
     while read -r r irq; do
       best=""
