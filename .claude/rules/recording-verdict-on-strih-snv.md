@@ -43,7 +43,8 @@ which also carries rig-NIC IRQs (design 7119179275): measured live, the decode r
 (~1000 frames / 6 min, a 9443-frame recording ~55 min) beside the RX softirq. So the snippet's LAST
 clause, when `/etc/strih-housekeeping-cpus.conf` is non-empty (setup-strih writes it only for a fact
 other than `none`) and the first line of `/etc/strih-isolated-cpus.conf` is a cpulist (`N` or `N-M`,
-comma separated, ASCII digits; `grep -Eqx`), sets `LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c
+comma separated, ASCII digits; `grep -Eqx`; the SHAPE only: a reversed `15-2` passes and `taskset`
+then fails the decode loudly), sets `LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c
 <OBS mask>"`: the OBS-mask placement the program-audio sampler took (`strih_program_audio_cpus`), plus
 SCHED_IDLE (new here; it runs only when an OBS CPU would idle). The box prints the prefix it resolved
 (`[<box>] launch prefix: ...` on stderr): read it in the E2E log. An empty or malformed mask keeps the
