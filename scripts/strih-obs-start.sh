@@ -140,6 +140,26 @@ strih_launcher_housekeeping_place() {
   return 0
 }
 
+# strih_launcher_irq_rebalance_arm FILE TIMER -> issue 1425 (design 7182688018): every OBS start re-creates the
+# NDI / JPEG XS / Dante flows, so the rig NIC's heavy RSS queues move and the measured IRQ map goes stale. Arm
+# the root timer TIMER (setup-strih step 11b) that runs the same re-balance once, 180 s from now, when the
+# cameras + the program flow; a restart re-arms it, so an OBS restart loop ends in ONE move. Only on a box with
+# housekeeping CPUs (FILE lists them) and the timer installed. The one sudoers line of the housekeeping lib
+# allows exactly this command; a refusal is one WARN line, never fatal to OBS. Always rc 0. Test seam: sudo
+# from PATH.
+strih_launcher_irq_rebalance_arm() {
+  local file="$1" timer="$2" cpus
+  [ -r "$file" ] && [ -e "$timer" ] || return 0
+  cpus="$(head -n 1 "$file" 2>/dev/null | tr -d '[:space:]' || true)"
+  case "$cpus" in '' | none) return 0 ;; esac
+  if sudo -n /usr/bin/systemctl restart --no-block "${timer##*/}" >/dev/null 2>&1; then
+    echo "issue 1425: the rig NIC IRQs are re-placed under load 180 s after this OBS start (${timer##*/} armed)"
+  else
+    echo "WARN issue 1425: could not arm ${timer##*/} (sudo refused or systemctl failed) -- the IRQ map of the previous flow set stays"
+  fi
+  return 0
+}
+
 # --- source-guard: when sourced (the unit tests), define funcs only -- never run the launch flow ---
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0 2>/dev/null || true
@@ -307,6 +327,8 @@ fi
 echo "supervising obs (pid $OBS_PID) -- exit propagated to systemd for Restart=on-failure (#882)"
 HANG_DUMP="${HOME}/.camera-box/obs-hang-$(date +%Y%m%d-%H%M%S)"
 strih_launcher_housekeeping_place "${STRIH_HOUSEKEEPING_CPUS_FILE:-/etc/strih-housekeeping-cpus.conf}" "$$"
+strih_launcher_irq_rebalance_arm "${STRIH_HOUSEKEEPING_CPUS_FILE:-/etc/strih-housekeeping-cpus.conf}" \
+  "${STRIH_IRQ_REBALANCE_OBS_TIMER:-/etc/systemd/system/strih-nic-irq-rebalance-obs.timer}"
 strih_obs_shutdown_watch "$OBS_PID" "${HOME}/.config/obs-studio/logs" "$OBS_LAUNCH_EPOCH" \
   "${STRIH_OBS_SHUTDOWN_BOUND_S:-60}" "$HANG_DUMP"
 OBS_EXIT=0

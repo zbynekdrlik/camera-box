@@ -36,6 +36,9 @@
 #   * strih-nic-irq-rebalance.timer + .service (design 7119686502): the same script once, 5 min after boot,
 #     when the rig carries traffic (the boot oneshot's sample reads every rate 0); the timer enabled, never
 #     started.
+#   * strih-nic-irq-rebalance-obs.timer + /etc/sudoers.d/strih-nic-irq-rebalance-obs (design 7182688018): the
+#     same service once, 180 s after each strih OBS start, armed by the OBS launcher (an OBS restart re-creates
+#     every flow, so the measured map goes stale).
 # `none` removes our files (header-checked: a file without our first line is never touched).
 #
 # Seams (tests): STRIH_HOUSEKEEPING_ROOT (prefix of /etc and /proc/sys), STRIH_HOUSEKEEPING_OWNER (the
@@ -93,7 +96,12 @@ strih_housekeeping_hook_text() {
 # (every rate 0 = the round-robin fallback), so a timer runs the same script once, 5 min after boot, when
 # the strih OBS pulls the cameras + the program. Once per boot only: every IRQ move costs a loss burst.
 STRIH_HOUSEKEEPING_REBALANCE=strih-nic-irq-rebalance
-strih_housekeeping_rebalance_path() { printf '%s/etc/systemd/system/%s.%s\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE" "${1:?service|timer required}"; }
+strih_housekeeping_rebalance_path() {
+  case "${1:?service|timer|obs required}" in
+    obs) printf '%s/etc/systemd/system/%s-obs.timer\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE" ;;
+    *) printf '%s/etc/systemd/system/%s.%s\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE" "$1" ;;
+  esac
+}
 
 # strih_housekeeping_rebalance_service_text -> systemd/strih-nic-irq-rebalance.service (byte-parity test):
 # a plain oneshot (no RemainAfterExit, no [Install]: only the timer starts it).
@@ -113,12 +121,55 @@ strih_housekeeping_rebalance_timer_text() {
   printf '[Timer]\nOnBootSec=5min\nUnit=%s.service\n\n[Install]\nWantedBy=timers.target\n' "$STRIH_HOUSEKEEPING_REBALANCE"
 }
 
-# strih_housekeeping_rebalance_install OWNER -> both units written if changed (daemon-reload then), the timer
-# enabled when it is not; never started (it fires at the next boot). rc 1 on a write failure; a failed
+# The re-place after every OBS start (issuecomment-7182637589, design 7182688018): the placement is valid only
+# for the flow set it measured, and an OBS restart re-creates every NDI / JPEG XS / Dante flow, so the RSS hash
+# moves the heavy queues. The OBS launcher (the operator's strih-obs.service) arms this timer with the ONE
+# command the sudoers line below allows; a restart of the timer re-arms OnActiveSec, so the same re-balance
+# service runs once, 180 s after each OBS start, when the cameras + the program flow. Never periodic.
+STRIH_HOUSEKEEPING_OBS_ARM="/usr/bin/systemctl restart --no-block ${STRIH_HOUSEKEEPING_REBALANCE}-obs.timer"
+strih_housekeeping_sudoers_path() { printf '%s/etc/sudoers.d/%s-obs\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE"; }
+
+# strih_housekeeping_rebalance_obs_text -> systemd/strih-nic-irq-rebalance-obs.timer (byte-parity test): no
+# [Install] (only the launcher starts it), AccuracySec=1s so the 180 s is 180 s.
+strih_housekeeping_rebalance_obs_text() {
+  printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
+  printf '[Unit]\nDescription=strih box: re-balance the rig-NIC IRQs 180 s after each strih OBS start (issue 1425)\n'
+  printf 'Documentation=https://github.com/zbynekdrlik/camera-box\n\n'
+  printf '[Timer]\nOnActiveSec=180s\nAccuracySec=1s\nUnit=%s.service\n' "$STRIH_HOUSEKEEPING_REBALANCE"
+}
+
+# strih_housekeeping_sudoers_text USER -> the one sudoers line: USER may arm the OBS-start timer, nothing else.
+strih_housekeeping_sudoers_text() {
+  printf '%s\n%s ALL=(root) NOPASSWD: %s\n' "$STRIH_HOUSEKEEPING_HEADER" "${1:?user required}" "$STRIH_HOUSEKEEPING_OBS_ARM"
+}
+
+# strih_housekeeping_sudoers_install OWNER USER -> the sudoers line, checked by `visudo -cf` before the write
+# (a line visudo refuses is never written: a broken sudoers.d file disables sudo box-wide). rc 1 named.
+strih_housekeeping_sudoers_install() {
+  local owner="$1" user="$2" dest tmp rc
+  dest="$(strih_housekeeping_sudoers_path)"
+  tmp="$(mktemp)" || { echo "housekeeping: no temp file for the sudoers check" >&2; return 1; }
+  strih_housekeeping_sudoers_text "$user" > "$tmp"
+  if ! visudo -cf "$tmp" >/dev/null; then
+    rm -f "$tmp"
+    echo "housekeeping: the rendered sudoers line for ${dest} does not parse (visudo -cf) -- nothing written" >&2
+    return 1
+  fi
+  rm -f "$tmp"
+  [ -d "${dest%/*}" ] || install -d -m 0750 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
+  rc=0; _strih_housekeeping_put "$dest" 0440 "$owner" housekeeping strih_housekeeping_sudoers_text "$user" || rc=$?
+  [ "$rc" != 1 ] || return 1
+  return 0
+}
+
+# strih_housekeeping_rebalance_install OWNER USER -> the three units written if changed (daemon-reload then),
+# the boot timer enabled when it is not; nothing started (the boot timer fires at the next boot, the OBS-start
+# timer when the launcher arms it). Then USER's sudoers line for the arm. rc 1 on a write failure; a failed
 # reload / enable is a WARN (verify item 16 FAILs it).
 strih_housekeeping_rebalance_install() {
-  local owner="$1" kind dest rc changed=0 timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
-  for kind in service timer; do
+  local owner="$1" user="$2" kind dest rc changed=0 timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
+  strih_housekeeping_sudoers_install "$owner" "$user" || return 1
+  for kind in service timer obs; do
     dest="$(strih_housekeeping_rebalance_path "$kind")"
     install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
     rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping "strih_housekeeping_rebalance_${kind}_text" || rc=$?
@@ -141,10 +192,18 @@ strih_housekeeping_rebalance_install() {
 # and stopped first, so no wants link dangles), then one daemon-reload.
 strih_housekeeping_rebalance_remove() {
   local kind f gone=0 timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
-  for kind in timer service; do
+  f="$(strih_housekeeping_sudoers_path)"
+  if [ -e "$f" ]; then
+    if strih_housekeeping_ours "$f"; then rm -f "$f" && echo "  housekeeping: removed ${f}" || return 1
+    else echo "  WARNING: ${f} is not ours (no camera-box header) -- left alone" >&2; fi
+  fi
+  for kind in obs timer service; do
     f="$(strih_housekeeping_rebalance_path "$kind")"
     [ -e "$f" ] || continue
     if ! strih_housekeeping_ours "$f"; then echo "  WARNING: ${f} is not ours (no camera-box header) -- left alone" >&2; continue; fi
+    if [ "$kind" = obs ] && ! systemctl stop "${f##*/}"; then
+      echo "  WARN: systemctl stop ${f##*/} failed -- stop it by hand"
+    fi
     if [ "$kind" = timer ] && ! systemctl disable --now "$timer"; then
       echo "  WARN: systemctl disable --now ${timer} failed -- disable it by hand"
     fi
@@ -206,6 +265,77 @@ strih_housekeeping_rebalance_row() {
          bad "(hk-rebalance) the re-balance ran this boot and failed: ${result:-unread} (exit ${status:-unread}) -- journalctl -b -u ${STRIH_HOUSEKEEPING_REBALANCE}.service"
        fi ;;
   esac
+  return 0
+}
+
+# _strih_housekeeping_show_value TEXT KEY -> KEY's value in `systemctl show` TEXT (empty when absent).
+_strih_housekeeping_show_value() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1; }
+
+# strih_housekeeping_obs_rebalance_row USER -> the `(hk-obs-rebalance)` row: the OBS-start timer as rendered,
+# sudo allowing USER the arm, and the re-balance service's last run vs the current strih-obs.service start
+# (both CLOCK_MONOTONIC, systemd's own stamps): a run after it = PASS / FAIL by its result; none yet with the
+# timer armed after that start = NOTE (it runs 180 s after it); none and not armed = FAIL; OBS down = NOTE.
+strih_housekeeping_obs_rebalance_row() {
+  local user="$1" f show state obs mono result status sstate tstate tsub tmono btime mtime svc="${STRIH_HOUSEKEEPING_REBALANCE}.service"
+  f="$(strih_housekeeping_rebalance_path obs)"
+  if ! cmp -s "$f" <(strih_housekeeping_rebalance_obs_text); then
+    bad "(hk-obs-rebalance) ${f} missing or drifted -- re-run setup-strih.sh step 11b"; return 0
+  fi
+  # shellcheck disable=SC2086  # the arm command is split into its words on purpose (sudo -l matches argv)
+  if ! { if [ "${STRIH_SESSION_APPS_EUID:-$(id -u)}" = 0 ]; then sudo -n -U "$user" -l $STRIH_HOUSEKEEPING_OBS_ARM; else sudo -n -l $STRIH_HOUSEKEEPING_OBS_ARM; fi; } >/dev/null 2>&1; then
+    bad "(hk-obs-rebalance) sudo does not allow ${user} to arm the re-place (${STRIH_HOUSEKEEPING_OBS_ARM}) -- re-run setup-strih.sh step 11b"; return 0
+  fi
+  show="$(_strih_housekeeping_systemctl user "$user" show -p ActiveState -p ActiveEnterTimestampMonotonic strih-obs.service 2>/dev/null || true)"
+  state="$(_strih_housekeeping_show_value "$show" ActiveState)"
+  obs="$(_strih_housekeeping_show_value "$show" ActiveEnterTimestampMonotonic)"
+  if [ "$state" != active ]; then
+    note "(hk-obs-rebalance) strih-obs.service is not running (${state:-unread}): the re-place is graded after its next start"; return 0
+  fi
+  if ! [[ "$obs" =~ ^[0123456789]+$ ]] || [ "$obs" = 0 ]; then
+    bad "(hk-obs-rebalance) cannot read strih-obs.service's start (ActiveEnterTimestampMonotonic '${obs}')"; return 0
+  fi
+  show="$(systemctl show -p ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus -p ActiveState "$svc" 2>/dev/null || true)"
+  mono="$(_strih_housekeeping_show_value "$show" ExecMainStartTimestampMonotonic)"
+  result="$(_strih_housekeeping_show_value "$show" Result)"
+  status="$(_strih_housekeeping_show_value "$show" ExecMainStatus)"
+  sstate="$(_strih_housekeeping_show_value "$show" ActiveState)"
+  if ! [[ "$mono" =~ ^[0123456789]+$ ]]; then
+    bad "(hk-obs-rebalance) cannot read ${svc}'s last run (ExecMainStartTimestampMonotonic '${mono}')"; return 0
+  fi
+  if [ "$mono" != 0 ] && [ "$mono" -ge "$obs" ]; then
+    # a run still in progress has the new start stamp and the previous run's result (review round 1)
+    if [ "$sstate" = activating ]; then
+      note "(hk-obs-rebalance) the IRQ placement is running now ($(( (mono - obs) / 1000000 )) s after the current OBS start)"
+    elif [ "$result" = success ] && [ "$status" = 0 ]; then
+      # any run after the start counts (the 5-min boot timer's too); its own journal says what it moved
+      ok "(hk-obs-rebalance) the IRQ placement ran $(( (mono - obs) / 1000000 )) s after the current OBS start: success (exit 0)"
+    else
+      bad "(hk-obs-rebalance) the re-place after the current OBS start failed: ${result:-unread} (exit ${status:-unread}) -- journalctl -b -u ${svc}"
+    fi
+    return 0
+  fi
+  show="$(systemctl show -p ActiveState -p SubState -p ActiveEnterTimestampMonotonic "${f##*/}" 2>/dev/null || true)"
+  tstate="$(_strih_housekeeping_show_value "$show" ActiveState)"
+  tsub="$(_strih_housekeeping_show_value "$show" SubState)"
+  tmono="$(_strih_housekeeping_show_value "$show" ActiveEnterTimestampMonotonic)"
+  if [ "$tstate" = active ] && { [ "$tsub" = waiting ] || [ "$tsub" = running ]; } \
+     && [[ "$tmono" =~ ^[0123456789]+$ ]] && [ "$tmono" -ge "$obs" ]; then
+    note "(hk-obs-rebalance) armed at the current OBS start: the re-place runs 180 s after it (${f##*/} ${tstate}/${tsub})"
+    return 0
+  fi
+  if [ "$tstate" = active ] && [ "$tsub" = elapsed ] && [[ "$tmono" =~ ^[0123456789]+$ ]] && [ "$tmono" -ge "$obs" ]; then
+    bad "(hk-obs-rebalance) ${f##*/} fired after the current OBS start but ${svc} did not run -- journalctl -b -u ${f##*/} -u ${svc}"
+    return 0
+  fi
+  # an OBS that was already running when setup installed the timer was never armed: its next start is
+  # (review round 1; the wall time of the start = btime + its monotonic stamp, a box that never suspends)
+  btime="$(sed -n 's/^btime //p' "${STRIH_HOUSEKEEPING_PROC:-/proc}/stat" 2>/dev/null || true)"
+  mtime="$(stat -c %Y "$f" 2>/dev/null || true)"
+  if [[ "$btime" =~ ^[0123456789]+$ ]] && [[ "$mtime" =~ ^[0123456789]+$ ]] && [ "$mtime" -gt $(( btime + obs / 1000000 )) ]; then
+    note "(hk-obs-rebalance) ${f##*/} was installed after the current OBS start: the re-place is graded after the next one"
+  else
+    bad "(hk-obs-rebalance) strih-obs.service started at $(( obs / 1000000 )) s but the re-place was never armed (${f##*/} ${tstate:-unread}/${tsub:-unread}) -- the launcher's 'could not arm' WARN in /tmp/strih-obs-start.log"
+  fi
   return 0
 }
 
@@ -333,7 +463,7 @@ strih_housekeeping_install() {
   install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
   rc=0; _strih_housekeeping_put "$dest" 0755 "$owner" housekeeping strih_housekeeping_hook_text "$drv" || rc=$?
   [ "$rc" != 1 ] || return 1
-  strih_housekeeping_rebalance_install "$owner" || return 1
+  strih_housekeeping_rebalance_install "$owner" "$user" || return 1
 
   for entry in "${STRIH_HOUSEKEEPING_UNITS[@]}"; do
     scope="${entry%%:*}"; unit="${entry#*:}"
@@ -612,5 +742,7 @@ strih_housekeeping_grade_report() {
   _strih_housekeeping_unit_row user "${STRIH_PROGRAM_AUDIO_UNIT:-program-audio-sampler.service}" "$user" "${iso:-unread}" "$home" sampler 0
   # (hk-rebalance) the delayed re-balance after boot: units as rendered, timer enabled, this boot's run.
   strih_housekeeping_rebalance_row
+  # (hk-obs-rebalance) the re-place under load after the current OBS start (its timer, sudo, the last run).
+  strih_housekeeping_obs_rebalance_row "$user"
   return 0
 }
