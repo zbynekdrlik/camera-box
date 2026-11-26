@@ -58,6 +58,23 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   rig carries no traffic 5 min later keeps the round-robin until the next NM `up` or a hand restart (since
   the 26.11.2026 load floor that run keeps the boot placement instead of balancing on tiny rates, and an
   idle run never repairs a bad placement: only a run under load does).
+- **The re-place after every OBS start (design 7182688018, 26.11.2026):** a rate-based placement is valid
+  only for the flow set it measured. The atlantic RSS hash puts each NDI / JPEG XS / Dante flow on a queue,
+  and an OBS restart re-creates every flow, so the heavy queues move (26.11: the deploy's OBS restart left 7
+  of 9 loaded IRQs on CPU 0, time_squeeze ~117/s, InDroppedDma +28k, Dante holes). The OBS launcher, right
+  after its own housekeeping move, runs `sudo -n /usr/bin/systemctl restart --no-block
+  strih-nic-irq-rebalance-obs.timer` (`strih_launcher_irq_rebalance_arm`; only with a housekeeping CPU list
+  and the timer file; a refusal is one WARN line, never fatal to OBS). That root timer (`OnActiveSec=180s`,
+  `AccuracySec=1s`, the SAME `strih-nic-irq-rebalance.service`, no `[Install]`) fires once 180 s later; a
+  restart re-arms it, so an OBS crash loop ends in ONE move. The one sudoers line
+  `/etc/sudoers.d/strih-nic-irq-rebalance-obs` (0440, our header, `visudo -cf` before the write, the house
+  pattern of obs-box-background.sh) allows exactly that command. `strih_housekeeping_rebalance_install`
+  writes both (text `strih_housekeeping_rebalance_obs_text` = the committed `systemd/` file, parity test),
+  never starts the timer; `none` stops it and removes both (header-checked). Rejected: a polkit
+  `manage-units` rule (the repo's cross-user root pattern is the sudoers line), a root poll of the OBS start
+  time (a second OBS-identity detector). Trade-off: a boot places up to twice under load (OBS start + 180 s,
+  the 5-min timer); each run writes only an IRQ whose target differs, and the idle floor keeps a map when
+  no load flows. Takes effect at the next OBS start after setup.
 - **Rejected:** irqbalance with the OBS CPUs banned (it rebalances every ~10 s, and each move measured
   rx_loss +144 / ~29 JXS lost_slices per camera); CPU 1 alone with RPS/GRO tuning (unmeasured on atlantic, no
   headroom at 86 %).
@@ -148,7 +165,12 @@ graded by the timer's `ActiveState/SubState`: `active/waiting` a NOTE (it runs a
 NOTE when the timer file is newer than the boot (`btime` of `/proc/stat`: setup enables without starting, so
 the boot it was installed in never runs it), a FAIL when it predates the boot, anything else
 (`active/elapsed`, unreadable) FAILs: the timer fired and the service never ran. `none` also
-`reset-failed`s a removed service.
+`reset-failed`s a removed service. `(hk-obs-rebalance)`: the OBS-start timer as rendered, `sudo -n -l` (as root
+`-U <user>`) allows the operator the exact arm command, then the service's `ExecMainStartTimestampMonotonic` vs
+the operator's `strih-obs.service` `ActiveEnterTimestampMonotonic` (one CLOCK_MONOTONIC): a run at or after the
+current OBS start = PASS on success + exit 0, else FAIL; none yet with the timer `active/waiting|running` and
+armed after that start = NOTE (it runs 180 s after it); none and not armed = FAIL (the launcher's `could not
+arm` WARN in /tmp/strih-obs-start.log); OBS not running = NOTE; an unreadable stamp FAILs.
 
 ## Deploy (supervisor)
 
