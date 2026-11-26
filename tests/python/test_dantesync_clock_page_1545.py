@@ -304,12 +304,31 @@ def test_a_hung_production_read_is_bounded_and_pages(tmp_path):
     assert len(pages) == 1 and "stav produkcie: unknown" in pages[0], err
 
 
-def test_a_zero_or_garbage_timeout_falls_back_to_the_default_bound():
-    src = _WATCHDOG.read_text()
-    assert 'PRODUCTION_TIMEOUT_S="${DANTE_CLOCK_PRODUCTION_TIMEOUT:-25}"' in src
-    assert "[[ \"$PRODUCTION_TIMEOUT_S\" =~ ^[123456789][0123456789]*$ ]] || PRODUCTION_TIMEOUT_S=25" in src
+def test_a_zero_timeout_falls_back_to_the_default_bound_never_unbounded(tmp_path):
+    # GNU `timeout 0` means NO bound; the override must fall back to 25 s. A seam hanging 40 s
+    # must still end near the 25 s default and page.
+    hang = _exe(tmp_path / "hang.sh", "#!/usr/bin/env bash\nsleep 40\necho no\n")
+    import time
+    t0 = time.monotonic()
+    (err,), _ = _run(tmp_path, {CAM3: LOST}, production="no",
+                     extra_env={"DANTE_CLOCK_PRODUCTION_CMD": str(hang),
+                                "DANTE_CLOCK_PRODUCTION_TIMEOUT": "0"})
+    assert time.monotonic() - t0 < 38, "timeout 0 left the production read unbounded"
+    assert "stav produkcie: unknown" in " ".join(_page_lines(err)), err
 
 
-def test_the_dns_page_line_names_the_dns_fault_not_a_box():
-    src = _WATCHDOG.read_text()
-    assert "BEZ dante clock: ${PAGE_LINES" not in src
+def test_the_dns_page_line_names_the_dns_fault_not_a_box(tmp_path):
+    resolver = _exe(tmp_path / "getent.sh", "#!/usr/bin/env bash\nexit 2\n")
+    (err,), _ = _run(tmp_path, {CAM3: OK}, production="yes",
+                     extra_env={"RIG_GRANDMASTER_IP": "", "RIG_GRANDMASTER_GETENT": str(resolver)})
+    (page,) = _page_lines(err)
+    assert "video-clock.lan" in page and "bez dante clock" not in page, page
+
+
+def test_a_production_read_without_a_venue_never_runs_a_live_pass(tmp_path):
+    env = dict(os.environ, DANTE_CLOCK_NODES=f"cam3|{CAM3}|fixed|video",
+               DANTE_CLOCK_ALERT_STATE_DIR=str(tmp_path), AIRULESET_NOTIFY=str(tmp_path / "none.py"))
+    r = subprocess.run(["bash", str(_WATCHDOG), "--production-read"], capture_output=True,
+                       text=True, env=env, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "unknown", (r.returncode, r.stdout, r.stderr)
+    assert "pass start" not in r.stderr, r.stderr
