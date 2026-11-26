@@ -371,7 +371,7 @@ if [ "$IRQ_CPUS" != none ]; then
     for c in "${cpus[@]}"; do nirq[$c]=0; done
     pending=""
     for irq in $irqs; do
-      curc="$(cpulist_canon "$(tr -d '[:space:]' < "${IRQ_DIR}/${irq}/smp_affinity_list" 2>/dev/null || true)")"
+      curc="$(cpulist_canon "$({ tr -d '[:space:]' < "${IRQ_DIR}/${irq}/smp_affinity_list"; } 2>/dev/null || true)")"
       if [ -n "$curc" ] && [ -n "${nirq[$curc]+x}" ]; then
         tgt[$irq]="$curc"; nirq[$curc]=$((nirq[$curc] + 1))
         log "IRQ ${irq}: on housekeeping cpu ${curc} -- kept (no load to balance by)"

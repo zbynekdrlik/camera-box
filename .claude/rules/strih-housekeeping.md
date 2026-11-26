@@ -55,7 +55,9 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   timer when it is not (never started: it fires at the next boot); `none` disables + stops our timer and
   removes both (header-checked). Rejected: a periodic re-balance (each move is a loss burst, no hysteresis
   data); delaying the boot oneshot (it must take the IRQs off the OBS CPUs at boot). Trade-off: a boot whose
-  rig carries no traffic 5 min later keeps the round-robin until the next NM `up` or a hand restart.
+  rig carries no traffic 5 min later keeps the round-robin until the next NM `up` or a hand restart (since
+  the 26.11.2026 load floor that run keeps the boot placement instead of balancing on tiny rates, and an
+  idle run never repairs a bad placement: only a run under load does).
 - **Rejected:** irqbalance with the OBS CPUs banned (it rebalances every ~10 s, and each move measured
   rx_loss +144 / ~29 JXS lost_slices per camera); CPU 1 alone with RPS/GRO tuning (unmeasured on atlantic, no
   headroom at 86 %).
