@@ -237,15 +237,19 @@ strih_nic_irq_affinity_script_text() {
   # issue 1361: the target IP + NIC driver are the loaded box's facts, substituted into the quoted
   # script body's @STRIH_TARGET_IP@ / @STRIH_NIC_DRIVER@ placeholders (the rest stays literal); issue 1425
   # adds @STRIH_HOUSEKEEPING_IRQ_CPUS@ = the IRQ CPUs of the housekeeping set (strih_housekeeping_irq_cpus in
-  # scripts/lib/strih-housekeeping.sh: every CPU of it, design 7119179275), `none` without housekeeping CPUs.
-  local ip drv box irq body
+  # scripts/lib/strih-housekeeping.sh: every CPU of it, design 7119179275), `none` without housekeeping CPUs,
+  # and @STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS@ = the IRQ CPUs that are not task CPUs (strih_housekeeping_slice_exclude,
+  # strih-snv 1-3; `none` for a one-CPU set): the placement uses only those (finding 26.11.2026).
+  local ip drv box irq irqonly body
   ip="$(strih_lx_ip)" || return 1
   drv="$(strih_lx_nic_driver)" || return 1
   box="$(strih_lx_hostname)" || return 1
   irq="$(strih_housekeeping_irq_cpus)" || return 1
+  irqonly="$(strih_housekeeping_slice_exclude)" || return 1
   body="$(_strih_nic_irq_affinity_script_template)" || return 1
   body="${body//@STRIH_TARGET_IP@/"$ip"}"
   body="${body//@STRIH_BOX@/"$box"}"
+  body="${body//@STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS@/"$irqonly"}"
   body="${body//@STRIH_HOUSEKEEPING_IRQ_CPUS@/"$irq"}"
   printf '%s\n' "${body//@STRIH_NIC_DRIVER@/"$drv"}"
 }
@@ -264,7 +268,10 @@ set -euo pipefail
 # (box fact STRIH_HOUSEKEEPING_CPUS, issue 1425) it places EVERY IRQ of the rig NIC
 # (/sys/class/net/<nic>/device/msi_irqs; a USB NIC: its xhci interrupt) on ONE of them, balanced by the
 # rate measured over IRQ_RATE_SAMPLE_S (design 7119179275: heaviest first to the least-loaded CPU, ties to
-# the lower CPU), writing an affinity only when it differs (every move costs a short loss burst). A sample
+# the lower CPU), writing an affinity only when it differs (every move costs a short loss burst). Only the
+# IRQ-only CPUs (IRQ_ONLY_CPUS: the set minus the task CPU, finding 26.11.2026: a 12k/s queue on the task
+# CPU 0 starved its softirq beside rustdesk / the launcher / the slice) take IRQs; the whole set only when
+# there is none (a one-CPU set). A sample
 # under IRQ_LOAD_MIN_PER_S in total (boot, or OBS down during a deploy: 26.11.2026 such a sample put 7 of 9
 # heavy queues on CPU 0) is no load to balance by: an IRQ already on one housekeeping CPU keeps it, only
 # one outside the set is placed, round-robin by IRQ count. Before that it set the NIC's RSS queues to the
@@ -288,6 +295,7 @@ IRQ_RATE_SAMPLE_S="${IRQ_RATE_SAMPLE_S:-2}"
 IRQ_LOAD_MIN_PER_S="${IRQ_LOAD_MIN_PER_S:-20000}"
 TARGET_IP="${STRIH_LX_TARGET_IP:-@STRIH_TARGET_IP@}"
 IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-@STRIH_HOUSEKEEPING_IRQ_CPUS@}"
+IRQ_ONLY_CPUS="${STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS:-@STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS@}"
 
 log() { printf 'strih-nic-irq-affinity: %s\n' "$*"; }
 die() { printf 'strih-nic-irq-affinity: FATAL: %s\n' "$*" >&2; exit 1; }
@@ -337,6 +345,15 @@ msi_dir="${SYS_ROOT}/class/net/${iface}/device/msi_irqs"
 if [ "$IRQ_CPUS" != none ]; then
   hk="$(cpulist_canon "$IRQ_CPUS")"
   [ -n "$hk" ] || die "STRIH_HOUSEKEEPING_IRQ_CPUS '${IRQ_CPUS}' is not a cpulist"
+  # the placement CPUs: the IRQ-only ones (never the task CPU while one exists), else the whole set
+  place="$hk"
+  if [ "$IRQ_ONLY_CPUS" != none ]; then
+    place="$(cpulist_canon "$IRQ_ONLY_CPUS")"
+    [ -n "$place" ] || die "STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS '${IRQ_ONLY_CPUS}' is not a cpulist"
+    for _c in $place; do
+      case " $hk " in *" $_c "*) ;; *) die "STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS '${IRQ_ONLY_CPUS}' is not inside the IRQ CPUs ${IRQ_CPUS}" ;; esac
+    done
+  fi
   [[ $IRQ_RATE_SAMPLE_S =~ ^[0123456789]{1,4}$ ]] || die "IRQ_RATE_SAMPLE_S '${IRQ_RATE_SAMPLE_S}' is not a whole number of seconds"
   [[ $IRQ_LOAD_MIN_PER_S =~ ^[0123456789]{1,9}$ ]] || die "IRQ_LOAD_MIN_PER_S '${IRQ_LOAD_MIN_PER_S}' is not a whole number of interrupts per second"
 fi
@@ -419,14 +436,15 @@ irq_count() {
   printf '%s\n' "$tot"
 }
 
-# (4) each IRQ's target CPU. Housekeeping CPUs: ONE of them per IRQ, by the measured rate (greedy: heaviest
+# (4) each IRQ's target CPU. Housekeeping CPUs: ONE placement CPU per IRQ (the IRQ-only CPUs, else the whole
+# set), by the measured rate (greedy: heaviest
 # first to the CPU with the least assigned rate, ties to the lower CPU; a total under IRQ_LOAD_MIN_PER_S =
 # keep every IRQ already on one of them, the rest to the CPU holding the fewest IRQs, in IRQ order, ties to
 # the lower CPU: round-robin at boot). Without them: the LAST cpu in cpu_atom (an E-core), fallback the
 # highest online cpu, for every IRQ.
 declare -A tgt=() rate=()
 if [ "$IRQ_CPUS" != none ]; then
-  read -ra cpus <<<"$hk"
+  read -ra cpus <<<"$place"
   declare -A c0=() load=()
   for irq in $irqs; do c0[$irq]="$(irq_count "$irq")"; done
   [ "$IRQ_RATE_SAMPLE_S" = 0 ] || sleep "$IRQ_RATE_SAMPLE_S"
@@ -447,9 +465,9 @@ if [ "$IRQ_CPUS" != none ]; then
   for c in "${cpus[@]}"; do load[$c]=0; done
   if [ "$total" -lt "$IRQ_LOAD_MIN_PER_S" ]; then
     if [ "$total" = 0 ]; then
-      log "no IRQ traffic measured (rates all 0) -- round-robin in IRQ order over cpus ${hk}; an IRQ already on one of them keeps it"
+      log "no IRQ traffic measured (rates all 0) -- round-robin in IRQ order over cpus ${place}; an IRQ already on one of them keeps it"
     else
-      log "rig NIC IRQ traffic ${total}/s measured over ${IRQ_RATE_SAMPLE_S} s is under IRQ_LOAD_MIN_PER_S ${IRQ_LOAD_MIN_PER_S}/s (no real load: OBS down or boot) -- an IRQ already on one of cpus ${hk} keeps it, the rest round-robin"
+      log "rig NIC IRQ traffic ${total}/s measured over ${IRQ_RATE_SAMPLE_S} s is under IRQ_LOAD_MIN_PER_S ${IRQ_LOAD_MIN_PER_S}/s (no real load: OBS down or boot) -- an IRQ already on one of cpus ${place} keeps it, the rest round-robin"
     fi
     declare -A nirq=()
     for c in "${cpus[@]}"; do nirq[$c]=0; done
