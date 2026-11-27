@@ -83,6 +83,9 @@ paths:
     server's real module-level import closure, so a missing entry fails there.
   - A box missing one module serves no `:8899` at all: the server exits on the ImportError, and the
     Windows supervisor loop restarts it every 5 s. So redeploy the WHOLE list, never one changed file.
+  - A re-run `try-restart`s the unit after the install (issue 1540): the server holds its modules in
+    memory, so without it a deploy left the OLD tree serving (strih-snv/stream-snv 27.11: new files
+    on disk, `/video-nodes.json` 404 from a server up since 24.11). A stopped server stays stopped.
   - Both setup scripts fetch the files from origin `dev` but take the list from the checkout, so
     after the install they run `python3 -I -B -c '…; import bundle_state_gather,
     bundle_state_windows'` against `/opt/camera-box` and `fail` on a partial tree. The facade

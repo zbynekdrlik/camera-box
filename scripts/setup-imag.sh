@@ -1780,6 +1780,10 @@ if user_bus_alive; then
     sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${BSS_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
         systemctl --user enable imag-bundle-state-server.service \
         || fail "issue 1299: systemctl --user enable imag-bundle-state-server.service failed"
+    # issue 1540: a RUNNING server reloads the tree installed above; a stopped one stays stopped.
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${BSS_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user try-restart imag-bundle-state-server.service \
+        || fail "issue 1540: the try-restart of imag-bundle-state-server.service failed"
     echo "  imag-bundle-state-server.service ENABLED (not started -- the supervisor starts it once; verify-imag.sh check (ba) gates :8899)"
 else
     # #1182: (fresh box) no user bus this run -- complete the ENABLE bus-free by hand-writing the

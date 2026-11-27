@@ -523,7 +523,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step 9 ":8899 bundle-state server (strih-bundle-state-server.service) -- enable-only"
+step 9 ":8899 bundle-state server (strih-bundle-state-server.service) -- enable, try-restart a running one"
 [ -f "${HERE}/../systemd/strih-bundle-state-server.service" ] || fail "systemd/strih-bundle-state-server.service not found next to this script"
 install -m 0644 "${HERE}/../systemd/strih-bundle-state-server.service" "${USER_HOME}/.config/systemd/user/strih-bundle-state-server.service"
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/dev/null || true
@@ -547,8 +547,8 @@ if [ -n "${GH_TOKEN:-}" ]; then
   python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/camera-box"); import bundle_state_gather, bundle_state_windows, bundle_state_video' \
     || fail "issue 1386: /opt/camera-box holds a partial bundle-state server tree -- re-run from a current checkout"
   echo "  installed bundle-state server tree -> /opt/camera-box (${BUNDLE_STATE_SERVER_FILES[*]})"
-  sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-bundle-state-server.service 2>/dev/null \
-    || warn "  enable strih-bundle-state-server.service by hand once the user session bus is up"
+  sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" sh -c 'systemctl --user enable strih-bundle-state-server.service && systemctl --user try-restart strih-bundle-state-server.service' 2>/dev/null \
+    || warn "  enable (+ issue 1540 try-restart onto the new tree) strih-bundle-state-server.service by hand once the user session bus is up"
 else
   warn "  GH_TOKEN unset -- install ${BUNDLE_STATE_SERVER_FILES[*]} (scripts/lib/bundle-state-files.txt) under /opt/camera-box, then enable strih-bundle-state-server.service"
 fi
