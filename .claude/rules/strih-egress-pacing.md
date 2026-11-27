@@ -55,6 +55,12 @@ issuecomment-7172341290. Sender only.
   queue 16) and fails `Specified class not found` on 1:11..1:16, so queues 10-15 (1:a..1:f) stay on
   fq_codel, UNPACED. That is what the 25.11.2026 hand loop did if it counted in decimal. The script
   names each class `printf '1:%x'`; the verdict names every class that is not fq.
+- **A `replace` of an existing `mq 1:` keeps it AND its children** (27.11.2026, strih-pp: `ethtool -L
+  enp5s0f1 combined 4` from 16, the restart logged "4 tx queue(s)" but the fq under 1:5..1:10 stayed and
+  verify FAILed `an extra qdisc under 1:5`; a grow would fail `Specified class not found`, exit 2). The
+  boot script reads `tc qdisc show` first: our mq whose children are not exactly 1:1..1:<queues hex> is
+  deleted (`tc qdisc del dev <nic> root`, logged), then rebuilt; an unchanged tree takes no delete and
+  keeps its handles. The test's fake tc models that kernel rule.
 - **`tc -j` prints fq `maxrate` in BYTES/s** (900mbit = 112500000); the human `tc qdisc show` prints
   `900Mbit`. The verdict compares bytes.
 - **JPEG XS is paced with NDI here** (no cambox-style prio + fw exemption): `mq` takes no filter, and the

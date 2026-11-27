@@ -17,6 +17,9 @@
 #   more than one tx queue -> `root handle 1: mq` + one fq per class 1:<queue in HEX> (tc reads the minor
 #     as hex: a decimal 1:10..1:16 loop names queue 16 and fails on 1:11.., leaving queues 10-15 unpaced);
 #   one tx queue           -> a root fq (mq refuses a single-queue device: "Operation not supported").
+#   A changed tx queue count (ethtool -L) is the one exception to `replace`: a replace of an EXISTING mq 1:
+#     keeps its children, so our mq whose children are not exactly 1:1..1:<queues hex> is deleted first
+#     (strih-pp 27.11.2026, 16 -> 4 channels left the fq under 1:5..1:10); an unchanged tree never is.
 #
 # Pieces:
 #   * the box fact STRIH_EGRESS_PACING_RATE (`none` | <N>mbit | <N>gbit), validated by strih-box-facts.sh;
@@ -118,6 +121,22 @@ done
 [ "\$q" -ge 1 ] || q=1
 fail_tc() { echo "${STRIH_EGRESS_PACING_SERVICE}: tc \$1 on \$nic FAILED -- its egress may be UNPACED (issue 1553)" >&2; exit 2; }
 if [ "\$q" -gt 1 ]; then
+  # A replace of an EXISTING mq 1: keeps it and its children, so a changed tx queue count (ethtool -L)
+  # never reaches the class set. Our mq whose children are not exactly 1:1..1:<q hex> is deleted first.
+  live="\$(tc qdisc show dev "\$nic")" || fail_tc "qdisc show"
+  ours=0 kids=0 stale=0
+  while read -r _ _ handle where cls _; do
+    if [ "\$handle \$where" = "1: root" ]; then ours=1; continue; fi
+    [ "\$where" = parent ] || continue
+    case "\$cls" in 1:*) ;; *) continue ;; esac
+    kids=\$((kids + 1))
+    if [[ ! "\${cls#1:}" =~ ^[0123456789abcdef]{1,4}\$ ]] || [ "\$((16#\${cls#1:}))" -gt "\$q" ]; then stale=1; fi
+  done <<<"\$live"
+  [ "\$kids" -eq "\$q" ] || stale=1
+  if [ "\$ours" = 1 ] && [ "\$stale" = 1 ]; then
+    echo "${STRIH_EGRESS_PACING_SERVICE}: the live mq 1: has \$kids children, the NIC has \$q tx queue(s) -- deleting the root first (issue 1553)" >&2
+    tc qdisc del dev "\$nic" root || fail_tc "root delete (stale mq)"
+  fi
   tc qdisc replace dev "\$nic" root handle 1: mq || fail_tc "root mq"
   i=1
   while [ "\$i" -le "\$q" ]; do
