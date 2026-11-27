@@ -1412,3 +1412,57 @@ def test_verify_fails_a_timer_that_fired_after_the_obs_start_without_the_service
 def test_verify_as_root_asks_sudo_for_the_operator(tmp_path):
     rows, env = _obs_rows(tmp_path, STRIH_SESSION_APPS_EUID="0")
     assert "sudo -n -U %s -l %s" % (ME, SUDO_CMD) in pathlib.Path(env["FAKE_SUDO_LOG"]).read_text()
+
+
+# --- per-queue packet weight (design 7228337095, 27.11.2026) ---------------------------------------------
+# strih-snv 22:2x CET: Q0 carried 97.5k pkt/s but raised only 13.4k IRQ/s (NAPI polling under load), so the
+# IRQ-rate greedy stacked it with other queues (cpu3 50.8 % softirq). IRQ 134+i = Queue[i], 142 = link.
+LIVE_RATES_2711 = {134: 13431, 135: 268, 136: 517, 137: 252, 138: 23626, 139: 11402, 140: 64, 141: 12054, 142: 0}
+LIVE_QUEUE_PKTS_2711 = [(97524, 15), (187, 201), (5192, 290), (19, 313), (30711, 302), (12041, 3), (24, 41),
+                        (6069, 8221)]
+
+
+def _queue_stats(pkts, scale):
+    return "".join("     Queue[%d] InPackets: %d\n     Queue[%d] OutPackets: %d\n" % (i, a * scale, i, b * scale)
+                   for i, (a, b) in enumerate(pkts))
+
+
+def _sampled_with_queues(tmp_path, rates, pkts, sample_s="2"):
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=sorted(rates))
+    (tmp_path / "interrupts").write_text(_interrupts(rates, 1))
+    (tmp_path / "interrupts.after").write_text(_interrupts(rates, 1 + int(sample_s)))
+    (tmp_path / "stats").write_text(_queue_stats(pkts, 1))
+    (tmp_path / "stats.after").write_text(_queue_stats(pkts, 1 + int(sample_s)))
+    _exe(bin_dir / "sleep", SWAP_SLEEP)
+    (tmp_path / "sleep.log").write_text("")
+    env.update({"PROC_INTERRUPTS": str(tmp_path / "interrupts"), "IRQ_RATE_SAMPLE_S": sample_s,
+                "FAKE_ETHTOOL_STATS": str(tmp_path / "stats"),
+                "FAKE_SLEEP_LOG": str(tmp_path / "sleep.log"),
+                "FAKE_SLEEP_SWAP": "%s:%s %s:%s" % (tmp_path / "interrupts.after", tmp_path / "interrupts",
+                                                    tmp_path / "stats.after", tmp_path / "stats")})
+    return _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env), irq_dir
+
+
+def test_a_queue_busy_in_napi_polling_is_weighed_by_its_packets_and_gets_a_cpu_alone(tmp_path):
+    r, irq_dir = _sampled_with_queues(tmp_path, LIVE_RATES_2711, LIVE_QUEUE_PKTS_2711)
+    assert r.returncode == 0, r.stderr + r.stdout
+    irqs = sorted(LIVE_RATES_2711)
+    got = dict(zip(irqs, _aff(irq_dir, irqs)))
+    assert got[134] == "0"
+    assert [n for n in irqs if got[n] == "0"] == [134]
+    assert "weight: per-queue packets (ethtool -S, 8 queues -> IRQs 134-141, the rest by IRQ rate)" in r.stdout
+    assert "IRQ 134 (msi enp7s0, iface enp7s0): 97539 pkt/s -> cpu 0 (was 0-15)" in r.stdout
+
+
+def test_without_per_queue_stats_the_weight_stays_the_irq_rate(tmp_path):
+    r, irq_dir = _sampled(tmp_path, LIVE_RATES)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "weight: IRQ rate (no per-queue packet stats from ethtool -S)" in r.stdout
+
+
+def test_more_queues_than_irqs_keeps_the_irq_rate_weight(tmp_path):
+    rates = {134: 30000, 135: 100}
+    r, irq_dir = _sampled_with_queues(tmp_path, rates, [(5, 0), (6, 0), (90000, 0)])
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "weight: IRQ rate (ethtool -S lists 3 queues for 2 IRQs: the queue<->vector order is unknown)" in r.stdout
+    assert _aff(irq_dir, (134, 135)) == ["0", "1"]
