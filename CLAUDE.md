@@ -21,6 +21,7 @@ Rules live in `.claude/rules/` and auto-load on their `paths:`. One short line p
 - Deploying a HISTORICAL camera-box build → historical-build-bisect.md
 - camera-box version-parity treadmill + the … → version-parity-treadmill-align.md
 - The cambox JPEG XS link beside NDI → jxs-link.md
+- Cambox video counters for dcontroller (`:8896/video.json`) → cambox-video-stats.md
 - The forked OBS on the Linux AND Windows OBS … → obs-pinned-release.md
 - strih-snv + stream-snv program audio over … → strih-dante-input.md
 - Pinned vstack tag → vstack-pin.md
