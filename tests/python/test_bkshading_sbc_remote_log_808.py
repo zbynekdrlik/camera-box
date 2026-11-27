@@ -89,7 +89,7 @@ def test_every_live_board_resolves_to_the_strih_boxes_that_name_it():
             if "@register:" in e:
                 boards.add(e.split("@register:", 1)[1])
     # issue 1537 (18.11.2026 evening, the owner reversed 15.11): PP's cam1 and cam4 run on their Oranges again.
-    assert {"cam1-shading", "cam2-shading", "cam4-shading"} <= boards
+    assert {"cam1-shading", "cam3-shading", "cam4-shading"} <= boards
     for board in sorted(boards):
         r = _bash('remote_log_board_sink_ips "$1"', board)
         assert r.returncode == 0, r.stderr
@@ -99,14 +99,15 @@ def test_every_live_board_resolves_to_the_strih_boxes_that_name_it():
 def test_each_board_gets_the_venue_that_lists_it():
     snv = _facts("strih-snv.env")["STRIH_IP"]
     pp = _facts("strih-pp.env")["STRIH_IP"]
-    assert _bash('remote_log_board_sink_ips cam2-shading').stdout.split() == [snv]
+    assert _bash('remote_log_board_sink_ips cam3-shading').stdout.split() == [snv]
     # issue 1537 (18.11.2026 evening): strih-pp lists cam1-shading and cam4-shading again (the PP Oranges)
     assert _bash('remote_log_board_sink_ips cam1-shading').stdout.split() == [pp]
     assert _bash('remote_log_board_sink_ips cam4-shading').stdout.split() == [pp]
 
 
 def test_an_unlisted_or_bad_board_name_is_refused_by_name_never_guessed():
-    for board in ("cam9-shading", "cam2-shadingx", "cam2", "", "-x", "a b", "c" * 65, "cam2-shading;x"):
+    for board in ("cam9-shading", "cam2-shading", "cam3-shadingx", "cam3", "", "-x", "a b", "c" * 65,
+                  "cam3-shading;x"):
         r = _bash('remote_log_board_sink_ips "$1"', board)
         assert r.returncode == 1, (board, r.stdout)
         assert r.stdout == ""
@@ -128,7 +129,7 @@ def test_the_resolver_never_answers_the_cambox_relay_or_a_bad_address(tmp_path):
 
 
 def test_the_resolver_leaves_the_callers_shell_as_it_was():
-    r = _bash('shopt -s nocasematch; IFS=:; x="$(remote_log_board_sink_ips cam2-shading)"; '
+    r = _bash('shopt -s nocasematch; IFS=:; x="$(remote_log_board_sink_ips cam3-shading)"; '
               'shopt -q nocasematch && [ "$IFS" = : ] && declare -F strih_box_parse_file >/dev/null '
               '|| echo NOLOADER; echo "got=$x"')
     assert r.returncode == 0, r.stderr
@@ -223,7 +224,7 @@ def test_install_writes_the_upload_wrapper_and_dropin_and_only_enables_the_uploa
     r, calls, _b = _run_provision("--install", root)
     assert r.returncode == 0, r.stdout + r.stderr
     p = _sbc_paths(root)
-    sinks = _expected_sinks("cam2-shading")
+    sinks = _expected_sinks("cam3-shading")
     script = pathlib.Path(p["ju_script"])
     assert script.read_text() == _gen('remote_log_board_upload_script_content "$@"', *sinks)
     assert oct(script.stat().st_mode & 0o777) == "0o755"

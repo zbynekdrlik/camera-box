@@ -8,10 +8,11 @@
 # `GET /control/api/v1/lens/iris` on the link (.claude/rules/shading-pinned-release.md).
 cam3 shading-release-rest.pin
 cam5 shading-release-rest.pin
-# The handheld SBC boards (owner 10.11.2026 via shading: REST relay 0.2.x on cam1-shading + cam2-shading; their
+# The handheld SBC boards (owner 10.11.2026 via shading: REST relay 0.2.x on cam1-shading + the SNV Orange, renamed
+# cam2-shading -> cam3-shading by issue 1556 when it moved to cam3; their
 # cameras plug in later -- cam4-shading joins with its camera in PP).
 cam1-shading shading-release-rest.pin
-cam2-shading shading-release-rest.pin
+cam3-shading shading-release-rest.pin
 # Poprad (owner sets it up 11.11.2026 via shading): cam6 + cam7 (Pocket 6K, fw >= 8.6 + Web media manager),
 # the cam4-shading board, and the strih-pp service (every relay it drives is then on v0.2.x).
 cam6 shading-release-rest.pin
