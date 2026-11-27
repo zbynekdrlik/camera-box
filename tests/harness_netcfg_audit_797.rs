@@ -400,16 +400,20 @@ fn nc_ssh_is_stdin_safe_for_while_read_loops() {
 
 #[test]
 fn designated_default_is_the_strih_lx_uplink_1242() {
+    // issue 1554 (27.11.2026): strih-snv runs on its 10 GbE atlantic NIC since 15.10.2026, plugged
+    // into foh2_video sfp-sfpplus2 (mikrotik-nlm path read); the USB 2.5 GbE uplink foh1_video ether2
+    // has no link (`--check`: designated-down), so it is no longer the designated port.
     let orch = std::fs::read_to_string(manifest_dir().join("scripts/netcfg-audit.sh")).unwrap();
     assert!(
-        orch.contains(r#"NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh1_video|ether2}""#),
-        "the designated drop-sampler default must name strih-snv's uplink foh1_video|ether2"
-    );
-    assert!(
-        !orch.contains(
+        orch.contains(
             r#"NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh2_video|sfp-sfpplus2}""#
         ),
-        "the retired Windows-strih DAC port must no longer be the designated default"
+        "the designated drop-sampler default must name strih-snv's 10G uplink foh2_video|sfp-sfpplus2"
+    );
+    assert!(
+        !orch
+            .contains(r#"NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh1_video|ether2}""#),
+        "the dead USB 2.5 GbE uplink must no longer be the designated default"
     );
 }
 
