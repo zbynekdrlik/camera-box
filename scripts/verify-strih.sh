@@ -862,11 +862,10 @@ if WHY="$(obs_box_step_applies 11b)"; then   # issue 1412: a PCIe rig NIC has no
   IRQ_IFACE="${STRIH_NIC_IFACE:-}"
   if [ -z "$IRQ_IFACE" ]; then
     # driver-first (the box's STRIH_NIC_DRIVER fact -- a USB rig NIC, e.g. r8152), then fall back to
-    # the address match; MULTI -> NOTE + no iface.
+    # the address match, also for MULTI (issue 1425: the strih_lx_rig_nic rule, a multi-port card).
     IRQ_DRV="$(strih_nic_iface_by_driver /sys "$(strih_lx_nic_driver)" 2>/dev/null || true)"
     case "$IRQ_DRV" in
-      MULTI:*) note "  multiple $(strih_lx_nic_driver) NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
-      "")      IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
+      MULTI:*|"") IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
       *)       IRQ_IFACE="$IRQ_DRV" ;;
     esac
   fi

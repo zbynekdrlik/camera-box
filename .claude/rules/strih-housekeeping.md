@@ -174,6 +174,13 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
 
 ## What moves, and how
 
+- **Which NIC: the ONE rule of `strih_lx_rig_nic`, in the oneshot too (strih-pp 27.11.2026).** Override,
+  else the ONE `STRIH_NIC_DRIVER` interface, else (none, OR more than one: strih-pp's dual-port ixgbe X520,
+  enp5s0f0 + enp5s0f1) the interface carrying STRIH_IP. Before, the oneshot died `multiple ixgbe NICs --
+  set STRIH_NIC_IFACE` while dsync / verify resolved enp5s0f1, so RSS stayed 16 and `(hk-rss)`/`(hk-irq)`
+  FAILed. None or two interfaces carrying the IP is FATAL. Never pin a per-box `STRIH_NIC_IFACE` for a
+  multi-port card. Tests: `tests/python/test_strih_nic_irq_multi_port_1425.py` (fake two-port sysfs + fake
+  `ip`, parity with `strih_lx_rig_nic`).
 - **The rig NIC's IRQs + RSS** -- the step-11b oneshot (`strih-nic-irq-affinity.service`, the script from
   `_strih_nic_irq_affinity_script_template` in `scripts/lib/strih-nic-irq.sh`), generalised, never a second
   unit. With housekeeping CPUs: `ethtool -L <nic> combined <count>` ONLY when the current count differs,
