@@ -266,3 +266,7 @@ names), set in ONE place, the Full-path E2E workflow env, next to its open `need
 source of `scripts/camera-set.sh` prints a NOTE naming it; an explicit `CAMERA_ACTIVE_SET` is never filtered;
 the venue's STRIH_CAMERAS and the default literal stay unchanged. The ticket closes only when the camera is
 measured again, together with removing the workflow line.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- `CAMERA_ACTIVE_SET` fleet-enumeration discipline (never a literal cam-number range) → `.claude/rules/camera-active-set.md` (auto-loads on its `paths:`)

@@ -1939,3 +1939,7 @@ A pytest that echoes a bash function's status (`fn; echo "RC=$?"`) and asserts `
 passes when the function does not exist at all: `command not found` prints `RC=127`, which contains
 `RC=1`. A RED commit then shows a "passing" test for code that is not written. Compare the whole last
 line: `assert r.stdout.splitlines()[-1:] == ["RC=1"]`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- CI/workflow concurrency-cancel risk, sourced-bash-test-harness `set -e` leak → `.claude/rules/ci-testing-gotchas.md` (auto-loads on its `paths:`)

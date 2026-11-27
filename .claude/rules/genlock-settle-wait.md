@@ -77,3 +77,7 @@ after the `[4i/8align]` `fi` and before the freeze-watch arm; gated `E2E_GENLOCK
 ALL_CAMBOX=1`; watched inputs = `camera_align_ndi_sources_excluding_csv "${PREFLIGHT_EXCLUDED_CAMS:-}"`
 (the exact set align pinned, acked-offline dropped). It never edits an existing anchored line and
 never duplicates the `[5/8] StartRecord` literal (comments included).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- genlock-FIFO settle-wait (`scripts/lib/genlock-settle.sh` — the `[4j/8settle]` step between `[4i/8align]` pin writes and `[5/8] StartRecord`: wait on the genlock-fifo audit relock/underrun/late_hold DELTAS going quiet (dropped_due is parsed + watched for reset but EXCLUDED from quiet — strih inputs decimate 60fps to 30fps so it structurally advances every tick, issue 1221 follow-up), NOT a blind sleep; raw counter-value deltas so #797-immune; TWO independent bounds — wall budget + pass ceiling — fail-open never abort; ALWAYS-exit-0 under the caller's `set -euo pipefail` (#1133 class); injectable reader/clock/sleep seams; issue 1221) → `.claude/rules/genlock-settle-wait.md` (auto-loads on its `paths:`)

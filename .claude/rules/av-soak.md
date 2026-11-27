@@ -123,6 +123,9 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   volume: full cleanup, exit = the report's verdict) -- it never holds the lease through a
   production. An unreadable
   read or a stalled marker log is a transient: a skipped row.
+- **Issue 1425: the soak's Linux decodes run on dev1** (through the same entry scripts, a paced copy
+  of the recording); the on-box kill below is now a harmless no-op on a Linux box, the local timeout
+  stops the decode, and the inner copy `timeout --foreground` calls stay in the caller's group.
 - **A decode is stopped on the box too.** Killing the local `timeout` does not stop a remote
   `recording-verdict`: on a decode timeout, and in cleanup while a decode runs, the soak stops
   THIS run's decode, matched by its own output name `av-soak-<stamp>-s...`
@@ -311,3 +314,7 @@ test that sends a signal once the sweep runs waits for a cut AFTER a StartRecord
 (`_wait_for_sweep`), because the slot's first cut now comes before the recording. The switch-count
 knobs (`FAKE_LIVE_AFTER_SWITCHES`, `FAKE_UNREADABLE_AFTER_SWITCHES`) count that cut too.
 The contract test `tests/soak_first_cut_burn_domain_1367.rs` is probe-gated.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The 8 h stream-output A/V soak (issue 1367: MEASURE-ONLY `scripts/av-soak.sh` -- `--plan` default touches nothing, `--run` holds the rig lease as `camera-box-av-soak`, one window per 10-min slot = ONE strih-program sweep over the soak cameras, recorded + decoded in place with the E2E primitives, never a pin/offset/correction and never a stream scene switch (TEST mode is a precondition); reads before writes (exit 4 vs 5), conservative recording flags (a recording that will not stop = exit 5 + the lease KEPT; `--stop-leftovers` as the unit's ExecStopPost runs the pure `scripts/av_soak_rig_state.py` plan: nothing while any box streams or is unreadable -- strih never streams -- and only a recording whose age matches the soak's flag time), a cleanup a second signal cannot cut short that never stops a recording or cuts the strih program during a broadcast (one broadcast read gates both; a broadcast mid-run -- guard, every cut, before StopRecord, every ~60 s between slots -- aborts), a recording started or stopped only on a proven idle rig (an unreadable read retried 3 x 20 s; unreadable at a slot start = nothing started), the rig leaving TEST mode ends the run, this run's remote decodes stopped on the box, one run per run dir, the slot budget checked up front, recordings kept + an exact-path cleanup plan; pure `scripts/av_soak_decision.py` reads `AV_OFFSET_GATE_TOLERANCE_MS`/`SPREAD_THRESHOLD_MS` from their Rust sources, loss on the gate's own per-window term (`gate_window_term`, never `relaxed_pass`) plus the verdict's own continuity fold (run-wide undecodable floor, a drift counter for the copied term), the strih/stream hop burns required, slope +/- t95*SE vs 2 ms/h, the 1 h partial, empty/gappy/short/unmeasured = UNKNOWN; the gate spreads need the capture burns so the passive stream-output spread is `av_spread_ms` (`--spread-columns`); the supervisor runbook for the 1 h check and the 8 h run) → `.claude/rules/av-soak.md` (auto-loads on its `paths:`)

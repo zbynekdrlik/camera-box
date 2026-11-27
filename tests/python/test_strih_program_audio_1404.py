@@ -272,7 +272,7 @@ def test_the_install_puts_everything_in_place_and_never_starts(tmp_path):
     shim = box.home / _lib_value("STRIH_PROGRAM_AUDIO_SHIM")
     assert shim.is_file()
     calls = box.calls()
-    assert "apt-get install -y python3-numpy" in calls
+    assert "apt-get install -y python3-numpy python3-websocket" in calls
     assert f"systemctl --user enable {UNIT}" in calls
     assert "systemctl --user daemon-reload" in calls
     assert f"systemctl --user try-restart {UNIT}" in calls
@@ -342,7 +342,7 @@ def test_a_failing_apt_or_a_missing_source_fails_the_step(tmp_path):
     box = Box(tmp_path)
     (box.state / "apt-fails").write_text("")
     r = box.install()
-    assert r.returncode == 1 and "apt-get install python3-numpy failed" in r.stderr
+    assert r.returncode == 1 and "apt-get install python3-numpy python3-websocket failed" in r.stderr
     repo = tmp_path / "repo"
     (repo / "systemd").mkdir(parents=True)
     r = box.run("strih_program_audio_install", str(repo), str(box.home), USER)
@@ -567,6 +567,18 @@ def test_the_installed_files_are_the_import_closure_plus_the_shim_sources():
     import obs_fleet_table as oft
     want.add(str(oft.OBS_FLEET_SH.relative_to(_ROOT)))
     assert "scripts/obs_fleet_table.py" in want and "scripts/program_audio_cg.py" in want
+    # issue 1553 (the CG arm's advisory probe): a stream box's fact file is read at run time, so every
+    # stream-role fact file ships (PROGRAM_AUDIO_STREAM_BOX picks one)
+    import program_audio_cg_advisory as pcga
+    for f in sorted(pcga.STRIH_BOXES_DIR.glob("*.env")):
+        if "STRIH_ROLE=stream" in f.read_text().splitlines():
+            want.add(str(f.relative_to(_ROOT)))
+    assert "scripts/strih-boxes/stream-pp.env" in want and "scripts/strih-boxes/stream-snv.env" in want
+    assert {"scripts/program_audio_cg_advisory.py", "scripts/obs_phase2.py"} <= want
+    # issue 1553 (26.11.2026, live crash loop on strih-snv): dantesync_fleet.py reads its canonical config
+    # JSON at import time, so that DATA file ships too
+    import dantesync_fleet as dsf
+    want.add(str(dsf.TEMPLATES_JSON.relative_to(_ROOT)))
     assert set(_lib_value("STRIH_PROGRAM_AUDIO_FILES").split()) == want
 
 

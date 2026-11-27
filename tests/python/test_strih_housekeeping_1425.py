@@ -1,6 +1,6 @@
 """issue 1425 (design 7106973291): strih-snv housekeeping off OBS's CPUs.
 
-The box fact STRIH_HOUSEKEEPING_CPUS (strih-snv 0-1, the complement of the OBS mask 2-15; the other
+The box fact STRIH_HOUSEKEEPING_CPUS (strih-snv 0-3 since ROZHODNUTE 7183885100 + the whole-core decision, the complement of the OBS mask 4-15; the other
 boxes `none`), the step-11b IRQ oneshot generalised to every IRQ of the rig NIC + the RSS channel
 count, the netdev_budget_usecs drop-in, the rustdesk / display-watch drop-ins, the OBS launcher's own
 placement (its shutdown watch = the stat / grep / tail loop) and verify item 16's rows.
@@ -8,10 +8,16 @@ placement (its shutdown watch = the stat / grep / tail loop) and verify item 16'
 Every lib runs under the callers' `set -euo pipefail`; host tools (ethtool, systemctl, taskset, renice)
 are fakes on PATH, /sys + /proc + /etc are temp trees through the libs' seams. Values reach bash as
 ARGUMENTS, never inside the script text.
+
+The mechanics scenarios below model a TWO-CPU housekeeping box (0-1, OBS mask 2-15: strih-snv's set until
+ROZHODNUTE 7183885100, stream-pp's today). They run on SCENARIO_BOXES, a copy of the real fact files with
+strih-snv's set at 0-1, so they keep testing that shape after strih-snv moved to 0-3; a test that reads the
+REAL fact files passes `real_boxes=True`. strih-snv's own 0-3 set is test_obs_mask_from_housekeeping_1425.py.
 """
 import os
 import pathlib
 import subprocess
+import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
@@ -24,18 +30,31 @@ VERIFY = SCRIPTS / "verify-strih.sh"
 LAUNCHER = SCRIPTS / "strih-obs-start.sh"
 BOXES = SCRIPTS / "strih-boxes"
 LEAKY = ("STRIH_LX_IP", "STRIH_NIC_IFACE", "STRIH_BOXES_DIR", "OBS_FLEET", "STRIH_HOUSEKEEPING_CPUS",
-         "STRIH_HOUSEKEEPING_IRQ_CPUS", "OBS_BOX_ONLINE_CPUS", "STRIH_PROGRAM_AUDIO_SYSFS",
+         "STRIH_HOUSEKEEPING_IRQ_CPUS", "STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS", "OBS_BOX_ONLINE_CPUS", "STRIH_PROGRAM_AUDIO_SYSFS",
          "STRIH_PROGRAM_AUDIO_ISOLATED_CONF",
          "STRIH_HOUSEKEEPING_ROOT", "STRIH_HOUSEKEEPING_SYS", "STRIH_HOUSEKEEPING_PROC", "ETHTOOL")
 ME = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
 MYGRP = subprocess.run(["id", "-gn"], capture_output=True, text=True, check=True).stdout.strip()
 
 
-def _run(body, *args, env=None, path_prefix=None, sources=(FACTS, PROVISION)):
+_SCENARIO_DIR = tempfile.TemporaryDirectory(prefix="hk-1425-boxes-")
+SCENARIO_BOXES = pathlib.Path(_SCENARIO_DIR.name)
+for _f in BOXES.glob("*"):
+    if _f.is_file():
+        (SCENARIO_BOXES / _f.name).write_bytes(_f.read_bytes())
+_snv = (SCENARIO_BOXES / "strih-snv.env").read_text()
+assert _snv.count("\nSTRIH_HOUSEKEEPING_CPUS=0-3\n") == 1
+(SCENARIO_BOXES / "strih-snv.env").write_text(_snv.replace("\nSTRIH_HOUSEKEEPING_CPUS=0-3\n",
+                                                           "\nSTRIH_HOUSEKEEPING_CPUS=0-1\n"))
+
+
+def _run(body, *args, env=None, path_prefix=None, sources=(FACTS, PROVISION), real_boxes=False):
     harness = ("set -euo pipefail\n" + "".join('. "%s"\n' % s for s in sources) +
                'fail() { echo "FAIL: $*" >&2; return 1; }\n'
                'ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n' + body)
     full = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    if not real_boxes:
+        full["STRIH_BOXES_DIR"] = str(SCENARIO_BOXES)
     if path_prefix:
         full["PATH"] = "%s:%s" % (path_prefix, full["PATH"])
     if env:
@@ -52,10 +71,11 @@ def _exe(path, text):
 
 # --- the fact ------------------------------------------------------------------------------------------
 
-def test_every_box_declares_the_fact_strih_snv_0_1_the_others_none():
-    want = {"strih-snv": "0-1", "strih-pp": "none", "stream-pp": "none", "stream-snv": "none"}
+def test_every_box_declares_its_housekeeping_cpus():
+    # issue 1553 (SNV/PP parity): every box measured = online minus its OBS mask (read 25.11.2026)
+    want = {"strih-snv": "0-3", "strih-pp": "0-1,8-9", "stream-pp": "0-1", "stream-snv": "0-1,12-19"}
     for box, v in want.items():
-        r = _run('strih_box_load "$1"; strih_lx_housekeeping_cpus', box)
+        r = _run('strih_box_load "$1"; strih_lx_housekeeping_cpus', box, real_boxes=True)
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == v, box
 
@@ -64,8 +84,8 @@ def _box_with(tmp_path, value):
     d = tmp_path / "boxes"
     d.mkdir(exist_ok=True)
     body = (BOXES / "strih-snv.env").read_text()
-    assert body.count("STRIH_HOUSEKEEPING_CPUS=0-1\n") == 1
-    (d / "strih-snv.env").write_text(body.replace("STRIH_HOUSEKEEPING_CPUS=0-1\n", "STRIH_HOUSEKEEPING_CPUS=%s\n" % value))
+    assert body.count("STRIH_HOUSEKEEPING_CPUS=0-3\n") == 1
+    (d / "strih-snv.env").write_text(body.replace("STRIH_HOUSEKEEPING_CPUS=0-3\n", "STRIH_HOUSEKEEPING_CPUS=%s\n" % value))
     return {"STRIH_BOXES_DIR": str(d)}
 
 
@@ -83,7 +103,9 @@ def test_step_11b_runs_on_a_housekeeping_box_and_skips_a_pcie_box_without_one(tm
     body = 'strih_box_load "$1"; if WHY="$(obs_box_step_applies 11b)"; then echo RUN; else echo "SKIP $WHY"; fi'
     srcs = (FACTS, ROLE)
     assert _run(body, "strih-snv", sources=srcs).stdout.strip() == "RUN"
-    out = _run(body, "strih-pp", sources=srcs).stdout.strip()
+    assert _run(body, "strih-pp", sources=srcs).stdout.strip() == "RUN"   # PCIe, housekeeping 0-1,8-9
+    # a PCIe box without housekeeping CPUs (no deployed box has that since issue 1553: strih-snv set to none)
+    out = _run(body, "strih-snv", sources=srcs, env=_box_with(tmp_path, "none")).stdout.strip()
     assert out.startswith("SKIP the rig NIC is not a USB device") and "STRIH_HOUSEKEEPING_CPUS=none" in out
     assert _run(body, "stream-snv", sources=srcs).stdout.strip() == "RUN"   # a USB rig NIC, no housekeeping
 
@@ -148,11 +170,18 @@ def _pcie_box(tmp_path, combined=8, irqs=range(134, 143)):
     return sysr, irq_dir, bin_dir, env
 
 
-def _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env):
+def _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env, render_env=None, real_boxes=False):
+    # The placement mechanics tests (greedy, idle keep, RSS, read-back) run over the WHOLE IRQ set:
+    # STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS defaults to `none` here (place over every IRQ CPU, the one-CPU-set
+    # rule). Which CPUs the placement uses on a real box (the IRQ-only CPUs, never the task CPU while any
+    # exist, finding 26.11.2026) is test_strih_nic_irq_task_cpu_1425.py; an EMPTY value there = the
+    # rendered default.
     script = tmp_path / "affinity.sh"
-    r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text > "$1"', str(script))
+    r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text > "$1"', str(script), env=render_env,
+             real_boxes=real_boxes)
     assert r.returncode == 0, r.stderr
     full = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    full["STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS"] = "none"
     full.update(env)
     full.update({"SYS_ROOT": str(sysr), "IRQ_DIR": str(irq_dir), "PATH": "%s:%s" % (bin_dir, full["PATH"]),
                  "CARRIER_WAIT_S": env.get("CARRIER_WAIT_S", "0"),
@@ -312,6 +341,97 @@ def test_an_irq_missing_from_proc_interrupts_counts_as_no_traffic(tmp_path):
     assert _aff(irq_dir, (134, 135)) == ["0", "1"]
 
 
+# --- the idle sample (finding 26.11.2026) ---------------------------------------------------------------
+# A genlock deploy stops OBS; a placement run in that window sampled tiny, wrong-ordered rates and put 7 of
+# 9 heavy queues on CPU 0 (time_squeeze ~117/s, InDroppedDma 4501 -> 32451). Under IRQ_LOAD_MIN_PER_S an IRQ
+# already on ONE housekeeping CPU keeps it; only an IRQ outside the set is placed.
+
+# the 05:24 loaded placement (60266/s vs 60261/s) and an OBS-down sample whose greedy would undo it
+BALANCED = {134: "1", 135: "0", 136: "1", 137: "0", 138: "1", 139: "0", 140: "1", 141: "1", 142: "0"}
+IDLE_RATES = {134: 40, 135: 900, 136: 30, 137: 700, 138: 20, 139: 600, 140: 10, 141: 500, 142: 5}
+
+
+def _sampled_from(tmp_path, rates, start, extra_env=None, lock=True):
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=sorted(start))
+    for n, a in start.items():
+        (irq_dir / str(n) / "smp_affinity_list").write_text(a + "\n")
+    (tmp_path / "interrupts").write_text(_interrupts(rates, 1))
+    (tmp_path / "interrupts.after").write_text(_interrupts(rates, 3))
+    _exe(bin_dir / "sleep", SWAP_SLEEP)
+    (tmp_path / "sleep.log").write_text("")
+    env.update({"PROC_INTERRUPTS": str(tmp_path / "interrupts"), "IRQ_RATE_SAMPLE_S": "2",
+                "FAKE_SLEEP_LOG": str(tmp_path / "sleep.log"),
+                "FAKE_SLEEP_SWAP": "%s:%s" % (tmp_path / "interrupts.after", tmp_path / "interrupts")})
+    env.update(extra_env or {})
+    # a kept IRQ is never written: its read-only file would fail a write
+    kept = [n for n, a in start.items() if lock and a in ("0", "1")]
+    for n in kept:
+        (irq_dir / str(n) / "smp_affinity_list").chmod(0o444)
+    try:
+        r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
+    finally:
+        for n in kept:
+            (irq_dir / str(n) / "smp_affinity_list").chmod(0o644)
+    return r, irq_dir
+
+
+def test_an_idle_sample_keeps_every_irq_already_on_one_housekeeping_cpu(tmp_path):
+    r, irq_dir = _sampled_from(tmp_path, IDLE_RATES, BALANCED)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert dict(zip(sorted(BALANCED), _aff(irq_dir, sorted(BALANCED)))) == BALANCED
+    assert ("rig NIC IRQ traffic 2805/s measured over 2 s is under IRQ_LOAD_MIN_PER_S 20000/s (no real load: "
+            "OBS down or boot) -- an IRQ already on one of cpus 0 1 keeps it, the rest round-robin") in r.stdout
+    assert "IRQ 135 (msi enp7s0, iface enp7s0): 900/s -> cpu 0 (already there, unchanged)" in r.stdout
+    assert "IRQ 135: on housekeeping cpu 0 -- kept (no load to balance by)" in r.stdout
+    assert "rig NIC IRQ rates measured over" not in r.stdout
+
+
+def test_an_idle_sample_places_only_an_irq_outside_the_set_on_the_cpu_with_fewest_irqs(tmp_path):
+    start = {134: "1", 135: "1", 136: "0-15", 137: "2"}
+    r, irq_dir = _sampled_from(tmp_path, {134: 10, 135: 10, 136: 10, 137: 10}, start)
+    assert r.returncode == 0, r.stderr + r.stdout
+    # 136: cpu 0 holds 0 IRQs, cpu 1 holds 2 -> 0; 137 (on an OBS CPU): 1 vs 2 -> 0
+    assert _aff(irq_dir, (134, 135, 136, 137)) == ["1", "1", "0", "0"]
+    assert "IRQ 136 (msi enp7s0, iface enp7s0): 10/s -> cpu 0 (was 0-15)" in r.stdout
+    assert "IRQ 137 (msi enp7s0, iface enp7s0): 10/s -> cpu 0 (was 2)" in r.stdout
+
+
+def test_a_loaded_sample_still_re_places_by_rate_over_the_current_placement(tmp_path):
+    start = {n: "1" for n in LIVE_RATES}
+    r, irq_dir = _sampled_from(tmp_path, LIVE_RATES, start, lock=False)
+    assert r.returncode == 0, r.stderr + r.stdout
+    want = {136: "0", 140: "1", 137: "1", 138: "1", 134: "0", 135: "1", 139: "0", 141: "1", 142: "0"}
+    assert dict(zip(sorted(want), _aff(irq_dir, sorted(want)))) == want
+    assert "rig NIC IRQ rates measured over 2 s, assigned load: cpu 0 21150/s, cpu 1 21100/s" in r.stdout
+
+
+def test_the_load_floor_is_inclusive_and_env_overridable(tmp_path):
+    start = {134: "1", 135: "1"}
+    (tmp_path / "at").mkdir()
+    (tmp_path / "under").mkdir()
+    r, irq_dir = _sampled_from(tmp_path / "at", {134: 60, 135: 40}, start, {"IRQ_LOAD_MIN_PER_S": "100"},
+                               lock=False)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert _aff(irq_dir, (134, 135)) == ["0", "1"]   # total 100 = the floor: placed by rate
+    r, irq_dir = _sampled_from(tmp_path / "under", {134: 60, 135: 39}, start, {"IRQ_LOAD_MIN_PER_S": "100"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert _aff(irq_dir, (134, 135)) == ["1", "1"]   # 99: kept
+
+
+def test_a_garbage_load_floor_is_refused(tmp_path):
+    sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134,))
+    env["IRQ_LOAD_MIN_PER_S"] = "20k"
+    r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
+    assert r.returncode == 1
+    assert "FATAL: IRQ_LOAD_MIN_PER_S '20k' is not a whole number of interrupts per second" in r.stderr
+
+
+def test_the_rendered_oneshot_carries_the_20000_per_s_load_floor():
+    r = _run('strih_box_load strih-snv; strih_nic_irq_affinity_script_text')
+    assert r.returncode == 0, r.stderr
+    assert 'IRQ_LOAD_MIN_PER_S="${IRQ_LOAD_MIN_PER_S:-20000}"' in r.stdout
+
+
 def test_a_garbage_sample_time_is_refused(tmp_path):
     sysr, irq_dir, bin_dir, env = _pcie_box(tmp_path, combined=2, irqs=(134,))
     env["IRQ_RATE_SAMPLE_S"] = "2s"
@@ -343,6 +463,12 @@ if args[:1] in (["enable"], ["disable"]):
 if args[:1] == ["is-enabled"]:
     sys.exit(0 if args[-1] in enabled else 1)
 # the re-balance pair answers only for its own unit names (a wrong name reads nothing, like an unknown unit)
+if args[:1] == ["show"] and args[-1] == "strih-obs.service" and "ActiveEnterTimestampMonotonic" in args:
+    print(os.environ.get("FAKE_OBS_SHOW", "ActiveState=inactive\nActiveEnterTimestampMonotonic=0"))
+    sys.exit(0)
+if args[:1] == ["show"] and args[-1] == "strih-nic-irq-rebalance-obs.timer":
+    print(os.environ.get("FAKE_OBS_TIMER_SHOW", "ActiveState=inactive\nSubState=dead\nActiveEnterTimestampMonotonic=0"))
+    sys.exit(0)
 if args[:1] == ["show"] and "ExecMainStartTimestampMonotonic" in args:
     if args[-1] == "strih-nic-irq-rebalance.service":
         print(os.environ.get("FAKE_REBALANCE_SHOW", "ExecMainStartTimestampMonotonic=0\nResult=success\nExecMainStatus=0"))
@@ -370,10 +496,16 @@ def _install_env(tmp_path):
     bin_dir.mkdir()
     _exe(bin_dir / "systemctl", FAKE_SYSTEMCTL)
     _exe(bin_dir / "udevadm", '#!/bin/sh\necho "udevadm $*" >> "$FAKE_SYSTEMCTL_LOG"\n')
+    # the OBS-start re-place trigger: visudo checks the sudoers line, sudo -n -l grades it (no log line in
+    # the systemctl log, so the existing call lists stay exact)
+    _exe(bin_dir / "visudo", '#!/bin/sh\necho "visudo $*" >> "$FAKE_SUDO_LOG"\nexit "${FAKE_VISUDO_RC:-0}"\n')
+    _exe(bin_dir / "sudo", '#!/bin/sh\necho "sudo $*" >> "$FAKE_SUDO_LOG"\nexit "${FAKE_SUDO_RC:-0}"\n')
     (tmp_path / "systemctl.log").write_text("")
+    (tmp_path / "sudo.log").write_text("")
     env = {"STRIH_HOUSEKEEPING_ROOT": str(root), "STRIH_HOUSEKEEPING_OWNER": "%s:%s" % (ME, MYGRP),
            "STRIH_SESSION_APPS_EUID": "1000", "FAKE_SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"),
            "FAKE_SYSTEMCTL_ENABLED": str(tmp_path / "systemctl.enabled"),
+           "FAKE_SUDO_LOG": str(tmp_path / "sudo.log"),
            "FAKE_ACTIVE": "rustdesk.service strih-display-watch.service"}
     return root, home, bin_dir, env
 
@@ -449,21 +581,24 @@ def test_a_box_with_none_removes_ours_and_keeps_a_foreign_file(tmp_path):
     assert not (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance.timer").exists()
     assert not (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance.service").exists()
     calls = (tmp_path / "systemctl.log").read_text().splitlines()
-    assert calls == ["disable --now strih-nic-irq-rebalance.timer", "daemon-reload",
+    assert not (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance-obs.timer").exists()
+    assert not (root / "etc" / "sudoers.d" / "strih-nic-irq-rebalance-obs").exists()
+    assert calls == ["stop strih-nic-irq-rebalance-obs.timer", "disable --now strih-nic-irq-rebalance.timer", "daemon-reload",
                      "reset-failed strih-nic-irq-rebalance.service",
                      "daemon-reload", "--user daemon-reload"], calls
 
 
 def test_a_none_box_with_nothing_of_ours_is_silent(tmp_path):
     root, home, bin_dir, env = _install_env(tmp_path)
-    r = _run('strih_box_load strih-pp; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    env.update(_box_with(tmp_path, "none"))   # issue 1553: no deployed box is none any more
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
     assert r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.stdout, r.stderr)
     assert (tmp_path / "systemctl.log").read_text() == ""
 
 
 # --- verify: item 16's housekeeping rows -----------------------------------------------------------------
 
-def _grade_env(tmp_path, irq_aff=("1", "0", "1"), combined=2, nice=10, cpus="0", running=True,
+def _grade_env(tmp_path, irq_aff=("1", "1", "1"), combined=2, nice=10, cpus="0", running=True,
                sampler_cpus="2-15", sampler_nice=10):
     tmp_path.mkdir(parents=True, exist_ok=True)
     sysr, irq_dir, bin_dir, eenv = _pcie_box(tmp_path, combined=combined, irqs=(134, 135, 136))
@@ -498,12 +633,14 @@ def _grade_env(tmp_path, irq_aff=("1", "0", "1"), combined=2, nice=10, cpus="0",
     (stats / "rx_dropped").write_text("0\n")
     env.update({"STRIH_HOUSEKEEPING_SYS": str(sysr), "STRIH_HOUSEKEEPING_PROC": str(proc), "STRIH_NIC_IFACE": "enp7s0",
                 "STRIH_HOUSEKEEPING_IPADDR": "", "STRIH_HOUSEKEEPING_SAMPLE_S": "0",
-                "FAKE_REBALANCE_SHOW": REBALANCE_RAN_OK})
+                "FAKE_REBALANCE_SHOW": REBALANCE_RAN_OK, "FAKE_OBS_SHOW": OBS_STARTED})
     return home, "%s:%s" % (bin_dir, sbin), env
 
 
 # `systemctl show -p ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus` of the re-balance service
 REBALANCE_RAN_OK = "Result=success\nExecMainStartTimestampMonotonic=301204512\nExecMainStatus=0"
+# `systemctl --user show -p ActiveState -p ActiveEnterTimestampMonotonic strih-obs.service`
+OBS_STARTED = "ActiveState=active\nActiveEnterTimestampMonotonic=120000000"
 
 
 def _grade(tmp_path, **kw):
@@ -529,12 +666,12 @@ def test_a_placed_box_passes_every_row(tmp_path):
                for r in rows), out
     assert "NOTE (hk-rx) enp7s0: rx_missed_errors +0, rx_dropped +0 over 0 s, total missed 7 (report-only)" in out
     assert "PASS (hk-cpus) housekeeping CPUs 0-1 = online 0-15 minus the OBS mask 2-15: rig NIC IRQs on 0-1, tasks on 0" in out
-    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->0 136->1" in out
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->1 136->1" in out
     assert "PASS (hk-slice) rig-background.slice: AllowedCPUs 0, off the IRQ-only CPUs 1" in out
     assert "PASS (hk-unit) sampler: pid 4003 runs on CPUs 2-15 at nice 10" in out
     for tag in ("(hk-cpus)", "(hk-rss)", "(hk-irq)", "(hk-hooks)", "(hk-sysctl)", "(hk-slice)", "(hk-unit) rustdesk.service",
                 "(hk-unit) strih-display-watch.service", "(hk-unit) launcher", "(hk-softnet)", "(hk-unit) sampler",
-                "(hk-rebalance)"):
+                "(hk-rebalance)", "(hk-obs-rebalance)"):
         assert any(tag in r for r in rows), (tag, out)
 
 
@@ -593,7 +730,7 @@ def test_verify_notes_a_driver_without_channel_control_and_skips_an_unrequested_
     (msi / "143").write_text("msix\n")
     r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
     assert "NOTE (hk-rss) enp7s0: RSS channel count not readable (the driver offers no channel control): queues left alone" in r.stdout, r.stdout
-    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->0 136->1" in r.stdout, r.stdout
+    assert "PASS (hk-irq) enp7s0: every IRQ on one housekeeping CPU of 0-1: 134->1 135->1 136->1" in r.stdout, r.stdout
     assert "FAIL" not in r.stdout, r.stdout
 
 
@@ -794,7 +931,7 @@ def test_a_file_with_our_header_on_line_2_is_ours_only_after_a_shebang(tmp_path)
 
 # --- the split (design 7116063669): the IRQ CPU and the task CPUs from the one fact ---------------------
 
-def test_the_irqs_get_the_whole_set_and_the_tasks_its_first_cpu():
+def test_the_irqs_get_the_whole_set_and_the_tasks_its_first_cpu(tmp_path):
     # design 7119179275 (supersedes the CPU-1-alone split of 7116063669)
     for hk, irq, task in (("0-1", "0-1", "0"), ("0,1", "0-1", "0"), ("3", "3", "3"), ("0-1,8", "0-1,8", "0"),
                           ("0-3", "0-3", "0"), ("none", "none", "none")):
@@ -804,6 +941,9 @@ def test_the_irqs_get_the_whole_set_and_the_tasks_its_first_cpu():
     r = _run('strih_box_load strih-snv; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
     assert r.stdout.split() == ["0-1", "0"], r.stdout
     r = _run('strih_box_load strih-pp; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus')
+    assert r.stdout.split() == ["0-1,8-9", "0"], r.stdout
+    r = _run('strih_box_load strih-snv; strih_housekeeping_irq_cpus; strih_housekeeping_task_cpus',
+             env=_box_with(tmp_path, "none"))
     assert r.stdout.split() == ["none", "none"], r.stdout
     for badv in ("a", "1-0", ""):
         assert _run('strih_housekeeping_irq_cpus "$1"', badv).returncode != 0, badv
@@ -838,7 +978,8 @@ def test_the_sampler_runs_on_the_obs_mask_at_nice_10_on_a_housekeeping_box(tmp_p
            "STRIH_PROGRAM_AUDIO_SYSFS": str(tmp_path / "nosys")}
     r = _run('strih_box_load strih-snv; strih_program_audio_cpus; echo; strih_program_audio_nice', env=env)
     assert r.returncode == 0 and r.stdout.split() == ["2-15", "10"], (r.stdout, r.stderr)
-    r = _run('strih_box_load strih-pp; strih_program_audio_cpus; echo; strih_program_audio_nice; echo END', env=env)
+    r = _run('strih_box_load strih-snv; strih_program_audio_cpus; echo; strih_program_audio_nice; echo END',
+             env=dict(env, **_box_with(tmp_path, "none")))
     assert r.returncode == 0 and r.stdout.split() == ["0-1", "END"], (r.stdout, r.stderr)
     r = _run('strih_box_load strih-snv; strih_program_audio_unit_text "$1" "$(strih_program_audio_cpus)" '
              '"$(strih_program_audio_nice)"', str(REPO), env=env)
@@ -1074,3 +1215,200 @@ def test_none_never_reset_fails_a_foreign_service_beside_our_timer(tmp_path):
     assert svc.exists() and "not ours" in r.stderr
     log = (tmp_path / "systemctl.log").read_text()
     assert "disable --now strih-nic-irq-rebalance.timer" in log and "reset-failed" not in log
+
+
+# --- the re-place under load after every OBS start (issuecomment-7182637589, design 7182688018) ----------
+
+OBS_TIMER = REPO / "systemd" / "strih-nic-irq-rebalance-obs.timer"
+SUDO_CMD = "/usr/bin/systemctl restart --no-block strih-nic-irq-rebalance-obs.timer"
+
+
+def test_the_obs_start_timer_is_the_lib_text_byte_for_byte():
+    r = _run("strih_housekeeping_rebalance_obs_text")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == OBS_TIMER.read_text()
+
+
+def test_the_obs_start_timer_runs_the_same_service_once_180_s_after_it_is_armed():
+    text = OBS_TIMER.read_text()
+    lines = text.splitlines()
+    assert lines[0].startswith("# camera-box issue 1425")
+    assert "OnActiveSec=180s" in lines and "Unit=strih-nic-irq-rebalance.service" in lines
+    # armed only by the launcher (restart = re-arm): no [Install], never periodic, no catch-up
+    assert "[Install]" not in lines
+    for banned in ("OnBootSec", "OnUnitActiveSec", "OnUnitInactiveSec", "OnCalendar", "Persistent"):
+        assert banned not in text, banned
+    assert "strih-snv" not in text
+
+
+def test_setup_writes_the_obs_start_timer_and_the_one_sudoers_line(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert (root / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance-obs.timer").read_text() == OBS_TIMER.read_text()
+    sudoers = root / "etc" / "sudoers.d" / "strih-nic-irq-rebalance-obs"
+    lines = sudoers.read_text().splitlines()
+    assert lines[0].startswith("# camera-box issue 1425")
+    assert lines[1:] == ["%s ALL=(root) NOPASSWD: %s" % (ME, SUDO_CMD)]
+    assert oct(sudoers.stat().st_mode & 0o777) == "0o440"
+    assert [x for x in (tmp_path / "sudo.log").read_text().splitlines() if x.startswith("visudo -cf ")], \
+        "the sudoers line is checked by visudo before the write"
+    # the timer is never started or enabled by setup: only the launcher arms it
+    calls = (tmp_path / "systemctl.log").read_text().splitlines()
+    assert not [c for c in calls if "rebalance-obs" in c], calls
+
+
+def test_a_sudoers_line_visudo_refuses_is_never_written(tmp_path):
+    root, home, bin_dir, env = _install_env(tmp_path)
+    env["FAKE_VISUDO_RC"] = "1"
+    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
+    assert r.returncode == 1
+    assert not (root / "etc" / "sudoers.d" / "strih-nic-irq-rebalance-obs").exists()
+    assert "does not parse" in r.stderr + r.stdout
+
+
+def _arm(tmp_path, content, timer=True, rc=0):
+    bin_dir = tmp_path / "b"
+    bin_dir.mkdir()
+    log = tmp_path / "arm.log"
+    log.write_text("")
+    _exe(bin_dir / "sudo", '#!/bin/sh\necho "sudo $*" >> "%s"\nexit %d\n' % (log, rc))
+    f = tmp_path / "hk.conf"
+    if content is not None:
+        f.write_text(content)
+    t = tmp_path / "strih-nic-irq-rebalance-obs.timer"
+    if timer:
+        t.write_text("[Timer]\n")
+    r = _run('strih_launcher_irq_rebalance_arm "$1" "$2"', str(f), str(t), sources=(LAUNCHER,), path_prefix=bin_dir)
+    assert r.returncode == 0, r.stderr
+    return r.stdout, log.read_text().splitlines()
+
+
+def test_the_launcher_arms_the_re_place_180_s_after_this_obs_start(tmp_path):
+    out, calls = _arm(tmp_path, "0\n")
+    assert calls == ["sudo -n " + SUDO_CMD]
+    assert "re-placed under load 180 s after this OBS start" in out
+
+
+def test_the_launcher_arms_nothing_without_housekeeping_cpus_or_the_timer(tmp_path):
+    for i, (content, timer) in enumerate(((None, True), ("none\n", True), ("", True), ("0\n", False))):
+        sub = tmp_path / ("c%d" % i)
+        sub.mkdir()
+        out, calls = _arm(sub, content, timer=timer)
+        assert calls == [] and out == "", (content, timer)
+
+
+def test_a_refused_sudo_is_one_warn_never_fatal(tmp_path):
+    out, calls = _arm(tmp_path, "0\n", rc=1)
+    assert calls == ["sudo -n " + SUDO_CMD]
+    assert out.startswith("WARN issue 1425: could not arm")
+
+
+def test_the_launcher_arms_the_re_place_after_its_own_move_before_the_shutdown_watch():
+    s = LAUNCHER.read_text()
+    place = s.index('strih_launcher_housekeeping_place "${STRIH_HOUSEKEEPING_CPUS_FILE:-/etc/strih-housekeeping-cpus.conf}" "$$"')
+    arm = s.index('strih_launcher_irq_rebalance_arm "${STRIH_HOUSEKEEPING_CPUS_FILE:-/etc/strih-housekeeping-cpus.conf}"')
+    assert s.count("strih_launcher_irq_rebalance_arm \"") == 1
+    assert place < arm < s.index('strih_obs_shutdown_watch "$OBS_PID"')
+
+
+def _obs_rows(tmp_path, **env_over):
+    home, path, env = _grade_env(tmp_path)
+    env.update(env_over)
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    assert r.returncode == 0, r.stderr
+    return [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x], env
+
+
+def test_verify_passes_a_re_place_that_ran_after_the_current_obs_start(tmp_path):
+    rows, env = _obs_rows(tmp_path)
+    assert rows == ["PASS (hk-obs-rebalance) the IRQ placement ran 181 s after the current "
+                    "OBS start: success (exit 0)"], rows
+    assert "sudo -n -l " + SUDO_CMD in pathlib.Path(env["FAKE_SUDO_LOG"]).read_text()
+
+
+def test_verify_notes_obs_down(tmp_path):
+    rows, _ = _obs_rows(tmp_path, FAKE_OBS_SHOW="ActiveState=inactive\nActiveEnterTimestampMonotonic=0")
+    assert len(rows) == 1 and rows[0].startswith("NOTE (hk-obs-rebalance) strih-obs.service is not running"), rows
+
+
+def test_verify_notes_a_re_place_armed_at_this_obs_start_that_has_not_fired_yet(tmp_path):
+    for i, sub in enumerate(("waiting", "running")):
+        rows, _ = _obs_rows(tmp_path / str(i), FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=400000000",
+                            FAKE_OBS_TIMER_SHOW="ActiveState=active\nSubState=%s\nActiveEnterTimestampMonotonic=401000000" % sub)
+        assert len(rows) == 1 and rows[0].startswith("NOTE (hk-obs-rebalance) armed at the current OBS start"), rows
+
+
+def _old_timer_file(env):
+    # the timer file predates the OBS start (btime 1700000000 + 400 s): installed before it
+    f = pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance-obs.timer"
+    os.utime(f, (1_700_000_100, 1_700_000_100))
+    (pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"]) / "stat").write_text("cpu  1 2 3\nbtime 1700000000\nprocesses 9\n")
+
+
+def test_verify_fails_an_obs_start_whose_re_place_was_never_armed(tmp_path):
+    # the run at 301 s predates the OBS start at 400 s, and the timer was armed by an EARLIER start (elapsed)
+    home, path, env = _grade_env(tmp_path)
+    _old_timer_file(env)
+    env.update(FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=400000000",
+               FAKE_OBS_TIMER_SHOW="ActiveState=active\nSubState=elapsed\nActiveEnterTimestampMonotonic=100000000")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x]
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) strih-obs.service started at 400 s but the "
+                                                 "re-place was never armed"), rows
+
+
+def test_verify_fails_a_failed_re_place_after_the_obs_start(tmp_path):
+    rows, _ = _obs_rows(tmp_path, FAKE_REBALANCE_SHOW="ExecMainStartTimestampMonotonic=301204512\nResult=exit-code\nExecMainStatus=1")
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) the re-place after the current OBS start "
+                                                 "failed: exit-code (exit 1)"), rows
+
+
+def test_verify_fails_a_drifted_timer_or_a_sudo_rule_that_does_not_allow_the_arm(tmp_path):
+    home, path, env = _grade_env(tmp_path / "drift")
+    f = pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "systemd" / "system" / "strih-nic-irq-rebalance-obs.timer"
+    f.write_text(f.read_text().replace("180s", "30s"))
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x]
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) ") and "drifted" in rows[0], rows
+    rows, _ = _obs_rows(tmp_path / "sudo", FAKE_SUDO_RC="1")
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) sudo does not allow"), rows
+
+
+def test_verify_fails_an_unreadable_obs_start(tmp_path):
+    rows, _ = _obs_rows(tmp_path, FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=12x")
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) cannot read"), rows
+
+
+def test_verify_notes_a_timer_installed_after_the_current_obs_start(tmp_path):
+    # review round 1: setup on a running OBS armed nothing for that start; the next start is graded
+    home, path, env = _grade_env(tmp_path)
+    # the OBS start = btime 1700000000 + 400 s; the timer file was written now, long after it
+    (pathlib.Path(env["STRIH_HOUSEKEEPING_PROC"]) / "stat").write_text("cpu  1 2 3\nbtime 1700000000\nprocesses 9\n")
+    env["FAKE_OBS_SHOW"] = "ActiveState=active\nActiveEnterTimestampMonotonic=400000000"
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x]
+    assert len(rows) == 1 and rows[0].startswith("NOTE (hk-obs-rebalance) strih-nic-irq-rebalance-obs.timer was "
+                                                 "installed after the current OBS start"), rows
+
+
+def test_verify_notes_a_placement_still_running(tmp_path):
+    rows, _ = _obs_rows(tmp_path, FAKE_REBALANCE_SHOW="ExecMainStartTimestampMonotonic=301204512\nResult=exit-code\n"
+                                                      "ExecMainStatus=1\nActiveState=activating")
+    assert rows == ["NOTE (hk-obs-rebalance) the IRQ placement is running now (181 s after the current OBS start)"], rows
+
+
+def test_verify_fails_a_timer_that_fired_after_the_obs_start_without_the_service(tmp_path):
+    home, path, env = _grade_env(tmp_path)
+    _old_timer_file(env)
+    env.update(FAKE_OBS_SHOW="ActiveState=active\nActiveEnterTimestampMonotonic=400000000",
+               FAKE_OBS_TIMER_SHOW="ActiveState=active\nSubState=elapsed\nActiveEnterTimestampMonotonic=401000000")
+    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
+    rows = [x for x in r.stdout.splitlines() if "(hk-obs-rebalance)" in x]
+    assert len(rows) == 1 and rows[0].startswith("FAIL (hk-obs-rebalance) strih-nic-irq-rebalance-obs.timer fired after "
+                                                 "the current OBS start but strih-nic-irq-rebalance.service did not run"), rows
+
+
+def test_verify_as_root_asks_sudo_for_the_operator(tmp_path):
+    rows, env = _obs_rows(tmp_path, STRIH_SESSION_APPS_EUID="0")
+    assert "sudo -n -U %s -l %s" % (ME, SUDO_CMD) in pathlib.Path(env["FAKE_SUDO_LOG"]).read_text()

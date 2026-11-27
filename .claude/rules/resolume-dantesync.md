@@ -120,3 +120,7 @@ manual `Start-Service`. The emitted apply program therefore uses `Stop-Service -
 `Start-Service` (never `Restart-Service`). After ANY dantesync restart on this box expect `mode=ACQ` for 1–3 min
 before PTP re-locks — and remember a PTP-less LAN (rig off, GM silent) keeps it in ACQ legitimately; check `pktmon`
 counters for 224.0.1.129 before suspecting the box (dantesync#112 covers the frozen-LOCK failure on the OTHER side).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- RESOLUME-SNV dantesync maintenance (the traveling CG box's dead NTP phase while strih is off + phase_slew off: the PURE `scripts/dantesync_config_patch.py` clock-policy (1.9.0 `clock_discipline=ptp_phase_lock` default, `--legacy-phase-slew` for a pre-1.9.0 node)/ntp_server-parametrised patcher that NEVER touches ntp_server_mode + its EMIT-only PS apply program; `scripts/dantesync-maintenance-gate.sh` REPORT-ONLY tier reusing the clock-offset-guard parsers + `obs_fleet_is_home`, SKIP-when-away never a false red, never in `[0/8]`; resolume in the fleet-upgrade `--win` traveling path via `dantesync_resolume_win_spec`/`dantesync_skip_away_traveling`; the supervisor RUNBOOK + strih-OFF/ON acceptance; the ntp_server repoint target is deferred to dantesync#111; issue 1297) → `.claude/rules/resolume-dantesync.md` (auto-loads on its `paths:`)

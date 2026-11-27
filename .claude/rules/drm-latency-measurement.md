@@ -97,3 +97,7 @@ excludes a None-ts frame in lock-step.
   both lived there) — pin it with static-text anchors + extra manual rigor, and expect the first rig
   campaign to be its first real exercise. `run --records <json>` (produced by `--out-records`) replays
   the pure path with no ffmpeg/cv2.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- DRM-latency measurement tooling (#1152 M3: the cam2-optical-differential capture+decode; the ffmpeg `-use_wallclock_as_timestamps 1` REQUIRES `-copyts` or the epoch rebases to ~0 = garbage; `-fps_mode` is an OUTPUT opt after `-i`; PLAN-default pure-builder orchestrator that NEVER writes drm-output.json; DORMANT−ENABLED delta cancels the grabber offset; reuse parse_payload/tick_map + qr_screenshot_check decoder) → `.claude/rules/drm-latency-measurement.md` (auto-loads on its `paths:`)

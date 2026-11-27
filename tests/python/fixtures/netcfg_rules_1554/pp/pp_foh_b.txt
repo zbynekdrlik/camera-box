@@ -1,0 +1,198 @@
+=== identity
+  name: PP-SW-Foh-B
+=== routerboard
+       routerboard: yes          
+             model: CRS310-8G+2S+
+     serial-number: HN30BPY3A49  
+     firmware-type: dx3230L      
+  minimum-firmware: 7.21.5       
+  current-firmware: 7.25.1       
+  upgrade-firmware: 7.25.2       
+
+=== bridge-monitor
+1
+                     ;;; defconf                    
+                  state: enabled                    
+    current-mac-address: 78:9A:18:42:EA:DD          
+              bridge-id: 0x6000.78:9A:18:42:EA:DD   
+            root-bridge: no                         
+         root-bridge-id: 0x1000.04:F4:1C:F1:6D:0D   
+         root-path-cost: 4000                       
+              root-port: sfp-sfpplus1::trunk::foh::a
+             port-count: 10                         
+  designated-port-count: 7                          
+           fast-forward: no                         
+       multicast-router: no                         
+           igmp-querier: none                       
+            mld-querier: none                       
+      declared-vlan-ids: 70                         
+                         89                         
+                         100                        
+                         200                        
+    registered-vlan-ids: 70                         
+                         89                         
+
+
+=== bridge-port
+Flags: I - INACTIVE; H - HW-OFFLOAD
+0   H interface=ether1::89+70::stream bridge=bridge priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89 frame-types=admit-all
+      ingress-filtering=yes unknown-unicast-flood=yes
+      unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no
+      bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no trusted-arp=no
+      mvrp-registrar-state=normal mvrp-applicant-state=non-participant
+      multicast-router=temporary-query fast-leave=no
+ 
+1   H interface=ether2::89+70::resolume bridge=bridge priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89 frame-types=admit-all
+      ingress-filtering=yes unknown-unicast-flood=yes
+      unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no
+      bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no trusted-arp=no
+      mvrp-registrar-state=normal mvrp-applicant-state=non-participant
+      multicast-router=temporary-query fast-leave=no
+ 
+2   H interface=ether3::89::cam1 bridge=bridge priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+3   H interface=ether4::89::cam2 bridge=bridge priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+4   H interface=ether5::89::cam6 bridge=bridge priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+5   H interface=ether6::89::cam7 bridge=bridge priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+6  IH interface=ether7::89::volny bridge=bridge priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+7  IH interface=ether8::89::volny bridge=bridge priority=0x80 edge=auto
+      point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no
+      restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-only-untagged-and-priority-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=non-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+8   H ;;; TRUNK do FOH-A
+      interface=sfp-sfpplus1::trunk::foh::a bridge=bridge priority=0x80
+      edge=auto point-to-point=auto learn=auto horizon=none hw=yes
+      auto-isolate=no restricted-role=no restricted-tcn=no pvid=1
+      frame-types=admit-only-vlan-tagged ingress-filtering=yes
+      unknown-unicast-flood=yes unknown-multicast-flood=yes broadcast-flood=yes
+      tag-stacking=no bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no
+      trusted-arp=no mvrp-registrar-state=normal
+      mvrp-applicant-state=normal-participant multicast-router=temporary-query
+      fast-leave=no
+ 
+9   H ;;; L+D strih
+      interface=sfp-sfpplus2::89+70::strih bridge=bridge priority=0x80
+      edge=auto point-to-point=auto learn=auto horizon=none hw=yes
+      auto-isolate=no restricted-role=no restricted-tcn=no pvid=89
+      frame-types=admit-all ingress-filtering=yes unknown-unicast-flood=yes
+      unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no
+      bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no trusted-arp=no
+      mvrp-registrar-state=normal mvrp-applicant-state=non-participant
+      multicast-router=temporary-query fast-leave=no
+
+=== port-monitor
+                      ;;;                                                                                                                                                                                           TRUNK do FOH-A              L+D strih
+               interface: ether1::89+70::stream    ether2::89+70::resolume  ether3::89::cam1         ether4::89::cam2         ether5::89::cam6         ether6::89::cam7         ether7::89::volny ether8::89::volny sfp-sfpplus1::trunk::foh::a sfp-sfpplus2::89+70::strih
+                  status: in-bridge                in-bridge                in-bridge                in-bridge                in-bridge                in-bridge                inactive          inactive          in-bridge                   in-bridge
+                 port-id: 0x80.1                   0x80.2                   0x80.3                   0x80.4                   0x80.5                   0x80.6                                                       0x80.9                      0x80.10
+                    role: designated-port          designated-port          designated-port          designated-port          designated-port          designated-port                                              root-port                   designated-port
+               edge-port: yes                      yes                      yes                      yes                      yes                      yes                                                          no                          yes
+     edge-port-discovery: yes                      yes                      yes                      yes                      yes                      yes                                                          yes                         yes
+     point-to-point-port: yes                      yes                      yes                      yes                      yes                      yes                                                          yes                         yes
+            external-fdb: no                       no                       no                       no                       no                       no                                                           no                          no
+            sending-rstp: yes                      yes                      yes                      yes                      yes                      yes                                                          yes                         yes
+                learning: yes                      yes                      yes                      yes                      yes                      yes                                                          yes                         yes
+              forwarding: yes                      yes                      yes                      yes                      yes                      yes                                                          yes                         yes
+        actual-path-cost: 8000                     8000                     20000                    20000                    20000                    20000                                                        2000                        2000
+          root-path-cost:                                                                                                                                                                                           4000
+    designated-bridge-id: 0x6000.78:9A:18:42:EA:DD 0x6000.78:9A:18:42:EA:DD 0x6000.78:9A:18:42:EA:DD 0x6000.78:9A:18:42:EA:DD 0x6000.78:9A:18:42:EA:DD 0x6000.78:9A:18:42:EA:DD                                     0x6000.78:9A:18:42:EA:0F    0x6000.78:9A:18:42:EA:DD
+         designated-cost: 4000                     4000                     4000                     4000                     4000                     4000                                                         2000                        4000
+      designated-port-id: 0x80.1                   0x80.2                   0x80.3                   0x80.4                   0x80.5                   0x80.6                                                       0x80.9                      0x80.10
+  designated-message-age: 2s                       2s                       2s                       2s                       2s                       2s                                                           1s                          2s
+      designated-max-age: 20s                      20s                      20s                      20s                      20s                      20s                                                          20s                         20s
+              tx-rx-bpdu: 3530/0                   3521/0                   3689/0                   3670/0                   3641/0                   3636/0                                                       3/3142                      3792/0
+     discard-transitions: 0                        0                        0                        0                        0                        0                                                            0                           0
+     forward-transitions: 1                        1                        1                        1                        1                        1                                                            1                           1
+                tx-rx-tc: 0/0                      0/0                      0/0                      0/0                      0/0                      0/0                                                          2/6                         0/0
+        topology-changes: 0                        0                        0                        0                        0                        0                                                            1                           0
+    last-topology-change:                                                                                                                                                                                           1h44m40s
+        multicast-router: no                       no                       no                       no                       no                       no                                                           no                          no
+        hw-offload-group: switch1                  switch1                  switch1                  switch1                  switch1                  switch1                                                      switch1                     switch1
+       declared-vlan-ids:                                                                                                                                                                                           70
+                                                                                                                                                                                                                    89
+     registered-vlan-ids: 70                       70                       89                       89                       89                       89                                                           70                          70
+                          89                       89                                                                                                                                                               89                          89
+                                                                                                                                                                                                                    100
+                                                                                                                                                                                                                    200
+
+
+=== export
+/interface ethernet switch qos profile add dscp=56 name=dante-ptp pcp=7 traffic-class=7
+/interface ethernet switch qos profile add dscp=46 name=dante-audio pcp=6 traffic-class=6
+/interface ethernet switch qos port set ether1::89+70::stream trust-l3=keep
+/interface ethernet switch qos port set ether2::89+70::resolume trust-l3=keep
+/interface ethernet switch qos port set ether3::89::cam1 trust-l3=keep
+/interface ethernet switch qos port set ether4::89::cam2 trust-l3=keep
+/interface ethernet switch qos port set ether5::89::cam6 trust-l3=keep
+/interface ethernet switch qos port set ether6::89::cam7 trust-l3=keep
+/interface ethernet switch qos port set ether7::89::volny trust-l3=keep
+/interface ethernet switch qos port set ether8::89::volny trust-l3=keep
+/interface ethernet switch qos port set sfp-sfpplus1::trunk::foh::a trust-l3=keep
+/interface ethernet switch qos port set sfp-sfpplus2::89+70::strih trust-l3=keep
+/interface bridge add auto-mac=no comment=defconf frame-types=admit-only-vlan-tagged igmp-snooping=yes mvrp=yes name=bridge priority=0x6000 vlan-filtering=yes
+/interface ethernet switch set switch1 l3-hw-offloading=yes qos-hw-offloading=yes
+/interface bridge port add bridge=bridge interface=ether1::89+70::stream mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge interface=ether2::89+70::resolume mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge frame-types=admit-only-untagged-and-priority-tagged interface=ether3::89::cam1 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge frame-types=admit-only-untagged-and-priority-tagged interface=ether4::89::cam2 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge frame-types=admit-only-untagged-and-priority-tagged interface=ether5::89::cam6 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge frame-types=admit-only-untagged-and-priority-tagged interface=ether6::89::cam7 mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge frame-types=admit-only-untagged-and-priority-tagged interface=ether7::89::volny mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge frame-types=admit-only-untagged-and-priority-tagged interface=ether8::89::volny mvrp-applicant-state=non-participant pvid=89
+/interface bridge port add bridge=bridge comment='TRUNK do FOH-A' frame-types=admit-only-vlan-tagged interface=sfp-sfpplus1::trunk::foh::a
+/interface bridge port add bridge=bridge comment='L+D strih' interface=sfp-sfpplus2::89+70::strih mvrp-applicant-state=non-participant pvid=89
+=== end

@@ -7,14 +7,76 @@ paths:
   - "systemd/strih-nic-irq-rebalance.*"
   - "scripts/strih-obs-start.sh"
   - "tests/python/test_strih_housekeeping_1425.py"
+  - "tests/python/test_strih_nic_irq_task_cpu_1425.py"
 ---
 
 # Housekeeping off the OBS CPUs on a strih box (issue 1425, design 7106973291)
 
-OBS runs on the CPUs in `/etc/strih-isolated-cpus.conf` (strih-snv 2-15). Everything else that wakes up
-often belongs on the rest: the box fact `STRIH_HOUSEKEEPING_CPUS` (strih-snv `0-1`, every other box `none`
-until measured). It must equal online minus the OBS mask (`obs_box_background_cpus`); verify `(hk-cpus)`
-FAILs otherwise.
+OBS runs on the CPUs in `/etc/strih-isolated-cpus.conf` (strih-snv 4-15). Everything else that wakes up
+often belongs on the rest: the box fact `STRIH_HOUSEKEEPING_CPUS` (strih-snv `0-3`, strih-pp `0-1,8-9`,
+stream-pp `0-1`, stream-snv `0-1,12-19`). It must equal online minus the OBS mask (`obs_box_background_cpus`);
+verify `(hk-cpus)` FAILs otherwise.
+
+## The OBS mask follows the fact (ROZHODNUTE 7183885100, 26.11.2026)
+
+Two CPUs could not carry strih-snv's atlantic RX softirq (9 MSI vectors, ~105k IRQ/s under the E2E load):
+any rate-based placement went stale when flows re-hashed (CPU 1 49 % soft, time_squeeze ~85-145/s,
+InDroppedDma +15k, Dante holes). So the fact now DRIVES the mask:
+- `obs_box_cpu_affinity BOX [HOUSEKEEPING]` (shared baseline, step 11): with the 2nd argument the mask =
+  `obs_box_obs_mask_from_housekeeping PLAN ONLINE HK` (`obs-box-background.sh`, pure): `none` = the
+  topology plan; else HK must be a cpulist inside online (`/sys/devices/system/cpu/online`, seam
+  `OBS_BOX_ONLINE_CPUS`) that leaves a non-empty mask, and when online minus HK is the plan's own CPU set the
+  PLAN STRING is written byte for byte, otherwise the compressed complement (strih-snv `0-3` -> `4-15`).
+  An argument passed EMPTY (setup-strih's `"$(strih_lx_housekeeping_cpus)"` when the fact cannot be read)
+  fails; imag passes none and stays topology-only.
+- **Nothing else moves:** stream-pp and stream-snv write exactly today's file (the plan string byte for
+  byte); `tests/python/test_obs_mask_from_housekeeping_1425.py` proves it over each box's fact + topology.
+  strih-pp moved with the IRQ-only placement (below): its old `1,9,2,10,...` plan file becomes `2-7,10-15`.
+- **Consumers on strih-snv** (all derive, none changed): the IRQ CPUs 0-3 (the oneshot's
+  `@STRIH_HOUSEKEEPING_IRQ_CPUS@`, the 1361 golden's `IRQ_CPUS` default), RSS count 4 (atlantic ignores
+  it), the task CPU 0 (rustdesk, the display watch, the launcher file, the slice), the slice exclude 1-3,
+  the sampler's `CPUAffinity=4-15`, the on-box decode's `taskset -c 4-15`.
+- **Whole cores (supervisor decision on the lane review's SMT finding):** the ruling first named 0-2 /
+  3-15, but strih-snv's SMT pairs are adjacent, so CPU 2 would share a physical core with OBS CPU 3 and
+  its RX softirq would run beside an OBS thread's sibling (the issue-1387 SMT fence grades only the
+  background slice, so no verify row would see it). The set is therefore `0-3`: two whole cores, OBS
+  on 4-15 (six whole cores). A housekeeping set must be whole SMT pairs on a box with SMT, and at least
+  two of them on a strih box (`test_every_strih_housekeeping_set_is_two_or_more_whole_smt_cores`).
+- **strih-pp, the same rule on N,N+8 numbering (26.11.2026):** its fact was `0,8` (one core). Since the
+  IRQ-only placement that left CPU 8 alone for both ixgbe RX queues (4 PP cameras over JPEG XS + the
+  program). It is now `0-1,8-9` (cores 0 and 1): task CPU 0, IRQ-only CPUs `1,8-9` (placement + slice
+  exclude), IRQ CPUs `0-1,8-9`, RSS count 4 (was 2), OBS mask `2-7,10-15` (12 threads, was 14). The
+  program-audio sampler is off there (`STRIH_PROGRAM_AUDIO_SAMPLER=off`), so no sampler mask moves.
+- The mechanics tests of `test_strih_housekeeping_1425.py` model a two-CPU set: they run on a copy of the
+  fact files with strih-snv at 0-1 (`SCENARIO_BOXES`).
+
+**Deploy (supervisor), strih-pp, off-production -- ONE live link drop is implied:** ixgbe HAS channel control,
+so the first run of the oneshot script after setup does `ethtool -L <nic> combined 4` (2 -> 4) = a ring re-init
+= the rig link drops once (the script logs `carrier_changes A -> B`). The udev rule (count 4 at `add`) only
+covers the NEXT boot. Every live trigger before that runs the -L: the NM `up` hook, the 5-min boot timer, the
+OBS-start re-balance 180 s after an OBS start, a hand restart. So never leave it to the next OBS start (a
+production OBS restart would then drop the link 180 s later): stop OBS, `sudo ./scripts/setup-strih.sh --box
+strih-pp` (step 11 writes `/etc/strih-isolated-cpus.conf` = `2-7,10-15`, the slice keeps `AllowedCPUs=0` with
+exclude `1,8-9`, the oneshot script + udev rule for 0-1,8-9 / count 4), then deliberately `sudo systemctl
+restart strih-nic-irq-affinity.service` (the one drop, then the IRQs spread over 1,8-9; or reboot instead: the
+udev rule sets 4 at `add`, before the link is up), then start OBS (`taskset -cp $(pgrep -xo obs)` =
+2-7,10-15). Read back `ethtool -l <nic>` combined 4, each rig-NIC IRQ's `smp_affinity_list` in 1,8-9, `mpstat
+-P 1,8,9 10 1` %soft, verify item 16. Not read from this lane: the ixgbe channel maximum on that NIC
+(`ethtool -l` pre-set max; 4 is expected well under it). Rollback: the fact back to `0,8` + the same steps
+(again one drop, 4 -> 2).
+
+**Deploy (supervisor), strih-snv, off-production:** stop OBS (`systemctl --user stop strih-obs.service`,
+the genlock deploy does it), `sudo ./scripts/setup-strih.sh --box strih-snv` (step 11 writes
+`/etc/strih-isolated-cpus.conf` = `4-15`, the slice moves to `AllowedCPUs=0` (slice exclude 1-3), the oneshot
+script + udev rule are re-rendered for 0-3 (RSS count 4; atlantic ignores it), the sampler unit gets
+`CPUAffinity=4-15` and is try-restarted), then
+`sudo systemctl restart strih-nic-irq-affinity.service` (the IRQs spread over 0-3 by the 2 s rate sample:
+run it under load, or the 180 s OBS-start re-balance places them), then start OBS
+(`systemctl --user start strih-obs.service`: the launcher's taskset pin 4-15). Read back:
+`cat /etc/strih-isolated-cpus.conf` = `4-15`, `taskset -cp $(pgrep -xo obs)` = 4-15, every rig-NIC IRQ's
+`smp_affinity_list` in 0-3, `systemctl show -p AllowedCPUs rig-background.slice` = 0,
+`mpstat -P 0,1,2,3 10 1` %soft, verify item 16 (`(hk-cpus)` PASS) and item 32
+(`background`). Rollback: the fact back to `0-1` + the same steps.
 
 ## The spread: the rig NIC IRQs over every housekeeping CPU by load (design 7119179275, 24.11.2026)
 
@@ -32,8 +94,27 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   `obs_box_cpulist_canon` / `obs_box_cpulist_first` in `obs-box-background.sh`.
 - **The placement (the oneshot):** it samples `/proc/interrupts` over `IRQ_RATE_SAMPLE_S` (2 s, a whole
   number of seconds or FATAL; 0 in tests = the delta of two reads) and puts each IRQ on ONE CPU, greedily:
-  heaviest first to the CPU with the least assigned rate, ties to the lower CPU. All rates 0 (boot, no
-  traffic) = round-robin in IRQ order. An IRQ with no `/proc/interrupts` row counts as rate 0 (logged). It
+  heaviest first to the CPU with the least assigned rate, ties to the lower CPU. **Only the IRQ-only
+  CPUs take IRQs (finding 26.11.2026):** the placement set is `@STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS@` =
+  `strih_housekeeping_slice_exclude` (env override `STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS`; a list that is not a
+  cpulist or not inside the IRQ CPUs is FATAL), the whole IRQ set only when it is `none` (a one-CPU set).
+  Live: ties-to-lower put IRQ 139 (12k/s) on the task CPU 0 of strih-snv's 0-3, beside rustdesk, the
+  display watch, the launcher and the slice: CPU 0 43 % softirq, time_squeeze ~5/s, ~750 InDroppedDma in
+  25 min, CPU 1 at 1.5 %. Per box: strih-snv 1-3 (RSS count 4, ignored by atlantic), strih-pp 1,8-9 (ixgbe RSS
+  count 4 = the IRQ CPU count: 4 queues + the link vector over 3 placement CPUs; the 2 -> 4 change is a link
+  drop, see the strih-pp deploy below), stream-pp 1 and stream-snv 1,12-19 (the USB xhci IRQ moves 0 -> 1). An IRQ on the task CPU
+  is misplaced, so the idle sample below moves it too. RSS count, the udev rule and `(hk-irq)` still
+  read the whole IRQ set. The mechanics tests pass `STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS=none`; the
+  placement set is pinned by `tests/python/test_strih_nic_irq_task_cpu_1425.py`. **An idle sample keeps
+  the placement (finding 26.11.2026):** a total under `IRQ_LOAD_MIN_PER_S` (default 20000/s, env
+  override, a whole number or FATAL; loaded reads were ~120k/s and ~42k/s) is no load to balance by. A
+  genlock deploy stops OBS, and a run in that window (the NM `up` hook, a hand restart) sampled tiny,
+  wrong-ordered rates and put 7 of 9 heavy queues on CPU 0 (time_squeeze ~117/s, InDroppedDma 4501 ->
+  32451, Dante holes, release E2E red). Under the floor every IRQ already on ONE housekeeping CPU keeps
+  it (logged `kept`, never written), and only an IRQ outside the set goes to the CPU holding the fewest
+  IRQs, in IRQ order, ties to the lower CPU: at boot nothing is kept, so that is the round-robin in IRQ
+  order. setup-strih step 11b is enable-only (never restarts the oneshot), so the fix lives in the
+  script, where every trigger runs it. An IRQ with no `/proc/interrupts` row counts as rate 0 (logged). It
   logs each IRQ's rate and CPU and the assigned load per CPU, and writes an affinity ONLY when it differs
   (every move costs a short loss burst, measured 24.11.2026). The placement holds until the next run (boot,
   NM `up`, the re-balance below); a later traffic change can unbalance it, the `(hk-softnet)` NOTE shows that.
@@ -47,7 +128,26 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   timer when it is not (never started: it fires at the next boot); `none` disables + stops our timer and
   removes both (header-checked). Rejected: a periodic re-balance (each move is a loss burst, no hysteresis
   data); delaying the boot oneshot (it must take the IRQs off the OBS CPUs at boot). Trade-off: a boot whose
-  rig carries no traffic 5 min later keeps the round-robin until the next NM `up` or a hand restart.
+  rig carries no traffic 5 min later keeps the round-robin until the next NM `up` or a hand restart (since
+  the 26.11.2026 load floor that run keeps the boot placement instead of balancing on tiny rates, and an
+  idle run never repairs a bad placement: only a run under load does).
+- **The re-place after every OBS start (design 7182688018, 26.11.2026):** a rate-based placement is valid
+  only for the flow set it measured. The atlantic RSS hash puts each NDI / JPEG XS / Dante flow on a queue,
+  and an OBS restart re-creates every flow, so the heavy queues move (26.11: the deploy's OBS restart left 7
+  of 9 loaded IRQs on CPU 0, time_squeeze ~117/s, InDroppedDma +28k, Dante holes). The OBS launcher, right
+  after its own housekeeping move, runs `sudo -n /usr/bin/systemctl restart --no-block
+  strih-nic-irq-rebalance-obs.timer` (`strih_launcher_irq_rebalance_arm`; only with a housekeeping CPU list
+  and the timer file; a refusal is one WARN line, never fatal to OBS). That root timer (`OnActiveSec=180s`,
+  `AccuracySec=1s`, the SAME `strih-nic-irq-rebalance.service`, no `[Install]`) fires once 180 s later; a
+  restart re-arms it, so an OBS crash loop ends in ONE move. The one sudoers line
+  `/etc/sudoers.d/strih-nic-irq-rebalance-obs` (0440, our header, `visudo -cf` before the write, the house
+  pattern of obs-box-background.sh) allows exactly that command. `strih_housekeeping_rebalance_install`
+  writes both (text `strih_housekeeping_rebalance_obs_text` = the committed `systemd/` file, parity test),
+  never starts the timer; `none` stops it and removes both (header-checked). Rejected: a polkit
+  `manage-units` rule (the repo's cross-user root pattern is the sudoers line), a root poll of the OBS start
+  time (a second OBS-identity detector). Trade-off: a boot places up to twice under load (OBS start + 180 s,
+  the 5-min timer); each run writes only an IRQ whose target differs, and the idle floor keeps a map when
+  no load flows. Takes effect at the next OBS start after setup.
 - **Rejected:** irqbalance with the OBS CPUs banned (it rebalances every ~10 s, and each move measured
   rx_loss +144 / ~29 JXS lost_slices per camera); CPU 1 alone with RPS/GRO tuning (unmeasured on atlantic, no
   headroom at 86 %).
@@ -67,6 +167,10 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   mostly idle. The housekeeping lib must be loaded (setup + verify); a `none` box keeps the E-cores / the
   background set at normal priority.
 - Trade-off: two Zen 5 cores carry the RX softirq; the tasks share CPU 0 (with its IRQs) at nice 10.
+- **The E2E on-box recording decode is not in the slice either** (finding 7178516822): on a box with
+  `/etc/strih-housekeeping-cpus.conf` it runs on the OBS mask under SCHED_IDLE + nice 19 + ionice idle
+  (`LOWPRIO_SNIPPET`, `.claude/rules/recording-verdict-on-strih-snv.md`); the slice's one task CPU gave it
+  one CPU beside the RX softirq.
 
 ## What moves, and how
 
@@ -102,11 +206,22 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
 - `none` removes ours (header-checked: our header on line 1, or line 2 after `#!/bin/sh`); a foreign file of
   the name is named and left; the live budget stays until the next boot.
 
+## GOTCHA: a live `ethtool -G` on the atlantic rig NIC took strih-snv off the network (24.11.2026)
+
+Under E2E load the AQC113 (`atlantic`, RX ring 2048 of 8184, rx-usecs 112) dropped at DMA level:
+InDroppedDma went from 3272 to 30178, and the strih Dante input lost packets that never reached its
+socket. dstack confirmed the cause in the NIC, not in the Dante RX path. A boot-oneshot step that
+raised the ring to the pre-set maximum was written and applied live (09:38 local). After
+`ethtool -G enp7s0 rx 8184` the NIC did not come back (ARP INCOMPLETE for 8+ minutes). It was
+reverted before any deploy. Never change the atlantic ring on a live rig NIC again until the failure
+is understood on the box's console. Keep the ring out of the NM profile too (the issue-1411 flap
+loop). The drop finding stays open on issue 1425.
+
 ## Verify item 16 (`strih_housekeeping_grade_report`)
 
 `(hk-cpus)` (also the launcher's file = the task CPUs), `(hk-rss)` (current combined = the IRQ CPU
 count), `(hk-irq)` (every rig-NIC IRQ's `smp_affinity_list` = exactly ONE CPU of the housekeeping set:
-placement only, the balance is traffic-dependent and never graded), `(hk-hooks)` (the udev rule + the executable hook as rendered), `(hk-rx)`
+placement only, the balance is traffic-dependent and never graded), `(hk-irq-task)` (REPORT-ONLY NOTE, only while IRQ-only CPUs exist: an IRQ on the task CPU, a stale placement the next run under load moves), `(hk-hooks)` (the udev rule + the executable hook as rendered), `(hk-rx)`
 (REPORT-ONLY NOTE: rx_missed_errors / rx_dropped delta over `STRIH_HOUSEKEEPING_SAMPLE_S`), `(hk-softnet)`
 (REPORT-ONLY NOTE over the SAME sample: each housekeeping CPU's `time_squeeze` increase from
 `/proc/net/softnet_stat` -- one row per CPU, column 3 hex, column 13 the CPU id, else the row index -- and
@@ -123,7 +238,16 @@ graded by the timer's `ActiveState/SubState`: `active/waiting` a NOTE (it runs a
 NOTE when the timer file is newer than the boot (`btime` of `/proc/stat`: setup enables without starting, so
 the boot it was installed in never runs it), a FAIL when it predates the boot, anything else
 (`active/elapsed`, unreadable) FAILs: the timer fired and the service never ran. `none` also
-`reset-failed`s a removed service.
+`reset-failed`s a removed service. `(hk-obs-rebalance)`: the OBS-start timer as rendered, `sudo -n -l` (as root
+`-U <user>`) allows the operator the exact arm command, then the service's `ExecMainStartTimestampMonotonic` vs
+the operator's `strih-obs.service` `ActiveEnterTimestampMonotonic` (one CLOCK_MONOTONIC): a run at or after the
+current OBS start = PASS on success + exit 0 (any run counts, the 5-min boot timer's too), a run still
+`activating` = NOTE, else FAIL; none yet with the timer `active/waiting|running` armed after that start = NOTE
+(it runs 180 s after it); the timer `active/elapsed` after that start with no service run = FAIL (journalctl of
+both); the timer file written after that start (`btime` + the start's monotonic, setup on a running OBS) = NOTE,
+graded at the next start; otherwise FAIL (the launcher's `could not arm` WARN in /tmp/strih-obs-start.log); OBS
+not running = NOTE; an unreadable stamp FAILs. The sudo check as root asks `-U <operator>` (seam
+`STRIH_SESSION_APPS_EUID`).
 
 ## Deploy (supervisor)
 
@@ -155,3 +279,7 @@ the `(hk-softnet)` softnet_stat / InDroppedDma deltas) is tested with a `sleep` 
 (`SWAP_SLEEP`) that copies an "after" fixture over the file being read: the code's own sleep becomes the
 moment the counters move, with no extra env seam and no wall-clock wait. Write greedy expectations from a
 hand-run of the algorithm (ties to the lower CPU decide the light IRQs).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Housekeeping off the OBS CPUs on a strih box (issue 1425: box fact `STRIH_HOUSEKEEPING_CPUS`, strih-snv 0-1; the step-11b oneshot cuts RSS + places every rig-NIC IRQ on ONE housekeeping CPU, balanced by a 2 s rate sample (design 7119179275), the tasks + slice on the first CPU, the program-audio sampler on the OBS mask at nice 10, a udev rule sets RSS at add so no link drop after boot, an NM up hook re-pins, `strih-nic-irq-rebalance.timer` re-balances once 5 min after boot (design 7119686502, verify `(hk-rebalance)`); no netdev_budget_usecs change (kernel 7.0 refuses < 2000); rustdesk + display-watch drop-ins; the launcher moves its own shutdown watch; verify item 16 `(hk-*)` rows) → `.claude/rules/strih-housekeeping.md` (auto-loads on its `paths:`)

@@ -41,6 +41,7 @@ sys.modules["dantesync_fleet_pp_cams"] = df
 _spec.loader.exec_module(df)
 
 PP_GM = re.search(r"^STRIH_DANTE_GM=(.+)$", (_BOXES / "strih-pp.env").read_text(), re.MULTILINE).group(1)
+PP_GM_IP = re.search(r"^STRIH_DANTE_GM_ADDR=(.+)$", (_BOXES / "strih-pp.env").read_text(), re.MULTILINE).group(1)  # issue 1553
 _CLEAN_PREFIXES = ("DANTESYNC_", "OBS_FLEET", "RIG_GRANDMASTER", "CAMBOX_OFFLINE_ACK", "WIN_SSH_USER",
                    "DANTE_CLOCK_")
 _PIN = re.search(r'DANTESYNC_VERSION_PIN="\$\{DANTESYNC_VERSION_PIN:-([0-9.]+)\}"', _GATE.read_text()).group(1)
@@ -255,7 +256,7 @@ def test_upgrade_verifies_a_pp_camera_against_the_pp_grandmaster_and_skips_it_wh
     r = _source_upgrade(tmp_path, 'echo "P=[$(dantesync_gate_env_for cam7)]"; echo "S=[$(dantesync_gate_env_for cam3)]";'
                                   ' for n in cam1 cam7 cam3; do dantesync_skip_away_traveling "$n" && echo "$n=skip" || echo "$n=roll"; done',
                         OBS_FLEET_HOME="strih-snv stream-snv resolume-snv cam7")
-    assert f"P=[RIG_GRANDMASTER_IP={PP_GM}]" in r.stdout and "S=[]" in r.stdout, r.stdout + r.stderr
+    assert f"P=[RIG_GRANDMASTER_IP={PP_GM_IP}]" in r.stdout and "S=[]" in r.stdout, r.stdout + r.stderr
     assert "cam1=skip" in r.stdout and "cam7=roll" in r.stdout and "cam3=roll" in r.stdout
 
 
@@ -294,7 +295,7 @@ def test_watchdog_rosters_split_the_cameras_by_venue():
 
 def test_watchdog_grades_a_pp_camera_at_its_pp_address_against_the_pp_grandmaster(tmp_path):
     hosts = {f"10.77.9.6{c[3:]}": "10.77.9.230" for c in SNV_CAMS}
-    hosts["10.76.9.67"] = PP_GM
+    hosts["10.76.9.67"] = PP_GM_IP
     err = _watchdog(tmp_path, hosts, "cam7")
     for c in SNV_CAMS:
         assert f"{c} (10.77.9.6{c[3:]}): reachable=1 verdict=OK" in err, err
@@ -310,4 +311,4 @@ def test_watchdog_pages_a_pp_camera_on_the_snv_grandmaster_with_the_pp_remedy(tm
     err = _watchdog(tmp_path, {"10.76.9.67": "10.77.9.230"}, "cam7", DANTE_CLOCK_CAM_NODES="")
     assert "cam7 (10.76.9.67): reachable=1 verdict=NO_CLOCK reason=wrong_gm" in err, err
     assert "WOULD alert" in err and "dante-clock-cam7-" in err
-    assert f"grandmaster miesta pp ({PP_GM})" in err, err
+    assert f"grandmaster miesta pp ({PP_GM_IP})" in err, err

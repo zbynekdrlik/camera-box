@@ -93,3 +93,7 @@ fleet's UTF-8 locale, plain grep then flags stdin BINARY (empty extraction) and 
 + the fix pattern: `.claude/rules/mv-reverify-escalate.md` "Layer 2" section (this watchdog is one of
 its 3 proven-RED consumers, verified via a fixture with an injected invalid byte). Never
 re-add a plain (non-`LC_ALL=C`) grep/sed on this extraction.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- non-60 source-cadence alert (dev1-side watchdog: strih `genlock-fifo audit received=` DELTA ÷ the audit lines' OWN timestamps — the #797 phantom-50.1 avoidance, NEVER a wall-clock divisor; the `@fps` decoration is the useless CANVAS fps, not per-source; watch STRIH cameras @60±3, a frozen source is UNKNOWN not "wrong 0 fps" (defers to #1052); reuse obs_watchdog confirm/throttle + #1001 no-double-page + require_tools fail-loud; the duplication-masked 50→60 hard layer is a follow-up; ships DISABLED, #794) → `.claude/rules/cadence-watchdog.md` (auto-loads on its `paths:`)

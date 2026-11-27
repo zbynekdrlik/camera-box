@@ -151,7 +151,7 @@ DANTESYNC_FLEET_REACH_PORT="${DANTESYNC_FLEET_REACH_PORT:-22}"
 
 # The dev1-local file that carries per-node ssh passwords by NAME (KEY=VALUE lines, mode 0600, never
 # committed). Only keys that a fleet row names as its credvar are read from it.
-DANTESYNC_FLEET_CRED_FILE="${DANTESYNC_FLEET_CRED_FILE:-$HOME/.config/camera-box/dantesync-fleet.env}"
+DANTESYNC_FLEET_CRED_FILE="${DANTESYNC_FLEET_CRED_FILE:-${HOME:-}/.config/camera-box/dantesync-fleet.env}"  # HOME may be unset (setup-device sources this, issue 1553)
 
 # The config.json path per OS (the drift check reads it; nothing here ever writes it).
 # shellcheck disable=SC2034  # consumed cross-file by scripts/dantesync-config-drift.sh
@@ -594,6 +594,70 @@ dantesync_fleet_venue_gm_host() {
   printf '%s\n' "$gm"
 }
 
+# dantesync_fleet_venue_gm_addr <venue> -> STRIH_DANTE_GM_ADDR of the venue's NTP-master fact file (issue
+# 1553): `none` (resolve the name on dev1) or the IPv4 dev1 grades the venue against. rc 1 + stderr when the
+# venue's file is missing or lacks the key.
+dantesync_fleet_venue_gm_addr() {
+  local venue="${1:-}" f line v r a found=""
+  local -
+  set +f
+  for f in "$DANTESYNC_FLEET_STRIH_BOXES_DIR"/*.env; do
+    [ -f "$f" ] || continue
+    v="" r="" a=""
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        STRIH_VENUE=*) v="${line#*=}" ;;
+        STRIH_DANTESYNC_ROLE=*) r="${line#*=}" ;;
+        STRIH_DANTE_GM_ADDR=*) a="${line#*=}" ;;
+      esac
+    done <"$f"
+    { [ "$v" = "$venue" ] && [ "$r" = server ]; } || continue
+    found="$a"
+  done
+  [ -n "$found" ] || { echo "dantesync-fleet: venue '$venue' has no STRIH_DANTE_GM_ADDR in its NTP-master fact file" >&2; return 1; }
+  printf '%s\n' "$found"
+}
+
+# dantesync_fleet_camera_gm_host camN -> the PTP grandmaster camN's dsync must allow (issue 1553): the
+# grandmaster of the venue whose strih fact file lists the camera (remote_log_camera_venue, the same
+# camera -> venue lookup the log sink and the JPEG XS target use). A PP camera gets the PP grandmaster,
+# never the SNV name video-clock.lan, which PP has no DNS entry for (22.11.2026: the PP cameras locked to
+# nothing). A camera in no venue, or a venue without a grandmaster -> the helpers' stderr + rc 1.
+dantesync_fleet_camera_gm_host() {
+  local cam="${1:-}" venue
+  if ! declare -F remote_log_camera_venue >/dev/null; then
+    # shellcheck source=scripts/lib/remote-logging.sh
+    . "${BASH_SOURCE[0]%/*}/remote-logging.sh" || return 1
+  fi
+  venue="$(remote_log_camera_venue "$cam")" || return 1
+  dantesync_fleet_venue_gm_host "$venue"
+}
+
+# dantesync_fleet_gm_allowlist_verdict CONFIG_TEXT WANT -> one word on stdout, rc 0 always (issue 1553):
+#   ok            system.gm_allowlist is exactly [WANT]
+#   other:<a,b>   it lists something else (the entries, comma-joined)
+#   missing       the config has no system.gm_allowlist
+#   unreadable    the text is empty or not a JSON object
+dantesync_fleet_gm_allowlist_verdict() {
+  python3 -c '
+import json, sys
+text, want = sys.argv[1], sys.argv[2]
+try:
+    cfg = json.loads(text)
+except ValueError:
+    print("unreadable"); sys.exit(0)
+if not isinstance(cfg, dict):
+    print("unreadable"); sys.exit(0)
+gms = (cfg.get("system") or {}).get("gm_allowlist") if isinstance(cfg.get("system"), dict) else None
+if not isinstance(gms, list):
+    print("missing")
+elif [str(g) for g in gms] == [want]:
+    print("ok")
+else:
+    print("other:" + ",".join(str(g) for g in gms))
+' "${1-}" "${2-}" || printf 'unreadable\n'
+}
+
 # dantesync_fleet_role_gm_host <role> -> the grandmaster HOST a node of ROLE must lock to: the video
 # roles use the rig grandmaster name (video-clock.lan, scripts/lib/rig-grandmaster.sh), the audio
 # role DANTESYNC_AUDIO_GM_HOST, a venue role its venue's grandmaster (issue 1412). Unknown role ->
@@ -629,6 +693,10 @@ dantesync_fleet_role_gm_ip() {
         return 1
       fi
       host="$(dantesync_fleet_role_gm_host "$1")" || return 1
+      # issue 1553: a venue whose clock name dev1 cannot resolve (its DNS is the SNV one) names the address
+      local addr
+      addr="$(dantesync_fleet_venue_gm_addr "$(dantesync_fleet_role_venue "$1")")" || return 1
+      if [ "$addr" != none ]; then printf '%s\n' "$addr"; return 0; fi
       ;;
   esac
   if [[ "$host" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+\.[0123456789]+$ ]]; then

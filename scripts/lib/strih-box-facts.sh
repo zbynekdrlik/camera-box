@@ -98,7 +98,7 @@ strih_box_fact_keys() {
     STRIH_DESKTOP \
     STRIH_DANTE_NETWORK_LATENCY_MS STRIH_DANTE_RECEIVE_BUFFER_MS STRIH_DANTE_TX STRIH_DANTE_TX_TRACK STRIH_DANTE_RX_STAMP_MARGIN_MS \
     STRIH_NIC_RENAME \
-    STRIH_HOUSEKEEPING_CPUS
+    STRIH_HOUSEKEEPING_CPUS STRIH_DANTE_GM_ADDR STRIH_EGRESS_PACING_RATE
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -278,7 +278,7 @@ strih_box_validate() {
   [[ "${f[STRIH_NIC_MIN_LINK_MBPS]}" =~ ^[1-9][0-9]*$ ]] \
     || { echo "strih-box ${name}: STRIH_NIC_MIN_LINK_MBPS '${f[STRIH_NIC_MIN_LINK_MBPS]}' must be a speed in Mb/s (e.g. 5000)" >&2; bad=1; }
   _strih_box_nic_rename_ok "$name" "${f[STRIH_NIC_RENAME]}" || bad=1
-  _strih_box_housekeeping_cpus_ok "$name" "${f[STRIH_HOUSEKEEPING_CPUS]}" || bad=1
+  _strih_box_housekeeping_cpus_ok "$name" "${f[STRIH_HOUSEKEEPING_CPUS]}" || bad=1; [[ "${f[STRIH_EGRESS_PACING_RATE]}" == none || "${f[STRIH_EGRESS_PACING_RATE]}" =~ ^[123456789][0123456789]{0,5}(mbit|gbit)$ ]] || { echo "strih-box ${name}: STRIH_EGRESS_PACING_RATE '${f[STRIH_EGRESS_PACING_RATE]}' must be none or <N>mbit / <N>gbit: the rig NIC sender fq maxrate per flow (issue 1553)" >&2; bad=1; }
   for k in STRIH_OBS_PROFILE STRIH_OBS_COLLECTION; do
     [[ "${f[$k]}" =~ ^[A-Za-z0-9._\ -]+$ ]] \
       || { echo "strih-box ${name}: ${k} '${f[$k]}' may only carry letters, digits, space, . _ -" >&2; bad=1; }
@@ -314,7 +314,7 @@ strih_box_validate() {
     *) echo "strih-box ${name}: STRIH_ROLE '${f[STRIH_ROLE]}' must be strih or stream" >&2; bad=1 ;;
   esac
   _strih_box_host "${f[STRIH_DANTE_GM]}" \
-    || { echo "strih-box ${name}: STRIH_DANTE_GM '${f[STRIH_DANTE_GM]}' is not a host name / address (the PTP grandmaster)" >&2; bad=1; }
+    || { echo "strih-box ${name}: STRIH_DANTE_GM '${f[STRIH_DANTE_GM]}' is not a host name / address (the PTP grandmaster)" >&2; bad=1; }; [[ "${f[STRIH_DANTE_GM_ADDR]}" == none || "${f[STRIH_DANTE_GM_ADDR]}" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+\.[0123456789]+$ ]] || { echo "strih-box ${name}: STRIH_DANTE_GM_ADDR '${f[STRIH_DANTE_GM_ADDR]}' must be none or an IPv4 address: the clock dev1 grades the venue against, none = resolve STRIH_DANTE_GM on dev1 (issue 1553)" >&2; bad=1; }
   case "${f[STRIH_PROGRAM_AUDIO_SAMPLER]}" in
     on | off) ;;
     *) echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_SAMPLER '${f[STRIH_PROGRAM_AUDIO_SAMPLER]}' must be on or off" >&2; bad=1 ;;

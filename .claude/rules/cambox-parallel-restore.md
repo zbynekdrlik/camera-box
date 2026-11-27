@@ -57,3 +57,7 @@ The `tests/harness_cambox_parallel_restore_71*.rs` drivers extract the loop/phas
   or slice from the subshell's `(`. (This PR's own wiring test hit exactly this.)
 - The lib no-`exit` guard: anchor on statement forms (`\nexit `, `; exit `, `|| exit `), never a
   bare `" exit "` (comment-trippable).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- cleanup() cambox parallel-restore group (the #1085 launch-stagger via fork-time `${#CAMBOX_PARALLEL_PIDS[@]}` index + the honest bounded-cancellation-window tradeoff; the #1085 explicit-`CAMBOX_PARALLEL_IPS` retry retiring #715's label→IP parse; the stagger-sits-ABOVE-the-ssh-anchor slicing gotcha + the `STAGGER_MS=0` timing-driver isolation, #712/#713/#715/#1085) → `.claude/rules/cambox-parallel-restore.md` (auto-loads on its `paths:`)

@@ -174,3 +174,7 @@ out-of-band present reading folds into the hop verdict; `UNKNOWN` never fails.
 - **Tests:** `bash -n` + `shellcheck -S warning`; source the lib and drive the pure functions over
   fixtures; pytest for the python part (`tests/python/test_cg_chain_rig_health_1300.py`);
   `cargo test --test harness_cg_chain_verify_1300` (the parity gate).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- CG-chain receiver-side verdict (`scripts/cg-chain-verify.sh` + pure `scripts/lib/cg-chain-verify.sh`: per-hop SongPlayer→cg OBS→strih/stream genlock-fifo playback verdict REPLICA pinned to `resolume_playback::evaluate` by a parity harness + asrc residual band + soak CSV; exits non-zero on FAIL; rig-health report-only NOTE row; accepts songplayer 146-151 from the RECEIVER side per issue-1294 §8, pixel level is issue 1301; #1300) → `.claude/rules/cg-chain-verify.md` (auto-loads on its `paths:`)

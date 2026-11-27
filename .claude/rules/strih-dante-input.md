@@ -246,3 +246,7 @@ proof took one 10-min capture, and nothing else would have shown it:
   no longer an A/V step; a move of a tick after a restart is a regression to report to obs.
 - Never pin an obs whose dlink failed obs's soak gate (v0.6.140 did); the stream TX underruns wait
   for a soak-passed dlink >= v0.6.143.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- strih-snv + stream-snv program audio over Dante (issue 1485 / 1495: the obs release's `dante_input` source, device `<STRIH_ROLE>-obs` (`strih-obs`, `stream-obs`; stream-snv keeps the input name `mbc`) from STRIH_DANTE_DEVICES, `~/.camera-box/dante-input.toml` from the facts + the untracked site file `/etc/camera-box/dante-input.site.conf`, the seed switch, verify item 9 `(program-dante)`, the E2E continuity fold) -> `.claude/rules/strih-dante-input.md` (auto-loads on its `paths:`)

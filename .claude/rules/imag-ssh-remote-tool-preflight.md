@@ -68,3 +68,7 @@ feeds a numeric pass/fail compare — that shape is the tell. #833's sweep found
 sibling (the `nm`-based MV divisor-capability check) sharing it with the `wmctrl` count; both are
 now guarded. Reuse `imag_require_remote_tool_cmd`/`imag_remote_tool_probe_missing` rather than
 writing a third ad-hoc "is the tool there" check.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- imag-nb SSH-remote tool preflight (a missing wmctrl/nm must fail loud by name, never read as a measured zero, #833) → `.claude/rules/imag-ssh-remote-tool-preflight.md` (auto-loads on its `paths:`)

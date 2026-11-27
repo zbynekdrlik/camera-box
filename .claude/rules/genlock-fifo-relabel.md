@@ -159,3 +159,7 @@ Camera inputs need the stamp-offset camera-box binary on the fleet too: each cam
 one `#1372 stamp offset re-sampled on a wall step of +<S> ms` line at the step (S = the booked
 step), and the strih-snv `genlock-fifo audit 'NDI camN'` lines read `late_holds` / `stamp_gap` /
 `relocks` flat across it.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The nightly fleet DATE step at the genlock RECEIVE FIFO (issue 1372 part B: dantesync rounds the step to 200 ms and every genlock FIFO relabels its OLD-EPOCH frames by the booked step S -- booked at the RELEASE from its own bracketed wall read (the render tick's detector runs after the release), queued frames split by FIFO order at the first stamp jump that carries S, late arrivals relabelled while stamp + S continues the timeline within one frame, one latency window on the sender's stamp timeline, |S| >= 100 ms; pure `vstack:rig/core/src/genlock_fifo_relabel.rs` ↔ `obs-genlock-fifo-relabel.h` + parity + wiring gates, `relabelled=` on the audit line; the two-clock bench (0 / 0 for the quantized step on the deep 2ME PGM, the shallow cg feed and an N>=2 camera with prompt stamps; a booking reaches only a source that was releasing at the step); the cambox re-samples its stamp offset in the frame its wall steps, `genlock_stamp::StampOffset`, ROZHODNUTÉ 6033853074) → `.claude/rules/genlock-fifo-relabel.md` (auto-loads on its `paths:`)

@@ -74,3 +74,7 @@ Pure fns are testable by direct sourcing over fixture raw-log text
 (the caller invokes it inside a `$(...)` assignment in recording-e2e.sh's strict-mode body) via a
 stateful fake reader on `FROZEN_CAM_RECEIVED_CMD` + `FROZEN_CAM_RECEIVED_GAP_S=0` — grep-no-match
 extracts are `|| true`-guarded so no expected empty read aborts the run.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- `[4c/8]` frozen-camera gate leg-liveness = strih `genlock-fifo received=` counter DELTA per input, NOT pixel-hash (content-dependent, false-FROZEN on a held/static receiver frame in the deploy wave); pixel-hash kept report-only; the THIRD received=-tap consumer reusing mv-reverify + frozen-input-health; abort on PROVEN freeze across attempts (never false-abort on INCONCLUSIVE/READ_FAIL); the #797 window>cadence rule; #1233 → `.claude/rules/frozen-cam-received-gate.md` (auto-loads on its `paths:`)

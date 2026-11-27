@@ -843,3 +843,6 @@ basis change drops an open candidate; a placement-judged-flag change also flushe
 - **Mutation (47/47):** the C mutants run against one compiled test set with
   `CARGO_MANIFEST_DIR` at a scratch tree (the C is read at run time).
 
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- ASRC bench harness (two-clock-domain simulation, the `AsrcCompensator` seam #803 mirrors, EMA convergence closed form, the RED/GREEN stub-then-restore TDD pattern, #804) → `.claude/rules/asrc-bench-harness.md` (auto-loads on its `paths:`)

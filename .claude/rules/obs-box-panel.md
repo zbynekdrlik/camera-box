@@ -158,3 +158,7 @@ and a launcher-list assert fails on dev1 only), `OBS_BOX_PANEL_LOGIND_TIMEOUT`. 
 `state/off` / `state/reb` holds another answer. The shared `Box` stub in
 `test_obs_box_panel_1420.py` answers "installed" for EVERY package once one install ran; a test about
 WHICH package apt installs needs per-package stubs (`test_install_asks_apt_for_pcmanfm_when_it_is_missing`).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The kiosk panel of the Linux OBS boxes (tint2, `scripts/lib/obs-box-panel.sh`: the launchers incl. issue 1464's `Vypnúť` power dialog first + `Chrome` on the stream role (the `(panel-power)` logind row through `systemd-run --user`), issue 1458's `Nahrávky` = pcmanfm in the ACTIVE OBS profile's record folder resolved at click time by `scripts/obs_box_recordings.py` with libfm `use_trash=0`, issue 1481's `Snímka obrazovky` = flameshot + the openbox Print / Alt+Print keys rewritten from scrot, the keyboard item, setup step 16h / verify item 44 and its test seams) -> `.claude/rules/obs-box-panel.md` (auto-loads on its `paths:`)

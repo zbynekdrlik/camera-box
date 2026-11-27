@@ -136,6 +136,37 @@ production-critical watchdog class (umbrella **#1308**).
   or an unresolvable pin, is SILENT. Seams: `DANTE_CLOCK_VERSION_PIN` (test pin override),
   `DANTE_CLOCK_BOX_UP_CMD` (test box-up probe stub, mirrors `DANTE_CLOCK_FETCH_CMD`),
   `DANTE_CLOCK_TCP_TIMEOUT`.
+- **A confirmed clock loss DURING A PRODUCTION is paged (issue 1545).** The plain bucketed notify
+  (`dante-clock-<box>-<bucket>`) is not a key the owner policy lets through (airuleset
+  `OWNER_PING_ALLOW`: only acctblock / credential-dead / healthz / `page:<check>:<n>`), so on
+  19.11.2026 cam3's whole-service NO_CLOCK reached nobody. Now, beside that unchanged notify:
+  - **Page-eligible:** a FIRED (confirmed) NO_CLOCK, NO_DANTESYNC, or the fleet-wide
+    DNS_UNRESOLVABLE. MGMT_DEAD (ssh wedge, the clock may be fine) and GM_CHANGED (one-shot; nodes
+    that do not follow it page NO_CLOCK) are never a page.
+  - **Venue:** `node_venue <role>` = the venue role's venue (`video-pp` → `pp`), else
+    `DANTESYNC_FLEET_HOME_VENUE` (snv: cameras, dev1, the SNV OBS boxes, audio, the DNS fault).
+  - **Production:** `venue_production` = `avsync_venue_production_live` from
+    `scripts/lib/avsync-production.sh` (the issue-1441 rule: SNV rig EVENT/TEST off the cam2 painter,
+    else the venue's stream box streams). `yes` and `unknown` page (a broken probe never silences a
+    broadcast), `no` logs `page withheld`. Read only when a page is queued, once per venue per pass,
+    cached `DANTE_CLOCK_PRODUCTION_TTL_S` (300 s) in the state file (a cambox login writes 11 journal
+    lines). Test seam `DANTE_CLOCK_PRODUCTION_CMD` (`<cmd> <venue>` → yes|no|unknown).
+  - **The read is bounded as a whole** (`DANTE_CLOCK_PRODUCTION_TIMEOUT`, 25 s; a bash function
+    cannot be timed out in-process, so it runs as `timeout N bash <self> --production-read <venue>`);
+    a read that does not finish is `unknown` = a page. Two venues add at most 50 s, so the unit's
+    `TimeoutStartSec` is 180.
+  - **`--dry-run` never logs into the rig** for it (the handover clock item runs `--dry-run` under a
+    30 s probe bound): unread = `unknown`, nothing cached. `AVSYNC_PRODUCTION` (yes|no) is still
+    honoured there, which is how the tests exercise the real avsync-production.sh path.
+  - **Accepted gap:** every node without a venue role (dev1, an audio node) belongs to the home venue,
+    so dev1 losing its clock during a Poprad production while SNV is in TEST mode is not paged.
+  - **Delivery:** after the roster loop, ONE `page:dante-clock-<venue>:$(watchdog_notify_key …)` per
+    venue listing every box without the clock (a fleet-wide grandmaster loss is one message, not one
+    per node); airuleset rewrites it to its 10-min window. `confirm_then_alert` sets `CTA_FIRED`, the
+    queue keys on it. Recovery stays a machine-channel line.
+  - Tests: `tests/python/test_dantesync_clock_page_1545.py` (dry-run passes on a TEST-NET
+    `DANTE_CLOCK_NODES` roster + one non-dry-run pass whose `AIRULESET_NOTIFY` stub records the
+    argv; run it under `unshare -n`).
 - **Ships DISABLED.** The supervisor installs + live-verifies + enables the timer on dev1; this repo
   makes no box-side change.
 
@@ -149,3 +180,7 @@ dev1-`local` arm is driven end-to-end from `test_dantesync_clock_dev1_local_1313
 subprocesses the watchdog `--dry-run` with `DANTE_CLOCK_LOCAL_NODES="dev1"` + a fetch stub — the
 subprocess runs INSIDE the python process, so the worktree-isolation guard never sees a `bash -c`;
 a lane cannot run the same stub as a bare `bash -c`/inline-env shape, `.claude/rules/ci-testing-gotchas.md`).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- dev1 dante-clock alert watchdog (#1307, PRODUCTION-CRITICAL class, umbrella #1308): headless-fleet clock-loss paging — reads EVERY dantesync node's `:8898/status` (the roster DERIVED from the issue-1372 dantesync fleet: every camera_resolve cam, the obs-fleet boxes, dev1, and the audio-VLAN PCs mbc/fohabl graded against the audio grandmaster; resolume home-gated) and pages on not-locked / foreign-gm / `ntp_step_storm` (dantesync's OWN 120/h boolean, never a re-hardcoded literal) / DNS `video-clock.lan` unresolvable / grandmaster IP MOVED between passes / **NO_DANTESYNC** (#1308: box UP via a TCP probe but `:8898` dead = dantesync crashed on a live box; box down/unprobed = SKIP defer #1001, never a false page); pure `dantesync_clock_decision.py` (#1199 mirror, grading mirrors clock-offset-guard.sh field semantics) + `dantesync-clock-alert-watchdog.sh` reusing obs-watchdog-decision.sh confirm + rig-grandmaster.sh + the shared watchdog-tcp-probe.sh; version != `DANTESYNC_VERSION_PIN` REPORTED in the card, never a page (#1308); TIME-BUCKETED `--dedup-key` via the shared `watchdog_notify_key` helper re-pings „dokolecka" while it persists (owner ruling — the production-critical class of watchdog-notify-dedup.md, allowlisted in the #1206 sweep), recovery log-only; UNREACHABLE+box-down=SKIP defers #1001; ships DISABLED (supervisor enables on dev1) → `.claude/rules/dantesync-clock-alert-watchdog.md` (auto-loads on its `paths:`)

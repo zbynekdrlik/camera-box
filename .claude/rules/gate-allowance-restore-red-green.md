@@ -203,3 +203,7 @@ Key facts for a future change:
 - Adding the `BurnUnreadableInferred` variant required the ONE exhaustive `match` on `MissingKind`
   (the classified-slot printer) to gain an arm — a new variant is a compile error otherwise, and
   this file is probe-gated.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Restoring a #904-style relaxed verdict-gate constant (keep the mechanism dormant not deleted, #905) → `.claude/rules/gate-allowance-restore-red-green.md` (auto-loads on its `paths:`)

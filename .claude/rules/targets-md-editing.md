@@ -26,3 +26,7 @@ Confirmed live (#1296, 2026-09-12): `git add … targets.md` blocked; the same c
 `git commit -- … targets.md` (no prior `git add` of targets.md) landed all five files cleanly. Do
 NOT rename/relocate targets.md to dodge the hook (CLAUDE.md forbids moving/deleting it), and do NOT
 reach for a bypass env — the pathspec-commit form is the clean path.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Editing `targets.md` (`git add` is hook-blocked as a sensitive file; commit it via the pathspec form) → `.claude/rules/targets-md-editing.md` (auto-loads on its `paths:`)

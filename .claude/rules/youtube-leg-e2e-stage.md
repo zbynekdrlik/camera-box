@@ -340,3 +340,7 @@ retry, an unreachable host, the bounds, purge, the stale sweep), `test_youtube_l
 (an injected rpc), `test_e2e_report_youtube_1404.py` (the real PASS fixture), `test_youtube_leg_wiring_1404.py`
 (the call sites + the lib RUN under `set -euo pipefail`). A test token must be low-entropy words
 (the secret scan blocks a hex/digit run).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The full-path E2E's BLOCKING YouTube stage (issue 1404, owner 24.10.2026 "end to end a nie len cast"): every verdict-executing run streams its window through restreamer's av-gate session (`scripts/av_gate_session.py`, run ON stream-snv over ssh, the bearer token read in place, never argv) to YouTube's "e2e rtmp", guard -> POST -> StartStream -> wait `ready` before StartRecord, a watch that stops the broadcast on a channel-guard refusal or a dead harness, stop after the stream StopRecord + in cleanup(), then the VOD judged by the issue-1404 tool against the stream recording (`scripts/youtube_leg_e2e.py measure`, trimmed schedule windows) and folded as the BLOCKING `youtube_leg` block in both gate tails; no VOD / refused delivery / UNKNOWN = RED; the report states its end point (no "celá cesta" before YouTube passed) and the per-point table goes to the job summary + a PR comment; job timeout 115 min = the lease hold ceiling 6900 s, issue 1551's 10 min pre-roll before the recording; av-gate is not yet provisioned on stream-snv (24.10.2026) → `.claude/rules/youtube-leg-e2e-stage.md` (auto-loads on its `paths:`)

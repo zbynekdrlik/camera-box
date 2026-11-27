@@ -75,10 +75,28 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/camera-set.sh"
 # shellcheck source=scripts/lib/dantesync-fleet.sh
 . "$HERE/lib/dantesync-fleet.sh"
+# issue 1545: "is this venue in a production?" -- the issue-1441 rule the A/V pagers use (SNV = rig
+# EVENT mode off the cam2 painter, else the venue's stream box streams; unknown = a production).
+# shellcheck source=scripts/lib/rig-mode-state.sh
+. "$HERE/lib/rig-mode-state.sh"
+# avsync-venues.sh pulls strih-box-facts.sh into the shellcheck closure (issue 1395: memory); it is
+# linted on its own as an input file.
+# shellcheck source=/dev/null
+. "$HERE/lib/avsync-venues.sh"
+# shellcheck source=scripts/lib/avsync-production.sh
+. "$HERE/lib/avsync-production.sh"
 
 DRY_RUN=0
+PRODUCTION_READ_VENUE=""
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
+  # issue 1545 (internal): one bounded production read for VENUE, run by venue_production under
+  # `timeout` (a bash function cannot be timed out in-process). Prints yes | no | unknown.
+  --production-read)
+    PRODUCTION_READ_VENUE="${2:-}"
+    # no venue: answer unknown, never fall through to a live (notifying) pass
+    [ -n "$PRODUCTION_READ_VENUE" ] || { printf 'unknown\n'; exit 0; }
+    ;;
   --help | -h)
     sed -n '10,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
@@ -159,6 +177,26 @@ CONFIRM_THRESHOLD="${DANTE_CLOCK_CONFIRM_THRESHOLD:-2}"
 # Production-critical re-ping bucket (owner ruling): while the fault persists, re-ping every
 # REPING_INTERVAL_S. The pure module floors this at 60s.
 REPING_INTERVAL_S="${DANTE_CLOCK_REPING_INTERVAL_S:-600}"
+
+# issue 1545: a confirmed clock loss (NO_CLOCK / NO_DANTESYNC / DNS_UNRESOLVABLE) in a venue that is
+# in a PRODUCTION also goes out as ONE airuleset `page:dante-clock-<venue>` per venue per pass (the
+# only key class the owner policy lets reach the phone; airuleset caps it at one message per check
+# per 10 min). The production read (a cam2 login for SNV) runs only when such a page is due, once per
+# venue, and is cached this long across passes (a cambox login writes 11 journal lines).
+PRODUCTION_TTL_S="${DANTE_CLOCK_PRODUCTION_TTL_S:-300}"
+[[ "$PRODUCTION_TTL_S" =~ ^[0123456789]+$ ]] || PRODUCTION_TTL_S=300
+# The whole production read (cam2 rig-mode ssh, then maybe the stream box OBS-WS) is bounded by this
+# (s); a read that does not finish in time is `unknown` (= a page). GNU `timeout 0` means no bound, so
+# only a positive whole number is taken.
+PRODUCTION_TIMEOUT_S="${DANTE_CLOCK_PRODUCTION_TIMEOUT:-25}"
+[[ "$PRODUCTION_TIMEOUT_S" =~ ^[123456789][0123456789]*$ ]] || PRODUCTION_TIMEOUT_S=25
+# DANTE_CLOCK_PRODUCTION_CMD (test seam): an executable run as `<cmd> <venue>` printing yes|no|unknown
+# in place of the live read (avsync_venue_production_live).
+# The pages queued this pass: venue -> "; "-joined box lines, in first-seen venue order.
+declare -A PAGE_LINES=()
+PAGE_VENUES=""
+# confirm_then_alert sets this to 1 when it fired the alert this call (the page queue keys on it).
+CTA_FIRED=0
 
 DECIDE="${DANTE_CLOCK_DECIDE:-$HERE/dantesync_clock_decision.py}"
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
@@ -350,6 +388,7 @@ fire_alert() {
 confirm_then_alert() {
   local suffix="$1" fault="$2" base="$3"; shift 3
   local prev decision confirm act
+  CTA_FIRED=0
   prev="$(read_state_field "confirm_${suffix}" 0)"
   decision="$(obs_watchdog_confirm "$prev" "$fault" "$CONFIRM_THRESHOLD")"
   confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
@@ -377,6 +416,86 @@ confirm_then_alert() {
   fi
   write_state_field "alerted_${suffix}" 1
   fire_alert "$base" "$@"
+  CTA_FIRED=1
+}
+
+# -- the production page (issue 1545) ------------------------------------------------------------
+# node_venue <role> -> the venue whose production a node's clock serves: a venue role's own venue
+# (video-pp / ntp-master-pp -> pp), every other node the home venue (the SNV rig, dev1, audio).
+node_venue() {
+  dantesync_fleet_role_venue "${1:-}" 2>/dev/null || printf '%s' "$DANTESYNC_FLEET_HOME_VENUE"
+}
+
+# queue_page <venue> <line> -- a confirmed clock loss that fired this pass joins its venue's page.
+queue_page() {
+  local venue="$1" line="$2"
+  if [ -z "${PAGE_LINES[$venue]+x}" ]; then
+    PAGE_LINES[$venue]="$line"
+    PAGE_VENUES="${PAGE_VENUES:+$PAGE_VENUES }$venue"
+  else
+    PAGE_LINES[$venue]="${PAGE_LINES[$venue]}; $line"
+  fi
+}
+
+# venue_production <venue> -> yes | no | unknown. Cached in the state file for PRODUCTION_TTL_S;
+# anything but yes/no reads unknown (a broken probe must never silence a broadcast).
+venue_production() {
+  local venue="$1" now at cached answer
+  now="$(now_epoch)"
+  cached="$(read_state_field "production_${venue}" "")"
+  at="$(read_state_field "production_at_${venue}" "")"
+  if [ -n "$cached" ] && [[ "$at" =~ ^[0123456789]+$ ]] && [ "$now" -ge "$at" ] \
+    && [ $((now - at)) -lt "$PRODUCTION_TTL_S" ]; then
+    printf '%s\n' "$cached"
+    return 0
+  fi
+  if [ -n "${DANTE_CLOCK_PRODUCTION_CMD:-}" ]; then
+    answer="$(timeout "$PRODUCTION_TIMEOUT_S" "$DANTE_CLOCK_PRODUCTION_CMD" "$venue" 2>/dev/null || true)"
+  elif [ "$DRY_RUN" -eq 1 ] && [ -z "${AVSYNC_PRODUCTION:-}" ]; then
+    # --dry-run (the handover check's clock item, a hand run) never logs into cam2 or dials OBS-WS:
+    # it reports what a live pass would do with an unread state (unknown = page), caches nothing.
+    log "production at $venue not read in --dry-run (no rig login) -- treated as unknown: a live pass pages unless the venue reads no production"
+    printf 'unknown\n'
+    return 0
+  else
+    answer="$(timeout "$PRODUCTION_TIMEOUT_S" bash "${BASH_SOURCE[0]}" --production-read "$venue" 2>/dev/null || true)"
+  fi
+  case "$answer" in
+    yes | no) : ;;
+    *) answer=unknown ;;
+  esac
+  write_state_field "production_${venue}" "$answer"
+  write_state_field "production_at_${venue}" "$now"
+  printf '%s\n' "$answer"
+}
+
+# fire_page <venue> <body...> -- the airuleset page: class, time-bucketed by the shared helper
+# (watchdog_notify_key stays on the notify line, the #1206 sweep checks it).
+fire_page() {
+  local venue="$1"; shift
+  if ! [[ "$venue" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789.-]*$ ]]; then
+    log "ERROR: venue '$venue' is not a valid airuleset page check name -- the page would be suppressed; not sent"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD page (page:dante-clock-${venue}): $*"
+    return 0
+  fi
+  python3 "$NOTIFY" notify --body "$*" --dedup-key "page:dante-clock-${venue}:$(watchdog_notify_key "dante-clock-page-${venue}" "$(now_epoch)" "$REPING_INTERVAL_S")" \
+    >/dev/null 2>&1 || log "PAGE: airuleset.py notify failed (non-fatal)"
+}
+
+# flush_pages -- after the roster loop: one page per venue in a production (yes or unknown).
+flush_pages() {
+  local venue prod
+  for venue in $PAGE_VENUES; do
+    prod="$(venue_production "$venue")"
+    if [ "$prod" = "no" ]; then
+      log "page withheld: no production at $venue (clock loss: ${PAGE_LINES[$venue]}) -- the plain alert above stays"
+      continue
+    fi
+    fire_page "$venue" "🚨 Dante-clock PRODUKCIA ($venue, $REPO_SLUG): ${PAGE_LINES[$venue]}. Počas produkcie to potichu rozhodí A/V aj genlock. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol (stav produkcie: $prod); opakuje sa každých ~10 min kým to trvá."
+  done
 }
 
 # -- per-node decision --------------------------------------------------------------------------
@@ -463,6 +582,7 @@ handle_node() {
       confirm_then_alert "mgmt_${name}" 0 "dante-clock-${name}-mgmt"   # #1309: :8898 dead, mgmt not probed this pass
       confirm_then_alert "http_${name}" 1 "dante-clock-nohttp-${name}" \
         "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) je HORE, ale dantesync HTTP na :$STATUS_PORT NEODPOVEDÁ -- démon dantesync spadol/zamrzol na živom boxe.${vnote_txt} Bez neho uzol nemá dante clock a pri produkcii to potichu rozhodí A/V aj genlock. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. Náprava: reštartuj dantesync na $name a over :$STATUS_PORT."
+      [ "$CTA_FIRED" = "1" ] && queue_page "$(node_venue "$role")" "$name ($ip) bez dante clock: dantesync neodpovedá"
       return 0
       ;;
     NO_CLOCK) : ;;
@@ -486,6 +606,8 @@ handle_node() {
   [ -n "$venue" ] && fix_txt="Náprava: over PTP grandmaster miesta ${venue} (${gm:-<neznámy>}), dantesync na boxe, gm_allowlist."
   confirm_then_alert "node_${name}" 1 "dante-clock-${name}" \
     "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) STRATIL dante clock -- dôvod **${reason}**${steps_note}.${vnote_txt} Uzol nie je PTP-zosynchronizovaný na rig grandmaster (${gm:-<neznámy>}); pri produkcii to potichu rozhodí A/V aj genlock celej fleet. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. ${fix_txt}"
+  [ "$CTA_FIRED" = "1" ] && queue_page "$(node_venue "$role")" "$name ($ip) bez dante clock: ${reason}"
+  return 0
 }
 
 # handle_grandmaster <resolved_ok 0|1> <grandmaster_ip> -> DNS_UNRESOLVABLE + GM_CHANGED global pages.
@@ -497,6 +619,7 @@ handle_grandmaster() {
   if [ "$resolved" != "1" ]; then
     confirm_then_alert "dns" 1 "dante-clock-dns" \
       "🚨 Dante-clock ($REPO_SLUG): grandmaster DNS **video-clock.lan** sa NEROZLÍŠI (rig DNS / MikroTik statický záznam chýba alebo je nedostupný). Bez neho nevie gate ani fleet overiť clock -- presne tichý pád, čo sa nesmie stať. Re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. Náprava: MikroTik DNS video-clock.lan -> Yamaha Dante karta."
+    [ "$CTA_FIRED" = "1" ] && queue_page "$DANTESYNC_FLEET_HOME_VENUE" "grandmaster DNS video-clock.lan sa nerozlíši"
     return 0
   fi
   # resolved OK: clear any DNS fault latch (recovery log-only).
@@ -603,10 +726,15 @@ main() {
     fi
     handle_node "$name" "$ip" "$homegate" "$node_gm" "$vpin" "$role"
   done < <(build_roster)
+  flush_pages
   log "pass end"
 }
 
 # Run only when EXECUTED (systemd/CLI). Sourcing (tests) only defines the functions above.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if [ -n "$PRODUCTION_READ_VENUE" ]; then
+    avsync_venue_production_live "$PRODUCTION_READ_VENUE" "$(avsync_venue_ws_host "$PRODUCTION_READ_VENUE" 2>/dev/null || true)"
+    exit 0
+  fi
   main
 fi

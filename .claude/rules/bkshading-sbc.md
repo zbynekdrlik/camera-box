@@ -516,3 +516,7 @@ The code lane ships the provisioning + `--check`; these live-hardware steps are 
      `wpa_cli reassociate` line with BSSID/signal before and after, about 60 s after that the
      `systemctl restart wpa_supplicant@wlan0` line. `nft delete table inet healtest` → the next
      pass logs `answers again` (or nothing after a restart reset the count) and `--check` is OK.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- bkshading handheld SBC (the device-agnostic arm64 board, the reused relay unit, the READ-ONLY root from the shared `scripts/lib/ro-root.sh` canon that setup-device STEP 18 also writes through, the arm64 relay deploy that reads the target's root, the supervisor bench checklist; issue 808) → `.claude/rules/bkshading-sbc.md` (auto-loads on its `paths:`)

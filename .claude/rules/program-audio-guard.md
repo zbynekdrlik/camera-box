@@ -5,6 +5,8 @@ paths:
   - "scripts/program_audio_sampler.py"
   - "scripts/program_audio_cg.py"
   - "scripts/program_audio_cg_corr.py"
+  - "scripts/program_audio_cg_advisory.py"
+  - "tests/python/test_program_audio_cg_advisory_1553.py"
   - "scripts/program_audio_ndi_url.py"
   - "tests/python/test_program_audio_cg_corr_1404.py"
   - "tests/python/test_program_audio_ndi_url_1404.py"
@@ -349,6 +351,64 @@ IN the program.
   - The committed real clip with the song = PRESENT; its null stays under 0.75 x the threshold.
   - Each UNDECIDED cause, the rings, the overlay and the payload, and the loop handing the arm the
     program's own frames.
+
+## The CG arm is ADVISORY while the program tree and the mbc proof hold (issue 1553, ROZHODNUTÉ 25.11.2026)
+
+Owner ruling (issue 1553 comment 7174499060), from the findings 7174372378 + 7174384065: stream-snv's
+program tree (`Development` = `PRO` nested + `JXS PGM src`) has ONE audio input, `mbc`, so CG audio can
+reach the stream only through the mbc mix, and fohmixer can prove that mix carries HAND 1 sync only.
+Goal: SongPlayer no longer needs blanking for YouTube/FB tests. `scripts/program_audio_cg_advisory.py`:
+- **(a) the program tree**, over OBS-WS read-only through `obs_phase2._conn` / `_rpc` (its
+  production-scene guard) over ONE session kept open between reads (`ProgramTreeReader`; a failure
+  closes it, the next read reconnects; the probe's stop shuts it for good, so no read in flight
+  reconnects; a session per read would log ~5,800 connect/close pairs a day
+  on the broadcast box): GetCurrentProgramScene, GetSceneItemList / GetGroupSceneItemList descending
+  nested scenes and groups, ENABLED items only, plus GetSpecialInputs (the global audio devices mix into
+  every output) and the transitions (GetCurrentSceneTransition and the program scene's own
+  GetSceneSceneTransitionOverride, its kind from GetSceneTransitionList; a kind outside OBS's built-in
+  silent ones, a stinger, reads as another audible input). Known limit: during a cut the OUTGOING scene's inputs stay in the
+  mix for the transition's length. An input is audible when GetInputAudioTracks has a track on (mixers != 0) and
+  GetInputMute is false; an input without audio answers request code 604 (not audible); any other error
+  = unreadable. Holds when no audible input but the program-audio input = STRIH_PROGRAM_AUDIO_INPUT of
+  the stream box's fact file (`PROGRAM_AUDIO_STREAM_BOX`, default stream-snv -> `mbc`), never a literal.
+  Read every 15 s, valid 45 s (`TREE_INTERVAL_S` / `TREE_MAX_AGE_S`). An answer is as old as its
+  read's START (a slow read never looks fresh).
+- **(b) the mbc proof**: fohmixer's `GET /api/mbc/stream-proof` on the FOH hub (fohmixer issue 267,
+  LAN only, `Authorization: Bearer <the hub's automation token>`, JSON `{ok, ts, open, hand1_sync_only,
+  outputs, age_ms}`, `ok:false` + `reason` when it cannot read). Holds on `ok` true AND `hand1_sync_only`
+  true. Read at most once a minute (`MBC_PROOF_INTERVAL_S` 60, a failed attempt counts), the answer
+  cached; its age = our read's age + the hub's `age_ms` (the hub caches one walk per 30 s), valid
+  150 s (`MBC_PROOF_MAX_AGE_S`: two missed reads + the hub's cache). A missing / negative /
+  non-numeric `age_ms` is unreadable.
+- **Config** in the sampler's env file `~/.config/camera-box/program-audio-sampler.env`:
+  `PROGRAM_AUDIO_MBC_PROOF_URL` + `PROGRAM_AUDIO_MBC_PROOF_TOKEN_FILE` (a 0600 file holding the token,
+  read per request; never in git, argv or a log). Either absent = NO probe = the strict arm exactly as
+  before (one `CG arm strict (no ... configured ...)` start line). `PROGRAM_AUDIO_STREAM_OBS_PASSWORD`
+  (default none: the rig runs no auth).
+- **The decision** (`decide`, pure; `AdvisoryProbe` thread like `HomeProbe`, owned by `CgArm`):
+  both hold -> `program_audio_cg.overlay` returns the window's OWN verdict and reason (no FOREIGN, no
+  UNKNOWN, no latch); `pcg.suppressed` names what the strict arm would have made of it. A stream-side
+  spectral FOREIGN / UNKNOWN is never touched. Either proof unreadable, stale or false -> the strict arm,
+  byte for byte. A failed read REPLACES the last good one (strict at once). Any exception in a read
+  (a `SystemExit` from obs_phase2 included) is an unreadable reading, and a probe thread that died reads
+  strict (`cg strict (the advisory probe thread stopped)`). fohmixer's `reason` / `open` text is cleaned
+  of control characters and cut to 120 characters before our log and payload.
+- **Visible:** the payload's `cg.advisory` = `{applies, text, suppressed, tree_age_s, mbc_proof_age_s}`
+  (only with a probe configured); the sampler logs each change (advisory on, strict with why, a
+  suppression starting / ending), never per window; the guard line appends
+  `cg advisory (mbc proof: hand1 sync only, program tree: mbc only)` and
+  `-- strict would be <V>: <reason>` when the arm would have acted, on a fresh PASSING line only (never
+  a stale or refusing one). The note is display only.
+- **Install:** setup-strih step 16e adds `python3-websocket`, the probe, `dantesync_fleet.py` (the fact
+  parser, `fact_file`), `obs_phase2.py` with its lazy imports and every stream-role fact file (DATA:
+  `PROGRAM_AUDIO_STREAM_BOX` picks one; the closure test derives them from STRIH_ROLE=stream). A
+  missing websocket-client reads unreadable (strict), never a dead thread.
+- **Tests:** `tests/python/test_program_audio_cg_advisory_1553.py`, fakes only (an in-process
+  `obs_phase2` module, a patched `urlopen`), green under `unshare -n`.
+- **After deploy:** set the two env values once fohmixer's endpoint exists, try-restart the sampler,
+  read the start line and the endpoint's `cg.advisory` (`applies` true with SongPlayer playing). Not
+  yet read live: that stream-snv's tree reads `mbc` only to this probe (`NDI 2ME PGM` nested in `PRO`
+  is hidden + muted per the 25.11 collection read; if it ever reads audible the arm just stays strict).
 
 ## Each sampler receiver is pinned to an on-link address (SP-program connections 0, 3.11.2026)
 
@@ -945,3 +1005,7 @@ shim + numpy next to restreamer's broadcast encoder).
   numpy 2.3.5 on dev1 (`uv run --no-project --python 3.14 --with numpy==2.3.5 --with pytest`).
 - strih-snv's USB 5 GbE NIC still has rx_missed bursts (issue 1242 / 1387): NDI rides TCP/RUDP, so they
   show as late bursts, which the sender-timeline logic keeps.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- stream program-audio guard (strih-snv) + dev1 cam2 marker-log mirror (issue 1404: the YouTube channel guard — `program_audio_sampler.py` receives `STREAM-SNV (stream)` audio-only over a ctypes libndi binding (the in-repo NDI receiver is video-only; private empty NDI_CONFIG_DIR = mDNS only), classifies every 2 s by the share of energy OUTSIDE the 200–800 Hz marker band (per-channel powers summed, never a downmix; the declared 1 kHz measurement tone line removed first) + a level gate: MEASUREMENT / FOREIGN ≥ 30 % / SILENT < −60 dBFS / UNKNOWN, calibrated on 1851 real measurement windows (max 25.3 %) and live SongPlayer music (88–94 %); MEASUREMENT also needs the cam2 QPSK marker (a timecode chain ≥ 4 over the trailing 4 s, repeating indices dropped) from the dock's decoder via the g++-built `scripts/qpsk_guard_shim.cpp`; the marker span restarts on a hole in the SENDER's NDI audio timestamps, not on the host's arrival time (a late burst from a starved sampler keeps it, a fleet date step matched to the host's own wall step is no hole at all; the 1 s arrival gap only for a frame without a timestamp; a capture thread only captures + queues; a short chain over bridged audio reads UNKNOWN, never FOREIGN; the sampler serves its own :8891 endpoint and moved to strih-snv: an E-core --user unit at normal priority, setup-strih step 16e, verify-strih item 41, rig-mode TEST starts / EVENT stops it; the consumers switched, so the dev1 :8890 route and the dev1 unit are gone, issue 1404 8.10.2026), and a spectral FOREIGN reads FOREIGN in the warm-up too; a FOREIGN latch; `program_audio_guard.py` exit 0/1/2 fail-closed, server-side ages; the mirror is ONE long-lived ssh `tail -c +1 -F` stream (a cam2 login writes 11 lines into its persistent stick journal — never a login per pass; a counted replay, paused while the rig is away on the mobile link, RTT > 20 ms); the mirror's serve dir `$XDG_RUNTIME_DIR/rig-lease-serve`, the sampler's its own `$XDG_RUNTIME_DIR/program-audio-sampler`; the dev1 mirror unit ships disabled) → `.claude/rules/program-audio-guard.md` (auto-loads on its `paths:`)

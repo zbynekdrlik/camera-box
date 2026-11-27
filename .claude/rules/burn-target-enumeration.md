@@ -50,3 +50,7 @@ occurrence — and broke the #252 "exactly 2 loop headers" guard (`harness_recor
 iterate the box IPs directly (`for _swpair in "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"`) —
 you only need the per-box IP, not the shared array's triples. And make WIRING guards anchor on the
 INVOCATION form (`obs_burn_filter.py" sweep-off`), never the bare token, which a comment can satisfy.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Measurement-burn OFF/CHECK/RESTORE target set — ENUMERATE ndi_source inputs over WS (obs_burn_filter.py sweep-check/sweep-off), never a static or CAMERA_ACTIVE_SET list; fail CLOSED on a failed GetInputList (#938/#1011 leak, guard class #246/#844) → `.claude/rules/burn-target-enumeration.md` (auto-loads on its `paths:`)

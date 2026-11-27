@@ -907,7 +907,7 @@ else
 fi
 
 # 36) rig NIC driver version, USB Gen 2 link, 5G link, NM pinning vs the box facts (issue 1391, strih-nic-driver.sh).
-strih_nic_grade_report /sys "$(ip -o -4 addr show 2>/dev/null || true)" || bad "(nic) the rig-NIC grader printed no row"
+strih_nic_grade_report /sys "$(ip -o -4 addr show 2>/dev/null || true)" || bad "(nic) the rig-NIC grader printed no row"; strih_egress_pacing_grade_report || bad "(egress-pacing) the grader did not print its rows"   # issue 1553: the sender egress pacing (scripts/lib/strih-egress-pacing.sh)
 obs_audio_buffering_verify_row "$(strih_lx_audio_buffering_ms)" "$USER_HOME" "$LOG"   # 48) the FIXED OBS audio buffering == the box fact (issue 1425)
 strih_jxs_verify_row "$LOG"   # 49) every running JPEG XS source: lost_slices=0 over its last minute (issue 1387, scripts/lib/strih-jxs-verify.sh)
 strih_jxs_config_verify_row "$USER_HOME"; strih_jxs_output_start_row "$USER_HOME" "$LOG"; strih_obs_dropin_verify_row "$USER_HOME"   # 49) + the JPEG XS config vs the box facts (manifest, inputs, program output), the output's start, the OBS network wait (issue 1387, strih-jxs-provision.sh)

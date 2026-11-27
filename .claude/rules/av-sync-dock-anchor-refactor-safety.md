@@ -256,3 +256,7 @@ The step uses its own `Assert-InOrder` helper (an `IndexOf` from the previous ma
 recipe: `mutate_wiring`-style, a scratch copy of `vendor/av-sync-dock/{src,test}` + the CMakeLists, one
 mutant each, the Rust tests compiled with `CARGO_MANIFEST_DIR=<scratch>` and the extracted pwsh steps
 run with the scratch tree as cwd.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Refactoring the dock-lock if/else-if/else decision chain in `sync-test-output-audio.cpp` (stale text-anchor gates hide in a probe-gated Rust test, #955; the windows-genlock*.yml pwsh mirrors were retired with issue 1505; issue 1386 split the dock output into lifecycle/video/audio TUs + an internal header in one namespace, and every anchor reads their union through ONE helper per language, `tests/support/av_sync_dock_output.rs` + the dot-sourced `vendor/av-sync-dock/test/dock-output-source.ps1`, whose body extractors refuse a signature found twice) → `.claude/rules/av-sync-dock-anchor-refactor-safety.md` (auto-loads on its `paths:`)

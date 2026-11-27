@@ -28,3 +28,7 @@ and MUST NOT claim a frame-loss/latency verdict for a run that produced none.
 Run bash DIRECTLY against a pure shell helper — the exact thing the Rust harness does internally:
 `bash -c '. scripts/lib/<lib>.sh; <fn> <args>'` (and the strict production shape
 `bash -c 'set -euo pipefail; . <lib>; <fn> …'` to prove `set -e` never swallows it).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Full-path E2E failed-gate Discord alert — derive the failed STAGE from durable per-run artifacts (verdict-<RUN_ID>.json + downloaded recordings), never hardcode a frame-loss verdict; + local shell-helper verification → `.claude/rules/e2e-failure-alert.md` (auto-loads on its `paths:`)

@@ -218,3 +218,7 @@ strih (read-only, deletes nothing). The bash side is pure pytest
   permissive than the Rust spec's `is_ascii_digit()` — the wrong direction for a DELETE gate. `[0-9]`
   keeps the PowerShell mirror byte-exact with the canonical Rust decision. Same lesson applies to any
   future Rust↔PowerShell parity mirror in this repo.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- E2E recordings retention — dry-run-first sweep of the OBS record dir (strih `C:\_REC` since 17.9.2026 — the D: NVMe failed, owner left recordings on C:, issue 1338; historically `D:\_REC`, ~691 GiB of old runs vs the 50 GB budget): pure `src/recordings_retention.rs` decision (keep newest-N runs UNION younger-than-D-days; EXPLICIT OBS-timestamp allowlist, NEVER a generic `*.mkv` sweep — `strih700105.mkv` stays PROTECTED) mirrored by `scripts/strih-recordings-retention.ps1` (scp -O + `powershell -File`, DRY-RUN default, `-Execute` = supervisor's reviewed step) AND, for the Linux strih-snv `/srv/_REC`, by the bash `--local-sweep` in `strih-recordings-retention.sh --box strih-snv` (record dir from the OBS profile, parity-pinned to the Rust plan() by ONE shared `tests/fixtures/recordings_retention_parity.tsv`, issue 1317); #1122 → `.claude/rules/recordings-retention.md` (auto-loads on its `paths:`)

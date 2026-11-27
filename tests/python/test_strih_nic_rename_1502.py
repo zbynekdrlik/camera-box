@@ -98,8 +98,8 @@ def test_every_other_box_declares_no_rename(box):
 
 
 def test_the_fact_is_the_last_key_and_every_box_loads():
-    # issue 1425 appended STRIH_HOUSEKEEPING_CPUS after it: the rename is the second-to-last key now.
-    r = _bash('strih_box_fact_keys | tail -n 2 | head -n 1\nfor b in strih-snv strih-pp stream-pp stream-snv; do '
+    # issue 1425 appended STRIH_HOUSEKEEPING_CPUS after it: the rename is the second-to-last key; issue 1553 STRIH_DANTE_GM_ADDR + STRIH_EGRESS_PACING_RATE after that.
+    r = _bash('strih_box_fact_keys | tail -n 4 | head -n 1\nfor b in strih-snv strih-pp stream-pp stream-snv; do '
               'strih_box_load "$b" >/dev/null; printf "%s %s\\n" "$b" "$(strih_lx_nic_rename)"; done')
     assert r.returncode == 0, r.stderr
     lines = r.stdout.splitlines()

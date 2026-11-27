@@ -166,3 +166,7 @@ steady cam2-only 60Hz temporal-tear baseline; pick the floor at ~50% headroom ov
 run-wide max. The pre-#707 regression level (10) is NO LONGER a ceiling for this floor (issue 915, 2026-09-15): 10 is now a MEASURED physical value the 60Hz-vs-60fps beat can reach, so the current floor (15) sits ABOVE it; a #707-class regression is caught by the copies/gaps tolerance + emit-gate-skip triage / frozen_leg / self-heal, never by this sum. Two distinct subsystems share the
 word "undecodable": THIS floor is `all_cambox_continuity.total_undecodable`/`segments[].undecodable`;
 `full_chain.loss.*.optical_undecodable` is a SEPARATE rate-gated per-node check — don't conflate.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Optical undecodable floor gate (`gates_overall_pass()` seam mirroring #914, strict-vs-relaxed independence, scoped JSON flag naming; #915 made it report-only, #905 item 3 RE-GATED it LIVE at floor 6 — the 60Hz baseline is permanent) → `.claude/rules/optical-undecodable-floor-report-only.md` (auto-loads on its `paths:`)

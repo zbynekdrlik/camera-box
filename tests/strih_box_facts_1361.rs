@@ -165,6 +165,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_NIC_RENAME",
     // issue 1425: the housekeeping CPUs (a cpulist | none).
     "STRIH_HOUSEKEEPING_CPUS",
+    "STRIH_DANTE_GM_ADDR", // issue 1553: the address dev1 grades the venue against
+    "STRIH_EGRESS_PACING_RATE", // issue 1553: the rig NIC sender egress pacing (none | <N>mbit | <N>gbit)
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -257,8 +259,10 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_DANTE_RX_STAMP_MARGIN_MS=10",
         // issue 1502: strih-snv's rig NIC keeps its kernel name.
         "STRIH_NIC_RENAME=none",
-        // issue 1425: strih-snv's housekeeping = the complement of the OBS mask 2-15.
-        "STRIH_HOUSEKEEPING_CPUS=0-1",
+        // issue 1425: strih-snv's housekeeping (ROZHODNUTE 7183885100: 0-3, two whole cores, the OBS mask 4-15 follows it).
+        "STRIH_HOUSEKEEPING_CPUS=0-3",
+        // issue 1553: the sender egress pacing, one value on every box.
+        "STRIH_EGRESS_PACING_RATE=900mbit",
         "LOADED=strih-snv",
     ] {
         assert!(

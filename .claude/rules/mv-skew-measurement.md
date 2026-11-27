@@ -70,3 +70,7 @@ OBS_PASSWORD-first, then the `--password` arg, default `""` — mirror `imag_lat
 a WebSocket. imag's OBS WS is auth-less today (`verify-imag.sh` runs `imag_scenes.py` bare), so the
 password is ignored — but wiring the SSH password makes yours the ONE consumer that silently goes
 dark the day WS auth is enabled, which for a report-only guard is a silent dead measurement.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- MV-clone-vs-main presentation SKEW via OBS-WS screenshots (the `t_send` latch-timing + local-wall-gap compensation — RPC-midpoint stamping is the noise source; universal-painter vs cam1-burn run_id; shared-source regression-guard reframing; imag WS uses OBS_PASSWORD not IMAG_PW, #761) → `.claude/rules/mv-skew-measurement.md` (auto-loads on its `paths:`)

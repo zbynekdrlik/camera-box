@@ -115,3 +115,7 @@ the watchdog `--dry-run`, override `probe_box`/`sshpass`/`rig_mode_probe`, run `
 worktree worker may find `bash -c '…source…'` blocked (#1265); the Rust harnesses
 (`tests/harness_rig_mode_state_1290.rs`, `tests/harness_splitter_port_event_gate_1290.rs`) cover the
 same, plus `bash -n` + `shellcheck -S warning`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Gating a TEST-premise dev1 watchdog on rig EVENT mode (the splitter-port #739 family paged the owner 5× during a LIVE show — a camera-less cambox is legitimately black in EVENT where each cambox has its OWN camera, so the sibling-anchor DEAD_PORT premise is false; the EVENT signal is the DURABLE cam2 painter state = pidfile OR `cam2-painter.service` enabled via `scripts/lib/rig-mode-state.sh`'s 3-state EVENT/TEST/UNKNOWN classifier reusing optical-chain-health.sh, NOT the ledger and NOT the #281 heartbeat; fail-safe UNKNOWN→page-as-today; the per-watchdog audit — only splitter-port needed the gate, optical-chain already has it, grabber-stuck/cadence/frozen-input are mode-independent; #1290) → `.claude/rules/rig-mode-event-gate.md` (auto-loads on its `paths:`)

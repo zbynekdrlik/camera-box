@@ -89,3 +89,7 @@ watchdog was blind for days without paging. The scope is now derived:
 ## Baseline goes stale after every genlock relaunch batch (16.9.2026)
 
 A fleet relaunch re-orders strih's sender ports around the issue-1185 pin (`2ME PGM` back on `:5961`, every republish one port lower); the 24.8. baseline then paged 14× overnight through the 12-pass throttle. Re-capture (`scripts/ndi-portmap-audit.sh --capture`, live read only) and commit the JSON in the deploy sitting; `--check` must read `NDI-PORTMAP-STABLE` before the sitting ends.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- NDI SENDER port-map stability watchdog (dev1 baseline alert on a moved sender port that hands stock TVs the wrong source; avahi `-p` DECIMAL `\DDD` escapes + resolved-line field layout; the TWO NDI instances at one IP isolated by the anchor's mDNS-hostname group; baseline stores name→port only so hostname-suffix drift never matters; empty/anchor-absent map = gather error never a page; the DistroAV FINISHED_LOADING deferral root cause for the #1185 PGM-pin; #1181; the watched strih RESOLVED from the obs-fleet `ndi-portmap` facet + anchor-record IPv4 IP + exit 4 = baseline captured on another strih, issue 1363) → `.claude/rules/ndi-portmap-watchdog.md` (auto-loads on its `paths:`)

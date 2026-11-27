@@ -218,3 +218,7 @@ Read the state after each step: `xrandr --current`, `journalctl --user -u strih-
    `display re-used` + `LIVE again`; a `has a new handle after a replug` line = the handle-stability
    premise failed, record it on the ticket), never an OBS restart; the NEC stays in the
    layout. verify-strih passes item 4c, `(display-watch)`, `(display-watch-pass)`, `(display-x-config)`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Linux OBS boxes without / after plugging / after switching on a monitor (issue 1424, owner 24.10.2026): the in-OBS retry supervisor of the vk-direct outputs (`obs-drm-output-retry.{c,h}` ↔ `src/drm_output_retry.rs` parity, a dormant output retried 2 s / 5 s / 30 s while unplugged, a dead loop released + retried, the present loop keeping a display acquired through an unplug beside another output, `drm_output_blog` capturing a failed attempt's lines), the X config keeping the fixed outputs out of X (`scripts/lib/strih-x-display.sh`, MetaModes over the operator outputs, step 6), the session display watch + the tint2 guard (`scripts/strih_display_watch.py`), item 4c reading the retry lines, the deploy + live runbook → `.claude/rules/display-hotplug.md` (auto-loads on its `paths:`)

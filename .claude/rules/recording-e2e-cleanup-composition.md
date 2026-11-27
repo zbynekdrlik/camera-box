@@ -71,3 +71,7 @@ program switch) saves the operator's transition to the durable
 `cleanup()` (right after `cold_cut_cleanup_restore`) puts it back and deletes the save. An existing
 save is never overwritten, so an aborted run's next start still restores the operator's real choice.
 Any other operator OBS state a measurement must override follows the same save/restore shape.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- `recording-e2e.sh` cleanup()'s always-runs stream-latency restore composing with a late OBS write (#856) + the 703 byte-window test → `.claude/rules/recording-e2e-cleanup-composition.md` (auto-loads on its `paths:`)

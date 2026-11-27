@@ -60,3 +60,7 @@ scanout and now has no source on cam2 → those windows read `Unproven` and PASS
 (never a red; "no aux source" is surfaced report-only, `.claude/rules/projection-tap-tear-detect.md`).
 The primary Vernier tick decodability on every
 active cambox (this rule's subject) is unaffected.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The cam2 Vernier `tick` decodes on EVERY cambox window on the splitter rig (CAM1/CAM3 undecodable≈0, populated presentation_cadence) — the `recording_segments.rs` "non-cam2 → tick None" doc is STALE; verify tick-decodability from verdict data, not that doc; re-confirm per-cambox before flipping any tick-based gate LIVE (#768) → `.claude/rules/cambox-tick-decodability.md` (auto-loads on its `paths:`)

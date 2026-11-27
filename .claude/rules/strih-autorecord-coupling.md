@@ -184,3 +184,7 @@ mutation on a LIVE production controller):
   GO-LIVE, `2/2` GO-OFF-AIR). **Never hit a Companion `.../press` / action endpoint on a LIVE
   production controller — GET the export ONLY.** A saved export lives at
   `~/.claude/work-products/issue-1274/`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Why strih+stream OBS auto-RECORD on stream go-live and orphan after StopStream (the recurring RIG_BUSY-blocks-E2E cause): NOT camera-box, NOT `RecordWhenStreaming`, NOT adv-ss — it is a Bitfocus Companion controller (10.77.9.205, strongly inferred not logged) running a PRE/PRODUCTION/POST scene state machine on stream OBS's program scene: `PRODUCTION` (scene "PRO" AND streaming) StartRecords BOTH boxes; the OFF (`POST` trigger → StopRecord both, button 24/1/2) is gated on cutting stream program to "POST" — a headless CI/dev stream StartStreams on "PRO" but StopStreams without ever cutting to POST, so the off never fires. camera-box's #657 stray-signature self-heal MITIGATES only while a run's preflight polls (no code change); the durable fix is owner-side Companion (a stream-STOP `PRODUCTION OFF` trigger). Full mechanism + config quotes + recommended fix + read-only re-inspect; #1274 → `.claude/rules/strih-autorecord-coupling.md` (auto-loads on its `paths:`)

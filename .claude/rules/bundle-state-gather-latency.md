@@ -253,3 +253,7 @@ request when this env var is set — zero cost otherwise beyond a `perf_counter(
 Use it live (redeploy + set the env + tail the server log) to find the NEXT bottleneck before
 guessing; the ~18.7s fresh-log baseline had at least two independent culprits (the log read and
 the port4455 WMI timeout) found only by measuring, not by inspection.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- bundle-state SERVER internals — gather latency + caching (bounded head+tail log read vs session-length growth, the port4455 PID-keyed cache pattern + its never-cache-empty/always-clear-on-failure discipline, opt-in BUNDLE_STATE_TIMING instrumentation, #1222; issue 1386: `bundle_state_gather` = the import facade over the flat `bundle_state_*` facet modules, the Windows-only identity readers + their caches in the server-side `bundle_state_windows`, and the ONE declared deployed file list `scripts/lib/bundle-state-files.{sh,txt}` pinned to the server's imports) → `.claude/rules/bundle-state-gather-latency.md` (auto-loads on its `paths:`)

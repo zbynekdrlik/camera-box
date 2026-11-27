@@ -599,7 +599,7 @@ obs_box_max_performance "$STRIH_NIC" strih
 obs_box_never_sleep "$DESKTOP_USER" strih
 obs_box_boot_safety_net "$STRIH_KERNEL_SERIES" strih
 obs_box_lowlatency_kernel "$STRIH_KERNEL_SERIES"
-obs_box_cpu_affinity strih        # -> /etc/strih-isolated-cpus.conf, strih-obs-start.sh's taskset pin
+obs_box_cpu_affinity strih "$(strih_lx_housekeeping_cpus)"   # -> /etc/strih-isolated-cpus.conf = online minus the fact (issue 1425)
 obs_box_nvidia_prime strih        # nvidia-driver-595-open + PRIME nvidia-PRIMARY (the RTX 5050)
 obs_box_dejitter "$DESKTOP_USER" strih "$OBS_CFG"
 obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth "$(strih_box_desktop)"   # issue 1466: the lightdm session = STRIH_DESKTOP
@@ -624,6 +624,7 @@ obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile co
 # is the biggest de-jitter win, so it rides alongside the never-sleep/de-jitter masks above.
 step "11b" "rig NIC IRQs off the OBS cores (issue 1317 item H: NET_RX softirq must not share an OBS core) + housekeeping on its own CPUs (issue 1425)"
 strih_housekeeping_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1425: housekeeping off the OBS CPUs (above)"   # scripts/lib/strih-housekeeping.sh: the sysctl, the rustdesk + display-watch drop-ins, the launcher's file
+strih_egress_pacing_install || fail "issue 1553: the rig NIC sender egress pacing (above)"   # scripts/lib/strih-egress-pacing.sh: an fq per tx queue, the boot unit + NM hook
 # The USB 2.5GbE NIC's xhci interrupt lands on ONE core (irqbalance is not installed, so the kernel
 # parks it) where ~1.1 Gb/s of NDI NET_RX softirq collides with OBS's ndir:video/libobs threads
 # (issue 1354, 22.9.2026: measured on strih-snv -- moving the IRQ to an idle E-core cut the genlock
@@ -634,9 +635,8 @@ strih_housekeeping_install "$DESKTOP_USER" "$USER_HOME" || fail "issue 1425: hou
 # issue 1412 (G7): only a USB rig NIC has an xhci IRQ to place; issue 1425: with housekeeping CPUs every rig-NIC IRQ + RSS.
 if WHY="$(obs_box_step_applies 11b)"; then
   install -d -m 755 /usr/local/bin
-  strih_nic_irq_affinity_script_text > /usr/local/bin/strih-nic-irq-affinity.sh \
-    || fail "could not write /usr/local/bin/strih-nic-irq-affinity.sh"
-  chmod 0755 /usr/local/bin/strih-nic-irq-affinity.sh
+  strih_nic_irq_affinity_script_install /usr/local/bin/strih-nic-irq-affinity.sh \
+    || fail "could not write /usr/local/bin/strih-nic-irq-affinity.sh (atomic install, issue 1425)"
   [ -f "${HERE}/../systemd/strih-nic-irq-affinity.service" ] || fail "systemd/strih-nic-irq-affinity.service not found next to this script"
   install -m 0644 "${HERE}/../systemd/strih-nic-irq-affinity.service" /etc/systemd/system/strih-nic-irq-affinity.service
   systemctl daemon-reload 2>/dev/null || true

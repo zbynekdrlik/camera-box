@@ -250,3 +250,7 @@ enabled=.. active=.. age_s=..`), and the pure `classify_watchdogs` decides it.
 - The `#1310`/`#1307`/`#1299` watchdogs may be absent on an older base — a MISSING probe script is
   the RC_MISSING sentinel → UNKNOWN, so the orchestrator is forward-compatible (it picks a probe up
   the moment it exists).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- "development" handover check — ONE dev1 command run when the owner hands the rig back after a production: `scripts/rig-dev-handover-check.sh` runs each EXISTING read-only probe (alert-watchdog `--dry-run`s, obs_burn_filter sweep-check, set-ndi-mapping --verify-only, latency_pins_verify, dantesync/camera-box version gates, rig-mode-state) bounded + drain-safe, and the pure `scripts/rig_dev_handover_decision.py` maps each item (mic/mode/painter/burns/mapping/pins/clock/obs/net/audiolag/genlock/dantesync/cambox) to OK/FORGOT-BY-OWNER/UNKNOWN + a Slovak line ending `zabudol si: …`; report-only never mutates, a DOWN box (cam2) fails safe to UNKNOWN never a false OK, absent genlock facet = UNKNOWN-not-forgot, scenes/Studio-Mode covered transitively by the `mode` item; #1312 → `.claude/rules/rig-dev-handover-check.md` (auto-loads on its `paths:`)

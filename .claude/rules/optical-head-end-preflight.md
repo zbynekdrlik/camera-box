@@ -59,3 +59,7 @@ be deployed to the cam boxes first — do not assume zbar/probe are there.
   message, extraction).
 - Byte-check the shell abort message against the Rust const (mind Rust's `\`-newline continuation,
   which strips the newline + leading whitespace): both were 240 bytes here.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Head-end OPTICAL blur/shutter `[0/8]` preflight (the head-end `rough=` signal + healthy 7.1–8.0 baseline; the observer-effect trap — never calibrate a camera-health gate from imag `stuck_density`; no on-box zbar/probe so journal-mine not a v4l2 grab; pure-Rust-classifier + shell-replica + parity-harness, #1141) → `.claude/rules/optical-head-end-preflight.md` (auto-loads on its `paths:`)

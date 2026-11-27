@@ -71,3 +71,7 @@ The CODE at (2) needs no edit (the loop is generic), which is exactly why its st
 to miss. When reversing/adding a facet, `grep -rn "picom off\|picom OFF\|picom-off\|<old-doctrine
 phrase>"` across `scripts/` + `tests/` + `.claude/rules/` and update every prose hit in the same
 branch, not just the verdict function.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- imag display-path drift facets (the box is Intel-iGPU-only — NVIDIA-era knobs obsolete; picom-off/igpu-maxperf/tap-conf as OK/DRIFT/UNKNOWN facets in the shared `imag-display-path.sh` lib, consumed by drift-guard `--check-imag` #10 AND the E2E `[0/8]` preflight; PICOM_PGREP inline-marker vs the shared require-tool helper, #780) → `.claude/rules/imag-display-path.md` (auto-loads on its `paths:`)

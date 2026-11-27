@@ -371,7 +371,9 @@ render at 23 of 33 ms. The on-box decode did the same. nice is a weight; it fenc
 sibling. The E-core pin of the decode is empty on AMD (no `cpu_atom`).
 
 - **The slice:** `rig-background.slice`, `AllowedCPUs` = online CPUs minus `/etc/<BOX>-isolated-cpus.conf`,
-  always derived (`obs_box_background_cpus`). strih-snv: 0-1, one physical core. imag: 0-1 + the E-cores.
+  always derived (`obs_box_background_cpus`). imag: 0-1 + the E-cores. On a strih box the mask itself
+  follows the fact `STRIH_HOUSEKEEPING_CPUS` (`obs_box_cpu_affinity strih <fact>`, issue 1425 ROZHODNUTE
+  7183885100: strih-snv 0-3 -> mask 4-15; `strih-housekeeping.md`), and the slice keeps the IRQ-only CPUs out.
   The launcher runs OBS on that whole block (the issue-1485 Dante CPU reservation that narrowed it is
   removed, `strih-dante-input.md`).
   `CPUWeight=1`, `IOWeight=1`, `MemoryHigh=30%`. Enabled and started by setup (`[Install]`
@@ -607,3 +609,7 @@ Live conversion results (strih-snv, 23.9.2026, first kiosk boot on 7.0.0-31 + `p
   internet NTP server (`ntp_server` 162.159.200.1), so the spread tracks WAN jitter (dev1 saw ping
   mdev 1.6 ms to the same server at the same time). The PTP lock (`mode=LOCK`) is the fleet signal;
   compare against dev1's ping jitter to the upstream before treating it as a box regression.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The ONE shared OBS-box appliance baseline (issue 1357: imag's box-level provisioning moved verbatim into `scripts/lib/obs-box-baseline.sh` + `obs-box-kiosk.sh`, run by BOTH setup-imag.sh and setup-strih.sh with per-box facts as arguments -- openbox on plain Xorg, preempt=full, de-jitter, maxperf, power envelope, the PM QoS CPU idle wake-up latency bound (150 us holder unit, grader row `cstate` = unit + no deeper C-state entered in a 1 s sample); ONE grader `obs-box-baseline-verify.sh` for verify-imag/verify-strih; rtprio stays OFF; the strih-snv conversion runbook) → `.claude/rules/obs-box-baseline.md` (auto-loads on its `paths:`)

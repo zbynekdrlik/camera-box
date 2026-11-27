@@ -56,3 +56,7 @@ the boxes and keeps the glue: `strih-intercom-hub-unit.sh`, `strih-interkom-publ
    copy, `src/drm_output_audio_match.rs` (apart from the hub's doc note), the TURN credential contract and
    the Dante ports all hold at the tag. A routing change moves the golden's `intercom-toml` sha.
 4. Python tests that grade camera-box logic against a routing file read that pinned copy.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The intercom = a pinned release of `zbynekdrlik/intercom` (issue 1487: `scripts/intercom-release.pin` + the cargo git tag, the verified bundle in `<tree>/intercom-release/<tag>/`, no fallback, verify item 16 against the pin, the bump steps; hub internals + their rules live in that repo; the cambox `camN` wire contract stays byte-identical) → `.claude/rules/intercom-pinned-release.md` (auto-loads on its `paths:`)

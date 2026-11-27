@@ -256,3 +256,7 @@ plus `bash -n` and `shellcheck -S warning scripts/vban-receiver-bench.sh` (never
 - The analysis and the log grade are the real scripts, on a recording synthesized from the
   planner's own pilot.
 - The analysis tests include an ffmpeg AAC round trip. CI's `python-tests` job installs ffmpeg.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- VBAN receiver bench (issue 1460 slice 1: an emulated lv1 on dev1 -- `scripts/vban_emulator.py` over the pure `scripts/vban_emulator_plan.py`, exact-rate slots from the index, lv1/stress send gaps, scheduled losses that keep nuFrame + the pilot -- sends to a TEMPORARY obs-vban input on strih-snv OBS (program-scene item, ONE dedicated track never 1 or the stream track, monitoring off, RecTracks ORed + restored, Studio Mode re-program for activation; `scripts/vban_bench_obs.py` over obs_phase2's client); the recording graded by `scripts/vban_sine_continuity.py` (pilot phase steps / silence slots / ppm vs the schedule, AAC-calibrated) and the OBS log by `scripts/vban_bench_log.py`; `scripts/vban-receiver-bench.sh` --plan default, --run behind TEST mode + a proven idle rig + the rig lease, --cleanup; only the QPSK marker may sound) -> `.claude/rules/vban-receiver-bench.md` (auto-loads on its `paths:`)

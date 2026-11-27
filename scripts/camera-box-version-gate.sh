@@ -591,7 +591,9 @@ camera_box_other_venue_report() {
     rc=0
     rows="$(dantesync_fleet_venue_camera_rows "$venue")" || rc=$?
     [ "$rc" -eq 0 ] || echo "!! CAMERA-BOX VENUE REPORT: the venue $venue camera list is incomplete (a strih fact-file error, named above) -- report-only." >&2
-    while IFS='|' read -r name addr gate; do
+    # issue 1553: the rows come on fd 3, never stdin -- the per-camera ssh read consumes stdin, and a
+    # here-string on stdin left every row after the first unread (25.11.2026: cam1 only of four).
+    while IFS='|' read -r -u 3 name addr gate; do
       [ -n "$name" ] || continue
       if cambox_offline_ack_is_acked "$name"; then
         printf '  %-14s %-16s EXCLUDED (acked offline: %s; venue %s, not read)\n' "$name" "-" \
@@ -611,7 +613,7 @@ camera_box_other_venue_report() {
         20) echo "!! CAMERA-BOX VENUE ALARM: $name (venue $venue, $addr) runs camera-box $version, not main's $pin -- redeploy it: scripts/deploy-fleet.sh --venue $venue (report-only, does NOT block this run)." >&2 ;;
         11) echo "!! CAMERA-BOX VENUE ALARM: $name (venue $venue, $addr) answers ssh but its camera-box version was not read (report-only, does NOT block this run)." >&2 ;;
       esac
-    done <<<"$rows"
+    done 3<<<"$rows"
   done
   return 0
 }

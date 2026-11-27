@@ -54,3 +54,7 @@ dual-QR/Vernier payload logic again: the settled side's payload must be byte-ide
 tick-to-tick — write a real encode→render→decode round-trip test (see
 `settled_left_half_payload_is_byte_identical_across_the_next_tick` in `src/probe/painter.rs`) to
 prove it, not just a geometry-level assertion.**
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Presenter DRM device selection + dual-QR Vernier payload stability (`/dev/dri/cardN` renumbering, #854) → `.claude/rules/presenter-drm-selection.md` (auto-loads on its `paths:`)

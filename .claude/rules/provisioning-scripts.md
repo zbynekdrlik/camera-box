@@ -679,3 +679,7 @@ were the starts. With PID 1 off the core: 2 re-seeds in 9 min, none near a unit 
 - A runtime A/B of every SERVICE restricted to 0-1 (PID 1 left alone) changed nothing: the trigger is
   PID 1's own work on a unit start, not the started service.
 - Tests: `tests/python/test_cambox_housekeeping_cpus_1367.py`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- `setup-device.sh`/`verify-device.sh` companion conventions (enable-only never live-start, the `(q)`-must-stay-last check ordering, cam2-painter display-ownership, #863; a provisioning fix is done only when `verify-fleet.sh` + `verify-fleet.sh --venue pp` pass on every box, issue 1394) → `.claude/rules/provisioning-scripts.md` (auto-loads on its `paths:`)

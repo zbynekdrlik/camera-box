@@ -257,3 +257,7 @@ buffering floor (`asrc-bench-harness.md` / `genlock-audio-buffering-floor.md`, t
 source's `target=` is the depth it had at the lock again, so it differs per launch by design (the
 buffering a launch draws no longer moves A/V). The line has no `fallbacks=` field; there is
 no UNREACHABLE warning to chase any more.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Reading the stream `asrc: source 'mbc' estimated=` residual (issue 1372: since dantesync 1.9.0 + the disciplined Windows media clock it reads ≈ 0 ppm, so a steady ≥ 3 ppm means a clock left the Dante tick — check dantesync `rate_source`/`f_phase` and the `media_clock` facet first, never tune the ASRC; the history: ≈ +8 ppm was the pre-1.9.0 Dante-GM-vs-UTC floor mirrored by `f_phase`, ≈ −18 ppm the DVS/PTP port collision fixed in dantesync 1.8.53, dantesync#109 / #1265) → `.claude/rules/asrc-residual-floor.md` (auto-loads on its `paths:`)

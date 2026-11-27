@@ -117,3 +117,7 @@ systemd-signature/camera-box/lifecycle-verb filter) runs against the fixture —
 proof that the reader keeps only the intended epochs (the #1133 harness's fake-journalctl tests do
 exactly this). NOTE: a worktree-isolated worker's guard may refuse a `bash -c '…source lib…'` /
 `eval` shape (`.claude/rules/ci-testing-gotchas.md`, #1265) — run the #1133 harness via `cargo test`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Leg-health `[0/8]` preflight capture-health signal (the HARD gate is FRAME LOSS = `max(0, sent-captured)` from the `Streaming:` lines — sent=emit-cadence, captured=device frames, over-rate benign #909; NEVER re-gate on the DEQUEUE STALL count — VIDIOC_DQBUF blocking-wait duration is ANTI-correlated with real loss, issue 1198; 1.25% calibrated gate + 3-window sustain guard; a dead leg is caught by emit-SKIP/EPROTO/#656 not this metric; #1133) → `.claude/rules/leg-health-frame-loss.md` (auto-loads on its `paths:`)

@@ -38,6 +38,8 @@ fail() {
 . "$HERE/camera-set.sh"
 # shellcheck source=scripts/lib/rig-grandmaster.sh
 . "$HERE/lib/rig-grandmaster.sh"  # rig_grandmaster_ip() -- the DNS-named PTP grandmaster (#1307)   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
+# shellcheck source=scripts/lib/dantesync-fleet.sh
+. "$HERE/lib/dantesync-fleet.sh"  # dantesync_fleet_camera_gm_host -- the venue grandmaster STEP 17 writes (issue 1553)
 # shellcheck source=scripts/lib/rt-kernel-plan.sh
 . "$HERE/lib/rt-kernel-plan.sh"  # rt_kernel_line_held_metas -- the fleet kernel line STEP 15 holds (issue 1446)
 
@@ -1648,8 +1650,17 @@ fi
 # rig_grandmaster_ip() is kept ONLY as a loud precondition that the name still resolves (fail
 # closed otherwise); the WRITTEN value is rig_grandmaster_host() = video-clock.lan. Written BEFORE
 # the unit so the enable/restart below picks it up on a first provision.
-_RG_GM_IP="$(rig_grandmaster_ip)" || fail "cannot resolve the PTP grandmaster host (video-clock.lan) -- refusing to provision dantesync without a resolvable grandmaster (#1307)"
-_RG_GM_HOST="$(rig_grandmaster_host)"
+# issue 1553: the grandmaster is the camera's VENUE grandmaster (STRIH_DANTE_GM of the venue's NTP-master
+# fact file): video-clock.lan at SNV, 10.77.7.200 at PP, where the SNV name does not resolve (22.11.2026:
+# the PP cameras locked to nothing). A host name must still resolve; a literal IPv4 needs no DNS.
+_RG_GM_HOST="$(dantesync_fleet_camera_gm_host "$CAMERA_NAME")" \
+    || fail "no venue grandmaster for ${CAMERA_NAME} from the fact files in scripts/strih-boxes/ (issue 1553)"
+if [[ "$_RG_GM_HOST" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+\.[0123456789]+$ ]]; then
+    _RG_GM_IP="$_RG_GM_HOST"
+else
+    _RG_GM_IP="$(rig_grandmaster_resolve "$_RG_GM_HOST")"
+    [ -n "$_RG_GM_IP" ] || fail "cannot resolve the PTP grandmaster host (${_RG_GM_HOST}) -- refusing to provision dantesync without a resolvable grandmaster (#1307, issue 1553)"
+fi
 # issue 1487: a box still on dantesync moves to dsync here: the old service out, its state dir renamed.
 dantesync_install_retire_legacy || fail "could not retire dantesync (above)"
 install -d -m 755 /etc/dsync

@@ -235,3 +235,7 @@ while main was 1.8.11) leaves the fleet MIXED. The [0/8] auto-align aligns only 
 release E2E refuses at `camera-box-version-gate` (`cam5 1.8.12 PIN-DRIFT ... NEWER than main`) about a
 minute in. Before opening a release PR, put every tested box back on main:
 `CAMERA_SET="cam5" scripts/deploy-fleet.sh` (the main head's ci.yml artifact; it also checks the relay pin).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- camera-box version-parity treadmill + the pre-[0/8] auto-align (`camera-box-parity-align.sh`: the main-lags-dev candidate-pin-only-path treadmill; align only a uniform-stale fleet; the BUILD-ORDER trap — a [0/8] step must source the CLEAN `camera-box-linux-amd64` ci.yml artifact, NOT `$PROBE_BIN_DIR` which is built at [1/8]; version-guard against a stale deploy; acked-exclusion from the deploy scope; #1202) → `.claude/rules/version-parity-treadmill-align.md` (auto-loads on its `paths:`)

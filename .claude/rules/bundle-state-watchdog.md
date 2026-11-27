@@ -105,3 +105,7 @@ Units are committed but NOT enabled. Install/live-verify/enable per
 `systemd/bundle-state-alert-watchdog.README.md`. This watchdog makes NO Windows-side change — it only
 INVOKES `schtasks /run` on the existing task. Recreating the task on re-provision and the
 stale-deployed-code drift class remain separate follow-ups.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- strih/stream :8899 BundleStateServer health-check + AUTO-RESTART (dev1-side watchdog: curl :8899/bundle-state.json FROM dev1 — not MCP Invoke-WebRequest which hangs; box-up=ping|:4455 EXCLUDES :8899; auto-restarts the task via session-agnostic `schtasks /run` over ssh — never `/it`; the auto-restart-vs-alert-only discriminator vs obs-liveness; require_tools fail-loud; defers a fully-dead box to #1001; ships DISABLED, #732) → `.claude/rules/bundle-state-watchdog.md` (auto-loads on its `paths:`)

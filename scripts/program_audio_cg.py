@@ -35,7 +35,12 @@ The decision (`overlay`, pure), applied to every window the sampler writes:
     MEASUREMENT/SILENT window (the guard fails closed, exit 2): a CG source we cannot hear cannot be
     proven silent. A stream FOREIGN or UNKNOWN keeps its own verdict. AWAY, this rule is not graded
     (a traveling box at another venue is not receivable at all); the payload names it;
-  * nothing to say -> the window's verdict and reason unchanged, byte for byte.
+  * nothing to say -> the window's verdict and reason unchanged, byte for byte;
+  * issue 1553 (ROZHODNUTÉ 25.11.2026): while program_audio_cg_advisory proves BOTH that the stream OBS
+    program tree carries no audible input but the program-audio input AND that fohmixer's mbc proof
+    reads ok + hand1_sync_only, the arm is ADVISORY: the window keeps its own verdict and reason, the
+    payload's `cg.advisory` names what the strict arm would have made of it (`suppressed`). Either
+    proof unreadable, stale or false = the strict arm above, unchanged.
 
 The CG box's third NDI output, `RESOLUME-SNV (CG OVERLAY)`, is NOT declared: read 3.11.2026 from dev1 it
 connects and delivers no audio frame at all, so it would read unreceivable for good.
@@ -127,10 +132,12 @@ class CgReading(NamedTuple):
 
 class CgState(NamedTuple):
     """The CG arm at one window: the box, whether it is home (True / False / None = not probed yet,
-    which counts as home: fail closed) and one reading per source."""
+    which counts as home: fail closed), one reading per source and (issue 1553) the advisory verdict
+    (program_audio_cg_advisory.Advisory; None = no advisory probe configured = strict)."""
     box: str
     home: bool | None
     readings: tuple
+    advisory: object | None = None
 
 
 def _loud(r: CgReading) -> bool:
@@ -171,8 +178,60 @@ def graded(state: CgState | None) -> bool:
     return state is not None and state.home is not False
 
 
+def advisory_applies(state: CgState | None) -> bool:
+    """issue 1553: the CG arm is ADVISORY now (both proofs of program_audio_cg_advisory hold)."""
+    adv = None if state is None else state.advisory
+    return adv is not None and getattr(adv, "applies", False) is True
+
+
 def overlay(verdict: str, reason: str | None, state: CgState | None) -> tuple[str, str | None]:
-    """The window's (verdict, reason) after the CG arm (rules in the module doc)."""
+    """The window's (verdict, reason) after the CG arm (rules in the module doc). issue 1553: while the
+    arm is advisory (advisory_applies) the window keeps its own verdict and reason; `suppressed` names
+    what the strict arm would have made of it."""
+    strict = strict_overlay(verdict, reason, state)
+    if advisory_applies(state):
+        return verdict, reason
+    return strict
+
+
+def suppressed(verdict: str, reason: str | None, state: CgState | None) -> str | None:
+    """issue 1553: `<V>: <reason>` the strict CG arm would have made of this window while it is only
+    advisory, None when the arm is strict or had nothing to say."""
+    if not advisory_applies(state):
+        return None
+    v2, r2 = strict_overlay(verdict, reason, state)
+    if (v2, r2) == (verdict, reason):
+        return None
+    return f"{v2}: {r2}" if r2 else v2
+
+
+class AdvisoryLog:
+    """issue 1553: logs the advisory state's CHANGES (advisory on, strict with why, a suppression
+    starting / ending), never per window."""
+
+    def __init__(self):
+        self.applies = None
+        self.suppressing = False
+
+    def __call__(self, state: CgState | None, suppressed_text: str | None, log: Callable[[str], None]) -> None:
+        adv = None if state is None else state.advisory
+        if adv is None:
+            return
+        if adv.applies != self.applies:
+            log(f"program-audio sampler: {adv.text}" if adv.applies
+                else f"program-audio sampler: CG arm strict: {adv.text}")
+            self.applies = adv.applies
+        if not adv.applies:
+            self.suppressing = False  # the strict arm acts itself; its verdict change is logged
+        elif (suppressed_text is not None) != self.suppressing:
+            log(f"program-audio sampler: {adv.text} -- "
+                + (f"the strict arm would read {suppressed_text} (advisory, not applied)"
+                   if suppressed_text is not None else "the strict arm has nothing to say any more"))
+            self.suppressing = suppressed_text is not None
+
+
+def strict_overlay(verdict: str, reason: str | None, state: CgState | None) -> tuple[str, str | None]:
+    """The strict CG arm (the rules in the module doc, unchanged since issue 1404)."""
     if state is None:
         return verdict, reason
     loud = [r for r in state.readings if _loud(r) and not _absent(r)]
@@ -197,8 +256,10 @@ def _round1(v):
     return round(float(v), 1) if pa.is_number(v) else None
 
 
-def payload_block(state: CgState | None) -> dict | None:
-    """The additive `cg` object of program-audio.json (None without a CG arm)."""
+def payload_block(state: CgState | None, suppressed_text: str | None = None) -> dict | None:
+    """The additive `cg` object of program-audio.json (None without a CG arm). issue 1553: with an
+    advisory probe configured it carries `advisory` = {applies, text, suppressed, tree_age_s,
+    mbc_proof_age_s}; without one the block is unchanged."""
     if state is None:
         return None
     if any(_loud(r) and not _absent(r) for r in state.readings):
@@ -211,7 +272,7 @@ def payload_block(state: CgState | None) -> dict | None:
         status = "unreceivable"
     else:
         status = "silent"
-    return {
+    block = {
         "box": state.box,
         "home": state.home,
         "graded": graded(state),
@@ -223,6 +284,13 @@ def payload_block(state: CgState | None) -> dict | None:
                      **_correlation_fields(r.correlation)}
                     for r in state.readings],
     }
+    adv = state.advisory
+    if adv is not None:
+        block["advisory"] = {"applies": advisory_applies(state), "text": adv.text,
+                             "suppressed": suppressed_text if advisory_applies(state) else None,
+                             "tree_age_s": _round1(adv.tree_age_s),
+                             "mbc_proof_age_s": _round1(adv.mbc_proof_age_s)}
+    return block
 
 
 def _correlation_fields(c: pcc.Correlation | None) -> dict:
@@ -368,7 +436,8 @@ class HomeProbe:
         self._stop.set()
 
 
-def open_arm(box: str, names: list[str], make_receiver: Callable[[str], object]) -> "CgArm":
+def open_arm(box: str, names: list[str], make_receiver: Callable[[str], object],
+             advisory=None) -> "CgArm":
     """Create one receiver per CG source (`make_receiver(name)`, the sampler passes the audio-only
     NdiAudioReceiver) and the arm over them, NOT started. A receiver that fails to create closes the
     ones made before it and the error propagates."""
@@ -380,7 +449,8 @@ def open_arm(box: str, names: list[str], make_receiver: Callable[[str], object])
         for r in receivers:
             r.close()
         raise
-    return CgArm(box, [CgSourceMonitor(r, n) for r, n in zip(receivers, names)], HomeProbe(box))
+    return CgArm(box, [CgSourceMonitor(r, n) for r, n in zip(receivers, names)], HomeProbe(box),
+                 advisory=advisory)
 
 
 def close_arm(arm: "CgArm", log: Callable[[str], None]) -> None:
@@ -418,10 +488,11 @@ def _correlate(prog, monitor) -> pcc.Correlation:
 class CgArm:
     """The box, its home probe and one monitor per source; `state()` is what the sampler reads."""
 
-    def __init__(self, box: str, monitors: list, home_probe):
+    def __init__(self, box: str, monitors: list, home_probe, advisory=None):
         self.box = box
         self.monitors = list(monitors)
         self.home_probe = home_probe
+        self.advisory = advisory  # issue 1553: program_audio_cg_advisory.AdvisoryProbe, None = strict
         self._last = {}  # source -> its recent RAW correlations (program_audio_cg_corr.confirm / remember)
 
     @property
@@ -446,14 +517,19 @@ class CgArm:
             # a quiet window keeps the memory: it ages by the judged segments' end stamps
             # (CONFIRM_SPAN_S), and a passage under the silence bar must not reset a song's lag chain
             readings.append(r)
-        return CgState(self.box, self.home_probe.home, tuple(readings))
+        adv = None if self.advisory is None else self.advisory.state()
+        return CgState(self.box, self.home_probe.home, tuple(readings), adv)
 
     def start(self) -> None:
         self.home_probe.start()
+        if self.advisory is not None:
+            self.advisory.start()
         for m in self.monitors:
             m.start()
 
     def stop(self) -> list:
         """Stop everything; the monitors whose thread left the capture call (safe to close)."""
         self.home_probe.stop()
+        if self.advisory is not None:
+            self.advisory.stop()
         return [m for m in self.monitors if m.stop()]

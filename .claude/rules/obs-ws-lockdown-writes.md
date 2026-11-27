@@ -50,3 +50,7 @@ obs-websocket. Both were missed by the first design of the (since removed, 28.9.
   writes a plugin-rewritten key needs its own settle poll (git history has the tested one).
   A whitelist key (a name, a latency pin) is never rewritten, so its immediate read-back stays
   honest; `reenforce_ndi_name` is correct as it is.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- OBS-WS writes to a genlocked NDI input (the #150 lockdown rewrites every forced key on each update — step outside it with `genlock_fifo: false`; `genlock_fifo` defaults TRUE; libobs applies the update one video tick after the overlay, so a read-back of a plugin-rewritten key must be a settle poll; issue 1242) → `.claude/rules/obs-ws-lockdown-writes.md` (auto-loads on its `paths:`)

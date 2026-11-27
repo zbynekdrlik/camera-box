@@ -55,3 +55,7 @@ EXACT rendered output as the GREEN fixture; nft renders EF as the keyword `ef`
 - Commits use a `feat(ds52-nft):` style prefix and say "dantesync issue 52" — NEVER a bare `#52`
   (camera-box #52 is a different ticket; a closing keyword would auto-close it, and the design gate
   scans for any `#N`).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- NTP-client DSCP nftables rule (dantesync issue 52 provisioning half: dedicated `table ip dantesync_dscp` OUTPUT-mangle rule + `dantesync-dscp` boot oneshot, NOT the distro nftables.service; EF/46 must match dantesync src/dscp.rs; nft needs ROOT NETLINK even for `-c` so render/validate fixtures via `sudo unshare -n`; the never-flush test checks a non-comment DIRECTIVE not the substring; verify check (ae) stays before (q); enable-only) → `.claude/rules/dscp-nft-provisioning.md` (auto-loads on its `paths:`)

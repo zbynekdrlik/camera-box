@@ -100,3 +100,7 @@ src, -1, ProjectorType::Multiview)` and calls its public API) needs NO obs.hpp s
 vendor/obs-studio/libobs` gives the real `obs.hpp`, and the only missing piece is the CMake-generated
 `obsconfig.h` (a stub with the four `OBS_*_PATH`/`PREFIX` defines). The full `.cpp` needs
 `OBSBasic.hpp`'s whole include tree, so check the header, not the translation unit (issue 1357).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- OBS projector window path = the STOCK upstream toplevel on every OS (issue 1357 RETIRED the issue-1352 Linux child-host + the `strih-mv-host` re-hosting helper: an XWayland+NVIDIA-PRIME present-stall workaround no box needs on the plain Xorg NVIDIA-primary baseline, and the hosted shape blacked the projector on a runtime always-on-top toggle because `SetAlwaysOnTop`'s `setWindowFlags`+`show` recreated the host's native window; never re-add a per-OS projector host, fix the display stack in the shared baseline; the `obs:tests/vendored/tests/obs_projector_stock_toplevel_1357.rs` guard; setup-strih step 8b removes a leftover helper, verify item 22 grades it absent; FRONTEND=full-bundle deploy; #1358 resize debounce) → `.claude/rules/obs-projector-stock-toplevel.md` (auto-loads on its `paths:`)

@@ -325,9 +325,10 @@ fn setup_device_dantesync_installs_the_pinned_release_1066() {
 fn setup_device_dantesync_gm_allowlist_is_the_hostname_1066() {
     let body = setup();
     assert!(
-        on_noncomment_line(&body, r#"_RG_GM_HOST="$(rig_grandmaster_host)""#),
-        "STEP 17 must resolve the grandmaster HOSTNAME (rig_grandmaster_host = video-clock.lan) \
-         for gm_allowlist (dantesync#113 accepts a hostname since 1.8.54) (#1066)"
+        on_noncomment_line(&body, r#"_RG_GM_HOST="$(dantesync_fleet_camera_gm_host "$CAMERA_NAME")" \"#),
+        "STEP 17 must take the grandmaster from the camera's venue (issue 1553: a host name such as \
+         video-clock.lan at SNV, which dantesync#113 accepts since 1.8.54, or the PP address) for \
+         gm_allowlist (#1066)"
     );
     // The gm_allowlist array must carry the hostname var, not the resolved IPv4 var.
     let allow = body
@@ -345,8 +346,9 @@ fn setup_device_dantesync_gm_allowlist_is_the_hostname_1066() {
     );
     // The resolve is kept only as a loud precondition (fail closed) -- still sources the resolver.
     assert!(
-        on_noncomment_line(&body, r#"_RG_GM_IP="$(rig_grandmaster_ip)""#),
-        "rig_grandmaster_ip must remain as the loud resolve precondition (#1066)"
+        on_noncomment_line(&body, r#"_RG_GM_IP="$(rig_grandmaster_resolve "$_RG_GM_HOST")""#)
+            && body.contains(r#"[ -n "$_RG_GM_IP" ] || fail "cannot resolve the PTP grandmaster host"#),
+        "a grandmaster host name must still resolve as a loud, fail-closed precondition (#1066, issue 1553)"
     );
     assert!(
         on_noncomment_line(&body, ". \"$HERE/lib/rig-grandmaster.sh\""),

@@ -663,3 +663,6 @@ aperture SETs = two gphoto2 shell-outs. The fix makes the whole chain reconstruc
 
 `scripts/bkshading-deploy-service.sh --execute` copies the exe, registers the `bkshading-service` keep-alive task and starts the service from the ssh session; Windows OpenSSH tears that process down at disconnect (the same job-object physics as OBS-over-ssh, issue 859), so 60 s later there is no process and no `:8770` listener while the script printed `OK … Listening`. Recovery = `schtasks /run /tn bkshading-service` over ssh (session-agnostic; the task launches the exe detached) → `keep-alive: bkshading service was not running - relaunched`; verify from dev1 with `curl :8770/api/version`. The relay on a cambox is unaffected (systemd unit). Followup for the script: start via the task, verify from a SECOND connection.
 
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- bkshading deploy + operation here (service + cambox/SBC relay provisioning, USB/USB-Eth only never BT, #808) → `.claude/rules/bkshading.md` (auto-loads on its `paths:`)

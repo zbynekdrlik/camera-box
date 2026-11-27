@@ -178,3 +178,7 @@ grabber-skew difference vs the cam4/cam5 anchors. Re-run `--multi` after each re
   floor-only (`reason="irreducible"`) for the current data → production stays floor-3, no regression;
   the excess is grabber-owned (this tool's own attribution) so the real lever is the cambox grabber, a
   per-box rig task, not the strih pin. See `qr-align.md` "Production per-box equalization".
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Per-box arrival-floor STAGE decomposition mining tool (issue 1168 task 1 — `scripts/arrival_floor_decompose.py`: which box/stage owns the cross-camera presented-age offset; `floor = latency_ms + mean_head_skew_ms` so `excess = Δlatency (strih-config) + Δskew (grabber/transport)`; uniform recv-timing cap_avg falsifies transport ⇒ grabber-owned; REUSE `arrival_floors_from_jitter`/`parse_recv_timing`/the jitter JSON, never a new skew regex; pure-Python RED→GREEN; supervisor mining only, no gate) → `.claude/rules/arrival-floor-decompose.md` (auto-loads on its `paths:`)

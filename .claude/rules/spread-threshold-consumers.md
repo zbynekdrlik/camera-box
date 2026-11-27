@@ -58,3 +58,7 @@ fail. Either way, grep the band and check every PASS/FAIL-asserting fixture.
 ## Python report fixtures (`tests/python/fixtures/e2e_discord_report/*.json`) carry pre-computed
 `spread_gate_pass` values (not re-derived) — they only need touching if a fixture's
 `cross_camera_spread_ms` sits in the changed band. At the 16→24 change none did (all ≤15.3ms).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Changing the cross-camera `SPREAD_THRESHOLD_MS` (the ONE constant shared by the blocking SOURCE-side + (since #1142) equally BLOCKING DELIVERY-side spread gates — a `delivery cross-camera spread … → FAIL (LIVE — folds into all_pass)` log line is a real red, not a report-only cross; its full lock-step consumer list incl. the easy-to-miss `src/lib.rs` mod-decl comments + the probe-gated `recording_verdict_merge_gate_exit_code.rs` subprocess test; the one-directional flip risk; #1120/#1121 re-tighten) → `.claude/rules/spread-threshold-consumers.md` (auto-loads on its `paths:`)

@@ -122,3 +122,7 @@ that interpreter as the script's python). Validated: the pinned asset reads `AV 
 = the PROVENANCE baseline. CPU cost is ~13 min wall per 35 s clip — capture the pairs on the rig first, analyse
 offline afterwards (dev2 CUDA if speed matters). A missing `websocket-client` in the venv fails the script
 instantly with `missing dep: pip install websocket-client` even in `--media` mode.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Lipsync cross-check fold (issue 1032): NOT in the E2E verdict JSONs, only `recording-verdict --av-sync --syncnet-offset-ms` (`scripts/lipsync-cross-check.sh`); a COUNTER-derived `gates_overall_pass()`, LIVE since 9.11.2026 (`RECORDED_CLEAN_PAIRED_RUNS`=5 on the 7.11 E2E vs the 8.11 production's dev2 SyncNet clips); same sign both sides, compare against the direct feed's `residual_offset_ms`, a pair only with no rig change in between; Disagree fails / Agree+Unknown pass; folds in `run_av_sync` not the verdict accumulator → `.claude/rules/lipsync-cross-check-fold.md` (auto-loads on its `paths:`)

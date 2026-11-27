@@ -104,7 +104,7 @@ EXPECTED_PP = {
     "STRIH_OBS_PROFILE": "strih-pp", "STRIH_OBS_COLLECTION": "strih-pp", "STRIH_NDI_RUNTIME_PEER": PEER,
     "STRIH_COMPANION_HOST": "10.77.8.205", "STRIH_CG_SENDER": "RESOLUME-PP (SP-program)",
     "STRIH_CAMERAS": "1 4 6 7", "STRIH_HDMI_OUTPUT_BACKEND": "vk-direct", "STRIH_ROLE": "strih",
-    "STRIH_DANTE_GM": "10.77.7.200", "STRIH_PROGRAM_AUDIO_SAMPLER": "off",  # issue 1536: the Dante GM on VLAN 70
+    "STRIH_DANTE_GM": "video-clock.lan", "STRIH_PROGRAM_AUDIO_SAMPLER": "off",  # issue 1536: the Dante GM on VLAN 70
     "STRIH_PROGRAM_SENDER": "none", "STRIH_VENUE": "pp",
     # issue 1413: dev1 dials the PP camboxes as 10.76.9.<octet> through companion-pp.
     "STRIH_CAMERA_DEV1_NET": "10.76.9",
@@ -357,7 +357,7 @@ def test_the_new_libs_run_clean_under_the_callers_errexit(tmp_path):
     full.update(env)
     r = subprocess.run(["bash", "-c", body], capture_output=True, text=True, env=full, cwd=str(REPO), timeout=60)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.splitlines()[0:2] == ["SKIP11b", "SKIP16e"] and r.stdout.rstrip().endswith("END")
+    assert r.stdout.splitlines()[0:2] == ["RAN", "SKIP16e"] and r.stdout.rstrip().endswith("END")
 
 
 # --- G7 + G11: the per-box step gate ----------------------------------------------------------------
@@ -379,7 +379,8 @@ def test_strih_lx_runs_the_irq_unit_and_the_sampler():
 
 def test_strih_pp_skips_the_irq_unit_and_the_sampler_by_fact(tmp_path):
     env = _pp_filled(tmp_path)
-    assert _applies(("pp", env), "11b").startswith("SKIP the rig NIC is not a USB device")
+    # issue 1553: strih-pp has housekeeping CPUs (0-1,8-9) now, so 11b places its PCIe NIC IRQs
+    assert _applies(("pp", env), "11b") == "RUN"
     assert _applies(("pp", env), "16e").startswith("SKIP STRIH_PROGRAM_AUDIO_SAMPLER=off")
     assert _applies(("pp", env), "16c") == "RUN"
 
@@ -457,7 +458,7 @@ def test_setup_strih_wires_g5_g6_g7_g11_and_stays_in_budget():
     hub = s.index("strih_intercom_hub_binary_install /usr/local/bin/intercom-hub")
     assert s.index("step 13 ") < hub < s.index("step 14 ")
     g11b = s.index('if WHY="$(obs_box_step_applies 11b)"; then')
-    assert s.index('step "11b"') < g11b < s.index("strih_nic_irq_affinity_script_text >") < s.index("step 12 ")
+    assert s.index('step "11b"') < g11b < s.index("strih_nic_irq_affinity_script_install /usr/local/bin/") < s.index("step 12 ")
     g16e = s.index('if WHY="$(obs_box_step_applies 16e)"; then')
     assert s.index('step "16e"') < g16e < s.index('strih_program_audio_install "${HERE}/..') < s.index("step 17 ")
 

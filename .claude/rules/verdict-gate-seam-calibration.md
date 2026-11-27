@@ -476,3 +476,7 @@ guard at all before this flip, unlike the delivery-spread branch which already h
 in `recording-verdict.rs` alone is NOT sufficient — grep `tests/`/`scripts/` for the seam's field name
 before declaring a promote cycle done; see `e2e-discord-report.md` for the routing rule this fix
 brought into line with its siblings.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Calibrating + wiring a NEW fused-verdict gate seam (mine local verdict JSONs for the distribution, pick the tight-green-ceiling signal, rate=one-term vs count=two-terms, LIVE-vs-report-only via the cam1-grabber issue-909 empirical test, the `gates_overall_pass()` one-line seam, #1036) → `.claude/rules/verdict-gate-seam-calibration.md` (auto-loads on its `paths:`)

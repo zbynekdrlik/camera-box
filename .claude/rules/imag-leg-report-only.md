@@ -222,3 +222,7 @@ Note the earlier issue-1094 section's aside ("emits `schema_version=3`, exactly 
 merge expects") was true at issue-1094 time; the schema is 4 now, which is exactly why the landmine
 fired. If you bump `PARTIAL_SCHEMA_VERSION` again, the STEP-1 sha gate handles the redeploy and the
 degrade path keeps a still-stale report-only imag leg from ever zeroing the whole verdict.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- imag leg recording verdict — SPLIT since #1142 (was issue-798 report-only): PRESENCE/VERIFICATION (`imag_leg_gate::gates_overall_pass()`=true — imag_leg_verified [offline-ack #1013 exempt] + span + undecodable floor, only when `--require-imag-leg`) BLOCKS; PER-FRAME CONTENT (`content_gates_overall_pass()`=false — burn contiguity + optical beat + per-segment sweep) stays REPORT-ONLY pending the #1143 encoder fix (issue 1130 x264 observer effect); `partial_schema_gate::box_degrades_on_schema_mismatch` decoupled (schema-degrade still degrades but REDs via imag_leg_verified). The imag verdict only FLOWS when recording-e2e.sh `[8/8c]` succeeds (0/76 historically), so check `full_chain.imag_leg_verified` before trusting a green run → `.claude/rules/imag-leg-report-only.md` (auto-loads on its `paths:`)

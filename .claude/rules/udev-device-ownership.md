@@ -107,3 +107,7 @@ Use this to distinguish a real cable/hardware event from a software-triggered re
 `.claude/rules/gap-metric-reconciliation.md` and `#895`'s own self-heal-attribution mechanism for
 the companion fix that keeps a self-heal-caused reset from being misreported as a camera fault in
 the first place.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- udev device ownership during an E2E burn run (burn-vs-production `/dev/videoN` ownership, the burn-gated hotplug rule, autosuspend re-apply on re-enumeration, the real-unplug-vs-self-heal kernel-signature discriminator, #894) → `.claude/rules/udev-device-ownership.md` (auto-loads on its `paths:`)

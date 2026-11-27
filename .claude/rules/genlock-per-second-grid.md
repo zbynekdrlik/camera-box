@@ -200,3 +200,7 @@ per-second grid. strih-snv's inputs get the counters too; judge `cg` / `CG-obs` 
 but expect a steady non-zero baseline on the 60 fps camera inputs (the free-running grabbers beat
 against the grid and their stamps key on the CAPTURE instant — the #889 copies/gaps residual),
 so compare a camera against its own earlier rate, never against zero.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- ONE per-second genlock grid (#1355: the receiver ts-align deadline + render tick AND the camera emit gate (step 3: `genlock_advance_boundary` / grid slots, never `+ interval` / `/ interval`) now floor on the SAME per-second grid the senders stamp on — the 1970 grid lost 10 ns/s and walked the 2ME PGM FIFO 31↔32 with the date; shared header `obs-genlock-grid.h` ↔ `vstack:rig/core/src/genlock_grid.rs`, integer rates only, day-long C↔Rust parity + sender-coincidence gate; the `src/genlock_grid_bench.rs` N==1 bench that reproduces the live flip on the 1970 grid and 0 drains on the production grid; the arrival-side `stamp_dup=` / `stamp_gap=` audit counters; what changes on deploy + the ≥30 min post-deploy audit) → `.claude/rules/genlock-per-second-grid.md` (auto-loads on its `paths:`)

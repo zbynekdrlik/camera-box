@@ -100,3 +100,7 @@ strih OBS (`publish_max_us=` / `decode_dropped=`, OBS output skipped frames) is 
 The same line grades the LUFS meter (issue 1436): `(loudness-dock)`, `(loudness-dock-loaded)` on every
 role, `(loudness-dock-layout)` on the stream role (verify-strih.sh is at its 1000-line budget, so the
 second call shares item 47's line).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- The A/V-sync dock on the Linux OBS boxes (issue 1470: built + staged by the linux-genlock strih job next to obs-vban, the C++17 the Qt6 targets raise, the dock source anchors stay ci.yml's Rust twins; OBS hides a plugin dock and the saved [BasicWindow] DockState decides, so `scripts/obs_dock_state.py` parses the Qt saveState blob exactly and seeds the dock (setup-strih step 16g, stream role) with a `[CameraBox] AvsyncDockSeeded` marker inside user.ini, proven by the real-Qt runner `tests/qt/run_dock_state_restore_1470.sh`; verify-strih item 47; issue 1436: the LUFS meter `net.nagater.obs-loudness-dock..main` seeded after it under its own marker, both docks specs over the ONE engine `scripts/lib/obs-box-plugin-dock.sh`) → `.claude/rules/av-sync-dock-linux.md` (auto-loads on its `paths:`)

@@ -202,3 +202,7 @@ signal at all** (incident 4 — re-derive the value with one live command agains
 before trusting the design comment's claim), or (c) a **known, already-tracked marginal-headroom
 preflight** (incident 5 — check the open tracking tickets before suspecting your own diff). Never
 weaken the gate to get past any of them.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- E2E gate preconditions (DanteSync servo, bundle-state-server) → `.claude/rules/rig-standing-services.md` (auto-loads on its `paths:`)

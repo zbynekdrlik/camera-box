@@ -91,6 +91,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import program_audio as pa  # noqa: E402
 import program_audio_capture as pac  # noqa: E402
 import program_audio_cg as pcg  # noqa: E402
+import program_audio_cg_advisory as pcga  # noqa: E402
 import program_audio_cg_corr as pcc  # noqa: E402
 import program_audio_http as pah  # noqa: E402
 import program_audio_marker as pam  # noqa: E402
@@ -310,7 +311,8 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     # issue 1404: the program's own audio at its sender stamps, for the CG arm's in-program test
     program_ring = None if cg is None else pcc.AudioRing(mono=False)
 
-    def write(verdict, rms, outside, reason=None, markers=None, chain=None, cg_state=None):
+    def write(verdict, rms, outside, reason=None, markers=None, chain=None, cg_state=None,
+              cg_suppressed=None):
         now = datetime.now(timezone.utc)
         if verdict == "FOREIGN":
             latch["last_foreign"] = rsf.format_ts_utc(now)
@@ -320,7 +322,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                                    holes_bridged=bridged_total["holes"],
                                    bridged_ms=bridged_total["ms"], queue_drops=drops_total["frames"],
                                    lag_ms=lag["ms"], sender_stalls=stalls_total["n"],
-                                   cg=pcg.payload_block(cg_state))
+                                   cg=pcg.payload_block(cg_state, cg_suppressed))
         pa.write_payload(serve_dir, payload)
         if on_write is not None:
             on_write(payload)
@@ -359,14 +361,20 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     bad_rate_logged = False
     loops = 0
 
+    advisory_log = pcg.AdvisoryLog()
+
     def with_cg(verdict, reason):
-        """The window's (verdict, reason, CG state) after the CG arm (issue 1404, the 3.11.2026
-        claim): CG audio heard = FOREIGN `cg-audio`, a CG source not heard while home = UNKNOWN."""
+        """The window's (verdict, reason, CG state, suppressed) after the CG arm (issue 1404, the
+        3.11.2026 claim): CG audio heard = FOREIGN `cg-audio`, a CG source not heard while home =
+        UNKNOWN; issue 1553: while the arm is advisory the window keeps its verdict, `suppressed`
+        names what the strict arm would have made of it. Changes are logged, never per window."""
         if cg is None:
-            return verdict, reason, None
+            return verdict, reason, None, None
         st = cg.state(program=program_ring)
         verdict2, reason2 = pcg.overlay(verdict, reason, st)
-        return verdict2, reason2, st
+        sup = pcg.suppressed(verdict, reason, st)
+        advisory_log(st, sup, log)
+        return verdict2, reason2, st, sup
 
     def restart_span(why: str) -> None:
         nonlocal rebase_windows
@@ -386,8 +394,8 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                                                                             win_real,
                                                                             rebased=rebase_windows > 0)
             rebase_windows = max(0, rebase_windows - 1)
-            verdict, reason, cg_state = with_cg(verdict, reason)
-            write(verdict, rms, outside, reason, markers, chain, cg_state)
+            verdict, reason, cg_state, cg_sup = with_cg(verdict, reason)
+            write(verdict, rms, outside, reason, markers, chain, cg_state, cg_sup)
             counts[verdict] += 1
             if verdict != last_verdict:
                 log(f"program-audio verdict {last_verdict} -> {verdict} rms={_fmt(rms)} dBFS "
@@ -539,8 +547,8 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                 reason = (f"no audio from {source!r} for {now - last_audio:.1f} s "
                           f"(connections={receiver.connections()})")
                 lag["ms"] = None  # no window judged: no lag to report
-                verdict, reason, cg_state = with_cg("UNKNOWN", reason)
-                write(verdict, None, None, reason=reason, cg_state=cg_state)
+                verdict, reason, cg_state, cg_sup = with_cg("UNKNOWN", reason)
+                write(verdict, None, None, reason=reason, cg_state=cg_state, cg_suppressed=cg_sup)
                 counts[verdict] += 1
                 last_unknown = now
                 if last_verdict != verdict:
@@ -883,6 +891,8 @@ def main(argv=None) -> int:
     try:
         cg_box = pcg.cg_box()
         cg_names = pcg.cg_sources(cg_box)
+        # issue 1553: the advisory probe (None = not configured = the strict arm)
+        advisory = pcga.from_env()
     except (ValueError, OSError, RuntimeError) as exc:
         set_unknown(f"sampler cannot listen to the CG chain: {exc}")
         log(f"program-audio sampler: FATAL the CG arm: {exc}")
@@ -903,7 +913,7 @@ def main(argv=None) -> int:
                 n, lib_path=args.lib, **({"url_address": url} if url else {})), log=log)
 
         try:
-            cg = pcg.open_arm(cg_box, cg_names, make_receiver)
+            cg = pcg.open_arm(cg_box, cg_names, make_receiver, advisory=advisory)
             receiver = make_receiver(args.source)
         except (OSError, RuntimeError) as exc:
             if cg is not None:
@@ -912,6 +922,7 @@ def main(argv=None) -> int:
             log(f"program-audio sampler: FATAL cannot create the NDI receiver: {exc}")
             return 1
         log(pcg.start_line(cg))
+        log(pcga.start_line(advisory))
         http = None
         if args.http_port:
             try:

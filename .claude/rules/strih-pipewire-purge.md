@@ -164,3 +164,7 @@ onto the TOML without `program_out`. The steps are on the issue-1439 LANE-RETURN
 Rollback: delete the pin file, `apt-get install pipewire pipewire-pulse pipewire-alsa wireplumber
 pipewire-audio gstreamer1.0-pipewire` (the shim then conflicts nowhere; `apt-get remove
 camera-box-pipewire-shim` if wanted), re-run setup-strih step 12 + 13 with the old code, reboot.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- PipeWire OUT of the strih role (issue 1440, owner 22.10.2026: PipeWire blacklisted there): the DERIVED condition `strih_pipewire_purge_decision` (strih role + `STRIH_PROGRAM_VBAN_STREAMS != none` + no `adapter = "pipewire"` in the box's hub TOML: strih-snv purges, strih-pp keeps it for its pipewire program_out, the stream role keeps its locked operator PipeWire); setup-strih step 12 = the apt pin (-1) on every server package for EVERY dpkg architecture (a bare name pins the native arch only), the `Provides: gstreamer1.0-pipewire` shim for RustDesk built with dpkg-deb from `scripts/strih-pipewire/`, the kept libpulse0 + libpipewire marked manual, an `apt-get -s` read that REFUSES a removal outside the declared list, the purge + read-back, the five strih-role drop-ins removed; step 13's hub drop-in without the pipewire group / runtime; verify item 9b's six rows (+ ONE NOTE elsewhere); the browser sources rerouted + muted by the seed (`browser_audio: reroute-mute`) and the strih port presets; the fixed HDMI output's audio check without a sound server → `.claude/rules/strih-pipewire-purge.md` (auto-loads on its `paths:`)

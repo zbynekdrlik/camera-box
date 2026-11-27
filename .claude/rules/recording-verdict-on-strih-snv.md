@@ -5,6 +5,22 @@ paths:
   - "scripts/recording-verdict-on-stream-snv.sh"
 ---
 
+**Since issue 1425 (owner ROZHODNUTÉ issuecomment-7187562277, 26.11.2026) NOTHING decodes on a rig
+box.** `recording-verdict-on-strih-snv.sh` copies the recording to a run-private dev1 dir under
+`--local-out-dir` through `scripts/lib/rec-pull-paced.sh` (`rec_pull_paced`: size + sha256 read on
+the box behind `LOWPRIO_SNIPPET`, `scp -l` PACED to `REC_PULL_RATE_MBIT` (default 200 Mbit/s =
+25 MB/s; an E2E recording is ~790 MB, so ~32 s, both boxes in parallel 400 Mbit/s into dev1),
+size + sha256 checked on dev1, one `[rec-pull]` line with bytes / seconds / rate / sha match), runs
+the SAME forwarded recording-verdict args LOCALLY with `--verdict-bin` (the dev1 binary) at nice 19,
+the box paths rewritten (the recording -> the copy, `--out <box dir>/<name>` -> `<local-out-dir>/<name>`
+so the partial + its `-pixels` dir land where the callers read them, any other path under
+`--out-dir` -- the `[8/8b-pre]` marker log / schedule -- fetched back once), logs the decode time,
+and removes the copy on EVERY exit (EXIT trap). No binary goes to the box (`--remote-bin` is
+accepted and ignored). The missing-slot pixel proofs of a Linux box export from a dev1 copy the same
+way (`.claude/rules/missing-slot-pixels.md`). The sections below describe the retired on-box decode;
+`strih_lx_lowprio_prefix` / `LOWPRIO_SNIPPET` now only place the box's sha256 read. Tests:
+`tests/python/test_dev1_decode_1425.py`.
+
 **It is the ONE Linux on-box decode (issue 1462).** The Linux stream box stream-snv decodes its
 `[8/8b]` stream recording through it: `scripts/recording-verdict-on-stream-snv.sh` resolves + checks
 the box and `exec`s this script with `STRIH_LX_BOX`/`STRIH_USER`/`STRIH_PW` = the stream box,
@@ -36,6 +52,35 @@ against the recording where it already lives, then scps back only the small part
 allows it:** `sudo -n /usr/local/sbin/obs-box-background-run` = `rig-background.slice` on the CPUs OBS
 does not use. The `nice` + E-core text below stays only for a box not yet provisioned (AMD has no
 `cpu_atom`, so it fenced nothing there). `.claude/rules/obs-box-baseline.md` has the slice.
+
+**On a box with housekeeping CPUs the decode leaves the slice for the OBS mask at idle priority
+(issue 1425, finding 7178516822).** There the slice is the ONE housekeeping task CPU (strih-snv 0),
+which also carries rig-NIC IRQs (design 7119179275): measured live, the decode ran on CPU 0 alone
+(~1000 frames / 6 min, a 9443-frame recording ~55 min) beside the RX softirq. So the snippet's LAST
+clause, when `/etc/strih-housekeeping-cpus.conf` is non-empty (setup-strih writes it only for a fact
+other than `none`) and the first line of `/etc/strih-isolated-cpus.conf` is a cpulist (`N` or `N-M`,
+comma separated, ASCII digits; `grep -Eqx`; the SHAPE only: a reversed `15-2` passes and `taskset`
+then fails the decode loudly), sets `LP="nice -n 19 ionice -c 3 chrt --idle 0 taskset -c
+<OBS mask>"`: the OBS-mask placement the program-audio sampler took (`strih_program_audio_cpus`), plus
+SCHED_IDLE (new here; it runs only when an OBS CPU would idle). The box prints the prefix it resolved
+(`[<box>] launch prefix: ...` on stderr): read it in the E2E log. An empty or malformed mask keeps the
+runner / E-core / nice choice; a box without the file keeps today's prefix byte-identical. The pure
+`strih_lx_lowprio_prefix` takes the same branch first (3rd argument = an etc root, test seam). stream-snv
+execs this script and has housekeeping CPUs, so it gets the same placement; the issue-1367 pixel export
+(the byte-pinned twin) too. `tests/recording_verdict_on_strih_lx_lowprio.rs` runs the SHIPPED snippet
+with its box paths moved into a fixture and pins it to the pure function. Expected effect (not measured
+yet): decode_workers follows the 14-CPU cpuset back to `MAX_DECODE_WORKERS`; read the decode's
+`Cpus_allowed_list` (= the OBS mask) and `chrt -p` (SCHED_IDLE) on the box at the next E2E.
+
+Accepted trade-offs, NOT measured (review of the issue-1425 lane, design comment 7178556621):
+- SCHED_IDLE decides who gets a CPU, not the SMT sibling, L3 or memory bandwidth: the decode shares
+  physical cores with OBS (strih-snv Zen 5 2-15, stream-snv the P-core pairs 2-11; its E-cores 12-19 are
+  housekeeping CPUs there and stay out). Issue 1354 measured ~800 relocks per camera from a decode at
+  nice 0 on the OBS cores; SCHED_IDLE was not measured. The blocking whole-session gate (issue 1534)
+  reads the logs after the decode, so a decode that disturbs OBS turns the E2E red by itself. Read the
+  genlock-fifo audit relock / underrun deltas over the `[8/8a]` / `[8/8b]` window at the first runs.
+- The slice's `CPUWeight=1` / `IOWeight=1` / `MemoryHigh=30%` no longer apply to this path (the
+  pre-1387 decode ran without them too); `decode_workers` stays bounded by `MemAvailable`.
 
 ## Why STEP 2 must be low-priority + E-core-pinned
 
@@ -84,3 +129,7 @@ exactly the failure a bulk job on the strih notebook would cause during a produc
   new lowprio test. Run the occurrence-count anchor sweep after any edit anyway.
 - Acceptance is a supervisor rig step: the next full E2E showing **zero relocks on strih-snv during
   `[8/8a]`**.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- strih-snv in-place recording decode (`[8/8a]` `recording-verdict-on-strih-snv.sh`) at IDLE priority on the E-cores (`strih_lx_lowprio_prefix` pure encoding + the single-quoted remote-shell replica that resolves `/sys/devices/cpu_atom/cpus` ON the box; the issue-1354 post-run relock-storm root cause; binary scp + partial pull byte-identical; issue 1351) → `.claude/rules/recording-verdict-on-strih-snv.md` (auto-loads on its `paths:`)

@@ -257,3 +257,7 @@ The fix threads a FRESHNESS facet through both arms:
   watchdog shell change needed).
 - **Tests:** `pytest tests/python/test_av_step_quality_age_1325.py` + `test_bundle_state_server_log.py`
   (the facet FLOWS through gather) + the existing #1319/#1267 arms stay green.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Upstream-audio-latency STEP detector (dev1-side watchdog, the #1265 A/V-residual early warning distinct from the #1226 ts_lag HEALTH axis: reads the av-sync dock's monitor-only `LOCK-CORRECT SUGGESTED genlock_latency_ms_src <pin> -> <new>ms (measured offset=<X>ms)` line — pin + offset INLINE, stream-only — summarized to `av_offset_*` facets; a rolling recent-vs-baseline median STEP at a CONSTANT pin pages report-only after 2-pass confirm; the pin is a covariate NEVER subtracted — `offset-pin` was FALSIFIED live so a pin move → REPIN; the rolling baseline self-normalizes a persistent step so RECOVERY is judged vs a FROZEN pre-step baseline; SKIP/STALE/UNKNOWN/REPIN never page; `av_step_decision.py` + `av-step-alert-watchdog.sh` reusing obs-watchdog-decision.sh, dedup-key `av-step-$box`, ships DISABLED, #1267) → `.claude/rules/av-step-upstream-detector.md` (auto-loads on its `paths:`)

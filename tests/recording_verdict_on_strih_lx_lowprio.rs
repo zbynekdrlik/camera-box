@@ -146,10 +146,15 @@ fn step2_ssh_run_launches_onstrihlx_cmd_through_the_lowprio_prefix() {
         "STEP 2 must pin to the E-cores read ON the box (so a replacement notebook uses its own map)"
     );
 
-    // The on-box verdict command must be launched THROUGH the prefix: `$LP $ONSTRIHLX_CMD`.
+    // issue 1425: the box runs no decode any more; the prefix only wraps the box's sha256 read of
+    // the recording (scripts/lib/rec-pull-paced.sh), and the verdict runs on dev1.
     assert!(
-        s.contains(r#"\$LP $ONSTRIHLX_CMD"#),
-        "the ssh-run line must invoke $ONSTRIHLX_CMD through the low-priority prefix $LP"
+        s.contains(r#"rec_pull_paced "$STRIH_USER" "$STRIH_PW" "$STRIH_LX_BOX" "$STRIH_REC" "$LOCAL_REC" "$LABEL" "$LOWPRIO_SNIPPET""#),
+        "the recording copy must hand the box's low-priority prefix to the box-side sha256 read"
+    );
+    assert!(
+        !s.contains("$LP $ONSTRIHLX_CMD"),
+        "issue 1425: recording-verdict must never be launched on the box"
     );
 }
 
@@ -165,16 +170,177 @@ fn the_lowprio_snippet_is_single_quoted_so_dev1_never_expands_the_cat() {
 }
 
 #[test]
-fn the_probe_scp_and_partial_pull_are_unchanged() {
-    // The change is confined to STEP 2's launch prefix — the binary deploy and the partial/pixels
-    // pull-back stay byte-identical (small files, seconds).
+fn no_binary_goes_to_the_box_and_the_decode_runs_on_dev1_1425() {
+    // issue 1425 (owner ROZHODNUTE issuecomment-7187562277): no recording-verdict upload, no
+    // on-box decode, no partial pull-back -- the copy comes to dev1 and the verdict runs here.
     let s = script_text();
     assert!(
-        s.contains(r#"sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "$VERDICT_BIN" "${TARGET}:${REMOTE_BIN}""#),
-        "the binary scp must be unchanged"
+        !s.contains("${TARGET}:${REMOTE_BIN}"),
+        "no binary upload to the box"
     );
     assert!(
-        s.contains(r#"sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "${TARGET}:${OUT_PARTIAL}" "$local_partial""#),
-        "the partial pull-back must be unchanged"
+        s.contains(r#"env RUST_LOG=info nice -n 19 "$VERDICT_BIN" "${LOCAL_ARGS[@]}""#),
+        "the verdict runs on dev1 with the rewritten args"
     );
+}
+
+// ================================================================================================
+// issue 1425 (finding 7178516822): on a box with housekeeping CPUs the decode runs on the OBS mask
+// at idle priority (SCHED_IDLE + nice 19), never in rig-background.slice (= the one housekeeping
+// task CPU, which also carries rig-NIC IRQs). A box without housekeeping keeps today's prefix.
+// ================================================================================================
+
+const HK_PREFIX_2_15: &str = "nice -n 19 ionice -c 3 chrt --idle 0 taskset -c 2-15";
+
+/// A fake box: `<root>/devices/cpu_atom/cpus` (sysfs, optional), `<root>/etc/strih-housekeeping-cpus.conf`
+/// and `<root>/etc/strih-isolated-cpus.conf` (optional), an executable runner and a `sudo` stub
+/// that allows it (`sudo -n -l` exits 0), so the runner arm is live and the housekeeping arm must beat it.
+struct FakeBox {
+    dir: TempDir,
+}
+
+impl FakeBox {
+    fn new(atom: Option<&str>, housekeeping: Option<&str>, mask: Option<&str>) -> FakeBox {
+        let dir = TempDir::new().expect("tempdir");
+        let p = dir.path();
+        if let Some(c) = atom {
+            fs::create_dir_all(p.join("devices/cpu_atom")).unwrap();
+            fs::write(p.join("devices/cpu_atom/cpus"), c).unwrap();
+        }
+        fs::create_dir_all(p.join("etc")).unwrap();
+        if let Some(h) = housekeeping {
+            fs::write(p.join("etc/strih-housekeeping-cpus.conf"), h).unwrap();
+        }
+        if let Some(m) = mask {
+            fs::write(p.join("etc/strih-isolated-cpus.conf"), m).unwrap();
+        }
+        fs::create_dir_all(p.join("bin")).unwrap();
+        for (name, body) in [
+            ("sudo", "#!/bin/sh\nexit 0\n"),
+            ("run", "#!/bin/sh\nexit 0\n"),
+        ] {
+            let f = p.join("bin").join(name);
+            fs::write(&f, body).unwrap();
+            let mut perm = fs::metadata(&f).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+            fs::set_permissions(&f, perm).unwrap();
+        }
+        FakeBox { dir }
+    }
+    fn root(&self) -> String {
+        self.dir.path().to_str().unwrap().to_string()
+    }
+    fn path_env(&self) -> String {
+        format!(
+            "{}/bin:{}",
+            self.root(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+    /// The pure contract with the runner allowed.
+    fn pure(&self) -> String {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(". \"$1\"; strih_lx_lowprio_prefix \"$2\" \"$2/bin/run\" \"$2\"")
+            .arg("bash")
+            .arg(onstrihlx_script())
+            .arg(self.root())
+            .env("PATH", self.path_env())
+            .output()
+            .expect("run strih_lx_lowprio_prefix");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    }
+    /// The REMOTE snippet as shipped, its box paths moved into the fixture, run in bash; prints $LP.
+    fn remote(&self) -> String {
+        let s = script_text();
+        let start = s.find("LOWPRIO_SNIPPET='").expect("snippet") + "LOWPRIO_SNIPPET='".len();
+        let end = start + s[start..].find("'\n").expect("snippet end");
+        let r = self.root();
+        let snippet = s[start..end]
+            .replace("/sys/", &format!("{r}/"))
+            .replace("/etc/", &format!("{r}/etc/"))
+            .replace(
+                "/usr/local/sbin/obs-box-background-run",
+                &format!("{r}/bin/run"),
+            );
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(format!("{snippet} printf '%s' \"$LP\""))
+            .env("PATH", self.path_env())
+            .output()
+            .expect("run the remote snippet");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+}
+
+#[test]
+fn housekeeping_box_runs_the_decode_on_the_obs_mask_at_idle_priority_1425() {
+    // A two-CPU housekeeping box (strih-snv's shape until ROZHODNUTE 7183885100 moved it to 0-2 /
+    // mask 3-15): housekeeping 0-1 (task CPU 0 on file), OBS mask 2-15, no cpu_atom (AMD).
+    let b = FakeBox::new(None, Some("0\n"), Some("2-15\n"));
+    assert_eq!(b.pure(), HK_PREFIX_2_15, "pure contract");
+    assert_eq!(
+        b.remote(),
+        HK_PREFIX_2_15,
+        "the remote snippet must agree with the pure contract"
+    );
+    assert!(!b.remote().contains("obs-box-background-run") && !b.remote().contains("sudo"));
+}
+
+#[test]
+fn housekeeping_beats_the_e_cores_too_1425() {
+    let b = FakeBox::new(Some("12-15\n"), Some("0-1\n"), Some("2-11\n"));
+    let want = "nice -n 19 ionice -c 3 chrt --idle 0 taskset -c 2-11";
+    assert_eq!(b.pure(), want);
+    assert_eq!(b.remote(), want);
+}
+
+#[test]
+fn no_housekeeping_file_keeps_todays_runner_prefix_1425() {
+    let b = FakeBox::new(Some("12-15\n"), None, Some("2-11\n"));
+    let want = format!("sudo -n {}/bin/run", b.root());
+    assert_eq!(
+        b.pure(),
+        want,
+        "a box without housekeeping keeps the rig-background.slice runner"
+    );
+    assert_eq!(b.remote(), want);
+}
+
+#[test]
+fn an_empty_or_malformed_obs_mask_keeps_todays_prefix_1425() {
+    for mask in [
+        None,
+        Some(""),
+        Some("  \n"),
+        Some("2-15; rm -rf /\n"),
+        Some("all\n"),
+        Some("2-\n"),
+        Some("-\n"),
+        Some(",,\n"),
+        Some("2-15,\n"),
+        Some("٢-١٥\n"),
+    ] {
+        let b = FakeBox::new(None, Some("0\n"), mask);
+        let want = format!("sudo -n {}/bin/run", b.root());
+        assert_eq!(b.pure(), want, "mask {mask:?}");
+        assert_eq!(b.remote(), want, "mask {mask:?}");
+    }
+}
+
+#[test]
+fn an_empty_housekeeping_file_is_no_housekeeping_1425() {
+    let b = FakeBox::new(None, Some(""), Some("2-15\n"));
+    assert_eq!(b.pure(), format!("sudo -n {}/bin/run", b.root()));
+    assert_eq!(b.remote(), format!("sudo -n {}/bin/run", b.root()));
 }

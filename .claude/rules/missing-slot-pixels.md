@@ -45,6 +45,12 @@ NodeSpec `source`. The cap (`MISSING_SLOT_PIXELS_CAP`, default 12) counts SLOTS,
 
 ## Per box
 
+- **Issue 1425: a Linux box (strih-snv, stream-snv) exports on DEV1.** `missing_slot_pixels_box_extract`
+  copies the recording with `rec_pull_paced` (paced + sha256-verified, `scripts/lib/rec-pull-paced.sh`)
+  into `<lparent>/.rec-copy-<box>.*`, runs the unchanged `missing_slot_pixels_linux_script` locally
+  into `<lparent>/<basename of the remote dir>` (where the pull used to land), and removes the copy.
+  The box runs no ffmpeg. The strih-snv / stream-snv bullets below are the retired on-box shape.
+
 - **strih-snv (Linux)**: one ssh bash script (`missing_slot_pixels_linux_script`, every dynamic value
   `%q`-quoted — OBS file names have spaces) probes the size, then runs both stages at the SAME idle
   priority as the on-box decode: `missing_slot_pixels_lowprio_snippet` is byte-identical to
@@ -73,3 +79,7 @@ program text, the whole runner against a fake `sshpass` first on PATH (ssh = run
 with local bash, scp = local `cp -r`; a `powershell` command fails, which exercises the best-effort
 failure path), and the recording-e2e.sh order (merge < this step < the Discord report < the cleanup plan).
 The report side is `tests/python/test_e2e_discord_report_missing_slot_pixels_1367.py`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Pixel proof for merge-classified slots with `png: null` (issue 1367: `scripts/lib/missing-slot-pixels.sh` after the merge, before the report + #652 cleanup plan; stage 1 = the verdict's own CFR rawvideo decode, stage 2 selects by raw-frame ordinal with `-framerate 1 -frame_pts 1` so the PNG name IS the frame_index — never `select` on the source file; camN -> strih recording, strih/stream -> stream recording; strih-snv at the on-box idle priority, stream through a `.cmd` because PS 5.1 pipes are not binary-safe; cap 12 slots; report-only `missing_slot_pixels` verdict block) → `.claude/rules/missing-slot-pixels.md` (auto-loads on its `paths:`)

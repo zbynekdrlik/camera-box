@@ -198,3 +198,7 @@ trap had NO mpv-kill, so the restore landed on a live mpv.
   the REAL script under its own `set -euo pipefail`+errtrace (a static-anchor-only test is blind to a
   `set -e`/ordering regression, per `ci-testing-gotchas.md` #1133). Live cam2 playback stays a
   supervisor rig step.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- lipsync-test-mode.sh playback is `mpv --vo=drm` NOT raw fbdev (#1187): the `--audio-delay` SIGN gotcha (negative delays video = the old positive video `-itsoffset`; flipping it doubles the offset), the fb0-blank reuses `rig_test_ledger_clean_paint_fallback_cmds`, the `LIPSYNC_MPV_BIN`/`LIPSYNC_DRM_DEVICE` seams, the `LIPSYNC_PLAYBACK_GAIN_DB` fixed-speech-gain seam (#1191, default 9, REMOTE-expanded literal `${…:-9}` — calibrated to the asset peak into the mic-chain AGC operating point, NOT a dynamic normalizer), `LIPSYNC_AUDIO_LEAD_MS` default now 0 (#1191, 408 was ffmpeg-era; 408 = a recalibration option), mpv provisioned STEP-16 + verify-device `(x2)`, live playback + recalibration are supervisor rig steps → `.claude/rules/lipsync-drm-playback.md` (auto-loads on its `paths:`)

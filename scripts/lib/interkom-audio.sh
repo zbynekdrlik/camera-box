@@ -58,8 +58,12 @@ interkom_mic_pct() {
 
 # interkom_pcm_pct DEVICE_NAME -> the canonical interkom PCM (playback / headphone) gain percent.
 # Per-box compensation (#782, owner 2026-07-15 final table): cam5-7 = 94, every other box = 79.
+# CAM2 = 100 (issue 1553, owner 26.11.2026): cam2's card output carries only the QPSK measurement
+# marker into a direct XLR to the mbc audio interface (no headphones), and at 79 % (-19.75 dB) the
+# 50 Hz hum after it weighed enough to trip the stream program-audio guard.
 interkom_pcm_pct() {
     case "$1" in
+        CAM2) printf '100' ;;
         CAM5 | CAM6 | CAM7) printf '94' ;;
         *) printf '79' ;;
     esac

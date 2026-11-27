@@ -391,3 +391,7 @@ even after someone re-enables the server. Checklist additions:
    (`Expecting value: line 1 column 1` = the auth-failure close read as JSON) and Companion (740 ×
    close code 4009 in an hour). The restored contract is the file
    `{"alerts_enabled":false,"auth_required":false,"first_load":false,"server_enabled":true,"server_password":"","server_port":4455}`.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Inspecting AND deploying live rig state without fooling yourself (a merged `vendor/<plugin>/**` fix is NOT deployed; nested PowerShell over ssh fails SILENTLY; the painter is `frame-probe` on DRM so an all-zero `/dev/fb0` proves nothing; the plain-ssh FULL-BUNDLE deploy recipe; a hook-blocked Bash call runs none of its heredocs either) → `.claude/rules/rig-state-inspection.md` (auto-loads on its `paths:`)

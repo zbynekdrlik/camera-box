@@ -324,3 +324,7 @@ disagree with — the gate that already owns that signal's real acceptance bar.*
 "widen the tolerance" or "soften the gate" — it is recognizing that ONE of the two gates should not
 be deciding that signal's fate at all once the other genuinely owns it; scope each gate to what its
 OWN acceptance criteria actually named, never to "anything left over that feels risky".
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- self-heal reset must never misreport as frozen_leg (two independent trigger bands sharing one reset log line, ALLOW-not-SUPPRESS correlation, all-active-camera scan scope, #895) → `.claude/rules/self-heal-frozen-leg-attribution.md` (auto-loads on its `paths:`)

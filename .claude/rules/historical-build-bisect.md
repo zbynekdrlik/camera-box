@@ -54,3 +54,7 @@ on cam3) will be refused. Real neutralization seams:
   the read-back's `abuf=`). A staged tree without `STRIH_AUDIO_BUFFERING_MS` (before issue 1425) gets
   one NOTE and is not graded; an OBS build that logs no `genlock-audio-buffering:` line is refused
   (`abuf=none`) — deploying such an OBS is a deliberate non-deterministic box, never a silent pass.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Deploying a HISTORICAL camera-box build (bisect/rollback: run-id lookup, deploy-fleet `--run`, the mixed-fleet version-parity gate refusal + neutralization seams, local E2E, the ci.yml auto-deploy clobber) → `.claude/rules/historical-build-bisect.md` (auto-loads on its `paths:`)

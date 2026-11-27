@@ -74,7 +74,7 @@ production without, invisible without a page:
 
 | watchdog | ticket | fault |
 |---|---|---|
-| `dantesync-clock-alert-watchdog.sh` | #1307 | PTP clock loss / GM move / DNS / NTP storm / dantesync-dead |
+| `dantesync-clock-alert-watchdog.sh` | #1307 | PTP clock loss / GM move / DNS / NTP storm / dantesync-dead -- since issue 1545 a confirmed clock loss in a venue that is in a production ALSO goes out as ONE airuleset `page:dante-clock-<venue>` per venue (the class the owner policy lets through) |
 | `genlock-lock-alert-watchdog.sh` | #1299 | fleet genlock UNLOCKED/DEGRADED |
 | `network-reach-alert-watchdog.sh` | #1001 | strih/stream unreachable |
 | `bundle-state-alert-watchdog.sh` | #732 | :8899 bundle-state server down |
@@ -196,3 +196,7 @@ calibration-log tests had to stub `deliver_alert` to avoid firing a real notify)
 ## Production-critical re-ping needs a QUALITY-GATED input — the 16.9.2026 night storm (135 pages)
 
 The 10-min re-ping class did exactly what the ruling asks, on THREE inputs that were false or stale: a CUMULATIVE widget term (`qpc_drift_ms`, unbounded on a disciplined clock → 38 pages), an estimator with MAD as wide as the band (the av-sync dock, ±40 ms → 78 pages), and a stale checked-in baseline (port map → 14 pages). Rule for every production-critical watchdog: (1) never feed the verdict a cumulative/since-start quantity — windowed rates + steps only; (2) an estimator-fed verdict carries its own quality gate (MAD/sample-count) and reads LOW_QUALITY (log-only) when it fails; (3) a baseline-fed verdict is re-captured in the same sitting as any deploy that legitimately moves the baseline. A storm of true-by-construction pages is a defect of the INPUT, not a reason to relax the re-ping.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Alert-watchdog Discord notify discipline (EVERY `notify --body` = a phone ping: ALERT class gets a STABLE per-incident `--dedup-key` — box/source/verdict/leg-scoped, no per-pass component — so a repeated identical state EDITS the airuleset card instead of re-pinging; RECOVERY/status ✅ pings go to the machine channel (`log` line) NOT the phone; 🚨/⚠️/🛟/🧹=keyed-ping, ✅=log-only; delivery-layer only, detection untouched; enforced by `tests/python/test_notify_dedup_key_sweep_1206.py`; airuleset #704/#705, #1206. **PRODUCTION-CRITICAL class (#1308):** the 11 watchdogs whose fault production cannot run without TIME-BUCKET their key via the ONE shared helper `watchdog_notify_key` (bash, in obs-watchdog-decision.sh) / `scripts/watchdog_reping.py` (python twin) → re-ping „dokolecka" while it persists; the sweep allowlist is CLASS-based + rejects a bucketed key in any diagnostic/TEST-mode watchdog) → `.claude/rules/watchdog-notify-dedup.md` (auto-loads on its `paths:`)

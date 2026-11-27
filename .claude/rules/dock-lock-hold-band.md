@@ -66,3 +66,7 @@ Half 1 alone is exactly what a mis-deployed / never-loaded build ALSO produces.
 to the same shape anywhere else on the rig:** gather BOTH halves in the same measurement window
 before calling it accepted. A flat value with no corroborating "still alive, still wanting to
 act" log evidence is not proof the fix worked; it might just be silence.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- `DockLockCorrector` hold-band boundary tuning (verify what the test suite pins before closing/widening an interval — degenerate vs ordinary margin, #942) → `.claude/rules/dock-lock-hold-band.md` (auto-loads on its `paths:`)

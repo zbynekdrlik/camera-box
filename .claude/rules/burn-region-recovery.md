@@ -238,3 +238,7 @@ Rules for a future change here:
 - A frame's echoes can hold the CURRENT id if a monitor shows the program with no delay. The echo
   list then has an identity that also counts from the slot. That is harmless: the count is a
   diagnostic, and the slot read is the burn (gating before the id merge is what keeps it).
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Burn-isolated slot recovery in the recording decode (issue 1370: a missing expected node burn is decoded from its own `src/burn_regions.rs` slot crop so optical content the camera puts into the #202 bottom tile cannot hide it; only missing ids merged, never optical/aux; `burn_regions` is the ONE Rust burn geometry (colour_sample pads its slots), pinned to the shipped burn-geom.hpp by a default-feature C++ parity test; the local real-rqrr rustc harness + the PIL-resize-is-not-CatmullRom trap; issue 1367 echo gate: a node burn counts only when read inside its own slot + pad, every recording decode drops every other read of it before reads merge (a camera filming an OBS multiview), report-only `burn_echoes_rejected`, synthetic grouped-decode tests must draw burns at their real slot; issue 1367 tight-box look: the camera burn renders 287 px at (816, 769), not the 320 px slot, so when the 1x crop reads nothing the burn's own white quiet-zone box, found by the pure `src/burn_quiet_zone.rs`, is decoded alone inside a white border) → `.claude/rules/burn-region-recovery.md` (auto-loads on its `paths:`)
