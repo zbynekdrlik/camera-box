@@ -94,9 +94,9 @@ def test_the_shipped_pin_carries_the_tray_release_or_later():
     assert len(pin["INTERCOM_RELEASE_SHA256"]) == 64
     assert ('intercom-vban = { git = "https://github.com/zbynekdrlik/intercom", tag = "%s" }' % tag) in \
         (REPO / "Cargo.toml").read_text()
-    # the routing files of the pinned release (v1.9.28+: intercom#38 level sliders; v1.9.33+: strih-pp Dante receive_buffer_ms 3.5)
+    # the routing files of the pinned release (v1.9.28+: intercom#38 level sliders; v1.9.37+: strih-pp Dante back on the default 13.04 ms)
     for name, sha in (("intercom.strih-snv.toml", "ac2d2e6ae1ebaf5a4d4e20a17cc178c5529ea614f8956b2c4d81aa85c1f94efe"),
-                      ("intercom.strih-pp.toml", "661ec1ee8cace21a3042c201c0a3ef5d229aa49dd70b860f4e22de15cd706b63")):
+                      ("intercom.strih-pp.toml", "ae4999c18c82e11107583dce8f6efe33d3b7874ea157195a58fe3f20f289ac10")):
         assert hashlib.sha256((PINNED / name).read_bytes()).hexdigest() == sha, name
 
 

@@ -632,6 +632,11 @@ pub use rig_core::send_stall;
 pub use av_ndi::send_stagger;
 // Issue 1487: the camera-box binary's log filter names every crate that logs for it.
 pub mod log_filter;
+// Issue 1540 slice 2: the cambox side of the dcontroller video-monitoring contract -- cumulative
+// capture/emit/NDI/JPEG XS counters (atomics folded once per 5-s window off the realtime path)
+// and the read-only std HTTP endpoint `GET :8896/video.json` that serves them.
+pub mod cambox_video_http;
+pub mod cambox_video_stats;
 // Issue 1387: the JPEG XS link, in vstack since issue 1487 (`camera-box-jxs`): the pure wire
 // format, bpp and congestion control on every platform; the cambox sender (off unless
 // CAMERA_BOX_JXS_TARGET is set) and the receive side on Linux. The codec needs the `jxs` feature.

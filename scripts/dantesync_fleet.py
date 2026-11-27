@@ -107,13 +107,19 @@ def venue_cameras() -> list:
     return out
 
 
+def camera_arms() -> dict:
+    """{camN: IP} from the camera_resolve arms of scripts/camera-set.sh (the camera's venue-LAN
+    address); the ONE python parse of those arms (issue 1540 reuses it for the video node list)."""
+    return dict(re.findall(r"^\s*(cam[0-9]+)\)\s*CAMERA_IP=([0-9.]+);", CAMERA_SET_SH.read_text(),
+                           re.MULTILINE))
+
+
 def camera_rows() -> list:
     """One row per camera a venue lists, walked cam1, cam2, ... to the first unknown camera_resolve
     name (the bash _dantesync_fleet_camera_rows): a home-venue camera is `video` / `always` at its
     camera_resolve address, another venue's is `video-<venue>` / `reach` at its dev1 address. A camera
     listed twice, a bad venue name or a bad dev1 network raises RuntimeError."""
-    arms = dict(re.findall(r"^\s*(cam[0-9]+)\)\s*CAMERA_IP=([0-9.]+);", CAMERA_SET_SH.read_text(),
-                           re.MULTILINE))
+    arms = camera_arms()
     home = _bash_default("DANTESYNC_FLEET_HOME_VENUE", FLEET_SH)
     venues = venue_cameras()
     rows = []
@@ -188,6 +194,9 @@ def _fact_file(path: Path) -> dict:
 
 # issue 1553: the public name other modules use (the program-audio sampler's advisory probe)
 fact_file = _fact_file
+# issue 1540: the public names the video node list generator (scripts/video_nodes.py) uses
+strih_boxes_dir = _strih_boxes_dir
+load_obs_fleet_table = _load_obs_fleet_table
 
 
 def venue_gm_host(venue: str) -> str:

@@ -135,7 +135,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # (camera-box issue 1545: cam3 ran the 19.11 SNV service on NTP with its cable in the other port).
 # 2026-11-26: v1.35.17 -- the pinned-list re-join is trusted-GM aware (dsync#215, the dsync second-NIC
 # case of camera-box issue 1553); dstack confirmed every rig box's dstack devices >= v0.6.193.
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.17}"
+# 2026-11-27: v1.35.20 -- a gm_allowlist whose entries all fail to resolve fails OPEN (accepts any GM,
+# WARN + /status.gm_allowlist_fail_open) instead of dropping every GM (dsync#217, pp-cam6 on NTP at the
+# 22.11 PP service, camera-box issue 1553); also carries 1.35.18 arrival-step WARN + 1.35.19 service detector.
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.35.20}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

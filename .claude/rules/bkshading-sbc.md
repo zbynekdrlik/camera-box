@@ -395,7 +395,7 @@ The board's journal lives in RAM and its `/etc/fake-hwclock.data` stayed at 3.10
   its venue is where its relay registers. `remote_log_board_sink_ips <board>` (in
   `scripts/lib/remote-logging.sh`, the ONE issue-1311/1394 lib) = the `STRIH_IP` of every strih-role
   fact file whose `STRIH_BKSHADING_RELAYS` names `sbc-relay@register:<board>`, in file order. Today:
-  cam1-shading -> strih-pp, cam2-shading -> strih-snv; cam4-shading is listed by no venue since
+  cam1-shading -> strih-pp, cam3-shading -> strih-snv (issue 1556); cam4-shading is listed by no venue since
   issue 1529 (strih-pp's cam4 block is the cambox relay), so the resolver refuses it by name.
   `remote_log_sink_ip camN` would be WRONG here: a board's venue is its relay's, not a camera's.
 - **The wrapper picks the venue at each start.** `/usr/local/sbin/bkshading-journal-upload.sh`
@@ -442,14 +442,14 @@ The board's journal lives in RAM and its `/etc/fake-hwclock.data` stayed at 3.10
 - The lib is `scripts/lib/bkshading-sbc-remote-log.sh`; `bkshading-provision-sbc.sh` gains one call
   per step. Tests: `tests/python/test_bkshading_sbc_remote_log_808.py` (the resolver over the real and
   synthetic fact files, the wrapper run against a real loopback listener, `--install`/`--check` through
-  `_run_provision`, the clock rules). The fakes default the board to `cam2-shading`
+  `_run_provision`, the clock rules). The fakes default the board to `cam3-shading`
   (`_run_provision(hostname=...)`), an uploader binary present (`ju_present=False` = the apt branch),
   a fake `timedatectl` (`FAKE_NTP_SYNC`) and `apt-get`.
 
 ### Live runbook (supervisor, a board after this change)
 
-The boards: `cam1-shading` (ex handheld-2, PP fact; not yet installed), `cam2-shading` (SNV,
-10.77.9.189 on 2.11.), `cam4-shading` (ex handheld-1, the travelling one; PP 10.77.8.78 on 28.10.,
+The boards: `cam1-shading` (ex handheld-2, PP fact; not yet installed), `cam3-shading` (SNV, was
+`cam2-shading` until issue 1556 moved it to cam3; 10.77.9.189 on 2.11.), `cam4-shading` (ex handheld-1, the travelling one; PP 10.77.8.78 on 28.10.,
 reached from dev1 only through strih-pp, see above). For each, with the rig idle:
 1. The venue strih receiver is up: on the strih `ss -ltnp | grep ':19532 '` names systemd
    (setup-strih step 16k; verify-strih item 46).

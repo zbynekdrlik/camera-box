@@ -48,6 +48,13 @@ paths:
     genlock audit + dante counters are cumulative (newest value, `counters_since` moves when one goes
     backwards); the JPEG XS `jxs-source` / `jxs-output` lines are per 5-s window and summed. It never
     goes through the bounded read: the 5 MB tail covers only ~110 min of a session.
+  - `bundle_state_video_nodes` (issue 1540 slice 3): `GET /video-nodes.json`, the box's venue node
+    list for dcontroller (`bundle_state_video.nodes_payload`, 404 for a box in no venue). It is a
+    GENERATED pure-data module: `scripts/video_nodes.py` builds it from the strih fact files +
+    camera_resolve + OBS_FLEET (through `dantesync_fleet`'s readers). After ANY change to a fact
+    file's hostname / IP / venue / role / cameras, a camera_resolve IP or an OBS_FLEET row, run
+    `python3 scripts/video_nodes.py --write` and commit the module (`test_video_nodes_1540.py`
+    fails while it is stale), then redeploy the server tree to publish it.
   - The server keeps the orchestration (`_windows_*_facets`) and calls the readers through its OWN
     globals, and re-exports every reader, parser and cache its tests reach as `bss.<name>`.
   - **A `bss.<name>` patch reaches ONLY the calls the server itself makes:** the readers
@@ -76,6 +83,9 @@ paths:
     server's real module-level import closure, so a missing entry fails there.
   - A box missing one module serves no `:8899` at all: the server exits on the ImportError, and the
     Windows supervisor loop restarts it every 5 s. So redeploy the WHOLE list, never one changed file.
+  - A re-run `try-restart`s the unit after the install (issue 1540): the server holds its modules in
+    memory, so without it a deploy left the OLD tree serving (strih-snv/stream-snv 27.11: new files
+    on disk, `/video-nodes.json` 404 from a server up since 24.11). A stopped server stays stopped.
   - Both setup scripts fetch the files from origin `dev` but take the list from the checkout, so
     after the install they run `python3 -I -B -c '…; import bundle_state_gather,
     bundle_state_windows'` against `/opt/camera-box` and `fail` on a partial tree. The facade

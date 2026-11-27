@@ -67,7 +67,7 @@ def _expected(cams, addresses):
 
 
 SNV_LIVE = _expected((2, 3, 5), {n: ("cambox-relay", "cam%d.lan:8771" % n) for n in range(1, 8)}
-                     | {2: ("sbc-relay", "register:cam2-shading")})
+                     | {3: ("sbc-relay", "register:cam3-shading")})
 # issue 1537 (18.11.2026 evening, the owner reversed 15.11): the Orange handhelds DO run in PP, cam1 and cam4 on
 # their boards (cam1-shading, handheld-1 = cam4-shading), cam6/cam7 on their camboxes' relays.
 PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)}
@@ -77,7 +77,7 @@ PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) f
 # --- the fact ---------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("box,want", [
-    ("strih-snv", "2=sbc-relay@register:cam2-shading"),
+    ("strih-snv", "3=sbc-relay@register:cam3-shading"),
     ("strih-pp", "1=sbc-relay@register:cam1-shading 4=sbc-relay@register:cam4-shading "
                  "6=cambox-relay@10.77.9.66:8771 7=cambox-relay@10.77.9.67:8771"),
     ("stream-snv", "none"),
@@ -141,9 +141,11 @@ def test_the_seed_writes_the_live_panel_of_the_box(boxes, box, want):
 
 def test_an_sbc_relay_block_names_the_ruling(boxes):
     text, _cfg = _seed(boxes, "strih-snv")
-    # issue 1452 (owner 10.11.2026): SBC boards exist only for cam1, cam2 and cam4; strih-snv's is cam2's.
-    block = text.split('id = "cam2"')[1].split("[[camera]]")[0]
+    # issue 1556 (owner 26.11.2026): strih-snv's Orange board (cam3-shading) controls cam3; cam2 is on its cambox.
+    block = text.split('id = "cam3"')[1].split("[[camera]]")[0]
     assert "# a handheld SBC relay controls this cambox's camera" in block, block
+    cam2 = text.split('id = "cam2"')[1].split("[[camera]]")[0]
+    assert "handheld SBC relay" not in cam2, cam2
 
 
 def test_explicit_args_override_the_bind_and_the_relays(boxes):
