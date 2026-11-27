@@ -588,7 +588,7 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=No
                    root_opts=None, root_uuid=ROOT_UUID, fstab_text=ARMBIAN_FSTAB,
                    persistent_dropin=True, cambox=False, systemctl_fail_on=None,
                    netplan_files=None, net_state=None, disabled_units=(), netplan_other=None,
-                   env_extra=None, hostname="cam2-shading", ju_present=True):
+                   env_extra=None, hostname="cam3-shading", ju_present=True):
     sysd = os.path.join(root, "systemd-system")
     binp = os.path.join(root, "bin", "bkshading-relay")
     calls = os.path.join(root, "systemctl-calls.log")
@@ -674,7 +674,7 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=No
         FAKE_ROOT_OPTS=root_opts,
         FAKE_ROOT_UUID=root_uuid,
         FAKE_ROOT_FSTYPE="ext4",
-        # the board's name = its relay id; strih-snv's STRIH_BKSHADING_RELAYS lists cam2-shading
+        # the board's name = its relay id; strih-snv's STRIH_BKSHADING_RELAYS lists cam3-shading (issue 1556)
         BKSHADING_SBC_HOSTNAME=hostname,
         BKSHADING_SBC_JU_BIN=paths["ju_bin"],
         BKSHADING_SBC_JU_SCRIPT=paths["ju_script"],
