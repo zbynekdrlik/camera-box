@@ -59,6 +59,8 @@ state = os.environ["FAKE_TC_STATE"]
 queues = int(os.environ.get("FAKE_TC_QUEUES", "1"))
 with open(os.environ["FAKE_TC_LOG"], "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\n")
+if os.environ.get("FAKE_TC_FAIL_DEL") and "del" in sys.argv:
+    sys.stderr.write("RTNETLINK answers: Operation not permitted\n"); sys.exit(2)
 if os.environ.get("FAKE_TC_FAIL") and "replace" in sys.argv:
     sys.stderr.write("RTNETLINK answers: Invalid argument\n"); sys.exit(2)
 tree = json.load(open(state)) if os.path.exists(state) else [{"kind": "noqueue", "handle": "0:", "root": True, "options": {}}]
@@ -81,12 +83,27 @@ def fq(opts):
     return o
 if a[:2] == ["-j", "qdisc"] and a[2] == "show":
     print(json.dumps(tree)); sys.exit(0)
+if a[:3] == ["qdisc", "show", "dev"]:
+    # the human form: `qdisc <kind> <handle> root|parent <class> <options>`, as a 7.0 kernel prints it
+    for q in tree:
+        where = "root" if q.get("root") else "parent " + q.get("parent", "")
+        print(("qdisc %s %s %s refcnt 2 " % (q["kind"], q.get("handle", "0:"), where)).rstrip())
+    sys.exit(0)
+if a[:3] == ["qdisc", "del", "dev"] and a[4:] == ["root"]:
+    # the kernel puts the default back: mq 0: + fq_codel per tx queue (one queue: fq_codel root)
+    if queues > 1:
+        tree = [{"kind": "mq", "handle": "0:", "root": True, "options": {}}] + [
+            {"kind": "fq_codel", "parent": "0:%x" % i, "options": {}} for i in range(1, queues + 1)]
+    else:
+        tree = [{"kind": "fq_codel", "handle": "0:", "root": True, "options": {}}]
+    json.dump(tree, open(state, "w")); sys.exit(0)
 assert a[:2] == ["qdisc", "replace"] and a[2] == "dev", a
 if a[4] == "root":
     if a[5:8] == ["handle", "1:", "mq"]:
         if queues < 2:
             sys.stderr.write("RTNETLINK answers: Operation not supported\n"); sys.exit(2)
-        if not (tree and tree[0].get("kind") == "mq"):
+        # the kernel rule this fake keeps: a replace of an EXISTING mq 1: keeps it AND its children
+        if not (tree and tree[0].get("kind") == "mq" and tree[0].get("handle") == "1:"):
             tree = [{"kind": "mq", "handle": "1:", "root": True, "options": {}}] + [
                 {"kind": "fq_codel", "parent": "1:%x" % i, "options": {}} for i in range(1, queues + 1)]
     elif a[5] == "fq":
@@ -99,7 +116,8 @@ elif a[4] == "parent":
     hit = [q for q in tree if q.get("parent") == cls]
     if not (tree and tree[0].get("kind") == "mq") or not hit:
         sys.stderr.write("Error: Specified class not found.\n"); sys.exit(2)
-    hit[0].clear(); hit[0].update({"kind": "fq", "parent": cls, "options": fq(a[7:])})
+    handle = hit[0].get("handle") if hit[0].get("kind") == "fq" else "80%02x:" % int(cls[2:], 16)
+    hit[0].clear(); hit[0].update({"kind": "fq", "handle": handle, "parent": cls, "options": fq(a[7:])})
 json.dump(tree, open(state, "w"))
 '''
 
@@ -298,6 +316,89 @@ def test_the_boot_script_waits_for_an_absent_nic_then_fails_loud(tmp_path):
     assert "FAILED -- the rig NIC rig0 is not present after 30 attempts" in r.stderr
     assert r.stderr.count("not present yet") == 1
     assert not (tmp_path / "tc.log").exists()
+
+
+def _set_queues(world, queues):
+    """The NIC's tx queue count changes under a paced tree (`ethtool -L <nic> combined N`)."""
+    import shutil
+    q = world["sys"] / "class" / "net" / world["nic"] / "queues"
+    shutil.rmtree(q)
+    q.mkdir()
+    for i in range(queues):
+        (q / ("tx-%d" % i)).mkdir()
+    world["env"]["FAKE_TC_QUEUES"] = str(queues)
+
+
+def _tree(world):
+    return json.loads((world["tmp"] / "tc.json").read_text())
+
+
+def test_the_boot_script_rebuilds_the_mq_when_the_nic_shrinks_its_queues(tmp_path):
+    """strih-pp 27.11.2026: 16 -> 4 channels, the restart said "4 tx queue(s)" but the 16 old fq stayed."""
+    w = _world(tmp_path, queues=16)
+    s = _script(w)
+    assert _boot(w, s).returncode == 0
+    _set_queues(w, 4)
+    (tmp_path / "tc.log").write_text("")
+    r = _boot(w, s)
+    assert r.returncode == 0, r.stderr
+    v = _verdict("900mbit", 4, (tmp_path / "tc.json").read_text())
+    assert v.startswith("OK mq 1: + fq on 4 tx queues"), v
+    assert sorted(q["parent"] for q in _tree(w) if not q.get("root")) == ["1:1", "1:2", "1:3", "1:4"]
+    log = _lines(tmp_path / "tc.log")
+    dels = [i for i, l in enumerate(log) if l.startswith("qdisc del ")]
+    mq = [i for i, l in enumerate(log) if l.endswith("root handle 1: mq")]
+    assert log[dels[0]] == "qdisc del dev enp5s0f1 root" and len(dels) == 1, log
+    assert dels[0] < mq[0], log
+    assert "the live mq 1: has 16 children, the NIC has 4 tx queue(s) -- deleting the root first" in r.stderr, r.stderr
+
+
+def test_the_boot_script_rebuilds_the_mq_when_the_nic_grows_its_queues(tmp_path):
+    """4 -> 16: a kept 4-class mq has no class 1:5, so the per-queue fq replace failed (exit 2)."""
+    w = _world(tmp_path, queues=4)
+    s = _script(w)
+    assert _boot(w, s).returncode == 0
+    _set_queues(w, 16)
+    r = _boot(w, s)
+    assert r.returncode == 0, r.stderr
+    v = _verdict("900mbit", 16, (tmp_path / "tc.json").read_text())
+    assert v.startswith("OK mq 1: + fq on 16 tx queues"), v
+
+
+def test_an_unchanged_tree_rerun_deletes_nothing_and_keeps_every_handle(tmp_path):
+    w = _world(tmp_path, queues=4)
+    s = _script(w)
+    assert _boot(w, s).returncode == 0
+    before = _tree(w)
+    (tmp_path / "tc.log").write_text("")
+    r = _boot(w, s)
+    assert r.returncode == 0, r.stderr
+    assert _tree(w) == before
+    assert not any(l.startswith("qdisc del") for l in _lines(tmp_path / "tc.log"))
+    assert "deleting the root" not in r.stderr
+
+
+def test_a_foreign_root_is_replaced_in_place_without_a_delete(tmp_path):
+    """A root that is not our mq 1: (the default mq 0:, a root fq) is left to `replace`, as today."""
+    w = _world(tmp_path, queues=4)
+    (tmp_path / "tc.json").write_text(json.dumps(
+        [{"kind": "mq", "handle": "0:", "root": True, "options": {}}]
+        + [{"kind": "fq_codel", "parent": "0:%x" % i, "options": {}} for i in range(1, 5)]))
+    r = _boot(w, _script(w))
+    assert r.returncode == 0, r.stderr
+    assert _verdict("900mbit", 4, (tmp_path / "tc.json").read_text()).startswith("OK mq 1: + fq on 4 tx queues")
+    assert not any(l.startswith("qdisc del") for l in _lines(tmp_path / "tc.log"))
+    assert "deleting the root" not in r.stderr
+
+
+def test_a_failed_root_delete_exits_2_naming_it(tmp_path):
+    w = _world(tmp_path, queues=16)
+    s = _script(w)
+    assert _boot(w, s).returncode == 0
+    _set_queues(w, 4)
+    r = _boot(w, s, FAKE_TC_FAIL_DEL="1")
+    assert r.returncode == 2
+    assert "tc root delete (stale mq) on enp5s0f1 FAILED" in r.stderr
 
 
 def test_a_failed_tc_step_exits_2_naming_it(tmp_path):
