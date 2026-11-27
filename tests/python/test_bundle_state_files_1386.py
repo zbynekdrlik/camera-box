@@ -213,3 +213,20 @@ def test_both_setup_scripts_iterate_the_declared_list():
         code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
         named = [(n, ln) for ln in code for n in tree_only if n in ln]
         assert named == [], f"{script} names a server-tree file in code instead of the list: {named}"
+
+
+def test_both_setup_scripts_restart_a_running_server_onto_the_new_tree():
+    # issue 1540 (27.11.2026): the strih-snv/stream-snv deploy installed a new tree under
+    # /opt/camera-box, but the server kept running the old one in memory (active since 24.11 and
+    # 19.11), so /video-nodes.json stayed 404 until a hand restart. After the install the scripts
+    # `try-restart` the unit: a running server reloads the new tree, a stopped one stays stopped.
+    for script, enable, restart in (
+            ("setup-strih.sh", "systemctl --user enable strih-bundle-state-server.service",
+             "systemctl --user try-restart strih-bundle-state-server.service"),
+            ("setup-imag.sh", "systemctl --user enable imag-bundle-state-server.service",
+             "systemctl --user try-restart imag-bundle-state-server.service")):
+        text = (_SCRIPTS / script).read_text(encoding="utf-8")
+        assert text.count(restart) == 1, f"{script} must try-restart the server once"
+        assert text.index(enable) < text.index(restart), f"{script}: enable, then try-restart"
+        assert "systemctl --user restart " + restart.split()[-1] not in text, (
+            f"{script}: never an unconditional restart (it would start a stopped server)")
