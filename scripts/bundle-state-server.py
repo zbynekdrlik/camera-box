@@ -46,7 +46,6 @@ import argparse
 import glob
 import json
 import os
-import socket
 import sys
 import threading
 import time
@@ -519,7 +518,7 @@ class _State:
     def __init__(self):
         self.lock = threading.Lock()
         self.last_record_dir = None
-        self.video = bundle_state_video.VideoFollower(socket.gethostname().split(".")[0])  # issue 1540
+        self.video = bundle_state_video.VideoFollower(bundle_state_video.node_name())  # issue 1540
 
 
 def make_handler(args, state):
@@ -538,8 +537,19 @@ def make_handler(args, state):
             elif path == "/video-connections.json":
                 state.video.update(args.obs_log_dir)
                 self._send_json(state.video.snapshot())
+            elif path == "/video-nodes.json":  # issue 1540 slice 3: the venue's node list
+                self._serve_video_nodes()
             else:
                 self._serve_record_file(path)
+
+        def _serve_video_nodes(self):
+            payload = bundle_state_video.nodes_payload(state.video.node)
+            if payload is None:
+                log(f"404: /video-nodes.json -- {state.video.node!r} is in no venue of the node list")
+                self.send_response(404)
+                self.end_headers()
+                return
+            self._send_json(payload)
 
         def _send_json(self, payload):
             body = json.dumps(payload, indent=2).encode("utf-8")

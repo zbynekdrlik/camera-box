@@ -31,5 +31,6 @@ BUNDLE_STATE_SERVER_FILES=(
   bundle_state_windows.py
   bundle_state_serverlog.py
   bundle_state_video.py
+  bundle_state_video_nodes.py
   obs_phase2.py
 )

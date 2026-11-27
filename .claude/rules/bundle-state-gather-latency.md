@@ -48,6 +48,13 @@ paths:
     genlock audit + dante counters are cumulative (newest value, `counters_since` moves when one goes
     backwards); the JPEG XS `jxs-source` / `jxs-output` lines are per 5-s window and summed. It never
     goes through the bounded read: the 5 MB tail covers only ~110 min of a session.
+  - `bundle_state_video_nodes` (issue 1540 slice 3): `GET /video-nodes.json`, the box's venue node
+    list for dcontroller (`bundle_state_video.nodes_payload`, 404 for a box in no venue). It is a
+    GENERATED pure-data module: `scripts/video_nodes.py` builds it from the strih fact files +
+    camera_resolve + OBS_FLEET (through `dantesync_fleet`'s readers). After ANY change to a fact
+    file's hostname / IP / venue / role / cameras, a camera_resolve IP or an OBS_FLEET row, run
+    `python3 scripts/video_nodes.py --write` and commit the module (`test_video_nodes_1540.py`
+    fails while it is stale), then redeploy the server tree to publish it.
   - The server keeps the orchestration (`_windows_*_facets`) and calls the readers through its OWN
     globals, and re-exports every reader, parser and cache its tests reach as `bss.<name>`.
   - **A `bss.<name>` patch reaches ONLY the calls the server itself makes:** the readers
