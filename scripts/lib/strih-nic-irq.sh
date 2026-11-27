@@ -434,6 +434,16 @@ else
   src="xhci_hcd ${pcifn}"
 fi
 
+# queue_pkts -> "Q0 Q1 ..." each queue's InPackets+OutPackets from `ethtool -S` (`Queue[N] InPackets` rows),
+# in queue order; empty when the driver lists none or the call fails (design 7228337095).
+queue_pkts() {
+  "$ETHTOOL" -S "$iface" 2>/dev/null | awk '
+    match($0, /Queue\[[0-9]+\] (In|Out)Packets:[[:space:]]*[0-9]+/) {
+      t = substr($0, RSTART, RLENGTH); q = t; sub(/^Queue\[/, "", q); sub(/\].*/, "", q)
+      v = t; sub(/.*:[[:space:]]*/, "", v); n[q + 0] += v; if (q + 0 > m) m = q + 0; seen = 1 }
+    END { if (seen) { for (i = 0; i <= m; i++) printf "%s%d", (i ? " " : ""), n[i]; print "" } }' || true
+}
+
 # irq_count IRQ -> the sum of IRQ's per-CPU counts in PROC_INTERRUPTS (empty when it has no row).
 irq_count() {
   local line tok tot=0
@@ -457,6 +467,9 @@ if [ "$IRQ_CPUS" != none ]; then
   read -ra cpus <<<"$place"
   declare -A c0=() load=()
   for irq in $irqs; do c0[$irq]="$(irq_count "$irq")"; done
+  # design 7228337095: a queue busy in NAPI polling raises few IRQs for many packets, so where the driver
+  # lists per-queue counters the weight is the queue's In+Out packets, sampled over the same window
+  q0=""; [[ "$src" == msi* ]] && q0="$(queue_pkts)"
   [ "$IRQ_RATE_SAMPLE_S" = 0 ] || sleep "$IRQ_RATE_SAMPLE_S"
   total=0
   for irq in $irqs; do
@@ -473,6 +486,24 @@ if [ "$IRQ_CPUS" != none ]; then
     total=$((total + rate[$irq]))
   done
   for c in "${cpus[@]}"; do load[$c]=0; done
+  unit="/s"
+  if [ "$total" -ge "$IRQ_LOAD_MIN_PER_S" ]; then
+    q1=""; [ -z "$q0" ] || q1="$(queue_pkts)"
+    read -ra _qa <<<"$q0"; read -ra _qb <<<"$q1"; read -ra _iv <<<"$irqs"
+    if [ "${#_qa[@]}" = 0 ] || [ "${#_qa[@]}" != "${#_qb[@]}" ]; then
+      log "weight: IRQ rate (no per-queue packet stats from ethtool -S)"
+    elif [ "${#_qa[@]}" -gt "${#_iv[@]}" ]; then
+      log "weight: IRQ rate (ethtool -S lists ${#_qa[@]} queues for ${#_iv[@]} IRQs: the queue<->vector order is unknown)"
+    else
+      _div="$IRQ_RATE_SAMPLE_S"; [ "$_div" != 0 ] || _div=1
+      for ((_i = 0; _i < ${#_qa[@]}; _i++)); do
+        _d=$((_qb[_i] - _qa[_i])); [ "$_d" -ge 0 ] || _d=0
+        rate[${_iv[$_i]}]=$((_d / _div))
+      done
+      unit=" pkt/s"
+      log "weight: per-queue packets (ethtool -S, ${#_qa[@]} queues -> IRQs ${_iv[0]}-${_iv[$((${#_qa[@]} - 1))]}, the rest by IRQ rate)"
+    fi
+  fi
   if [ "$total" -lt "$IRQ_LOAD_MIN_PER_S" ]; then
     if [ "$total" = 0 ]; then
       log "no IRQ traffic measured (rates all 0) -- round-robin in IRQ order over cpus ${place}; an IRQ already on one of them keeps it"
@@ -529,7 +560,7 @@ for irq in $irqs; do
   aff="${IRQ_DIR}/${irq}/smp_affinity_list"
   t="${tgt[$irq]}"
   what="IRQ ${irq} (${src}, iface ${iface})"
-  [ -z "${rate[$irq]+x}" ] || what="${what}: ${rate[$irq]}/s"
+  [ -z "${rate[$irq]+x}" ] || what="${what}: ${rate[$irq]}${unit:-/s}"
   cur="$(tr -d '[:space:]' < "$aff" 2>/dev/null || true)"
   if [ -n "$cur" ] && [ "$(cpulist_canon "$cur")" = "$(cpulist_canon "$t")" ]; then
     log "${what} -> cpu ${t} (already there, unchanged)"; placed="${placed:+$placed }${irq}->${t}"; continue
