@@ -318,9 +318,13 @@ cpulist_canon() {
   printf '%s\n' $out | sort -nu | tr '\n' ' ' | sed 's/ $//'
 }
 
-# (1) NIC iface -- STRIH_NIC_IFACE override wins; else resolve by DRIVER (the @STRIH_NIC_DRIVER@ rig NIC), which
-# works at boot BEFORE any address is assigned; else fall back to the address match. Exactly one
-# @STRIH_NIC_DRIVER@ iface is expected -- more than one fails LOUD (set STRIH_NIC_IFACE to disambiguate).
+# (1) NIC iface -- the ONE rig-NIC rule of strih_lx_rig_nic: STRIH_NIC_IFACE override wins; else the ONE
+# @STRIH_NIC_DRIVER@ iface (works at boot BEFORE any address is assigned); else -- no such iface, or more than
+# one (issue 1425: strih-pp's dual-port ixgbe card) -- the interface carrying the target IP. None or two
+# carrying it fail LOUD (set STRIH_NIC_IFACE to disambiguate).
+by_address() {
+  { ip -o -4 addr show 2>/dev/null || true; } | awk -v ip="$TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2 }' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
 iface="${STRIH_NIC_IFACE:-}"
 if [ -z "$iface" ]; then
   matches=""
@@ -334,8 +338,13 @@ if [ -z "$iface" ]; then
     [ "$_drv" = @STRIH_NIC_DRIVER@ ] && matches="${matches:+$matches }$_ifc"
   done
   case "$matches" in
-    *" "*) die "multiple @STRIH_NIC_DRIVER@ NICs (${matches}) -- set STRIH_NIC_IFACE" ;;
-    "")    iface="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
+    "" | *" "*)
+      iface="$(by_address)"
+      case "$iface" in
+        *" "*) die "${TARGET_IP} is on more than one interface (${iface}) -- set STRIH_NIC_IFACE" ;;
+        "")    [ -z "$matches" ] || die "multiple @STRIH_NIC_DRIVER@ NICs (${matches}) and none carries ${TARGET_IP} -- set STRIH_NIC_IFACE" ;;
+        *)     [ -z "$matches" ] || log "multiple @STRIH_NIC_DRIVER@ NICs (${matches}): ${iface} carries ${TARGET_IP}" ;;
+      esac ;;
     *)     iface="$matches" ;;
   esac
 fi
