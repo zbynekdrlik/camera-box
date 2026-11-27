@@ -1,6 +1,8 @@
 """Issue 1540 slice 1 -- the per-connection video counters of one OBS box for dcontroller.
 
-`GET :8899/video-connections.json` (bundle-state-server.py) serves `VideoFollower.snapshot()`.
+`GET :8899/video-connections.json` (bundle-state-server.py) serves `VideoFollower.snapshot()`, and
+`GET :8899/video-nodes.json` serves `nodes_payload()` (slice 3: the box's venue node list, from the
+module scripts/video_nodes.py generates).
 The counters exist only in the OBS log, in three shapes:
 
   * `genlock-fifo audit '<input>': received= underruns= relocks= dropped_due= latency_ms= ...`
@@ -21,11 +23,15 @@ for the file reads in `update`; never raises on a bad line (it is skipped).
 """
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import glob
 import os
 import re
+import socket
 import threading
+
+import bundle_state_video_nodes  # the GENERATED venue -> nodes list (scripts/video_nodes.py)
 
 SCHEMA = 1
 
@@ -42,6 +48,25 @@ JXS_OUT_SUMMED = ("frames", "dropped_busy", "offered", "taken", "not_taken", "se
 # The cumulative genlock audit + dante counters reported as the newest value.
 AUDIT_KEPT = ("received", "underruns", "relocks", "dropped_due", "late_holds", "overruns", "latency_ms")
 DANTE_KEPT = ("rx_packets", "rx_loss", "rx_gaps", "rx_holes", "underruns", "overruns", "rebootstraps", "re_anchors")
+
+
+def node_name():
+    """This box's node name: BUNDLE_STATE_NODE_NAME when set (tests, a box whose hostname is not its
+    fleet name), else the short hostname (= the strih fact file's STRIH_HOSTNAME)."""
+    return os.environ.get("BUNDLE_STATE_NODE_NAME") or socket.gethostname().split(".")[0]
+
+
+def nodes_payload(node, venues=None, now=None):
+    """Issue 1540 slice 3, `GET /video-nodes.json`: the node list of the venue NODE belongs to, or
+    None when NODE is in no venue (the server answers 404, never an empty list that reads as "no
+    nodes"). VENUES defaults to the generated bundle_state_video_nodes.VENUES; the result is a copy."""
+    venues = bundle_state_video_nodes.VENUES if venues is None else venues
+    now = now or _dt.datetime.now().astimezone()
+    for venue in sorted(venues):
+        if any(n.get("name") == node for n in venues[venue]):
+            return {"schema": SCHEMA, "venue": venue, "node": node,
+                    "read_at": now.isoformat(timespec="seconds"), "nodes": copy.deepcopy(venues[venue])}
+    return None
 
 
 def _fields(text):
