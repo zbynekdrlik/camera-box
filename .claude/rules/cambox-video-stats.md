@@ -35,3 +35,7 @@ issue 1540 comment 7034656554, the slice-2 decisions comment 7126682640). The OB
 - `CAMERA_BOX_VIDEO_STATS_PORT` (default 8896, `0` = off). A bind failure is one WARN.
 - **Local `cargo mutants` on these files is impractical** (each mutant rebuilds every binary:
   ~5 min per mutant here); rely on the CI diff gate and prove a test bites with a hand mutant.
+
+## Router entry (moved from CLAUDE.md, issue 1552)
+
+- Cambox video counters for dcontroller (`GET :8896/video.json`, issue 1540: atomics folded once per 5-s window, the 1-s JPEG XS `take_window` poll, one deadline per connection) → `.claude/rules/cambox-video-stats.md` (auto-loads on its `paths:`)

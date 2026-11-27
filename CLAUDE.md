@@ -21,12 +21,12 @@ Rules live in `.claude/rules/` and auto-load on their `paths:`. One short line p
 - Deploying a HISTORICAL camera-box build → historical-build-bisect.md
 - camera-box version-parity treadmill + the … → version-parity-treadmill-align.md
 - The cambox JPEG XS link beside NDI → jxs-link.md
-- Cambox video counters for dcontroller (`:8896/video.json`) → cambox-video-stats.md
+- Cambox video counters (`:8896/video.json`) → cambox-video-stats.md
 - The forked OBS on the Linux AND Windows OBS … → obs-pinned-release.md
 - strih-snv + stream-snv program audio over … → strih-dante-input.md
 - Pinned vstack tag → vstack-pin.md
-- Provisioning / new cam box (build USB → setup-device.sh → verify-device.sh acceptance gate, #448-#454) → load `.claude/skills/provision`
-- V4L2 capture controls (colour vs sharp sets, device-state persistence, NZXT CAM4 no-controls, grayscale/tint, the #299 colour-capture chroma metric) → load `.claude/skills/capture`
+- Provisioning / new cam box (USB → setup-device.sh → verify-device.sh) → load `.claude/skills/provision`
+- V4L2 capture controls (colour/sharp sets, persistence, chroma metric) → load `.claude/skills/capture`
 - Head-end OPTICAL blur/shutter `[0/8]` … → optical-head-end-preflight.md
 - Genlock OBS (deployed state, monorepo direction, NDI input mapping, timecode lag) → load `.claude/skills/genlock`
   - Genlock latency is ONE user knob in MS (#235): `OBS_GENLOCK_LATENCY_MS=N` (canonical; `OBS_GENLOCK_RESERVE_MS` is the back-compat alias; prod=3ms). Setting it implies ts-align on; preload is internal/auto-derived. Display: `latency = N ms (≈ M frames)`.
