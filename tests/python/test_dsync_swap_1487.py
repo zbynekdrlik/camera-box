@@ -30,13 +30,13 @@ def src(expr):
 def test_the_pinned_shas_are_of_the_pinned_version():
     pin = re.search(r'DANTESYNC_VERSION_PIN:-([0-9.]+)', (SCRIPTS / "dantesync-version-gate.sh").read_text()).group(1)
     rel = (SCRIPTS / "lib/dsync-release.sh").read_text()
-    assert pin == "1.35.17"
+    assert pin == "1.35.20"
     assert re.search(r'DSYNC_PINNED_SHA_VERSION="\$\{DSYNC_PINNED_SHA_VERSION-([0-9.]+)\}"', rel).group(1) == pin
     assert len(re.findall(r'DSYNC_SHA256_[A-Z_]+="[0-9a-f]{64}"', rel)) == 4
 
 
 def test_a_binary_that_is_not_the_pinned_one_is_refused():
-    r = bash('. scripts/lib/dsync-release.sh; dsync_release_sha_ok dsync-linux-amd64 1.35.17 deadbeef; echo rc=$?')
+    r = bash('. scripts/lib/dsync-release.sh; dsync_release_sha_ok dsync-linux-amd64 1.35.20 deadbeef; echo rc=$?')
     assert "rc=1" in r.stdout and "the pin says" in r.stderr
     r = bash('. scripts/lib/dsync-release.sh; dsync_release_sha_ok dsync-linux-amd64 9.9.9 deadbeef; echo rc=$?')
     assert "rc=0" in r.stdout
