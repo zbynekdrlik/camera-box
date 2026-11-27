@@ -75,14 +75,14 @@ def _with(text, key, value):
 
 def test_a_box_absent_from_obs_fleet_refuses(tmp_path, monkeypatch):
     d = _fact_dir(tmp_path, {"x.env": _with(SNV_FACT, "STRIH_HOSTNAME", "strih-xyz")})
-    monkeypatch.setenv("VIDEO_NODES_STRIH_BOXES_DIR", str(d))
+    monkeypatch.setenv("DANTESYNC_FLEET_STRIH_BOXES_DIR", str(d))
     with pytest.raises(RuntimeError, match="no OBS_FLEET row"):
         video_nodes.build()
 
 
 def test_a_retired_box_refuses(tmp_path, monkeypatch):
     d = _fact_dir(tmp_path, {"x.env": _with(SNV_FACT, "STRIH_HOSTNAME", "imag")})
-    monkeypatch.setenv("VIDEO_NODES_STRIH_BOXES_DIR", str(d))
+    monkeypatch.setenv("DANTESYNC_FLEET_STRIH_BOXES_DIR", str(d))
     with pytest.raises(RuntimeError, match="retired"):
         video_nodes.build()
 
@@ -90,16 +90,49 @@ def test_a_retired_box_refuses(tmp_path, monkeypatch):
 def test_a_camera_listed_twice_refuses(tmp_path, monkeypatch):
     stream = (SCRIPTS / "strih-boxes" / "stream-snv.env").read_text()
     d = _fact_dir(tmp_path, {"a.env": SNV_FACT, "b.env": _with(stream, "STRIH_CAMERAS", "3")})
-    monkeypatch.setenv("VIDEO_NODES_STRIH_BOXES_DIR", str(d))
+    monkeypatch.setenv("DANTESYNC_FLEET_STRIH_BOXES_DIR", str(d))
     with pytest.raises(RuntimeError, match="cam3 is listed by"):
         video_nodes.build()
 
 
 def test_a_camera_unknown_to_camera_resolve_refuses(tmp_path, monkeypatch):
     d = _fact_dir(tmp_path, {"a.env": _with(SNV_FACT, "STRIH_CAMERAS", "2 42")})
-    monkeypatch.setenv("VIDEO_NODES_STRIH_BOXES_DIR", str(d))
+    monkeypatch.setenv("DANTESYNC_FLEET_STRIH_BOXES_DIR", str(d))
     with pytest.raises(RuntimeError, match="cam42, unknown to camera_resolve"):
         video_nodes.build()
+
+
+@pytest.mark.parametrize("key", ["STRIH_HOSTNAME", "STRIH_IP", "STRIH_VENUE", "STRIH_ROLE"])
+def test_a_fact_file_without_a_needed_fact_refuses(tmp_path, monkeypatch, key):
+    d = _fact_dir(tmp_path, {"a.env": _with(SNV_FACT, key, "")})
+    monkeypatch.setenv("DANTESYNC_FLEET_STRIH_BOXES_DIR", str(d))
+    with pytest.raises(RuntimeError, match="lacks STRIH_HOSTNAME / STRIH_IP / STRIH_VENUE / STRIH_ROLE"):
+        video_nodes.build()
+
+
+def test_a_box_named_by_two_fact_files_refuses(tmp_path, monkeypatch):
+    d = _fact_dir(tmp_path, {"a.env": SNV_FACT, "b.env": _with(SNV_FACT, "STRIH_CAMERAS", "none")})
+    monkeypatch.setenv("DANTESYNC_FLEET_STRIH_BOXES_DIR", str(d))
+    with pytest.raises(RuntimeError, match="strih-snv is named by a.env and b.env"):
+        video_nodes.build()
+
+
+def test_a_camera_token_that_is_no_number_refuses(tmp_path, monkeypatch):
+    d = _fact_dir(tmp_path, {"a.env": _with(SNV_FACT, "STRIH_CAMERAS", "2 cam3")})
+    monkeypatch.setenv("DANTESYNC_FLEET_STRIH_BOXES_DIR", str(d))
+    with pytest.raises(RuntimeError, match="not a camera number"):
+        video_nodes.build()
+
+
+def test_write_then_check_round_trips_and_a_stale_module_fails_the_check(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "bundle_state_video_nodes.py"
+    monkeypatch.setattr(video_nodes, "MODULE_PATH", target)
+    assert video_nodes.main(["--write"]) == 0
+    assert target.read_text() == video_nodes.render(video_nodes.build())
+    assert video_nodes.main(["--check"]) == 0
+    target.write_text(target.read_text().replace("10.77.9.63", "10.77.9.99"))
+    assert video_nodes.main(["--check"]) == 1
+    assert "is stale" in capsys.readouterr().err
 
 
 VENUES = {"snv": [{"name": "strih-snv", "kind": "obs", "role": "strih", "url": "http://a:8899/v"},
