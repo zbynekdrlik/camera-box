@@ -141,16 +141,26 @@ def parse_detail(lines):
     """`print detail` lines of one section -> [{"flags": str, "comment": str, "props": dict}].
 
     RouterOS wraps at 80 columns: an INDENTED line starts a new run of `key=value` tokens, a line
-    with NO indent continues the previous one mid-token (a long comment is cut mid-word). The
-    comment sits on its own `;;; ` line; values are double-quoted when they need it.
+    with NO indent continues the previous one mid-token (a long comment is cut mid-word). RouterOS
+    may also indent the rest of a property token cut mid-way (live 28.11.2026: `tagged=...,sfp-` +
+    `       sfpplus2 `): an indented line whose first token has no `=` continues the cut token
+    (issue 1554). Trailing spaces are no signal: some dumps have them stripped.
+    The comment sits on its own `;;; ` line; values are double-quoted when they need it.
     """
     entries = []
     for block in _entry_blocks(lines):
         m = _HEADER.match(block[0])
         joined = [m.group(2)]
-        for ln in block[1:]:
-            if ln[:1].isspace():
+        for i, ln in enumerate(block[1:], start=1):
+            # only after a PROPERTY line (the header run -- index, flags, a `;;; ` comment and its
+            # unindented wrap -- is joined[0]); every property is `key=value`, so an indented line
+            # whose first token has no `=` is the rest of a token cut mid-way
+            first = ln.split(None, 1)[0] if ln.strip() else ""
+            cut = len(joined) > 1 and first != "" and "=" not in first
+            if ln[:1].isspace() and not cut:
                 joined.append(ln)
+            elif ln[:1].isspace():
+                joined[-1] += ln.strip()
             else:
                 joined[-1] += ln
         text = joined[0]
