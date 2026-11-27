@@ -216,7 +216,10 @@ def test_a_second_run_changes_no_channel_and_still_places(tmp_path):
     r = _render_and_run(tmp_path, sysr, irq_dir, bin_dir, env)
     assert r.returncode == 0, r.stderr
     calls = (tmp_path / "ethtool.log").read_text().splitlines()
-    assert calls == ["-l enp7s0"], calls   # never a -L (a ring re-init) when the count is right
+    # never a -L (a ring re-init) when the count is right; read-only calls (-l, the -S stats of the
+    # per-queue weight, design 7228337095) are fine
+    assert calls[0] == "-l enp7s0", calls
+    assert not [c for c in calls if c.startswith("-L")], calls
     assert "RSS queues already 2 (combined) -- unchanged" in r.stdout
     assert _aff(irq_dir, (134, 135, 136)) == ["0", "1", "0"]
 
