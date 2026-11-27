@@ -2,9 +2,9 @@
   "_comment": "issue 1554: sha256 of each device's normalised `/export terse` (scripts/netcfg_rules.py export_hash). The text itself stays on dev1 (~/.camera-box/netcfg-export/<venue>/), never in this public repo. A legitimate change = scripts/netcfg-rules.sh --capture --venue <v> + a PR of this file.",
   "snv": {
     "foh1_audio": "be579535b15591fa541ecdd6acb2bd202b9bd80ad8465bc2e35abda5833b8a11",
-    "foh1_video": "6d3417d397d6c524cfaaefc776e47aec184dbd1bde8b143f8f0cebe533ffaa6f",
-    "foh2_video": "8a8d1ccb88ec2fe0bae3d70f8145f5205e46206905778545a6073e3a931c5bb2",
-    "router_snv": "575cd9ac1855f78e66b3b2e3c0f25362b923a0775045e6a4465df42917eb0819",
-    "stage_av": "fb7f2edbdac5d07e368fd7b78994a74e0d8e24b7f9220f65e82708762d2dcaae"
+    "foh1_video": "51b6f3562da40a113a45291a0fce2a4e0a0587ecf95f0848d40ddf3095ce9c80",
+    "foh2_video": "6ec54afe9809f3dfc9053d8c85496facbbf401541b9470a4eb49bb376bde61a6",
+    "router_snv": "1e8dbed07f0ee6d4181612b332bba92b303db4db9440dc2c5bf48c9b01d0957f",
+    "stage_av": "9f04966abd20dd4d08c073320c6bc65fb2ab77ee3a3cf745a27aabf3daac877b"
   }
 }
