@@ -556,3 +556,17 @@ def test_baseline_flat_walk_skips_the_facet_sections():
     for sec in nbq.FACET_KEYS:
         assert '"%s"' % sec in facet, sec
     assert "if len(prefix) == 1 and k in FACET:" in body
+
+
+def test_a_port_name_wrapped_mid_token_onto_an_indented_line_stays_one_port():
+    # live 28.11.2026, foh2_video VLAN 71 (network#21): RouterOS cut `sfp-sfpplus2` at column 80 and put
+    # the rest on a line indented ONE space deeper (`      tagged=...,sfp-` + `       sfpplus2 `). A line that
+    # ends a token ends with a space; the cut line does not. The parser read `sfp-` as a port and lost
+    # sfp-sfpplus2, so the captured baseline carried a phantom port.
+    flat = ' 1    bridge=bridge vlan-ids=70 tagged=bridge,sfp-sfpplus2 untagged="" \r\n'
+    wrapped = ' 1    bridge=bridge vlan-ids=70 \r\n      tagged=bridge,sfp-\r\n       sfpplus2 untagged="" \r\n'
+    raw = _raw("foh2_video")
+    assert flat in raw
+    facet = _facet("foh2_video", raw.replace(flat, wrapped))
+    assert facet == _facet("foh2_video")
+    assert facet["bridge_vlan"]["70"]["tagged"] == ["bridge", "sfp-sfpplus2"]
