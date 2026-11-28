@@ -212,6 +212,11 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   below 2000 us with EINVAL (`sysctl -w` 500 / 1001..1999 read on strih-snv 7.0.0-38), and the box already
   runs 2000. A leftover `/etc/sysctl.d/60-strih-housekeeping.conf` of ours is removed; `(hk-sysctl)` FAILs it
   and otherwise reports the running value.
+- **No `net.core.netdev_budget` change either** (measured 28.11.2026 on strih-snv, design 7234507614 then
+  reverted): 10-min A/B on the same IRQ map gave time_squeeze +4665 at 300 vs +4911 at 600 (balanced map),
+  +44577 vs +43286 (stale map). The squeeze follows the per-CPU softirq LOAD (the time budget), not the
+  packet budget, so the lever is the IRQ balance itself: a re-place on the current rates took the stale
+  map's +44577 down to +4911.
 - `CPUAffinity=<cpus>` + `Nice=10` drop-ins: `rustdesk.service` (system) and `strih-display-watch.service`
   (the operator's `--user` unit). A RUNNING unit whose drop-in changed is restarted; a stopped or
   not-yet-installed one (rustdesk is step 16b, the display watch 16d) is never started.
