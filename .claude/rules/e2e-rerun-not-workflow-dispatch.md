@@ -40,3 +40,11 @@ canonical source now — this CLAUDE.md section is kept only as a pointer + a lo
 the old advice; do not restore the `gh workflow run` snippet here). Same "manual re-trigger after a
 stale/superseded run" IDEA the `linux-genlock.yml` GOTCHA above documents for a cancelled run — but
 `gh workflow run` is the WRONG mechanism for this specific workflow; `gh run rerun` is correct.
+
+**Before ANY rerun, give both SNV OBS boxes a fresh session (release 1.8.20, 28.11.2026).** The
+stream/strih Dante program-input gate counts the WHOLE OBS session ("rx_holes=N earlier in this OBS
+session"), not just the recording window. A peer's mbc restart or reboot (dasio, fohmixer) or our own
+deploy since OBS started poisons every later E2E in that session. Run 46087181144 failed this way:
+rx_holes=402048 from dasio's approved mbc restart, 4 min after the deploy had started OBS. So, right
+before `gh run rerun`: `systemctl --user restart strih-obs.service` on strih-snv AND stream-snv, read
+rx_holes 0 + genlock LOCKED, and ask dasio/fohmixer to hold mbc until the run ends.
