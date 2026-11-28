@@ -1595,3 +1595,12 @@ def test_verify_fails_a_drifted_check_unit(tmp_path):
     f.write_text(f.read_text().replace("IRQ_SKEW_PCT=25", "IRQ_SKEW_PCT=5"))
     r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
     assert "FAIL (hk-rebalance-check) " + str(f) + " missing or drifted -- re-run setup-strih.sh step 11b" in r.stdout, r.stdout
+
+
+def test_the_check_timer_first_runs_relative_to_its_own_start_not_to_boot():
+    # strih-snv 28.11.2026 08:55: step 11b starts the check timer BEFORE it installs the new IRQ script; with
+    # OnBootSec=10min an already-elapsed boot offset fires at once, so the first check ran the OLD script.
+    # OnActiveSec counts from the timer's start: at boot = 10 min after boot, from setup = 10 min after setup.
+    t = CHECK_TIMER.read_text()
+    assert "OnActiveSec=10min\n" in t, t
+    assert "OnBootSec" not in t, t
