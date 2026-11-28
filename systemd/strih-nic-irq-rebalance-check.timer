@@ -6,6 +6,7 @@ Documentation=https://github.com/zbynekdrlik/camera-box
 [Timer]
 OnBootSec=10min
 OnUnitActiveSec=5min
+RandomizedDelaySec=120
 Unit=strih-nic-irq-rebalance-check.service
 
 [Install]
