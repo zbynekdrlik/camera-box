@@ -55,7 +55,7 @@ switches foh1_audio `10.77.9.2`, stage_av `10.77.9.3`, foh1_video `10.77.9.4`, f
   `NETCFG_DROP_THRESHOLD` (1/s) → `DROPPING` (the microburst-tail-drop signature — check shared-buffers
   / the uplink step-down). This is a LIVE rate, deliberately NOT a cumulative-counter baseline diff.
   **Designated always-probe set (#1110):** the `node|port` tokens in `NETCFG_DROP_PROBE_PORTS` (default
-  `foh1_video|ether2` — strih-snv's USB 2.5 GbE uplink egress since the M4 cut-over, issue 1242,
+  `foh2_video|sfp-sfpplus2` — strih-snv's 10 GbE uplink since 15.10.2026, issue 1554, 27.11.2026; before it `foh1_video|ether2`, the USB 2.5 GbE uplink of the M4 cut-over, issue 1242,
   live-verified 2026-09-23 via `/interface bridge host print where mac-address=<strih-snv MAC>`; it
   was `foh2_video|sfp-sfpplus2`, the Windows strih PC's 10 G DAC, until 20.9.2026) are
   re-probed on EVERY `--check` regardless of cumulative growth, so a HEALTHY suspect uplink (dq1 flat

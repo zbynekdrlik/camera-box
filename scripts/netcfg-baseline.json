@@ -1,5 +1,5 @@
 {
-  "_captured": "2026-11-21",
+  "_captured": "2026-11-28",
   "_comment": "#797 venue MikroTik switch-chain config baseline. REPORT-ONLY source of truth: scripts/netcfg-audit.sh --check diffs the live chain vs this and reports drift LOUD; it NEVER overwrites (a legitimate re-config is recorded by updating this file in a PR, exactly like scripts/latency-pins-baseline.json). Seeded from a live read-only snapshot. See .claude/rules/netcfg-audit.md.",
   "nodes": {
     "foh1_audio": {
@@ -339,7 +339,24 @@
             "ether5",
             "ether6",
             "ether7",
-            "ether8"
+            "ether8",
+            "sfp-sfpplus2"
+          ],
+          "untagged": []
+        },
+        "71": {
+          "disabled": "no",
+          "tagged": [
+            "ether1",
+            "ether2",
+            "ether3",
+            "ether4",
+            "ether5",
+            "ether6",
+            "ether7",
+            "ether8",
+            "sfp-sfpplus1",
+            "sfp-sfpplus2"
           ],
           "untagged": []
         },
@@ -372,8 +389,8 @@
         },
         "ether3": {
           "comment": "basic",
-          "dq1": "48934",
-          "fcs": "34",
+          "dq1": "59056",
+          "fcs": "58",
           "fullduplex": "true",
           "rate": "1Gbps",
           "running": "true"
@@ -388,7 +405,7 @@
         },
         "ether5": {
           "comment": "basic",
-          "dq1": "5768",
+          "dq1": "8904",
           "fcs": "0",
           "fullduplex": "true",
           "rate": "1Gbps",
@@ -608,6 +625,20 @@
           ],
           "untagged": []
         },
+        "71": {
+          "disabled": "no",
+          "tagged": [
+            "ether1",
+            "ether2",
+            "ether3",
+            "ether4",
+            "ether5",
+            "ether6",
+            "sfp-sfpplus1",
+            "sfp-sfpplus2"
+          ],
+          "untagged": []
+        },
         "89": {
           "disabled": "no",
           "tagged": [
@@ -638,7 +669,7 @@
         "ether3": {
           "comment": "lan+dante-tag",
           "dq1": "2842",
-          "fcs": "17",
+          "fcs": "18",
           "fullduplex": "true",
           "rate": "1Gbps",
           "running": "true"
@@ -686,7 +717,7 @@
         "sfp-sfpplus1": {
           "comment": "trunk::foh1",
           "dq1": "0",
-          "fcs": "1781",
+          "fcs": "1806",
           "fullduplex": "true",
           "rate": "10Gbps",
           "running": "true"
@@ -863,6 +894,21 @@
           ],
           "untagged": []
         },
+        "71": {
+          "disabled": "no",
+          "tagged": [
+            "ether1",
+            "ether2",
+            "ether3",
+            "ether4",
+            "ether5",
+            "ether6",
+            "ether7",
+            "sfp-sfpplus1",
+            "sfp-sfpplus2"
+          ],
+          "untagged": []
+        },
         "89": {
           "disabled": "no",
           "tagged": [
@@ -909,7 +955,7 @@
         "ether5": {
           "comment": "",
           "dq1": "0",
-          "fcs": "1",
+          "fcs": "2",
           "fullduplex": "true",
           "rate": "1Gbps",
           "running": "true"
@@ -933,7 +979,7 @@
         "ether8": {
           "comment": "",
           "dq1": "42",
-          "fcs": "5",
+          "fcs": "7",
           "fullduplex": "true",
           "rate": "1Gbps",
           "running": "true"

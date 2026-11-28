@@ -118,6 +118,15 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   logs each IRQ's rate and CPU and the assigned load per CPU, and writes an affinity ONLY when it differs
   (every move costs a short loss burst, measured 24.11.2026). The placement holds until the next run (boot,
   NM `up`, the re-balance below); a later traffic change can unbalance it, the `(hk-softnet)` NOTE shows that.
+- **The weight is the queue's packets, not its IRQs (design 7228337095, 27.11.2026).** A queue busy in NAPI
+  polling raises few IRQs for many packets: strih-snv Q0 carried 97.5k pkt/s on 13.4k IRQ/s, the IRQ-rate
+  greedy stacked Q5 beside it, cpu3 50.8 % softirq with all the time_squeeze. On a loaded sample the oneshot
+  reads `ethtool -S` `Queue[N] InPackets` + `OutPackets` over the same window; with Q queues and Q <= the
+  IRQ count, the first Q IRQs in MSI order (IRQ 134+i = Queue[i] on atlantic, proven live; the last vector
+  is the link) take the queue's pkt/s, the rest keep their IRQ rate. The log says which weight it used
+  (`weight: per-queue packets ...` / `weight: IRQ rate (...)`). ixgbe (strih-pp) names its counters
+  `rx_queue_N_packets`, so it keeps the IRQ-rate weight. The load floor stays on the IRQ total.
+  Tests: never pin the exact ethtool call list; the no-ring-reinit check is "no `-L`".
 - **The delayed re-balance (design 7119686502):** at boot no traffic flows, so the oneshot's sample reads
   every rate 0 and places round-robin. `strih-nic-irq-rebalance.timer` (`OnBootSec=5min`, no `Persistent`,
   `WantedBy=timers.target`) starts `strih-nic-irq-rebalance.service` (`Type=oneshot`, NO RemainAfterExit,

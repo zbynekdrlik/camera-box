@@ -90,7 +90,9 @@ def test_two_ports_of_the_driver_pick_the_one_carrying_the_rig_ip(tmp_path):
     assert placed == ["1", "8", "9", "1", "8"], placed
     # the other port is never touched
     assert hk._aff(irq_dir, PORT_IRQS["enp5s0f0"]) == ["0-15"] * 5
-    assert (tmp_path / "ethtool.log").read_text().splitlines() == ["-l enp5s0f1"]
+    # only the rig port is ever asked: -l (and the read-only -S of the per-queue weight, design 7228337095)
+    assert {c.split()[-1] for c in (tmp_path / "ethtool.log").read_text().splitlines()} == {"enp5s0f1"}
+    assert (tmp_path / "ethtool.log").read_text().splitlines()[0] == "-l enp5s0f1"
 
 
 def test_two_ports_and_no_interface_carrying_the_ip_fail_loud_naming_both(tmp_path):

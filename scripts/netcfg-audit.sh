@@ -63,13 +63,12 @@ NETCFG_DROP_THRESHOLD="${NETCFG_DROP_THRESHOLD:-1}"
 # Designated drop-sampler ALWAYS-probe set (#1110): "node|port" tokens (space-separated) that get the
 # live two-read rate probe on EVERY --check regardless of cumulative-counter growth -- so a starvation
 # episode on a suspect uplink always yields a fresh drop DELTA (the growth-gate below would otherwise
-# never sample a HEALTHY port whose dq1 is flat at 0). Default = strih's egress port. Since the M4
-# cut-over (20.9.2026) strih is the Linux notebook strih-snv on a USB 2.5 GbE adapter plugged into
-# foh1_video_switch ether2 (issue 1242, live-verified 2026-09-23 via the bridge host table); the old
-# Windows strih PC's 10 G DAC port foh2_video sfp-sfpplus2 (issue 1110) has no link any more. A
+# never sample a HEALTHY port whose dq1 is flat at 0). Default = strih's egress port. Since 15.10.2026
+# strih-snv runs on its 10 GbE NIC plugged into foh2_video sfp-sfpplus2 (issue 1554: mikrotik-nlm's
+# path read 27.11.2026); its USB 2.5 GbE uplink foh1_video ether2 (issue 1242) has no link any more. A
 # designated port with no link reports `designated-down` (stale designation) -- re-point this default
 # whenever strih is re-cabled. Set empty to restore the pre-#1110 growth-gated-only behaviour.
-NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh1_video|ether2}"
+NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh2_video|sfp-sfpplus2}"
 
 log() { printf '%s [netcfg-audit] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
