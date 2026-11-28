@@ -158,13 +158,15 @@ strih_housekeeping_rebalance_check_text() {
 }
 
 # strih_housekeeping_rebalance_checktimer_text -> systemd/strih-nic-irq-rebalance-check.timer (byte-parity
-# test): 10 min after boot (after the 5-min boot re-balance), then every 5 min after each run, spread
+# test): 10 min after the timer starts (at boot: after the 5-min boot re-balance; from setup step 11b: after
+# it installed the new IRQ script, which it does AFTER this start -- OnBootSec fired the old one at once,
+# strih-snv 28.11.2026), then every 5 min after each run, spread
 # over 2 min like every 5-min timer of the repo (test_watchdog_batch_spread_1387).
 strih_housekeeping_rebalance_checktimer_text() {
   printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
   printf '[Unit]\nDescription=strih box: check the rig-NIC IRQ balance every 5 min (issue 1425)\n'
   printf 'Documentation=https://github.com/zbynekdrlik/camera-box\n\n'
-  printf '[Timer]\nOnBootSec=10min\nOnUnitActiveSec=5min\nRandomizedDelaySec=120\nUnit=%s-check.service\n\n[Install]\nWantedBy=timers.target\n' "$STRIH_HOUSEKEEPING_REBALANCE"
+  printf '[Timer]\nOnActiveSec=10min\nOnUnitActiveSec=5min\nRandomizedDelaySec=120\nUnit=%s-check.service\n\n[Install]\nWantedBy=timers.target\n' "$STRIH_HOUSEKEEPING_REBALANCE"
 }
 
 # strih_housekeeping_sudoers_text USER -> the one sudoers line: USER may arm the OBS-start timer, nothing else.

@@ -143,7 +143,7 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
 - **The periodic skew check (design 7235012847, 28.11.2026):** flows also change WITHOUT an OBS restart (a
   cambox restart from a CI fleet deploy, the E2E teardown, a rig-mode switch), so the OBS-start map goes
   stale (28.11: the 02:49 map read cpu3 60.8 %soft, time_squeeze +44577/10 min at 06:15; a re-place on the
-  current rates took it to +4911). `strih-nic-irq-rebalance-check.timer` (OnBootSec=10min,
+  current rates took it to +4911). `strih-nic-irq-rebalance-check.timer` (OnActiveSec=10min: from the timer's own start, so setup never fires the OLD script,
   OnUnitActiveSec=5min, enabled + STARTED by step 11b) runs `strih-nic-irq-rebalance-check.service`
   = the same script with `IRQ_SKEW_PCT=25`. It samples as usual, sums the rates per CPU of the CURRENT map,
   and moves only when that busiest CPU is over the greedy target's busiest by more than 25 %, or when an IRQ
