@@ -760,7 +760,10 @@ outside dstack's slots 4440-4471, and a leg VBAN sender on a Dante box. A box wi
   device each (the program from dsg, the SoundGrid<->Dante bridge), the terms 1 / 12.041666, no TX; strih-pp's
   hub also carries its own device `strih-pp-intercom=4442:8802:4457` (dstack slot 2, never SNV's slot 1;
   intercom#32, its TOML is the intercom project's), so item 16's `(intercom-dante)` rows run there. `STRIH_DANTE_GM=10.77.7.200` ("dante-ptp" on VLAN 70); the PP switch also copies its
-  PTP onto the LAN untagged, so dsync stays on the rig NIC exactly like SNV. Tests:
+  PTP reaches the untagged LAN only through the router's igmp-proxy, and the switch drops the 224.0.1.129 membership
+  260 s after each join (dstack #487, 28.11.2026: a re-join every ~271 s, ~205/day). So dsync binds the Dante VLAN
+  (`--interface <rig NIC>.70`, `strih_dantesync_rig_nic`) wherever `STRIH_DANTE_GM_ADDR` is in the leg's /24.
+  SNV (GM on the LAN, `STRIH_DANTE_GM_ADDR=none`) keeps the rig NIC. Tests:
   `tests/python/test_pp_dante_leg_1536.py`; the VBAN-shape tests run the PP boxes in their pre-1536 rollback
   shape (`vban_leg_fakes_1439.PP_PRE_1536`, `pp_pre_1536_boxes_dir`).
 
