@@ -102,11 +102,26 @@ strih_dantesync_running_argv() {
 # explicitly, never by chance), resolved by the ONE rig-NIC rule strih_lx_rig_nic (STRIH_NIC_IFACE, then
 # the fact STRIH_NIC_DRIVER, then the NIC carrying STRIH_IP). rc 1 + nothing on stdout when unresolved.
 # STRIH_DANTESYNC_SYSFS (default /sys) is the test seam.
+# dstack #487 (28.11.2026): where the venue's grandmaster (fact STRIH_DANTE_GM_ADDR) sits in the /24 of the
+# box's Dante leg on a VLAN of the rig NIC (STRIH_PROGRAM_VBAN_LEG=vlan:<id>, _LEG_ADDR), dsync binds THAT
+# VLAN interface (<rig NIC>.<id>). Bound to the untagged LAN it heard the PP GM 10.77.7.200 only through the
+# router's igmp-proxy, and the switch dropped the 224.0.1.129 membership 260 s after each join (a re-join
+# every ~271 s). SNV's GM (STRIH_DANTE_GM_ADDR none: resolved on the LAN, 10.77.9.230) keeps the rig NIC.
 strih_dantesync_rig_nic() {
-  local nic
+  local nic gm leg addr ptp
   nic="$(strih_lx_rig_nic "${STRIH_DANTESYNC_SYSFS:-/sys}" "$(ip -o -4 addr show 2>/dev/null || true)" \
     "$(strih_lx_ip 2>/dev/null || true)")" || return 1
   [ -n "$nic" ] || return 1
+  if declare -F strih_box_fact >/dev/null; then
+    gm="$(strih_box_fact STRIH_DANTE_GM_ADDR 2>/dev/null || true)"
+    leg="$(strih_box_fact STRIH_PROGRAM_VBAN_LEG 2>/dev/null || true)"
+    addr="$(strih_box_fact STRIH_PROGRAM_VBAN_LEG_ADDR 2>/dev/null || true)"
+    if [ "$gm" != none ] && [ -n "$gm" ] && [[ "$leg" == vlan:* ]] && [ "${addr%.*}" = "${gm%.*}" ]; then
+      ptp="${nic}.${leg#vlan:}"
+      [ "${#ptp}" -le 15 ] || return 1
+      nic="$ptp"
+    fi
+  fi
   printf '%s\n' "$nic"
 }
 

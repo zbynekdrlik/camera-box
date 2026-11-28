@@ -164,7 +164,11 @@ def test_stream_pp_before_the_rename_resolves_no_leg(tmp_path):
     assert "rig NIC cannot be resolved" in r.stderr, r.stderr
 
 
-# --- dsync stays on the rig NIC (the switch copies dante-ptp's PTP onto the LAN) -------------------------
+# --- dsync binds the Dante VLAN at PP (dstack #487, 28.11.2026) -----------------------------------------
+# The PP grandmaster dante-ptp (10.77.7.200) lives on VLAN 70. Bound to the untagged LAN, dsync heard it only
+# through the router's igmp-proxy; no IGMP query reaches that VLAN, so the switch dropped the 224.0.1.129
+# membership 260 s after each join: `no PTP announce for 10s -- re-joining` every ~271 s (strih-pp 206x and
+# stream-pp 205x on 28.11). Fact STRIH_DANTESYNC_PTP_IFACE=leg = the PTP interface is the box's Dante leg.
 
 def _unit(tmp_path, box, nics, addrs=""):
     sysfs = _sysfs(tmp_path, nics)
@@ -173,19 +177,23 @@ def _unit(tmp_path, box, nics, addrs=""):
                  '"$(strih_dantesync_rig_nic)")"\nstrih_dantesync_exec_start "$t"', box, env=_env(sysfs, addrs))
 
 
-def test_the_strih_pp_unit_is_byte_for_byte_the_hand_set_live_one(tmp_path):
-    """Supervisor 18.11.2026: strih-pp runs `/usr/local/bin/dsync --interface enp5s0f1` (role server), LOCKED
-    to 10.77.7.200; setup-strih's next run must render exactly that ExecStart, so strih_dantesync_install
-    keeps the running date master (no restart)."""
+def test_the_strih_pp_unit_binds_dsync_to_the_dante_vlan(tmp_path):
     r = _unit(tmp_path, "strih-pp", dict(STRIH_PP_NICS, **{"enp5s0f1.70": None}), STRIH_PP_ADDRS)
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "/usr/local/bin/dsync --interface enp5s0f1\n"
+    assert r.stdout == "/usr/local/bin/dsync --interface enp5s0f1.70\n"
 
 
-def test_the_stream_pp_unit_is_the_strih_pp_client_on_rig0(tmp_path):
+def test_the_stream_pp_unit_is_the_strih_pp_client_on_rig0_vlan_70(tmp_path):
     r = _unit(tmp_path, "stream-pp", {"rig0": "r8152", "rig0.70": None})
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "/usr/local/bin/dsync --ntp-server strih-pp.lan --interface rig0\n"
+    assert r.stdout == "/usr/local/bin/dsync --ntp-server strih-pp.lan --interface rig0.70\n"
+
+
+def test_a_box_without_the_fact_keeps_dsync_on_the_rig_nic(tmp_path):
+    """SNV's grandmaster is on the untagged LAN (10.77.9.230): strih-snv keeps --interface <rig NIC>."""
+    r = _unit(tmp_path, "strih-snv", {"enp7s0": "atlantic", "enp7s0.70": None})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.rstrip("\n").endswith("--interface enp7s0"), r.stdout
 
 
 # --- the launch seed switches the PP program inputs to the Dante source -----------------------------------
