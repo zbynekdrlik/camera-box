@@ -210,14 +210,8 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   no device/driver link and is skipped).
 - **No `net.core.netdev_budget_usecs` change** (dropped 23.11.2026): kernel 7.0 at HZ 1000 refuses anything
   below 2000 us with EINVAL (`sysctl -w` 500 / 1001..1999 read on strih-snv 7.0.0-38), and the box already
-  runs 2000; `(hk-sysctl)` reports the running value.
-- **`net.core.netdev_budget` 300 -> 600** (design 7234507614, 28.11.2026): the PACKET budget per RX softirq
-  round. Q0 is one ~100k pkt/s flow on one housekeeping CPU, so 300 packets (~3 ms of traffic) ended every
-  round before the 2000 us time budget (cpu1 time_squeeze). Step 11b writes `/etc/sysctl.d/60-strih-housekeeping.conf`
-  (header-checked, `net.core.netdev_budget = 600` only) AND the running `/proc/sys/net/core/netdev_budget`
-  at once (a counter limit: no ring re-init, no link drop); a failed live write fails the step.
-  `(hk-sysctl)` FAILs a missing/drifted drop-in or a running value other than 600. Measure squeeze
-  before/after over 10 min each; threaded NAPI is the next step if it does not flatten.
+  runs 2000. A leftover `/etc/sysctl.d/60-strih-housekeeping.conf` of ours is removed; `(hk-sysctl)` FAILs it
+  and otherwise reports the running value.
 - `CPUAffinity=<cpus>` + `Nice=10` drop-ins: `rustdesk.service` (system) and `strih-display-watch.service`
   (the operator's `--user` unit). A RUNNING unit whose drop-in changed is restarted; a stopped or
   not-yet-installed one (rustdesk is step 16b, the display watch 16d) is never started.
@@ -304,4 +298,4 @@ hand-run of the algorithm (ties to the lower CPU decide the light IRQs).
 
 ## Router entry (moved from CLAUDE.md, issue 1552)
 
-- Housekeeping off the OBS CPUs on a strih box (issue 1425: box fact `STRIH_HOUSEKEEPING_CPUS`, strih-snv 0-1; the step-11b oneshot cuts RSS + places every rig-NIC IRQ on ONE housekeeping CPU, balanced by a 2 s rate sample (design 7119179275), the tasks + slice on the first CPU, the program-audio sampler on the OBS mask at nice 10, a udev rule sets RSS at add so no link drop after boot, an NM up hook re-pins, `strih-nic-irq-rebalance.timer` re-balances once 5 min after boot (design 7119686502, verify `(hk-rebalance)`); netdev_budget 600 (design 7234507614), no netdev_budget_usecs change (kernel 7.0 refuses < 2000); rustdesk + display-watch drop-ins; the launcher moves its own shutdown watch; verify item 16 `(hk-*)` rows) → `.claude/rules/strih-housekeeping.md` (auto-loads on its `paths:`)
+- Housekeeping off the OBS CPUs on a strih box (issue 1425: box fact `STRIH_HOUSEKEEPING_CPUS`, strih-snv 0-1; the step-11b oneshot cuts RSS + places every rig-NIC IRQ on ONE housekeeping CPU, balanced by a 2 s rate sample (design 7119179275), the tasks + slice on the first CPU, the program-audio sampler on the OBS mask at nice 10, a udev rule sets RSS at add so no link drop after boot, an NM up hook re-pins, `strih-nic-irq-rebalance.timer` re-balances once 5 min after boot (design 7119686502, verify `(hk-rebalance)`); no netdev_budget_usecs change (kernel 7.0 refuses < 2000); rustdesk + display-watch drop-ins; the launcher moves its own shutdown watch; verify item 16 `(hk-*)` rows) → `.claude/rules/strih-housekeeping.md` (auto-loads on its `paths:`)

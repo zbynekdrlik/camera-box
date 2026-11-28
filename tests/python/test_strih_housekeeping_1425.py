@@ -493,7 +493,6 @@ def _install_env(tmp_path):
     root = tmp_path / "root"
     (root / "proc" / "sys" / "net" / "core").mkdir(parents=True)
     (root / "proc" / "sys" / "net" / "core" / "netdev_budget_usecs").write_text("2000\n")
-    (root / "proc" / "sys" / "net" / "core" / "netdev_budget").write_text("300\n")
     home = tmp_path / "home"
     home.mkdir()
     bin_dir = tmp_path / "sbin"
@@ -520,12 +519,9 @@ def test_setup_writes_the_sysctl_the_two_dropins_the_launcher_file_and_restarts_
     assert r.returncode == 0, r.stderr + r.stdout
     # design 7119179275: the launcher's file + the drop-ins carry the TASK CPU (the first, 0)
     assert (root / "etc" / "strih-housekeeping-cpus.conf").read_text() == "0\n"
-    # design 7234507614 (28.11.2026): the PACKET budget goes 300 -> 600 (Q0 = one ~100k pkt/s flow on cpu1
-    # hits 300 packets per round long before 2000 us); netdev_budget_usecs stays as the kernel runs it
-    # (7.0 at HZ 1000 refuses < 2000), so the drop-in carries only netdev_budget, applied live at once
-    assert (root / "etc" / "sysctl.d" / "60-strih-housekeeping.conf").read_text().splitlines()[1:] == [
-        "net.core.netdev_budget = 600"]
-    assert (root / "proc" / "sys" / "net" / "core" / "netdev_budget").read_text().strip() == "600"
+    # strih-snv 23.11.2026: kernel 7.0 at HZ 1000 refuses netdev_budget_usecs below 2000 (EINVAL), so the
+    # step writes no budget drop-in and never touches the running value
+    assert not (root / "etc" / "sysctl.d" / "60-strih-housekeeping.conf").exists()
     assert (root / "proc" / "sys" / "net" / "core" / "netdev_budget_usecs").read_text().strip() == "2000"
     for d in (root / "etc" / "systemd" / "system" / "rustdesk.service.d",
               home / ".config" / "systemd" / "user" / "strih-display-watch.service.d"):
@@ -573,7 +569,7 @@ def test_a_box_with_none_removes_ours_and_keeps_a_foreign_file(tmp_path):
     assert _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env,
                 path_prefix=bin_dir).returncode == 0
     foreign = root / "etc" / "sysctl.d" / "60-strih-housekeeping.conf"
-    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.parent.mkdir(parents=True, exist_ok=True)   # setup no longer creates sysctl.d (no budget drop-in)
     foreign.write_text("net.core.netdev_budget_usecs = 800\n")
     env.update(_box_with(tmp_path, "none"))
     (tmp_path / "systemctl.log").write_text("")
@@ -783,32 +779,19 @@ def test_a_fact_that_is_not_the_complement_of_the_obs_mask_fails(tmp_path):
     assert "FAIL (hk-cpus) STRIH_HOUSEKEEPING_CPUS 0-1 is not the complement of the OBS mask 4-15" in r.stdout
 
 
-def test_the_budget_row_passes_the_drop_in_and_the_running_600(tmp_path):
+def test_the_budget_row_reports_the_running_value_and_fails_our_leftover_drop_in(tmp_path):
     home, path, env = _grade_env(tmp_path)
     r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
-    assert ("PASS (hk-sysctl) net.core.netdev_budget = 600 (drop-in + running); netdev_budget_usecs = 2000 "
-            "(left as the kernel runs it") in r.stdout, r.stdout
-
-
-def test_the_budget_row_fails_a_running_value_that_is_not_600(tmp_path):
-    home, path, env = _grade_env(tmp_path)
-    (pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "proc" / "sys" / "net" / "core" / "netdev_budget").write_text("300\n")
+    assert "PASS (hk-sysctl) net.core.netdev_budget_usecs = 2000 (left as the kernel runs it" in r.stdout, r.stdout
+    left = pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "sysctl.d" / "60-strih-housekeeping.conf"
+    left.parent.mkdir(parents=True, exist_ok=True)
+    left.write_text("# camera-box issue 1425: housekeeping off the OBS CPUs (scripts/lib/strih-housekeeping.sh) -- do not edit\n"
+                    "net.core.netdev_budget_usecs = 500\n")
     r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
-    assert "FAIL (hk-sysctl) net.core.netdev_budget runs 300, not 600 -- re-run setup-strih.sh step 11b" in r.stdout, r.stdout
+    assert "FAIL (hk-sysctl) " + str(left) + " is a leftover" in r.stdout, r.stdout
 
 
-def test_the_budget_row_fails_a_missing_or_drifted_drop_in(tmp_path):
-    home, path, env = _grade_env(tmp_path)
-    f = pathlib.Path(env["STRIH_HOUSEKEEPING_ROOT"]) / "etc" / "sysctl.d" / "60-strih-housekeeping.conf"
-    f.write_text(f.read_text().replace("600", "500"))
-    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
-    assert "FAIL (hk-sysctl) " + str(f) + " missing or drifted -- re-run setup-strih.sh step 11b" in r.stdout, r.stdout
-    f.unlink()
-    r = _run('strih_box_load strih-snv; strih_housekeeping_grade_report "$1" "$2"', str(home), ME, env=env, path_prefix=path)
-    assert "FAIL (hk-sysctl) " + str(f) + " missing or drifted" in r.stdout, r.stdout
-
-
-def test_setup_replaces_an_old_budget_usecs_drop_in_of_ours(tmp_path):
+def test_setup_removes_our_leftover_budget_drop_in(tmp_path):
     root, home, bin_dir, env = _install_env(tmp_path)
     left = root / "etc" / "sysctl.d" / "60-strih-housekeeping.conf"
     left.parent.mkdir(parents=True)
@@ -816,16 +799,7 @@ def test_setup_replaces_an_old_budget_usecs_drop_in_of_ours(tmp_path):
                     "net.core.netdev_budget_usecs = 500\n")
     r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
     assert r.returncode == 0, r.stderr + r.stdout
-    assert left.read_text().splitlines()[1:] == ["net.core.netdev_budget = 600"]
-
-
-def test_setup_fails_loud_when_the_running_budget_cannot_be_written(tmp_path):
-    root, home, bin_dir, env = _install_env(tmp_path)
-    (root / "proc" / "sys" / "net" / "core" / "netdev_budget").unlink()
-    (root / "proc" / "sys" / "net" / "core" / "netdev_budget").mkdir()   # a directory: the write fails
-    r = _run('strih_box_load strih-snv; strih_housekeeping_install "$1" "$2"', ME, str(home), env=env, path_prefix=bin_dir)
-    assert r.returncode != 0
-    assert "cannot set net.core.netdev_budget = 600" in r.stderr, r.stderr
+    assert not left.exists()
 
 
 # --- the OBS launcher places its own shutdown watch -----------------------------------------------------
