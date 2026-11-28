@@ -24,9 +24,11 @@
 #     strih-provision.sh, generalised in place) -- not here;
 #   * /etc/strih-housekeeping-cpus.conf: the TASK CPU list, read by strih-obs-start.sh, which puts its own
 #     shutdown watch (the stat / grep / tail loop) there at nice 10 at the next OBS start;
-#   * NO netdev_budget_usecs change: kernel 7.0 at HZ 1000 refuses anything below 2000 us (EINVAL, read on
-#     strih-snv 23.11.2026), which is what the box runs; a leftover 60-strih-housekeeping.conf of ours is
-#     removed and verify reports the running value;
+#   * net.core.netdev_budget 300 -> 600 (design 7234507614, 28.11.2026): /etc/sysctl.d/60-strih-housekeeping.conf
+#     + the running value at once (a counter limit: no ring re-init, no link drop). Q0 is one ~100k pkt/s
+#     flow on one housekeeping CPU and ran out of the 300-PACKET budget long before the time budget
+#     (time_squeeze). NO netdev_budget_usecs change: kernel 7.0 at HZ 1000 refuses anything below 2000 us
+#     (EINVAL, read on strih-snv 23.11.2026); verify reports its running value;
 #   * CPUAffinity= + Nice=10 drop-ins for rustdesk.service (system) and strih-display-watch.service (the
 #     operator's --user unit); a running unit whose drop-in changed is restarted (a stopped one is never
 #     started);
@@ -68,6 +70,14 @@ STRIH_HOUSEKEEPING_UNITS=(system:rustdesk.service user:strih-display-watch.servi
 strih_housekeeping_conf_path() { printf '%s/etc/strih-housekeeping-cpus.conf\n' "${STRIH_HOUSEKEEPING_ROOT:-}"; }
 strih_housekeeping_sysctl_path() { printf '%s/etc/sysctl.d/60-strih-housekeeping.conf\n' "${STRIH_HOUSEKEEPING_ROOT:-}"; }
 strih_housekeeping_budget_proc() { printf '%s/proc/sys/net/core/netdev_budget_usecs\n' "${STRIH_HOUSEKEEPING_ROOT:-}"; }
+strih_housekeeping_pkt_budget_proc() { printf '%s/proc/sys/net/core/netdev_budget\n' "${STRIH_HOUSEKEEPING_ROOT:-}"; }
+# design 7234507614: the RX softirq's PACKET budget per round (kernel default 300)
+STRIH_HOUSEKEEPING_NETDEV_BUDGET=600
+# strih_housekeeping_sysctl_text -> the sysctl drop-in: the packet budget only.
+strih_housekeeping_sysctl_text() {
+  printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
+  printf 'net.core.netdev_budget = %s\n' "$STRIH_HOUSEKEEPING_NETDEV_BUDGET"
+}
 strih_housekeeping_isolated_path() { printf '%s/etc/strih-isolated-cpus.conf\n' "${STRIH_HOUSEKEEPING_ROOT:-}"; }
 strih_housekeeping_online_path() { printf '%s/devices/system/cpu/online\n' "${STRIH_HOUSEKEEPING_SYS:-/sys}"; }
 strih_housekeeping_udev_path() { printf '%s/etc/udev/rules.d/71-strih-housekeeping-rss.rules\n' "${STRIH_HOUSEKEEPING_ROOT:-}"; }
@@ -431,7 +441,7 @@ _strih_housekeeping_put() {
 # strih_housekeeping_install USER HOME -> setup-strih step 11b's housekeeping half. rc 1 named on a failure
 # (a unit restart that fails is a WARN: the unit keeps running on its old placement, verify FAILs it).
 strih_housekeeping_install() {
-  local user="${1:?user required}" home="${2:?home required}" hk irq task owner rc entry scope unit dest live proc drv
+  local user="${1:?user required}" home="${2:?home required}" hk irq task owner rc entry scope unit dest live proc drv f
   owner="${STRIH_HOUSEKEEPING_OWNER:-root:root}"
   hk="$(strih_lx_housekeeping_cpus)" || { echo "housekeeping: the box fact STRIH_HOUSEKEEPING_CPUS cannot be read" >&2; return 1; }
   if [ "$hk" = none ]; then
@@ -447,11 +457,18 @@ strih_housekeeping_install() {
   [ "$rc" != 1 ] || return 1
   [ "$rc" != 0 ] || echo "  housekeeping: the OBS launcher's shutdown watch moves at the next OBS start (systemctl --user restart strih-obs.service)"
 
-  # issue 1425 (23.11.2026): no budget change -- kernel 7.0 at HZ 1000 refuses netdev_budget_usecs < 2000
+  # design 7234507614: the packet budget (the drop-in for the next boot + the running value now); the time
+  # budget netdev_budget_usecs stays as the kernel runs it (7.0 at HZ 1000 refuses < 2000)
   dest="$(strih_housekeeping_sysctl_path)"
-  if [ -e "$dest" ] && strih_housekeeping_ours "$dest"; then
-    rm -f "$dest" || { echo "housekeeping: cannot remove ${dest}" >&2; return 1; }
-    echo "  housekeeping: removed ${dest} (the kernel refuses a netdev_budget_usecs below 2000)"
+  install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
+  rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping strih_housekeeping_sysctl_text || rc=$?
+  [ "$rc" != 1 ] || return 1
+  f="$(strih_housekeeping_pkt_budget_proc)"
+  live="$(head -n 1 "$f" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [ "$live" != "$STRIH_HOUSEKEEPING_NETDEV_BUDGET" ]; then
+    { printf '%s\n' "$STRIH_HOUSEKEEPING_NETDEV_BUDGET" > "$f"; } 2>/dev/null \
+      || { echo "housekeeping: cannot set net.core.netdev_budget = ${STRIH_HOUSEKEEPING_NETDEV_BUDGET} (${f})" >&2; return 1; }
+    echo "  housekeeping: net.core.netdev_budget ${live:-unread} -> ${STRIH_HOUSEKEEPING_NETDEV_BUDGET} (running now; ${dest} for the next boot)"
   fi
   drv="$(strih_lx_nic_driver)" || { echo "housekeeping: the box fact STRIH_NIC_DRIVER cannot be read" >&2; return 1; }
   dest="$(strih_housekeeping_udev_path)"
@@ -732,13 +749,17 @@ strih_housekeeping_grade_report() {
   fi
   # (hk-rx) + (hk-softnet) report-only: what the NIC and the RX softirq dropped over one short sample.
   [ -z "$nic" ] || strih_housekeeping_rx_note "$sys" "$nic" "$irq"
-  # (hk-sysctl) no budget change (kernel 7.0 refuses < 2000 us): our leftover drop-in FAILs, else the running value.
+  # (hk-sysctl) the packet budget: the drop-in as rendered AND the running value (design 7234507614); the time
+  # budget reported as the kernel runs it (7.0 at HZ 1000 refuses < 2000 us).
   f="$(strih_housekeeping_sysctl_path)"
   live="$(head -n 1 "$(strih_housekeeping_budget_proc)" 2>/dev/null | tr -d '[:space:]' || true)"
-  if [ -e "$f" ] && strih_housekeeping_ours "$f"; then
-    bad "(hk-sysctl) ${f} is a leftover of an earlier setup -- re-run setup-strih.sh step 11b"
+  n="$(head -n 1 "$(strih_housekeeping_pkt_budget_proc)" 2>/dev/null | tr -d '[:space:]' || true)"
+  if ! cmp -s "$f" <(strih_housekeeping_sysctl_text); then
+    bad "(hk-sysctl) ${f} missing or drifted -- re-run setup-strih.sh step 11b"
+  elif [ "$n" != "$STRIH_HOUSEKEEPING_NETDEV_BUDGET" ]; then
+    bad "(hk-sysctl) net.core.netdev_budget runs ${n:-unreadable}, not ${STRIH_HOUSEKEEPING_NETDEV_BUDGET} -- re-run setup-strih.sh step 11b"
   else
-    ok "(hk-sysctl) net.core.netdev_budget_usecs = ${live:-unreadable} (left as the kernel runs it: 7.0 at HZ 1000 refuses < 2000)"
+    ok "(hk-sysctl) net.core.netdev_budget = ${n} (drop-in + running); netdev_budget_usecs = ${live:-unreadable} (left as the kernel runs it: 7.0 at HZ 1000 refuses < 2000)"
   fi
   # (hk-slice) rig-background.slice keeps off the IRQ CPUs (its exact CPUs: the baseline `background` row).
   strih_housekeeping_slice_row "$(strih_housekeeping_slice_exclude "$hk")"
