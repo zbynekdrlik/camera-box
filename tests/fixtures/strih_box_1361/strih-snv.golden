@@ -205,6 +205,10 @@ IRQ_RATE_SAMPLE_S="${IRQ_RATE_SAMPLE_S:-2}"
 # ~120k/s (05:24, 60266/s vs 60261/s per CPU) and ~42k/s (24.11, the CPU-1 split); boot and OBS down read
 # far less. Under it the current placement is kept, never re-balanced on meaningless rates.
 IRQ_LOAD_MIN_PER_S="${IRQ_LOAD_MIN_PER_S:-20000}"
+# design 7235012847: unset = always place by the sample; set (strih-nic-irq-rebalance-check.service, every
+# 5 min) = move only when the current map's busiest CPU carries more than this % over the target's busiest
+# (a flow change re-hashes the heavy queues without an OBS restart: 28.11.2026 cpu3 60.8 %soft).
+IRQ_SKEW_PCT="${IRQ_SKEW_PCT:-}"
 TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
 IRQ_CPUS="${STRIH_HOUSEKEEPING_IRQ_CPUS:-0-3}"
 # a hand run that overrides STRIH_HOUSEKEEPING_IRQ_CPUS overrides STRIH_HOUSEKEEPING_IRQ_ONLY_CPUS with it
@@ -452,6 +456,32 @@ if [ "$IRQ_CPUS" != none ]; then
     summary=""
     for c in "${cpus[@]}"; do summary="${summary:+$summary, }cpu ${c} ${load[$c]}/s"; done
     log "rig NIC IRQ rates measured over ${IRQ_RATE_SAMPLE_S} s, assigned load: ${summary}"
+    # design 7235012847: IRQ_SKEW_PCT set (the periodic check) = move only when the CURRENT map's busiest CPU
+    # carries more than IRQ_SKEW_PCT % over the target's busiest; an IRQ off the housekeeping CPUs always moves
+    if [ -n "${IRQ_SKEW_PCT:-}" ]; then
+      [[ $IRQ_SKEW_PCT =~ ^[0123456789]{1,3}$ ]] || die "IRQ_SKEW_PCT '${IRQ_SKEW_PCT}' is not a whole percent"
+      declare -A curload=()
+      for c in "${cpus[@]}"; do curload[$c]=0; done
+      off=""; curmax=0; tmax=0
+      for irq in $irqs; do
+        curc="$(cpulist_canon "$({ tr -d '[:space:]' < "${IRQ_DIR}/${irq}/smp_affinity_list"; } 2>/dev/null || true)")"
+        if [ -n "$curc" ] && [ -n "${curload[$curc]+x}" ]; then curload[$curc]=$((curload[$curc] + rate[$irq]))
+        else off="${off:+$off }${irq}"; fi
+      done
+      for c in "${cpus[@]}"; do
+        [ "${curload[$c]}" -le "$curmax" ] || curmax="${curload[$c]}"
+        [ "${load[$c]}" -le "$tmax" ] || tmax="${load[$c]}"
+      done
+      if [ -z "$off" ] && [ $((curmax * 100)) -le $((tmax * (100 + IRQ_SKEW_PCT))) ]; then
+        log "skew check: the current map's busiest cpu carries ${curmax}${unit}, the target's ${tmax}${unit}: within ${IRQ_SKEW_PCT} % -- kept, nothing moved"
+        exit 0
+      fi
+      if [ -n "$off" ]; then
+        log "skew check: IRQ(s) ${off} not on one housekeeping cpu -- re-placing"
+      else
+        log "skew check: the current map's busiest cpu carries ${curmax}${unit}, the target's ${tmax}${unit}: over ${IRQ_SKEW_PCT} % -- re-placing"
+      fi
+    fi
   fi
 else
   target=""

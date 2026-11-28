@@ -140,6 +140,18 @@ CPU could not carry them: CPU 1 ~86 % softirq (ksoftirqd/1 ~67 %), `time_squeeze
   rig carries no traffic 5 min later keeps the round-robin until the next NM `up` or a hand restart (since
   the 26.11.2026 load floor that run keeps the boot placement instead of balancing on tiny rates, and an
   idle run never repairs a bad placement: only a run under load does).
+- **The periodic skew check (design 7235012847, 28.11.2026):** flows also change WITHOUT an OBS restart (a
+  cambox restart from a CI fleet deploy, the E2E teardown, a rig-mode switch), so the OBS-start map goes
+  stale (28.11: the 02:49 map read cpu3 60.8 %soft, time_squeeze +44577/10 min at 06:15; a re-place on the
+  current rates took it to +4911). `strih-nic-irq-rebalance-check.timer` (OnBootSec=10min,
+  OnUnitActiveSec=5min, enabled + STARTED by step 11b) runs `strih-nic-irq-rebalance-check.service`
+  = the same script with `IRQ_SKEW_PCT=25`. It samples as usual, sums the rates per CPU of the CURRENT map,
+  and moves only when that busiest CPU is over the greedy target's busiest by more than 25 %, or when an IRQ
+  is off the housekeeping CPUs. Otherwise it logs `skew check: ... -- kept, nothing moved` and exits 0. A
+  sample under IRQ_LOAD_MIN_PER_S never moves anything (the low-load branch). The 06:37 re-place cost no
+  Dante hole (dante-input rx_holes + rx_late flat), which retires the old "every move costs a loss burst, so
+  never periodic" reason. `(hk-rebalance-check)`: both units as rendered, the timer enabled + active, the last
+  run's result (none yet this boot = NOTE).
 - **The re-place after every OBS start (design 7182688018, 26.11.2026):** a rate-based placement is valid
   only for the flow set it measured. The atlantic RSS hash puts each NDI / JPEG XS / Dante flow on a queue,
   and an OBS restart re-creates every flow, so the heavy queues move (26.11: the deploy's OBS restart left 7
