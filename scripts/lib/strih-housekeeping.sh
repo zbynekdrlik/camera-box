@@ -100,6 +100,8 @@ STRIH_HOUSEKEEPING_REBALANCE=strih-nic-irq-rebalance
 strih_housekeeping_rebalance_path() {
   case "${1:?service|timer|obs required}" in
     obs) printf '%s/etc/systemd/system/%s-obs.timer\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE" ;;
+    check) printf '%s/etc/systemd/system/%s-check.service\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE" ;;
+    checktimer) printf '%s/etc/systemd/system/%s-check.timer\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE" ;;
     *) printf '%s/etc/systemd/system/%s.%s\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE" "$1" ;;
   esac
 }
@@ -126,7 +128,8 @@ strih_housekeeping_rebalance_timer_text() {
 # for the flow set it measured, and an OBS restart re-creates every NDI / JPEG XS / Dante flow, so the RSS hash
 # moves the heavy queues. The OBS launcher (the operator's strih-obs.service) arms this timer with the ONE
 # command the sudoers line below allows; a restart of the timer re-arms OnActiveSec, so the same re-balance
-# service runs once, 180 s after each OBS start, when the cameras + the program flow. Never periodic.
+# service runs once, 180 s after each OBS start, when the cameras + the program flow (the periodic skew check
+# below covers flow changes without an OBS restart).
 STRIH_HOUSEKEEPING_OBS_ARM="/usr/bin/systemctl restart --no-block ${STRIH_HOUSEKEEPING_REBALANCE}-obs.timer"
 strih_housekeeping_sudoers_path() { printf '%s/etc/sudoers.d/%s-obs\n' "${STRIH_HOUSEKEEPING_ROOT:-}" "$STRIH_HOUSEKEEPING_REBALANCE"; }
 
@@ -137,6 +140,33 @@ strih_housekeeping_rebalance_obs_text() {
   printf '[Unit]\nDescription=strih box: re-balance the rig-NIC IRQs 180 s after each strih OBS start (issue 1425)\n'
   printf 'Documentation=https://github.com/zbynekdrlik/camera-box\n\n'
   printf '[Timer]\nOnActiveSec=180s\nAccuracySec=1s\nUnit=%s.service\n' "$STRIH_HOUSEKEEPING_REBALANCE"
+}
+
+# The periodic skew check (design 7235012847): a flow change (a cambox restart, an E2E teardown, a rig-mode
+# switch) re-hashes the heavy RSS queues WITHOUT an OBS restart, so neither timer above re-places them
+# (28.11.2026: the 02:49 map read cpu3 60.8 %soft at 06:15). Every 5 min the same script samples and moves
+# IRQs only when the current map's busiest CPU carries more than STRIH_HOUSEKEEPING_SKEW_PCT % over the
+# target's; a balanced box is never touched. A re-place at 06:37 cost no Dante hole (rx_holes, rx_late flat).
+STRIH_HOUSEKEEPING_SKEW_PCT=25
+
+# strih_housekeeping_rebalance_check_text -> systemd/strih-nic-irq-rebalance-check.service (byte-parity test).
+strih_housekeeping_rebalance_check_text() {
+  printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
+  printf '[Unit]\nDescription=strih box: re-place the rig-NIC IRQs only when the current map is skewed (issue 1425)\n'
+  printf 'Documentation=https://github.com/zbynekdrlik/camera-box\nAfter=strih-nic-irq-affinity.service\n\n'
+  printf '[Service]\nType=oneshot\nEnvironment=IRQ_SKEW_PCT=%s\nExecStart=%s\n' "$STRIH_HOUSEKEEPING_SKEW_PCT" "$STRIH_HOUSEKEEPING_IRQ_SCRIPT"
+}
+
+# strih_housekeeping_rebalance_checktimer_text -> systemd/strih-nic-irq-rebalance-check.timer (byte-parity
+# test): 10 min after the timer starts (at boot: after the 5-min boot re-balance; from setup step 11b: after
+# it installed the new IRQ script, which it does AFTER this start -- OnBootSec fired the old one at once,
+# strih-snv 28.11.2026), then every 5 min after each run, spread
+# over 2 min like every 5-min timer of the repo (test_watchdog_batch_spread_1387).
+strih_housekeeping_rebalance_checktimer_text() {
+  printf '%s\n' "$STRIH_HOUSEKEEPING_HEADER"
+  printf '[Unit]\nDescription=strih box: check the rig-NIC IRQ balance every 5 min (issue 1425)\n'
+  printf 'Documentation=https://github.com/zbynekdrlik/camera-box\n\n'
+  printf '[Timer]\nOnActiveSec=10min\nOnUnitActiveSec=5min\nRandomizedDelaySec=120\nUnit=%s-check.service\n\n[Install]\nWantedBy=timers.target\n' "$STRIH_HOUSEKEEPING_REBALANCE"
 }
 
 # strih_housekeeping_sudoers_text USER -> the one sudoers line: USER may arm the OBS-start timer, nothing else.
@@ -169,8 +199,9 @@ strih_housekeeping_sudoers_install() {
 # reload / enable is a WARN (verify item 16 FAILs it).
 strih_housekeeping_rebalance_install() {
   local owner="$1" user="$2" kind dest rc changed=0 timer="${STRIH_HOUSEKEEPING_REBALANCE}.timer"
+  local check="${STRIH_HOUSEKEEPING_REBALANCE}-check.timer"
   strih_housekeeping_sudoers_install "$owner" "$user" || return 1
-  for kind in service timer obs; do
+  for kind in service timer obs check checktimer; do
     dest="$(strih_housekeeping_rebalance_path "$kind")"
     install -d -m 0755 "${dest%/*}" || { echo "housekeeping: cannot create ${dest%/*}" >&2; return 1; }
     rc=0; _strih_housekeeping_put "$dest" 0644 "$owner" housekeeping "strih_housekeeping_rebalance_${kind}_text" || rc=$?
@@ -186,6 +217,14 @@ strih_housekeeping_rebalance_install() {
       echo "  WARN: systemctl enable ${timer} failed -- enable it by hand; verify item 16 FAILs it until then"
     fi
   fi
+  # the skew check runs from now on (a timer, read-only unless the map is skewed): enabled AND started
+  if ! systemctl is-enabled -q "$check" || ! systemctl is-active -q "$check"; then
+    if systemctl enable --now "$check"; then
+      echo "  housekeeping: ${check} enabled + started -- the IRQ balance is checked every 5 min"
+    else
+      echo "  WARN: systemctl enable --now ${check} failed -- enable it by hand; verify item 16 FAILs it until then"
+    fi
+  fi
   return 0
 }
 
@@ -198,7 +237,7 @@ strih_housekeeping_rebalance_remove() {
     if strih_housekeeping_ours "$f"; then rm -f "$f" && echo "  housekeeping: removed ${f}" || return 1
     else echo "  WARNING: ${f} is not ours (no camera-box header) -- left alone" >&2; fi
   fi
-  for kind in obs timer service; do
+  for kind in checktimer check obs timer service; do
     f="$(strih_housekeeping_rebalance_path "$kind")"
     [ -e "$f" ] || continue
     if ! strih_housekeeping_ours "$f"; then echo "  WARNING: ${f} is not ours (no camera-box header) -- left alone" >&2; continue; fi
@@ -208,6 +247,9 @@ strih_housekeeping_rebalance_remove() {
     if [ "$kind" = timer ] && ! systemctl disable --now "$timer"; then
       echo "  WARN: systemctl disable --now ${timer} failed -- disable it by hand"
     fi
+    if [ "$kind" = checktimer ] && ! systemctl disable --now "${f##*/}"; then
+      echo "  WARN: systemctl disable --now ${f##*/} failed -- disable it by hand"
+    fi
     rm -f "$f" || return 1
     echo "  housekeeping: removed ${f}"
     gone=1
@@ -216,6 +258,35 @@ strih_housekeeping_rebalance_remove() {
   # a service that failed this boot would stay listed as `not-found failed` (review round 1)
   [ -e "$(strih_housekeeping_rebalance_path service)" ] || [ "$gone" = 0 ] \
     || systemctl reset-failed "${STRIH_HOUSEKEEPING_REBALANCE}.service" 2>/dev/null || true
+  return 0
+}
+
+# strih_housekeeping_rebalance_check_row -> the `(hk-rebalance-check)` row: both check units as rendered, the
+# timer enabled + active, and the check service's last run (not run yet = NOTE, a failed run = FAIL).
+strih_housekeeping_rebalance_check_row() {
+  local kind f show mono result status timer="${STRIH_HOUSEKEEPING_REBALANCE}-check.timer" svc="${STRIH_HOUSEKEEPING_REBALANCE}-check.service"
+  for kind in check checktimer; do
+    f="$(strih_housekeeping_rebalance_path "$kind")"
+    if ! cmp -s "$f" <("strih_housekeeping_rebalance_${kind}_text"); then
+      bad "(hk-rebalance-check) ${f} missing or drifted -- re-run setup-strih.sh step 11b"; return 0
+    fi
+  done
+  if ! systemctl is-enabled -q "$timer" || ! systemctl is-active -q "$timer"; then
+    bad "(hk-rebalance-check) ${timer} is not enabled + active -- systemctl enable --now ${timer} (or re-run setup-strih.sh step 11b)"; return 0
+  fi
+  show="$(systemctl show -p ExecMainStartTimestampMonotonic -p Result -p ExecMainStatus "$svc" 2>/dev/null || true)"
+  mono="$(_strih_housekeeping_show_value "$show" ExecMainStartTimestampMonotonic)"
+  result="$(_strih_housekeeping_show_value "$show" Result)"
+  status="$(_strih_housekeeping_show_value "$show" ExecMainStatus)"
+  if ! [[ "$mono" =~ ^[0123456789]+$ ]]; then
+    bad "(hk-rebalance-check) cannot read ${svc}'s last run (ExecMainStartTimestampMonotonic '${mono}')"
+  elif [ "$mono" = 0 ]; then
+    note "(hk-rebalance-check) ${timer} active; the first check has not run yet this boot (10 min after boot, then every 5 min)"
+  elif [ "$result" = success ] && [ "$status" = 0 ]; then
+    ok "(hk-rebalance-check) ${timer} active; the last balance check: success (exit 0) -- journalctl -u ${svc} says whether it moved anything"
+  else
+    bad "(hk-rebalance-check) the last balance check failed: ${result:-unread} (exit ${status:-unread}) -- journalctl -b -u ${svc}"
+  fi
   return 0
 }
 
@@ -750,6 +821,8 @@ strih_housekeeping_grade_report() {
   _strih_housekeeping_unit_row user "${STRIH_PROGRAM_AUDIO_UNIT:-program-audio-sampler.service}" "$user" "${iso:-unread}" "$home" sampler 0
   # (hk-rebalance) the delayed re-balance after boot: units as rendered, timer enabled, this boot's run.
   strih_housekeeping_rebalance_row
+  # (hk-rebalance-check) the periodic skew check (design 7235012847).
+  strih_housekeeping_rebalance_check_row
   # (hk-obs-rebalance) the re-place under load after the current OBS start (its timer, sudo, the last run).
   strih_housekeeping_obs_rebalance_row "$user"
   return 0

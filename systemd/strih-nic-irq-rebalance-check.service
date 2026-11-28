@@ -1,0 +1,10 @@
+# camera-box issue 1425: housekeeping off the OBS CPUs (scripts/lib/strih-housekeeping.sh) -- do not edit
+[Unit]
+Description=strih box: re-place the rig-NIC IRQs only when the current map is skewed (issue 1425)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=strih-nic-irq-affinity.service
+
+[Service]
+Type=oneshot
+Environment=IRQ_SKEW_PCT=25
+ExecStart=/usr/local/bin/strih-nic-irq-affinity.sh
