@@ -48,3 +48,8 @@ deploy since OBS started poisons every later E2E in that session. Run 4608718114
 rx_holes=402048 from dasio's approved mbc restart, 4 min after the deploy had started OBS. So, right
 before `gh run rerun`: `systemctl --user restart strih-obs.service` on strih-snv AND stream-snv, read
 rx_holes 0 + genlock LOCKED, and ask dasio/fohmixer to hold mbc until the run ends.
+
+**Opening the release PR STARTS the full-path E2E at once (28.11.2026, PR 1559).** Its rig-busy gate queries
+both OBS WebSockets within seconds of `gh pr create`, so do the OBS restart BEFORE opening the PR, never after.
+An OBS restart in the same minute = `strih (10.77.9.202) unreachable: [Errno 111] Connection refused` and a red
+run (46128704170 attempt 1). The same applies to any push to `dev` while the PR is open: it starts a new E2E.
